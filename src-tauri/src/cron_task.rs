@@ -151,6 +151,8 @@ pub struct TaskProviderEnv {
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_protocol: Option<String>,
 }
 
 /// Delivery target for IM Bot cron task results
@@ -1318,6 +1320,7 @@ async fn execute_task_directly(
         provider_env: task.provider_env.as_ref().map(|env| ProviderEnv {
             base_url: env.base_url.clone(),
             api_key: env.api_key.clone(),
+            api_protocol: env.api_protocol.clone(),
         }),
         run_mode: Some(run_mode_str.to_string()),
         interval_minutes: Some(task.interval_minutes),

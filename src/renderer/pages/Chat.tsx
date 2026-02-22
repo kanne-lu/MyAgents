@@ -235,6 +235,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           baseUrl: provider.config.baseUrl,
           apiKey: apiKeys[provider.id],
           authType: provider.authType,
+          apiProtocol: provider.apiProtocol,
         } : undefined;
 
         // 5. Send message
@@ -292,6 +293,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         baseUrl: currentProvider.config.baseUrl,
         apiKey: apiKeys[currentProvider.id],
         authType: currentProvider.authType,
+        apiProtocol: currentProvider.apiProtocol,
       } : undefined;
       await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv, true /* isCron */);
     },
@@ -877,6 +879,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         baseUrl: provider.config.baseUrl,
         apiKey: keys[provider.id], // Get from stored apiKeys, not provider object
         authType: provider.authType,
+        apiProtocol: provider.apiProtocol,
       } : undefined;
 
       // If cron mode is enabled and task hasn't started yet, start the task
@@ -1337,6 +1340,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
             baseUrl: currentProvider.config.baseUrl,
             apiKey: apiKeys[currentProvider.id],
+            authType: currentProvider.authType,
+            apiProtocol: currentProvider.apiProtocol,
           } : undefined;
 
           // If task is already running, only update config (preserves task state)

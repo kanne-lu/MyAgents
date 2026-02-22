@@ -88,6 +88,13 @@ export function getModelsDisplay(provider: Provider, maxLength = 35): string {
 export type ProviderAuthType = 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
 
 /**
+ * API protocol type for provider communication
+ * - 'anthropic': Native Anthropic Messages API (default)
+ * - 'openai': OpenAI Chat Completions API (translated via built-in bridge)
+ */
+export type ApiProtocol = 'anthropic' | 'openai';
+
+/**
  * Service provider configuration
  */
 export interface Provider {
@@ -108,6 +115,9 @@ export interface Provider {
 
   // 认证方式 (默认 'both' 以保持向后兼容)
   authType?: ProviderAuthType;
+
+  // API 协议 (默认 'anthropic')
+  apiProtocol?: ApiProtocol;
 
   // 官网链接 (用于"去官网"入口)
   websiteUrl?: string;

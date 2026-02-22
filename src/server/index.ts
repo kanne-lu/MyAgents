@@ -103,6 +103,8 @@ import {
   rewindSession,
   getPendingInteractiveRequests,
   stripPlaywrightResults,
+  setSidecarPort,
+  getOpenAiBridgeConfig,
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
@@ -123,6 +125,7 @@ import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
 import { broadcast, createSseClient, getClients } from './sse';
 import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
+import { createBridgeHandler } from './openai-bridge';
 
 type ImagePayload = {
   name: string;
@@ -165,6 +168,8 @@ type SendMessagePayload = {
   providerEnv?: {
     baseUrl?: string;
     apiKey?: string;
+    authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
+    apiProtocol?: 'anthropic' | 'openai';
   };
 };
 
@@ -181,6 +186,8 @@ type CronExecutePayload = {
   providerEnv?: {
     baseUrl?: string;
     apiKey?: string;
+    authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
+    apiProtocol?: 'anthropic' | 'openai';
   };
   /** Run mode: "single_session" (keep context) or "new_session" (fresh each time) */
   runMode?: 'single_session' | 'new_session';
@@ -641,6 +648,20 @@ async function main() {
   seedBundledSkills();
 
   await initializeAgent(currentAgentDir, initialPrompt, initialSessionId);
+
+  // Store sidecar port for OpenAI bridge loopback
+  setSidecarPort(port);
+
+  // Create OpenAI bridge handler (lazy: only processes requests when bridge config is active)
+  const bridgeHandler = createBridgeHandler({
+    getUpstreamConfig: () => {
+      const config = getOpenAiBridgeConfig();
+      if (!config) throw new Error('Bridge not active');
+      return { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model };
+    },
+    maxOutputTokens: 8192,
+    logger: (msg) => console.log(msg),
+  });
 
   Bun.serve({
     port,
@@ -2402,9 +2423,10 @@ async function main() {
             apiKey?: string;
             model?: string;
             authType?: string;
+            apiProtocol?: string;
           };
 
-          const { baseUrl, apiKey, model, authType } = payload;
+          const { baseUrl, apiKey, model, authType, apiProtocol } = payload;
 
           if (!baseUrl || !apiKey) {
             return jsonResponse({ success: false, error: 'baseUrl and apiKey are required.' }, 400);
@@ -2415,8 +2437,15 @@ async function main() {
           console.log(`[api/provider/verify] apiKey: ${apiKey.slice(0, 10)}...`);
           console.log(`[api/provider/verify] model: ${model ?? 'default'}`);
           console.log(`[api/provider/verify] authType: ${authType ?? 'both'}`);
+          console.log(`[api/provider/verify] apiProtocol: ${apiProtocol ?? 'anthropic'}`);
 
-          const result = await verifyProviderViaSdk(baseUrl, apiKey, authType ?? 'both', model || undefined);
+          // Unified SDK verification for all protocols (Anthropic + OpenAI)
+          // For OpenAI protocol: SDK → CLI → bridge loopback → upstream (end-to-end)
+          // For Anthropic protocol: SDK → CLI → upstream (same as before)
+          const result = await verifyProviderViaSdk(
+            baseUrl, apiKey, authType ?? 'both', model || undefined,
+            apiProtocol === 'openai' ? 'openai' : undefined,
+          );
 
           console.log(`[api/provider/verify] result:`, JSON.stringify(result));
           console.log(`[api/provider/verify] =========================`);
@@ -4548,6 +4577,8 @@ async function main() {
               providerEnv: payload.providerEnv ? {
                 baseUrl: payload.providerEnv.baseUrl,
                 apiKey: payload.providerEnv.apiKey,
+                authType: payload.providerEnv.authType,
+                apiProtocol: payload.providerEnv.apiProtocol,
               } : undefined,
             });
           }
@@ -4908,6 +4939,43 @@ async function main() {
       }
 
       // ============= END IM BOT API =============
+
+      // ============= OPENAI BRIDGE (Loopback) =============
+      // SDK subprocess sends Anthropic requests here when provider uses OpenAI protocol
+      if (pathname === '/v1/messages' && request.method === 'POST') {
+        const bridgeConfig = getOpenAiBridgeConfig();
+        if (bridgeConfig) {
+          try {
+            return await bridgeHandler(request);
+          } catch (error) {
+            console.error('[bridge] Handler error:', error);
+            return jsonResponse(
+              { type: 'error', error: { type: 'api_error', message: error instanceof Error ? error.message : 'Bridge error' } },
+              500,
+            );
+          }
+        }
+        // Bridge not active — fall through to 404
+      }
+
+      // POST /v1/messages/count_tokens — CLI sends this for context window management.
+      // OpenAI-compatible APIs have no equivalent, so return an estimated token count.
+      if (pathname === '/v1/messages/count_tokens' && request.method === 'POST') {
+        const bridgeConfig = getOpenAiBridgeConfig();
+        if (bridgeConfig) {
+          try {
+            const body = await request.json() as { messages?: unknown[]; system?: unknown; tools?: unknown[] };
+            // Rough estimate: serialize content → chars / 4 ≈ tokens
+            const contentLength = JSON.stringify(body.messages ?? []).length
+              + JSON.stringify(body.system ?? '').length
+              + JSON.stringify(body.tools ?? []).length;
+            const estimatedTokens = Math.max(1, Math.ceil(contentLength / 4));
+            return jsonResponse({ input_tokens: estimatedTokens });
+          } catch {
+            return jsonResponse({ input_tokens: 1024 }); // Safe fallback
+          }
+        }
+      }
 
       const staticResponse = await serveStatic(pathname);
       if (staticResponse) {

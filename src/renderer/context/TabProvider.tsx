@@ -1274,7 +1274,7 @@ export default function TabProvider({
         images?: ImageAttachment[],
         permissionMode?: PermissionMode,
         model?: string,
-        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key' },
+        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai' },
         isCron?: boolean
     ): Promise<boolean> => {
         const trimmed = text.trim();

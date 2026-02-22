@@ -177,8 +177,33 @@ export type ProviderEnv = {
   baseUrl?: string;
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
+  apiProtocol?: 'anthropic' | 'openai';
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
+
+// OpenAI Bridge: sidecar port for loopback, and active bridge config
+let sidecarPort: number = 0;
+
+export type OpenAiBridgeConfig = {
+  baseUrl: string;
+  apiKey: string;
+  /** Target model name — bridge overrides ALL request models to this */
+  model?: string;
+} | null;
+
+let currentOpenAiBridgeConfig: OpenAiBridgeConfig = null;
+
+/** Set the sidecar port (called once from index.ts on startup) */
+export function setSidecarPort(port: number): void {
+  sidecarPort = port;
+}
+
+/** Get the current OpenAI bridge config (used by bridge handler in index.ts).
+ *  Model is always derived from currentModel to avoid staleness after setSessionModel(). */
+export function getOpenAiBridgeConfig(): OpenAiBridgeConfig {
+  if (!currentOpenAiBridgeConfig) return null;
+  return { ...currentOpenAiBridgeConfig, model: currentModel || undefined };
+}
 // SDK 是否已注册当前 sessionId。true 时后续 query 必须用 resume。
 // 仅由非 pre-warm 的 system_init 设为 true，仅由 sessionId 变更设为 false。
 // Pre-warm 永不修改此标志 — 从结构上消除超时/重试导致的状态错误。
@@ -1409,6 +1434,38 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
 
   // Use provided providerEnv or fall back to currentProviderEnv
   const effectiveProviderEnv = providerEnv ?? currentProviderEnv;
+
+  // OpenAI Bridge: if provider uses OpenAI protocol, loopback to sidecar
+  if (effectiveProviderEnv?.apiProtocol === 'openai' && sidecarPort > 0) {
+    // SDK requests go to sidecar's /v1/messages route, which translates to OpenAI format
+    env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${sidecarPort}`;
+    env.ANTHROPIC_API_KEY = effectiveProviderEnv.apiKey ?? '';
+    delete env.ANTHROPIC_AUTH_TOKEN;
+    // CRITICAL: Strip proxy env vars from subprocess environment.
+    // The Claude Code CLI's MA6() unconditionally sets fetchOptions.proxy for the Anthropic
+    // SDK client when any proxy env var is present, WITHOUT checking no_proxy. This causes
+    // the loopback request to http://127.0.0.1:{port} to be routed through the system proxy,
+    // resulting in timeout/502 errors. The subprocess only needs to talk to our local bridge;
+    // the bridge handler itself handles upstream proxy if needed (via process.env).
+    for (const proxyVar of [
+      'http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY',
+      'ALL_PROXY', 'all_proxy', 'no_proxy', 'NO_PROXY',
+    ]) {
+      delete env[proxyVar];
+    }
+    // Store upstream config for bridge handler (includes proxy from process.env for upstream fetch)
+    // Note: model is NOT stored here — getOpenAiBridgeConfig() derives it from currentModel
+    // to stay in sync after setSessionModel() / applySessionConfig() model switches
+    currentOpenAiBridgeConfig = {
+      baseUrl: effectiveProviderEnv.baseUrl ?? '',
+      apiKey: effectiveProviderEnv.apiKey ?? '',
+    };
+    console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);
+    return env;
+  }
+
+  // Clear bridge config when not using OpenAI protocol
+  currentOpenAiBridgeConfig = null;
 
   // Handle provider-specific environment variables
   // IMPORTANT: Must explicitly delete these when switching back to Anthropic subscription

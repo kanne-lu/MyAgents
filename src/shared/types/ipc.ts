@@ -26,10 +26,12 @@ export interface SendMessagePayload {
   model?: string;
   /** Permission mode to use for this message */
   permissionMode?: 'auto' | 'plan' | 'fullAgency' | 'custom';
-  /** Provider environment variables (baseUrl, apiKey) for third-party providers */
+  /** Provider environment variables (baseUrl, apiKey, authType) for third-party providers */
   providerEnv?: {
     baseUrl?: string;
     apiKey?: string;
+    authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
+    apiProtocol?: 'anthropic' | 'openai';
   };
 }
 

@@ -199,13 +199,15 @@ export async function verifyProviderViaSdk(
   baseUrl: string,
   apiKey: string,
   authType: string,
-  model?: string
+  model?: string,
+  apiProtocol?: 'anthropic' | 'openai',
 ): Promise<{ success: boolean; error?: string }> {
-  console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}`);
+  console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}, apiProtocol=${apiProtocol ?? 'anthropic'}`);
   const env = buildClaudeSessionEnv({
     baseUrl,
     apiKey,
     authType: authType as 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key',
+    apiProtocol,
   });
   return verifyViaSdk(env, {
     model,

@@ -1,0 +1,142 @@
+// Message array translation: Anthropic messages → OpenAI messages
+
+import type {
+  AnthropicMessage,
+  AnthropicContentBlock,
+  AnthropicSystemBlock,
+  AnthropicToolResultBlock,
+} from '../types/anthropic';
+import type { OpenAIMessage, OpenAIAssistantMessage, OpenAIContentPart } from '../types/openai';
+import { translateImageBlock } from './multimodal';
+
+/** Convert Anthropic system + messages to OpenAI messages array */
+export function translateMessages(
+  system: string | AnthropicSystemBlock[] | undefined,
+  messages: AnthropicMessage[],
+): OpenAIMessage[] {
+  const result: OpenAIMessage[] = [];
+
+  // 1. System prompt → system message
+  if (system) {
+    const systemText = typeof system === 'string'
+      ? system
+      : system.map(b => b.text).join('\n\n');
+    if (systemText) {
+      result.push({ role: 'system', content: systemText });
+    }
+  }
+
+  // 2. Translate each message
+  for (const msg of messages) {
+    if (msg.role === 'user') {
+      translateUserMessage(msg, result);
+    } else if (msg.role === 'assistant') {
+      translateAssistantMessage(msg, result);
+    }
+  }
+
+  return result;
+}
+
+function translateUserMessage(msg: AnthropicMessage, result: OpenAIMessage[]): void {
+  // String content → simple user message
+  if (typeof msg.content === 'string') {
+    result.push({ role: 'user', content: msg.content });
+    return;
+  }
+
+  // Block array: split tool_result blocks into separate tool messages
+  const toolResults: AnthropicToolResultBlock[] = [];
+  const otherBlocks: AnthropicContentBlock[] = [];
+
+  for (const block of msg.content) {
+    if (block.type === 'tool_result') {
+      toolResults.push(block);
+    } else if (block.type !== 'thinking') {
+      // Filter out thinking blocks
+      otherBlocks.push(block);
+    }
+  }
+
+  // Emit tool messages first (OpenAI requires tool responses before next user message)
+  for (const tr of toolResults) {
+    result.push({
+      role: 'tool',
+      tool_call_id: tr.tool_use_id,
+      content: extractToolResultContent(tr),
+    });
+  }
+
+  // Emit remaining content as user message (if any)
+  if (otherBlocks.length > 0) {
+    const parts = convertToOpenAIParts(otherBlocks);
+    if (parts.length === 1 && parts[0].type === 'text') {
+      result.push({ role: 'user', content: parts[0].text });
+    } else if (parts.length > 0) {
+      result.push({ role: 'user', content: parts });
+    }
+  }
+}
+
+function translateAssistantMessage(msg: AnthropicMessage, result: OpenAIMessage[]): void {
+  if (typeof msg.content === 'string') {
+    result.push({ role: 'assistant', content: msg.content });
+    return;
+  }
+
+  const textParts: string[] = [];
+  const thinkingParts: string[] = [];
+  const toolCalls: { id: string; type: 'function'; function: { name: string; arguments: string } }[] = [];
+
+  for (const block of msg.content) {
+    if (block.type === 'text') {
+      textParts.push(block.text);
+    } else if (block.type === 'tool_use') {
+      toolCalls.push({
+        id: block.id,
+        type: 'function',
+        function: {
+          name: block.name,
+          arguments: JSON.stringify(block.input),
+        },
+      });
+    } else if (block.type === 'thinking') {
+      // Preserve thinking blocks as reasoning_content for upstream models
+      // that require it in conversation history (e.g. DeepSeek reasoner)
+      if (block.thinking) {
+        thinkingParts.push(block.thinking);
+      }
+    }
+  }
+
+  const assistantMsg: OpenAIAssistantMessage = {
+    role: 'assistant',
+    content: textParts.length > 0 ? textParts.join('') : null,
+    ...(thinkingParts.length > 0 ? { reasoning_content: thinkingParts.join('\n') } : {}),
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+  };
+
+  result.push(assistantMsg);
+}
+
+function extractToolResultContent(tr: AnthropicToolResultBlock): string {
+  if (!tr.content) return '';
+  if (typeof tr.content === 'string') return tr.content;
+  return tr.content
+    .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
+    .map(c => c.text)
+    .join('\n');
+}
+
+function convertToOpenAIParts(blocks: AnthropicContentBlock[]): OpenAIContentPart[] {
+  const parts: OpenAIContentPart[] = [];
+  for (const block of blocks) {
+    if (block.type === 'text') {
+      parts.push({ type: 'text', text: block.text });
+    } else if (block.type === 'image') {
+      parts.push(translateImageBlock(block));
+    }
+    // tool_use and tool_result are handled separately
+  }
+  return parts;
+}

@@ -2620,6 +2620,8 @@ pub struct ProviderEnv {
     pub base_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_protocol: Option<String>,
 }
 
 /// Cron task execution response from Sidecar

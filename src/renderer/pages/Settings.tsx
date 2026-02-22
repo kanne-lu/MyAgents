@@ -18,6 +18,7 @@ import {
     PRESET_PROVIDERS,
     type Provider,
     type ProviderAuthType,
+    type ApiProtocol,
     type McpServerDefinition,
     type McpServerType,
     type McpEnableError,
@@ -67,6 +68,7 @@ type SubscriptionStatus = SubscriptionStatusWithVerify;
 interface CustomProviderForm {
     name: string;
     cloudProvider: string;  // 服务商标签
+    apiProtocol: ApiProtocol;  // API 协议
     baseUrl: string;
     authType: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
     models: string[];  // 支持多个模型 ID
@@ -77,6 +79,7 @@ interface CustomProviderForm {
 const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     name: '',
     cloudProvider: '',
+    apiProtocol: 'anthropic',
     baseUrl: '',
     authType: 'auth_token',
     models: [],
@@ -93,6 +96,7 @@ interface ProviderEditForm {
     // 自定义供应商编辑字段
     editName?: string;
     editCloudProvider?: string;
+    editApiProtocol?: ApiProtocol;
     editBaseUrl?: string;
     editAuthType?: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
 }
@@ -883,6 +887,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 apiKey,
                 model: provider.primaryModel,
                 authType: provider.authType,
+                apiProtocol: provider.apiProtocol,
             });
 
             console.log('[verifyProvider] Result:', JSON.stringify(result, null, 2));
@@ -950,6 +955,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
             primaryModel: customForm.models[0],
             isBuiltin: false,
             authType: customForm.authType,
+            apiProtocol: customForm.apiProtocol === 'openai' ? 'openai' : undefined,
             config: {
                 baseUrl: customForm.baseUrl,
             },
@@ -1025,6 +1031,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
             ...(provider.isBuiltin ? {} : {
                 editName: provider.name,
                 editCloudProvider: provider.cloudProvider,
+                editApiProtocol: provider.apiProtocol ?? 'anthropic',
                 editBaseUrl: provider.config.baseUrl || '',
                 editAuthType: provider.authType === 'api_key' ? 'api_key' : 'auth_token',
             }),
@@ -1071,7 +1078,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
     // Save provider edits
     const saveProviderEdits = async () => {
         if (!editingProvider) return;
-        const { provider, customModels, removedModels, editName, editCloudProvider, editBaseUrl, editAuthType } = editingProvider;
+        const { provider, customModels, removedModels, editName, editCloudProvider, editApiProtocol, editBaseUrl, editAuthType } = editingProvider;
 
         if (provider.isBuiltin) {
             // For preset providers: save user-added custom models
@@ -1122,6 +1129,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 name: editName.trim(),
                 cloudProvider: editCloudProvider?.trim() || '自定义',
                 authType: editAuthType ?? provider.authType ?? 'auth_token',
+                apiProtocol: editApiProtocol === 'openai' ? 'openai' : undefined,
                 config: {
                     ...provider.config,
                     baseUrl: editBaseUrl.trim(),
@@ -1382,6 +1390,11 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                                 <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
                                                     {provider.cloudProvider}
                                                 </span>
+                                                {provider.apiProtocol === 'openai' && (
+                                                    <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                        OpenAI 协议
+                                                    </span>
+                                                )}
                                             </div>
                                             <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
                                                 {getModelsDisplay(provider)}
@@ -2694,20 +2707,56 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                             </div>
 
                             <div>
+                                <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">API 协议</label>
+                                {customForm.apiProtocol === 'openai' && (
+                                    <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
+                                        通过内置桥接自动转换为 Anthropic 协议，存在稳定性风险
+                                    </p>
+                                )}
+                                <div className={`flex gap-4${customForm.apiProtocol !== 'openai' ? ' mt-1' : ''}`}>
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="radio"
+                                            name="create-apiProtocol"
+                                            value="anthropic"
+                                            checked={customForm.apiProtocol !== 'openai'}
+                                            onChange={() => setCustomForm((p) => ({ ...p, apiProtocol: 'anthropic', authType: 'auth_token' }))}
+                                            className="accent-[var(--ink)]"
+                                        />
+                                        <span className="text-sm text-[var(--ink)]">Anthropic 兼容</span>
+                                    </label>
+                                    <label className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                            type="radio"
+                                            name="create-apiProtocol"
+                                            value="openai"
+                                            checked={customForm.apiProtocol === 'openai'}
+                                            onChange={() => setCustomForm((p) => ({ ...p, apiProtocol: 'openai', authType: 'api_key' }))}
+                                            className="accent-[var(--ink)]"
+                                        />
+                                        <span className="text-sm text-[var(--ink)]">OpenAI 兼容</span>
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    API Base URL (Anthropic兼容协议) <span className="text-[var(--error)]">*</span>
+                                    API Base URL <span className="text-[var(--error)]">*</span>
                                 </label>
                                 <input
                                     type="url"
                                     value={customForm.baseUrl}
                                     onChange={(e) => setCustomForm((p) => ({ ...p, baseUrl: e.target.value }))}
-                                    placeholder="https://api.example.com/anthropic"
+                                    placeholder={customForm.apiProtocol === 'openai' ? 'https://api.openai.com/v1' : 'https://api.example.com/anthropic'}
                                     className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
                                 />
                             </div>
 
                             <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
+                                    请根据供应商认证参数进行选择
+                                </p>
                                 <div className="flex gap-4">
                                     <label className="flex items-center gap-2 cursor-pointer">
                                         <input
@@ -2732,9 +2781,6 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                         <span className="text-sm text-[var(--ink)]">API_KEY</span>
                                     </label>
                                 </div>
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    请根据供应商认证参数进行选择
-                                </p>
                             </div>
 
                             <div>
@@ -2889,6 +2935,42 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                 </div>
                             )}
 
+                            {/* API Protocol - only for custom providers */}
+                            {!editingProvider.provider.isBuiltin && (
+                                <div>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">API 协议</label>
+                                    {editingProvider.editApiProtocol === 'openai' && (
+                                        <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
+                                            通过内置桥接自动转换为 Anthropic 协议，存在稳定性风险
+                                        </p>
+                                    )}
+                                    <div className={`flex gap-4${editingProvider.editApiProtocol !== 'openai' ? ' mt-1' : ''}`}>
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="radio"
+                                                name="edit-apiProtocol"
+                                                value="anthropic"
+                                                checked={editingProvider.editApiProtocol !== 'openai'}
+                                                onChange={() => setEditingProvider((p) => p ? { ...p, editApiProtocol: 'anthropic', editAuthType: 'auth_token' } : null)}
+                                                className="accent-[var(--ink)]"
+                                            />
+                                            <span className="text-sm text-[var(--ink)]">Anthropic 兼容</span>
+                                        </label>
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="radio"
+                                                name="edit-apiProtocol"
+                                                value="openai"
+                                                checked={editingProvider.editApiProtocol === 'openai'}
+                                                onChange={() => setEditingProvider((p) => p ? { ...p, editApiProtocol: 'openai', editAuthType: 'api_key' } : null)}
+                                                className="accent-[var(--ink)]"
+                                            />
+                                            <span className="text-sm text-[var(--ink)]">OpenAI 兼容</span>
+                                        </label>
+                                    </div>
+                                </div>
+                            )}
+
                             {/* Base URL */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">API Base URL</label>
@@ -2903,7 +2985,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                         type="text"
                                         value={editingProvider.editBaseUrl || ''}
                                         onChange={(e) => setEditingProvider((p) => p ? { ...p, editBaseUrl: e.target.value } : null)}
-                                        placeholder="https://api.example.com"
+                                        placeholder={editingProvider.editApiProtocol === 'openai' ? 'https://api.openai.com/v1' : 'https://api.example.com'}
                                         className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm font-mono transition-colors focus:border-[var(--ink)] focus:outline-none"
                                     />
                                 )}
@@ -2912,7 +2994,10 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                             {/* Auth Type - only for custom providers */}
                             {!editingProvider.provider.isBuiltin && (
                                 <div>
-                                    <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                    <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
+                                        请根据供应商认证参数进行选择
+                                    </p>
                                     <div className="flex gap-4">
                                         <label className="flex items-center gap-2 cursor-pointer">
                                             <input
@@ -2937,9 +3022,6 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                             <span className="text-sm text-[var(--ink)]">API_KEY</span>
                                         </label>
                                     </div>
-                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                        请根据供应商认证参数进行选择
-                                    </p>
                                 </div>
                             )}
 

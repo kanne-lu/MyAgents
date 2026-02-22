@@ -177,6 +177,7 @@ export default function ImBotWizard({
                 baseUrl: selectedProvider.config.baseUrl,
                 apiKey: apiKeys[selectedProvider.id],
                 authType: selectedProvider.authType,
+                apiProtocol: selectedProvider.apiProtocol,
             });
         }
 

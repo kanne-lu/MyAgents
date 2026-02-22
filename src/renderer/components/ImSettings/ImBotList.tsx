@@ -96,6 +96,7 @@ export default function ImBotList({
                 baseUrl: selectedProvider.config.baseUrl,
                 apiKey: apiKeys[selectedProvider.id],
                 authType: selectedProvider.authType,
+                apiProtocol: selectedProvider.apiProtocol,
             });
         }
 

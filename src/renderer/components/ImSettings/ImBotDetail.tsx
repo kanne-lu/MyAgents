@@ -179,6 +179,7 @@ export default function ImBotDetail({
                 baseUrl: selectedProvider.config.baseUrl,
                 apiKey: apiKeys[selectedProvider.id],
                 authType: selectedProvider.authType,
+                apiProtocol: selectedProvider.apiProtocol,
             });
         }
 
@@ -561,6 +562,7 @@ export default function ImBotDetail({
                             baseUrl: provider.config.baseUrl,
                             apiKey: apiKeys[provider.id],
                             authType: provider.authType,
+                            apiProtocol: provider.apiProtocol,
                         });
                     }
                     // Persist providerId + model + providerEnvJson (undefined clears old value)
