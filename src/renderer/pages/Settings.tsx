@@ -1,4 +1,4 @@
-import { Check, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, Download, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -287,6 +287,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
     // Tauri: Downloads on first launch and caches locally, CDN in browser
     const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
     const [qrCodeLoading, setQrCodeLoading] = useState(false);
+    const [logExporting, setLogExporting] = useState(false);
 
     // Load QR code when entering about section
     useEffect(() => {
@@ -1912,6 +1913,50 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                         </p>
                                     </div>
                                 )}
+                            </div>
+
+                            {/* Log Export */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <h3 className="text-base font-medium text-[var(--ink)]">运行日志</h3>
+                                        <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                            支持导出近 3 天运行日志排查问题
+                                        </p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={async () => {
+                                            setLogExporting(true);
+                                            try {
+                                                const result = await apiGetJson<{ success: boolean; path?: string; error?: string }>('/api/logs/export');
+                                                if (result.success && result.path) {
+                                                    toast.success(`已导出至 ${result.path}`);
+                                                } else {
+                                                    toast.error(result.error || '导出失败');
+                                                }
+                                            } catch {
+                                                toast.error('导出失败，请重试');
+                                            } finally {
+                                                setLogExporting(false);
+                                            }
+                                        }}
+                                        disabled={logExporting}
+                                        className="flex items-center gap-1.5 rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-strong)] disabled:opacity-50"
+                                    >
+                                        {logExporting ? (
+                                            <>
+                                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                                导出中...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <Download className="h-3.5 w-3.5" />
+                                                导出
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     )}

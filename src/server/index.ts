@@ -2413,6 +2413,61 @@ async function main() {
         }
       }
 
+      // GET /api/logs/export - Export recent unified logs as zip
+      if (pathname === '/api/logs/export' && request.method === 'GET') {
+        try {
+          const { readdirSync, statSync } = await import('fs');
+          const { join: joinPath } = await import('path');
+          const { homedir } = await import('os');
+          const logsDir = joinPath(homedir(), '.myagents', 'logs');
+
+          // Collect last 3 days of unified-*.log files
+          const now = Date.now();
+          const threeDaysMs = 3 * 24 * 60 * 60 * 1000;
+          const files = readdirSync(logsDir)
+            .filter(f => f.startsWith('unified-') && f.endsWith('.log'))
+            .filter(f => {
+              try {
+                return now - statSync(joinPath(logsDir, f)).mtimeMs < threeDaysMs;
+              } catch { return false; }
+            })
+            .sort();
+
+          if (files.length === 0) {
+            return jsonResponse({ success: false, error: '没有找到近3天的运行日志' }, 404);
+          }
+
+          // Output to Desktop
+          const desktopDir = joinPath(homedir(), 'Desktop');
+          const timestamp = new Date().toISOString().slice(0, 10);
+          const zipName = `MyAgents-logs-${timestamp}.zip`;
+          const zipPath = joinPath(desktopDir, zipName);
+
+          // Create zip using platform-appropriate command
+          const isWin = process.platform === 'win32';
+          const filePaths = files.map(f => joinPath(logsDir, f));
+
+          if (isWin) {
+            // PowerShell Compress-Archive
+            const proc = Bun.spawn(['powershell', '-Command',
+              `Compress-Archive -Path '${filePaths.join("','")}' -DestinationPath '${zipPath}' -Force`
+            ]);
+            await proc.exited;
+          } else {
+            // macOS/Linux: zip command
+            const proc = Bun.spawn(['zip', '-j', zipPath, ...filePaths]);
+            await proc.exited;
+          }
+
+          return jsonResponse({ success: true, path: zipPath });
+        } catch (error) {
+          return jsonResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Failed to export logs'
+          }, 500);
+        }
+      }
+
       // ============= PROVIDER VERIFICATION API =============
 
       // POST /api/provider/verify - Verify API key via SDK (same path as normal chat)
