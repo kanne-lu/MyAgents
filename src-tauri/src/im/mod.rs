@@ -896,6 +896,16 @@ pub async fn start_im_bot<R: Runtime>(
                                         &chat_id,
                                         &format!("✅ 模型已切换为: {}", id),
                                     ).await;
+
+                                    // Persist to config.json + notify frontend
+                                    let bid = bot_id_for_loop.clone();
+                                    let model_str = id.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        persist_ai_config_to_disk(&bid, Some(&model_str), None, None);
+                                    });
+                                    let _ = app_clone.emit("im:ai-config-changed", json!({
+                                        "botId": bot_id_for_loop,
+                                    }));
                                 }
                                 None => {
                                     let _ = adapter_for_reply.send_message(
@@ -962,27 +972,48 @@ pub async fn start_im_bot<R: Runtime>(
                                     let provider_id = provider["id"].as_str().unwrap_or("");
 
                                     // Subscription provider → clear provider env
-                                    if provider_id.contains("sub") {
+                                    let (penv_json, pid_str): (Option<String>, Option<String>) = if provider_id.contains("sub") {
                                         *current_provider_env_for_loop.write().await = None;
+                                        (Some(String::new()), Some(String::new())) // empty = clear
                                     } else {
-                                        // Build new provider env from stored info
+                                        // Build new provider env from stored info (include apiProtocol)
                                         let new_env = serde_json::json!({
                                             "baseUrl": provider["baseUrl"],
                                             "apiKey": provider["apiKey"],
                                             "authType": provider["authType"],
+                                            "apiProtocol": provider["apiProtocol"],
                                         });
+                                        let env_str = new_env.to_string();
                                         *current_provider_env_for_loop.write().await = Some(new_env);
-                                    }
+                                        (Some(env_str), Some(provider_id.to_string()))
+                                    };
 
                                     // Also switch model to the provider's primary model
-                                    if !primary_model.is_empty() {
+                                    let model_for_persist = if !primary_model.is_empty() {
                                         *current_model_for_loop.write().await = Some(primary_model.to_string());
-                                    }
+                                        Some(primary_model.to_string())
+                                    } else {
+                                        None
+                                    };
 
                                     let _ = adapter_for_reply.send_message(
                                         &chat_id,
                                         &format!("✅ 已切换供应商: {}\n模型: {}", name, primary_model),
                                     ).await;
+
+                                    // Persist to config.json + notify frontend
+                                    let bid = bot_id_for_loop.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        persist_ai_config_to_disk(
+                                            &bid,
+                                            model_for_persist.as_deref(),
+                                            penv_json.as_deref(),
+                                            pid_str.as_deref(),
+                                        );
+                                    });
+                                    let _ = app_clone.emit("im:ai-config-changed", json!({
+                                        "botId": bot_id_for_loop,
+                                    }));
                                 }
                                 None => {
                                     let _ = adapter_for_reply.send_message(
@@ -1172,6 +1203,7 @@ pub async fn start_im_bot<R: Runtime>(
 
                         // 5. SSE stream: route message + stream response to Telegram
                         let penv = task_provider_env.read().await.clone();
+                        let task_model_val = task_model.read().await.clone();
                         let images = if image_payloads.is_empty() {
                             None
                         } else {
@@ -1185,6 +1217,7 @@ pub async fn start_im_bot<R: Runtime>(
                             &chat_id,
                             &task_perm,
                             penv.as_ref(),
+                            task_model_val.as_deref(),
                             images,
                             &task_pending_approvals,
                             Some(&task_bot_id),
@@ -1228,10 +1261,17 @@ pub async fn start_im_bot<R: Runtime>(
                         task_adapter.ack_clear(&chat_id, &message_id).await;
 
                         // 7. Update session state
-                        task_router
-                            .lock()
-                            .await
-                            .record_response(&session_key, session_id.as_deref());
+                        {
+                            let mut router = task_router.lock().await;
+                            router.record_response(&session_key, session_id.as_deref());
+                            // If Bun sidecar created a new session (e.g. provider switch),
+                            // upgrade the Rust-side session_id + Sidecar Manager key
+                            if let Some(new_sid) = session_id.as_deref() {
+                                router.upgrade_peer_session_id(
+                                    &session_key, new_sid, &task_manager,
+                                );
+                            }
+                        }
 
                         // Update health
                         task_health
@@ -1259,6 +1299,7 @@ pub async fn start_im_bot<R: Runtime>(
                                         &buf_chat_id,
                                         &task_perm,
                                         penv.as_ref(),
+                                        task_model_val.as_deref(),
                                         None, // buffered messages don't preserve attachments
                                         &task_pending_approvals,
                                         Some(&task_bot_id),
@@ -1266,13 +1307,17 @@ pub async fn start_im_bot<R: Runtime>(
                                     .await
                                     {
                                         Ok(buf_sid) => {
-                                            task_router
-                                                .lock()
-                                                .await
-                                                .record_response(
-                                                    &session_key,
-                                                    buf_sid.as_deref(),
+                                            let mut router = task_router.lock().await;
+                                            router.record_response(
+                                                &session_key,
+                                                buf_sid.as_deref(),
+                                            );
+                                            if let Some(sid) = buf_sid.as_deref() {
+                                                router.upgrade_peer_session_id(
+                                                    &session_key, sid, &task_manager,
                                                 );
+                                            }
+                                            drop(router);
                                             replayed += 1;
                                         }
                                         Err(e) => {
@@ -1631,6 +1676,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     chat_id: &str,
     permission_mode: &str,
     provider_env: Option<&serde_json::Value>,
+    model: Option<&str>,
     images: Option<&Vec<serde_json::Value>>,
     pending_approvals: &PendingApprovals,
     bot_id: Option<&str>,
@@ -1651,6 +1697,9 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     });
     if let Some(env) = provider_env {
         body["providerEnv"] = env.clone();
+    }
+    if let Some(m) = model {
+        body["model"] = json!(m);
     }
     if let Some(imgs) = images {
         if !imgs.is_empty() {
@@ -2246,6 +2295,112 @@ fn persist_bound_user_to_config(bot_id: &str, user_id: &str) {
     }
 
     ulog_info!("[im] Persisted bound user {} for bot {} to config.json", user_id, bot_id);
+}
+
+/// Persist AI config changes (model / providerEnvJson / providerId) to `~/.myagents/config.json`.
+///
+/// Each `Option` parameter: `None` = leave unchanged, `Some("")` = clear the field,
+/// `Some(value)` = set the field.  Uses the same atomic write pattern as `persist_bound_user_to_config`.
+fn persist_ai_config_to_disk(
+    bot_id: &str,
+    model: Option<&str>,
+    provider_env_json: Option<&str>,
+    provider_id: Option<&str>,
+) {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => {
+            ulog_warn!("[im] Cannot persist AI config: home dir not found");
+            return;
+        }
+    };
+    let config_path = home.join(".myagents").join("config.json");
+    let tmp_path = config_path.with_extension("json.tmp.rust");
+    let bak_path = config_path.with_extension("json.bak");
+
+    let content = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            ulog_warn!("[im] Cannot read config.json to persist AI config: {}", e);
+            return;
+        }
+    };
+    let mut config: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            ulog_warn!("[im] Cannot parse config.json to persist AI config: {}", e);
+            return;
+        }
+    };
+
+    let modified = if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
+        if let Some(bot) = bots.iter_mut().find(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
+            let mut changed = false;
+            if let Some(m) = model {
+                if m.is_empty() {
+                    if let Some(o) = bot.as_object_mut() { o.remove("model"); }
+                } else {
+                    bot["model"] = serde_json::json!(m);
+                }
+                changed = true;
+            }
+            if let Some(penv) = provider_env_json {
+                if penv.is_empty() {
+                    if let Some(o) = bot.as_object_mut() { o.remove("providerEnvJson"); }
+                } else {
+                    bot["providerEnvJson"] = serde_json::json!(penv);
+                }
+                changed = true;
+            }
+            if let Some(pid) = provider_id {
+                if pid.is_empty() {
+                    if let Some(o) = bot.as_object_mut() { o.remove("providerId"); }
+                } else {
+                    bot["providerId"] = serde_json::json!(pid);
+                }
+                changed = true;
+            }
+            changed
+        } else {
+            ulog_warn!("[im] Bot {} not found in config.json, cannot persist AI config", bot_id);
+            false
+        }
+    } else {
+        ulog_warn!("[im] No imBotConfigs in config.json, cannot persist AI config");
+        false
+    };
+
+    if !modified {
+        return;
+    }
+
+    let new_content = match serde_json::to_string_pretty(&config) {
+        Ok(c) => c,
+        Err(e) => {
+            ulog_warn!("[im] Cannot serialize config for AI config: {}", e);
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::write(&tmp_path, &new_content) {
+        ulog_warn!("[im] Cannot write tmp config for AI config: {}", e);
+        return;
+    }
+
+    if config_path.exists() {
+        let _ = std::fs::rename(&config_path, &bak_path);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
+        ulog_warn!("[im] Cannot rename tmp config for AI config: {}", e);
+        if bak_path.exists() && !config_path.exists() {
+            let _ = std::fs::rename(&bak_path, &config_path);
+        }
+        return;
+    }
+
+    ulog_info!("[im] Persisted AI config for bot {} to config.json (model={:?}, provider={:?})",
+        bot_id, model, provider_id);
 }
 
 // ===== Tauri Commands =====

@@ -170,6 +170,29 @@ export default function ImBotDetail({
         };
     }, [botId, refreshConfig]);
 
+    // Listen for AI config changes (Rust /provider or /model commands persist to config.json)
+    useEffect(() => {
+        if (!isTauriEnvironment()) return;
+        let cancelled = false;
+        let unlisten: (() => void) | undefined;
+
+        import('@tauri-apps/api/event').then(({ listen }) => {
+            if (cancelled) return;
+            listen<{ botId: string }>('im:ai-config-changed', (event) => {
+                if (!isMountedRef.current || event.payload.botId !== botId) return;
+                refreshConfig();
+            }).then(fn => {
+                if (cancelled) fn();
+                else unlisten = fn;
+            });
+        });
+
+        return () => {
+            cancelled = true;
+            unlisten?.();
+        };
+    }, [botId, refreshConfig]);
+
     // Build start params
     const buildStartParams = useCallback(async (cfg: ImBotConfig) => {
         const selectedProvider = providers.find(p => p.id === cfg.providerId);
@@ -191,6 +214,7 @@ export default function ImBotDetail({
                 primaryModel: p.primaryModel,
                 baseUrl: p.config.baseUrl,
                 authType: p.authType,
+                apiProtocol: p.apiProtocol,
                 apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
                 models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
             }));
@@ -575,6 +599,7 @@ export default function ImBotDetail({
                         .map(p => ({
                             id: p.id, name: p.name, primaryModel: p.primaryModel,
                             baseUrl: p.config.baseUrl, authType: p.authType,
+                            apiProtocol: p.apiProtocol,
                             apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
                             models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
                         }));

@@ -4610,6 +4610,7 @@ async function main() {
             senderName?: string;
             permissionMode?: string;
             providerEnv?: ProviderEnv;
+            model?: string;
             images?: Array<{ name: string; mimeType: string; data: string }>;
             botId?: string;
           };
@@ -4627,7 +4628,7 @@ async function main() {
               chatId: payload.sourceId,
               platform: payload.source.split('_')[0], // "telegram" or "feishu"
               workspacePath: agentDir,
-              model: getSessionModel(),
+              model: payload.model ?? getSessionModel(),
               permissionMode: payload.permissionMode,
               providerEnv: payload.providerEnv ? {
                 baseUrl: payload.providerEnv.baseUrl,
@@ -4657,7 +4658,7 @@ async function main() {
             payload.message || '',
             payload.images, // forward image attachments from Telegram
             (payload.permissionMode as PermissionMode) ?? 'plan',
-            undefined, // model: already set via /api/model/set, not per-message
+            payload.model ?? undefined, // model: per-message from Rust /model command
             payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM
             metadata,
           );

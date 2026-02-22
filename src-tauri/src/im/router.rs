@@ -201,13 +201,41 @@ impl SessionRouter {
     }
 
     /// Record a successful AI response — increment message_count and refresh activity.
-    /// Note: session_id is NOT updated from the SSE response. The PeerSession.session_id
-    /// is the Sidecar manager key (set at Sidecar creation time via --session-id).
-    /// Overwriting it would cause a key mismatch on Sidecar restart.
+    /// Note: session_id is NOT updated here. Use `upgrade_peer_session_id` when the
+    /// Bun sidecar creates a new session internally (e.g., provider switch).
     pub fn record_response(&mut self, session_key: &str, _session_id: Option<&str>) {
         if let Some(ps) = self.peer_sessions.get_mut(session_key) {
             ps.message_count += 1;
             ps.last_active = Instant::now();
+        }
+    }
+
+    /// Upgrade a peer's session_id when the Bun sidecar internally created a new session
+    /// (e.g., provider switch third-party → Anthropic). Also upgrades the Sidecar Manager key.
+    /// Returns true if the session_id was actually changed.
+    pub fn upgrade_peer_session_id(
+        &mut self,
+        session_key: &str,
+        new_session_id: &str,
+        manager: &ManagedSidecarManager,
+    ) -> bool {
+        if let Some(ps) = self.peer_sessions.get_mut(session_key) {
+            if ps.session_id == new_session_id {
+                return false; // no change
+            }
+            let old_id = ps.session_id.clone();
+            {
+                let mut mgr = manager.lock().unwrap();
+                mgr.upgrade_session_id(&old_id, new_session_id);
+            }
+            ps.session_id = new_session_id.to_string();
+            ulog_info!(
+                "[im-router] Upgraded peer session_id: {} -> {} (session_key={})",
+                old_id, new_session_id, session_key,
+            );
+            true
+        } else {
+            false
         }
     }
 
