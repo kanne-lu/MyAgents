@@ -226,7 +226,6 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         deleteCustomProvider: deleteCustomProviderService,
         savePresetCustomModels,
         removePresetCustomModel: _removePresetCustomModel,
-        reload: reloadConfig,
     } = useConfig();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -483,17 +482,15 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         loadMcp();
     }, []);
 
-    // Refresh all local state when tab becomes active (inactive → active transition).
-    // useConfig() and MCP state are standalone per-component — changes from other pages don't propagate.
+    // Refresh MCP local state when tab becomes active (inactive → active transition).
+    // Config/projects/providers/apiKeys are shared via ConfigProvider and auto-sync.
+    // MCP servers are local state, so we reload them from disk on tab activation.
     const prevIsActiveRef = useRef(isActive);
     useEffect(() => {
         const wasInactive = !prevIsActiveRef.current;
         prevIsActiveRef.current = isActive;
         if (!wasInactive || !isActive) return;
 
-        // Reload config from disk (projects, providers, apiKeys, etc.)
-        void reloadConfig();
-        // Reload MCP servers & enabled IDs
         void (async () => {
             try {
                 const servers = await getAllMcpServers();
@@ -504,7 +501,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 console.warn('[Settings] Failed to reload MCP servers on activation:', err);
             }
         })();
-    }, [isActive, reloadConfig]);
+    }, [isActive]);
 
     // Toggle MCP server enabled status
     // For preset MCP (npx): warmup bun cache

@@ -80,8 +80,7 @@ export const CUSTOM_EVENTS = {
     OPEN_SETTINGS: 'open-settings',
     /** Fired when user tries to open a Session that's already active in another Tab */
     JUMP_TO_TAB: 'jump-to-tab',
-    /** Fired when app config is updated (for cross-component sync) */
-    CONFIG_CHANGED: 'config-changed',
+    // CONFIG_CHANGED removed — ConfigProvider shares state via Context, no DOM event bridge needed
     // Note: CRON_TASK_STOPPED event removed
     // With Session-centric Sidecar (Owner model), stopping a cron task only releases
     // the CronTask owner. If Tab still owns the Sidecar, it continues running.

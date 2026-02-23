@@ -53,7 +53,6 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         providerVerifyStatus,
         refreshProviderData,
         updateConfig,
-        reload: reloadConfig,
     } = useConfig();
     const [_addError, setAddError] = useState<string | null>(null);
     const [launchingProjectId, setLaunchingProjectId] = useState<string | null>(null);
@@ -124,21 +123,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedWorkspace?.id]);
 
-    // Refresh data when tab becomes active (inactive → active transition).
-    // useConfig() is a standalone hook, not a context — each component instance has
-    // independent state. Changes in Settings (projects, providers, API keys) don't
-    // automatically propagate here, so we reload from disk on tab activation.
+    // Refresh MCP local state when tab becomes active (inactive → active transition).
+    // Config/projects/providers/apiKeys are shared via ConfigProvider and auto-sync.
+    // MCP servers are local state, so we reload them from disk on tab activation.
     const prevIsActiveRef = useRef(isActive);
     useEffect(() => {
         const wasInactive = !prevIsActiveRef.current;
         prevIsActiveRef.current = isActive;
         if (!wasInactive || !isActive) return;
 
-        // Reload config/projects/providers/apiKeys from disk
-        void reloadConfig();
-        // Reload global MCP servers (may have changed in Settings or Chat).
-        // Workspace MCP enabled list is handled by the settings sync effect cascade:
-        // reloadConfig → projects update → selectedWorkspace update → settings sync effect.
         void (async () => {
             try {
                 const servers = await getAllMcpServers();
@@ -149,7 +142,6 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 console.warn('[Launcher] Failed to reload MCP servers on activation:', err);
             }
         })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- only trigger on visibility transition
     }, [isActive]);
 
     // Handle workspace MCP toggle — persist to project config via patchProject (updates disk + React state)

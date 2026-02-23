@@ -138,18 +138,8 @@ export default function App() {
     void restartAndUpdateRef.current();
   }, []);
 
-  // App config for tray behavior
-  const { config, reload: reloadConfig } = useConfig();
-
-  // Listen for config changes from other components (e.g., Settings page)
-  useEffect(() => {
-    const handleConfigChange = () => {
-      console.log('[App] Config changed, reloading...');
-      void reloadConfig();
-    };
-    window.addEventListener(CUSTOM_EVENTS.CONFIG_CHANGED, handleConfigChange);
-    return () => window.removeEventListener(CUSTOM_EVENTS.CONFIG_CHANGED, handleConfigChange);
-  }, [reloadConfig]);
+  // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
+  const { config } = useConfig();
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
@@ -263,7 +253,7 @@ export default function App() {
     void startGlobalSidecarSilent();
 
     // NOTE: Bundled workspace (mino) initialization is handled by
-    // ensureBundledWorkspace() inside useConfig.load(), which runs
+    // ensureBundledWorkspace() inside ConfigProvider.load(), which runs
     // before loadProjects() to eliminate race conditions.
 
     // 方案 A: Rust 统一恢复 - 监听恢复事件（仅用于日志和 UI 反馈）

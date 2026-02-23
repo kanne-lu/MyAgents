@@ -172,28 +172,7 @@ export default function ImBotDetail({
         };
     }, [botId, refreshConfig]);
 
-    // Listen for bot config changes (Rust unified event for all config mutations)
-    useEffect(() => {
-        if (!isTauriEnvironment()) return;
-        let cancelled = false;
-        let unlisten: (() => void) | undefined;
-
-        import('@tauri-apps/api/event').then(({ listen }) => {
-            if (cancelled) return;
-            listen<{ botId: string }>('im:bot-config-changed', (event) => {
-                if (!isMountedRef.current || event.payload.botId !== botId) return;
-                refreshConfig();
-            }).then(fn => {
-                if (cancelled) fn();
-                else unlisten = fn;
-            });
-        });
-
-        return () => {
-            cancelled = true;
-            unlisten?.();
-        };
-    }, [botId, refreshConfig]);
+    // im:bot-config-changed listener moved to ConfigProvider (shared state auto-updates)
 
     // Build start params — providerEnvJson is already persisted on disk by Rust,
     // so we read it directly from the config instead of rebuilding from React state.
