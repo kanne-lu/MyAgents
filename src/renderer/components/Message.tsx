@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react';
+import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Copy, Check, Undo2 } from 'lucide-react';
 
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
@@ -13,6 +13,8 @@ interface MessageProps {
   isLoading?: boolean;
   isStreaming?: boolean;       // AI 回复中时隐藏时间回溯按钮
   onRewind?: (messageId: string) => void;
+  /** Slot rendered after the BlockGroup containing ExitPlanMode tool */
+  exitPlanModeSlot?: ReactNode;
 }
 
 /**
@@ -31,6 +33,8 @@ function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
   // Different loading state -> must re-render
   if (prev.isLoading !== next.isLoading) return false;
   if (prev.isStreaming !== next.isStreaming) return false;
+  // exitPlanModeSlot — useMemo in MessageList keeps reference stable during streaming
+  if (prev.exitPlanModeSlot !== next.exitPlanModeSlot) return false;
   // onRewind 不比较 — 通过 Chat.tsx useCallback([]) + ref 保证稳定
 
   const prevMsg = prev.message;
@@ -84,7 +88,7 @@ function formatLocalCommandOutput(content: string): string {
  * Message component with memo optimization.
  * History messages won't re-render when streaming message updates.
  */
-const Message = memo(function Message({ message, isLoading = false, isStreaming, onRewind }: MessageProps) {
+const Message = memo(function Message({ message, isLoading = false, isStreaming, onRewind, exitPlanModeSlot }: MessageProps) {
   const { openPreview } = useImagePreview();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -266,6 +270,18 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
 
   const isAssistantStreaming = isLoading && hasIncompleteBlocks;
 
+  // Find the LAST BlockGroup containing ExitPlanMode for slot placement.
+  // Only the last one gets the slot — avoids duplicates when reject → re-plan
+  // produces multiple ExitPlanMode tool calls in the same message.
+  const exitPlanModeGroupIndex = exitPlanModeSlot
+    ? groupedBlocks.findLastIndex(item =>
+        Array.isArray(item) && item.some(
+          block => (block.type === 'tool_use' || block.type === 'server_tool_use')
+            && block.tool?.name === 'ExitPlanMode'
+        )
+      )
+    : -1;
+
   return (
     <div className="flex justify-start select-none">
       <article className="w-full px-3 py-2">
@@ -297,13 +313,15 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
                 .some((nextItem) => !Array.isArray(nextItem) && nextItem.type === 'text');
 
             return (
-              <BlockGroup
-                key={`group-${index}`}
-                blocks={item}
-                isLatestActiveSection={isLatestActiveSection}
-                isStreaming={isAssistantStreaming}
-                hasTextAfter={hasTextAfter}
-              />
+              <Fragment key={`group-${index}`}>
+                <BlockGroup
+                  blocks={item}
+                  isLatestActiveSection={isLatestActiveSection}
+                  isStreaming={isAssistantStreaming}
+                  hasTextAfter={hasTextAfter}
+                />
+                {index === exitPlanModeGroupIndex && exitPlanModeSlot}
+              </Fragment>
             );
           })}
         </div>

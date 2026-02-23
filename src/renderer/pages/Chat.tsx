@@ -67,7 +67,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     pendingExitPlanMode,
     pendingEnterPlanMode,
     respondExitPlanMode,
-    respondEnterPlanMode,
     toolCompleteCount,
     setMessages,
     setIsLoading,
@@ -997,15 +996,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     void respondExitPlanMode(false);
   }, [respondExitPlanMode]);
 
-  const handleEnterPlanModeApprove = useCallback(() => {
-    void respondEnterPlanMode(true);
-    // Mode switch is handled by the useEffect below reacting to resolved='approved'
-  }, [respondEnterPlanMode]);
-
-  const handleEnterPlanModeReject = useCallback(() => {
-    void respondEnterPlanMode(false);
-  }, [respondEnterPlanMode]);
-
   // React to plan mode changes: auto-approved by SDK, or user-approved via card
   // Single source of truth for permission mode switch during plan mode
   useEffect(() => {
@@ -1270,9 +1260,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               pendingExitPlanMode={pendingExitPlanMode}
               onExitPlanModeApprove={handleExitPlanModeApprove}
               onExitPlanModeReject={handleExitPlanModeReject}
-              pendingEnterPlanMode={pendingEnterPlanMode}
-              onEnterPlanModeApprove={handleEnterPlanModeApprove}
-              onEnterPlanModeReject={handleEnterPlanModeReject}
               systemStatus={rewindStatus || systemStatus}
               isStreaming={isLoading || sessionState === 'running'}
               onRewind={handleRewind}

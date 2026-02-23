@@ -179,16 +179,11 @@ const ProcessRow = memo(function ProcessRow({
                         ? 'bg-[var(--error)]'
                         : block.isStopped || block.tool?.isStopped
                             ? 'bg-[var(--warning)]'
-                            : isThinking
-                                ? 'bg-[var(--accent-cool)]'
-                                : 'bg-[var(--ink-muted)]/40'
+                            : 'bg-[var(--ink-muted)]/40'
                     }`} />
 
                 {/* Icon - fixed size container */}
-                <div className={`flex size-4 shrink-0 items-center justify-center ${isThinking
-                    ? 'text-[var(--accent-cool)]'
-                    : 'text-[var(--ink-muted)]'
-                    } [&>svg]:size-4`}>
+                <div className={`flex size-4 shrink-0 items-center justify-center text-[var(--ink-muted)] [&>svg]:size-4`}>
                     {icon}
                 </div>
 

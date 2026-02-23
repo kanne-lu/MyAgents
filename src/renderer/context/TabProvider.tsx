@@ -315,6 +315,17 @@ export default function TabProvider({
      * - Generates new session ID on backend
      * - Clears logs and permissions
      */
+
+    // Shared cleanup for all session boundary transitions (reset, load, SSE init).
+    // Single source of truth — add new interactive states here to avoid leaking across sessions.
+    const clearInteractiveState = useCallback(() => {
+        setPendingPermission(null);
+        setPendingAskUserQuestion(null);
+        setPendingExitPlanMode(null);
+        setPendingEnterPlanMode(null);
+        setQueuedMessages([]);
+    }, []);
+
     const resetSession = useCallback(async (): Promise<boolean> => {
         console.log(`[TabProvider ${tabId}] resetSession: starting...`);
 
@@ -330,13 +341,7 @@ export default function TabProvider({
         setAgentError(null);
         setUnifiedLogs([]);
         setLogs([]);
-        // Clear pending prompts to prevent stale UI
-        setPendingPermission(null);
-        setPendingAskUserQuestion(null);
-        setPendingExitPlanMode(null);
-        setPendingEnterPlanMode(null);
-        // Clear queued messages
-        setQueuedMessages([]);
+        clearInteractiveState();
         // Clear current session ID - no active session until first message creates one
         // This ensures history dropdown shows no selection for new conversations
         setCurrentSessionId(null);
@@ -358,7 +363,7 @@ export default function TabProvider({
             console.error(`[TabProvider ${tabId}] resetSession error:`, error);
             return false;
         }
-    }, [tabId, postJson, setStreamingMessage]);
+    }, [tabId, postJson, setStreamingMessage, clearInteractiveState]);
 
     // Append log
     const appendLog = useCallback((line: string) => {
@@ -485,6 +490,7 @@ export default function TabProvider({
                 setHistoryMessages([]);
                 setStreamingMessage(null);
                 setAgentError(null);
+                clearInteractiveState();
 
                 // Sync isLoading with backend state on SSE connect/reconnect
                 // This catches cases where message-complete was lost during connection issues
@@ -1138,12 +1144,12 @@ export default function TabProvider({
             case 'enter-plan-mode:request': {
                 const payload = data as { requestId: string; autoApproved?: boolean } | null;
                 if (payload?.requestId) {
-                    if (payload.autoApproved) {
-                        // SDK auto-allowed EnterPlanMode — show as already approved, no user action needed
-                        setPendingEnterPlanMode({ requestId: payload.requestId, autoApproved: true, resolved: 'approved' });
-                    } else {
-                        setPendingEnterPlanMode({ requestId: payload.requestId });
-                        notifyPlanModeRequest();
+                    // Always auto-approve EnterPlanMode (no user card needed).
+                    // For SDK-auto path, backend already proceeded; just update UI state.
+                    // For canUseTool path, backend is waiting — notify it to proceed.
+                    setPendingEnterPlanMode({ requestId: payload.requestId, autoApproved: true, resolved: 'approved' });
+                    if (!payload.autoApproved) {
+                        void postJson('/api/enter-plan-mode/respond', { requestId: payload.requestId, approved: true });
                     }
                 }
                 break;
@@ -1243,7 +1249,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState]);
 
     // Connect SSE
     // Uses Session-centric port lookup via currentSessionIdRef
@@ -1550,6 +1556,7 @@ export default function TabProvider({
             }
             setSystemStatus(null);
             setAgentError(null);
+            clearInteractiveState();
             // Update current session ID to reflect the loaded session
             setCurrentSessionId(targetSessionId);
 
@@ -1568,7 +1575,7 @@ export default function TabProvider({
             return false;
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson and postJson are stable
-    }, [tabId]);
+    }, [tabId, clearInteractiveState]);
 
     // Track whether initial session has been loaded
     const initialSessionLoadedRef = useRef(false);
@@ -1633,6 +1640,14 @@ export default function TabProvider({
         }
 
         // Case 4: Need to load session (initial load or session switch)
+        // Exception: if resetSession was just called (isNewSessionRef=true), the session
+        // upgrade (old→new) arrives via system:init. Messages are already streaming via SSE,
+        // so calling loadSession would flash isLoading=false. Skip and let SSE handle it.
+        if (isNewSessionRef.current) {
+            console.log(`[TabProvider ${tabId}] SessionId upgraded to ${sessionId} after resetSession, skipping loadSession (messages arriving via SSE)`);
+            initialSessionLoadedRef.current = true;
+            return;
+        }
         if (prevSessionId !== sessionId) {
             console.log(`[TabProvider ${tabId}] SessionId changed from ${prevSessionId} to ${sessionId}, loading session`);
         } else {
@@ -1727,18 +1742,6 @@ export default function TabProvider({
         }
     }, [pendingExitPlanMode, postJson]);
 
-    // Respond to EnterPlanMode request (keep card visible with resolved status)
-    const respondEnterPlanMode = useCallback(async (approved: boolean) => {
-        if (!pendingEnterPlanMode) return;
-        const requestId = pendingEnterPlanMode.requestId;
-        setPendingEnterPlanMode(prev => prev ? { ...prev, resolved: approved ? 'approved' : 'rejected' } : null);
-        try {
-            await postJson('/api/enter-plan-mode/respond', { requestId, approved });
-        } catch (error) {
-            console.error('[TabProvider] Failed to send EnterPlanMode response:', error);
-        }
-    }, [pendingEnterPlanMode, postJson]);
-
     // Context value - use currentSessionId (which tracks the actually loaded session)
     const contextValue: TabContextValue = useMemo(() => ({
         tabId,
@@ -1783,7 +1786,6 @@ export default function TabProvider({
         respondPermission,
         respondAskUserQuestion,
         respondExitPlanMode,
-        respondEnterPlanMode,
         cancelQueuedMessage,
         forceExecuteQueuedMessage,
         // Cron task exit handler ref (mutable, no need in deps)
@@ -1792,7 +1794,7 @@ export default function TabProvider({
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, isLoading, sessionState,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, resetSession,
-        apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, respondEnterPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
+        apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 
     // Lightweight API-only context value — deps are all stable (created once per tabId),

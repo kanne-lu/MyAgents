@@ -115,7 +115,6 @@ export interface TabContextValue extends TabState {
 
     // PlanMode handling
     respondExitPlanMode: (approved: boolean) => Promise<void>;
-    respondEnterPlanMode: (approved: boolean) => Promise<void>;
 
     // Queue actions
     cancelQueuedMessage: (queueId: string) => Promise<string | null>;
@@ -170,7 +169,6 @@ const defaultContextValue: TabContextValue = {
     respondPermission: async () => { },
     respondAskUserQuestion: async () => { },
     respondExitPlanMode: async () => { },
-    respondEnterPlanMode: async () => { },
     cancelQueuedMessage: async () => null,
     forceExecuteQueuedMessage: async () => false,
     onCronTaskExitRequested: { current: null },

@@ -18,7 +18,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
 
     return (
         <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
-            <div className={`mx-auto max-w-2xl rounded-xl border p-4 shadow-sm ${
+            <div className={`rounded-xl border p-4 shadow-sm ${
                 isResolved && !isApproved
                     ? 'border-gray-200 bg-gray-50/80 dark:border-gray-700 dark:bg-gray-900/40'
                     : 'border-green-200 bg-green-50/80 dark:border-green-800 dark:bg-green-950/40'
@@ -65,7 +65,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
 
                 {/* Plan content — always visible */}
                 {request.plan && (
-                    <div className={`mt-3 max-h-80 overflow-y-auto rounded-lg border p-3 text-sm ${
+                    <div className={`mt-3 max-h-[26rem] overflow-y-auto rounded-lg border p-3 text-sm ${
                         isResolved && !isApproved
                             ? 'border-gray-200 bg-gray-50/60 dark:border-gray-700 dark:bg-gray-900/40'
                             : 'border-green-200 bg-white/80 dark:border-green-800 dark:bg-gray-900/60'
@@ -97,7 +97,7 @@ export function ExitPlanModePrompt({ request, onApprove, onReject }: ExitPlanMod
 
                 {/* Actions - only show when not resolved */}
                 {!isResolved && (
-                    <div className="flex justify-end gap-2">
+                    <div className="mt-3 flex justify-end gap-2">
                         <button
                             onClick={onReject}
                             className="flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-600 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600"
