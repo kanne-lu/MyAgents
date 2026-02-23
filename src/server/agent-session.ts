@@ -151,6 +151,18 @@ const childToolToParent: Map<string, string> = new Map();
 let messageSequence = 0;
 let sessionId = randomUUID();
 
+// Reset guard: prevents enqueueUserMessage from racing with async resetSession()/switchToSession()
+// Single promise — non-null means a reset is in progress; enqueueUserMessage awaits it.
+let resetPromise: Promise<void> | null = null;
+
+/** Mark the start of an async reset. Returns a cleanup function for the finally block. */
+function beginReset(): () => void {
+  if (resetPromise) console.warn('[agent] beginReset: already resetting — possible reentrancy');
+  let resolve: () => void;
+  resetPromise = new Promise(r => { resolve = r; });
+  return () => { resetPromise = null; resolve!(); };
+}
+
 // Pre-warm: start SDK subprocess + MCP servers before user sends first message
 let isPreWarming = false;
 let preWarmTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2444,14 +2456,37 @@ function extractAgentError(sdkMessage: unknown): string | null {
   }
   const candidate = (sdkMessage as { error?: unknown }).error;
   if (candidate) {
+    let errorStr: string;
     if (typeof candidate === 'string') {
-      return candidate;
+      errorStr = candidate;
+    } else {
+      try {
+        errorStr = JSON.stringify(candidate);
+      } catch {
+        errorStr = String(candidate);
+      }
     }
-    try {
-      return JSON.stringify(candidate);
-    } catch {
-      return String(candidate);
+
+    // Try to get a more descriptive message from assistant content or result field
+    let detail: string | null = null;
+    if ('message' in sdkMessage) {
+      const assistantMessage = (sdkMessage as { message?: { content?: unknown } }).message;
+      const contentText = formatAssistantContent(assistantMessage?.content);
+      if (contentText) {
+        detail = contentText;
+      }
     }
+    if (!detail && 'result' in sdkMessage) {
+      const result = (sdkMessage as { result?: unknown }).result;
+      if (typeof result === 'string' && result.length > 0) {
+        detail = result;
+      }
+    }
+
+    if (detail) {
+      return `${errorStr}: ${detail}`;
+    }
+    return errorStr;
   }
 
   if (
@@ -2558,6 +2593,8 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
 export async function resetSession(): Promise<void> {
   console.log('[agent] resetSession: starting new conversation');
 
+  const endReset = beginReset();
+  try {
   // 1. Properly terminate the SDK session (same pattern as switchToSession)
   // Must abort persistent session so the generator exits and subprocess terminates
   if (querySession || sessionTerminationPromise) {
@@ -2628,6 +2665,9 @@ export async function resetSession(): Promise<void> {
 
   // Pre-warm with fresh session so next message is fast
   schedulePreWarm();
+  } finally {
+    endReset();
+  }
 }
 
 /**
@@ -2720,6 +2760,8 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     return false;
   }
 
+  const endReset = beginReset();
+  try {
   // Properly terminate the old session if one is running
   // Must abort persistent session so the generator exits and subprocess terminates
   // Otherwise the old session continues processing messages with stale settings
@@ -2800,6 +2842,9 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Pre-warm with resumed session so subprocess + MCP are ready before user types
   schedulePreWarm();
   return true;
+  } finally {
+    endReset();
+  }
 }
 
 type ImagePayload = {
@@ -2855,6 +2900,15 @@ export async function enqueueUserMessage(
   providerEnv?: ProviderEnv,
   metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group'; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
+  // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
+  // 这些函数是异步的（await sessionTerminationPromise 需要数秒），
+  // 在此期间投递的消息会被随后的 clearMessageState() 清除导致消息丢失
+  if (resetPromise) {
+    console.log('[agent] enqueueUserMessage: waiting for session reset to complete...');
+    await resetPromise;
+    console.log('[agent] enqueueUserMessage: session reset completed, proceeding');
+  }
+
   // 等待进行中的时间回溯完成，防止并发写入 messages/session 状态
   if (rewindPromise) {
     await rewindPromise;
