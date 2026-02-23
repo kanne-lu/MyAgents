@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.26] - 2026-02-24
+
+### Changed
+- **前端配置服务域拆分**：将 1028 行 configService.ts 上帝模块拆分为 6 个域模块（configStore / appConfigService / providerService / mcpService / projectService / projectSettingsService），原文件保留为 barrel re-export，所有现有 import 无需修改
+- **ConfigProvider 共享状态架构**：新增 ConfigProvider 双 Context（ConfigDataContext + ConfigActionsContext），消除 useConfig 独立 hook 多调用者状态不同步问题。useConfig 改为兼容 wrapper，现有消费者零改动
+- **消除 CONFIG_CHANGED DOM 事件桥接**：配置变更通过 ConfigProvider 的 setState 直接同步，不再依赖 window.dispatchEvent 临时方案
+- **im:bot-config-changed 监听上移**：从 ImBotDetail 移入 ConfigProvider，所有消费者通过 Context 自动获得最新配置
+- **atomicModifyConfig 统一写入模式**：providerService 和 mcpService 的 9 处写入函数从手动 lock+read+write 改为 atomicModifyConfig，_writeAppConfigLocked 收为模块私有
+- **IM Bot 配置架构统一**：建立 Rust 层作为 IM Bot 配置唯一管理者，前端和 IM 命令共享同一条配置变更通道
+
+### Fixed
+- **safeWriteJson 并发读写竞态**：备份步骤从 rename（删除原文件）改为 copyFile（保留原文件），消除并发读取时 "No such file or directory" 错误
+- **safeLoadJson 读操作中写文件竞态**：改为纯只读恢复，不在读操作中触发写入
+- **共享 isLoading 全局闪烁**：移除 Launcher/Settings 的冗余 reloadConfig 调用，避免 ConfigProvider 共享 isLoading 导致 ImSettings 等组件闪烁
+- **Windows 手动检查更新误报「已是最新版本」**
+
+---
+
 ## [0.1.25] - 2026-02-23
 
 ### Added
