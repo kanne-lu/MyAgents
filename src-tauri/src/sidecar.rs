@@ -2653,6 +2653,8 @@ pub struct CronExecuteResponse {
     pub ai_requested_exit: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_text: Option<String>,
 }
 
 /// Execute a cron task synchronously via Sidecar HTTP API

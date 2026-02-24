@@ -741,7 +741,7 @@ impl CronTaskManager {
 
                 // Log the actual execution outcome (not just is_ok which only means "no Rust error")
                 match &execution_result {
-                    Ok((success, _)) => {
+                    Ok((success, _, _)) => {
                         log::info!("[CronTask] execute_task_directly completed for task {}: task_success={}", task_id_owned, success);
                         let _ = handle.emit("cron:debug", serde_json::json!({
                             "taskId": task_id_owned,
@@ -766,7 +766,7 @@ impl CronTaskManager {
 
                 // Handle execution result
                 match execution_result {
-                    Ok((success, ai_exit_reason)) => {
+                    Ok((success, ai_exit_reason, output_text)) => {
                         // Update execution count and last_executed_at
                         {
                             let mut tasks_guard = tasks.write().await;
@@ -778,13 +778,16 @@ impl CronTaskManager {
                         }
 
                         // Deliver results to IM Bot + wake heartbeat (v0.1.21)
+                        // Use actual AI output when available, fallback to generic summary
                         if let Some(ref delivery) = task.delivery {
-                            let summary = if success {
-                                format!("Cron task '{}' completed successfully.", task.name.as_deref().unwrap_or(&task_id_owned))
-                            } else {
-                                format!("Cron task '{}' completed with issues.", task.name.as_deref().unwrap_or(&task_id_owned))
-                            };
-                            deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &summary).await;
+                            let content = output_text.unwrap_or_else(|| {
+                                if success {
+                                    format!("Cron task '{}' completed successfully.", task.name.as_deref().unwrap_or(&task_id_owned))
+                                } else {
+                                    format!("Cron task '{}' completed with issues.", task.name.as_deref().unwrap_or(&task_id_owned))
+                                }
+                            });
+                            deliver_cron_result_to_bot(&handle, delivery, &task_id_owned, &content).await;
                         }
 
                         // Check if AI requested exit
@@ -1315,12 +1318,12 @@ fn check_end_conditions_static(task: &CronTask) -> bool {
 }
 
 /// Execute a task directly via Sidecar (without going through frontend)
-/// Returns (success, ai_exit_reason) tuple
+/// Returns (success, ai_exit_reason, output_text) tuple
 async fn execute_task_directly(
     handle: &AppHandle,
     task: &CronTask,
     is_first_execution: bool,
-) -> Result<(bool, Option<String>), String> {
+) -> Result<(bool, Option<String>, Option<String>), String> {
     log::info!("[CronTask] execute_task_directly starting for task {}", task.id);
 
     // Emit debug event: entering function
@@ -1415,7 +1418,7 @@ async fn execute_task_directly(
         None
     };
 
-    Ok((result.success, ai_exit_reason))
+    Ok((result.success, ai_exit_reason, result.output_text))
 }
 
 /// Stop a task, unregister CronTask user, and deactivate its session (internal helper)
@@ -1829,6 +1832,7 @@ async fn deliver_cron_result_to_bot(
             let body = serde_json::json!({
                 "event": "cron_complete",
                 "content": summary,
+                "taskId": task_id,
             });
             match client.post(&url).json(&body).send().await {
                 Ok(_) => log::info!("[CronTask] Delivered system event to bot {} sidecar", delivery.bot_id),

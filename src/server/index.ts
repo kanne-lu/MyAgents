@@ -626,11 +626,52 @@ interface SwitchPayload {
 }
 
 // System event queue for heartbeat relay (cron completion, etc.)
-const systemEventQueue: Array<{ event: string; content: string; timestamp: number }> = [];
+const systemEventQueue: Array<{ event: string; content: string; timestamp: number; taskId?: string }> = [];
 
 /** Drain all pending system events (used by heartbeat endpoint) */
-export function drainSystemEvents(): Array<{ event: string; content: string; timestamp: number }> {
+export function drainSystemEvents(): Array<{ event: string; content: string; timestamp: number; taskId?: string }> {
   return systemEventQueue.splice(0);
+}
+
+/** Build a dedicated prompt for cron completion events (replaces standard heartbeat prompt) */
+function buildCronEventPrompt(
+  cronEvents: Array<{ event: string; content: string; timestamp: number; taskId?: string }>
+): string {
+  const now = new Date().toLocaleString('en-US', {
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', timeZoneName: 'short',
+  });
+
+  if (cronEvents.length === 1) {
+    const e = cronEvents[0];
+    return (
+      'A scheduled task has been triggered and completed. ' +
+      'Please relay these results to the user in a helpful and friendly way.\n' +
+      `Task id: ${e.taskId || 'unknown'}\n` +
+      `Current time: ${now}\n` +
+      'The task results are:\n' +
+      '```markdown\n' +
+      e.content + '\n' +
+      '```'
+    );
+  }
+
+  // Multiple tasks
+  let prompt =
+    'Scheduled tasks have been triggered and completed. ' +
+    'Please relay these results to the user in a helpful and friendly way.\n' +
+    `Current time: ${now}\n`;
+
+  for (const e of cronEvents) {
+    prompt +=
+      `\nTask id: ${e.taskId || 'unknown'}\n` +
+      'The task results are:\n' +
+      '```markdown\n' +
+      e.content + '\n' +
+      '```\n';
+  }
+  return prompt;
 }
 
 async function main() {
@@ -1174,8 +1215,8 @@ async function main() {
           const messages = getMessages();
           const lastAssistantMessage = [...messages].reverse().find(m => m.role === 'assistant');
 
+          let textContent = '';
           if (lastAssistantMessage) {
-            let textContent = '';
             if (typeof lastAssistantMessage.content === 'string') {
               textContent = lastAssistantMessage.content;
             } else if (Array.isArray(lastAssistantMessage.content)) {
@@ -1214,7 +1255,8 @@ async function main() {
           const response = {
             success: true,
             aiRequestedExit,
-            exitReason
+            exitReason,
+            outputText: textContent || undefined,
           };
           console.log(`[cron] execute-sync taskId=${taskId} returning response:`, JSON.stringify(response));
           return jsonResponse(response);
@@ -4867,20 +4909,36 @@ async function main() {
           // Drain pending system events
           const pendingEvents = drainSystemEvents();
 
+          // Separate cron events from other events
+          const cronEvents = pendingEvents.filter(e => e.event === 'cron_complete');
+          const otherEvents = pendingEvents.filter(e => e.event !== 'cron_complete');
+
           // Skip AI call if HEARTBEAT.md is empty AND no system events AND not high-priority
           if (!heartbeatMdContent && pendingEvents.length === 0 && !payload.isHighPriority) {
             console.log('[im/heartbeat] Skipped: HEARTBEAT.md is empty and no pending events');
             return jsonResponse({ status: 'silent', reason: 'empty_heartbeat_md' });
           }
 
-          // Build enriched prompt: wrap in <HEARTBEAT> tags
-          let enrichedPrompt = payload.prompt;
-          if (pendingEvents.length > 0) {
-            const eventLines = pendingEvents.map(
-              e => `[System Event: ${e.event}] ${e.content}`
-            ).join('\n');
-            enrichedPrompt += `\n\n${eventLines}`;
+          let enrichedPrompt: string;
+
+          if (cronEvents.length > 0) {
+            // Cron event prompt: completely replaces standard heartbeat prompt
+            enrichedPrompt = buildCronEventPrompt(cronEvents);
+            // Push back non-cron events so they aren't lost — next heartbeat cycle will pick them up
+            for (const e of otherEvents) {
+              systemEventQueue.push(e);
+            }
+          } else {
+            // Standard heartbeat prompt (from Rust)
+            enrichedPrompt = payload.prompt;
+            if (otherEvents.length > 0) {
+              const eventLines = otherEvents.map(
+                e => `[System Event: ${e.event}] ${e.content}`
+              ).join('\n');
+              enrichedPrompt += `\n\n${eventLines}`;
+            }
           }
+
           // Wrap the entire heartbeat message in <HEARTBEAT> tags
           enrichedPrompt = `<HEARTBEAT>\n${enrichedPrompt}\n</HEARTBEAT>`;
 
@@ -4945,12 +5003,13 @@ async function main() {
       // POST /api/im/system-event — Receive system events (e.g. cron task completion) for heartbeat relay
       if (pathname === '/api/im/system-event' && request.method === 'POST') {
         try {
-          const { event, content } = (await request.json()) as {
+          const { event, content, taskId } = (await request.json()) as {
             event: string;
             content: string;
+            taskId?: string;
           };
           // Store in queue for next heartbeat to pick up
-          systemEventQueue.push({ event, content, timestamp: Date.now() });
+          systemEventQueue.push({ event, content, timestamp: Date.now(), taskId });
           console.log(`[system-event] Queued: ${event} (queue size: ${systemEventQueue.length})`);
           return jsonResponse({ ok: true });
         } catch (_err) {

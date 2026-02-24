@@ -200,7 +200,24 @@ impl HeartbeatRunner {
         }
 
         // Gate 3: Concurrent execution guard
-        {
+        // Both paths do check+set in a single lock acquisition to avoid TOCTOU races.
+        if is_high_priority {
+            // High priority (e.g. CronComplete): poll-wait for the lock to become free
+            let start = std::time::Instant::now();
+            loop {
+                let mut executing = self.executing.lock().await;
+                if !*executing {
+                    *executing = true;
+                    break;
+                }
+                drop(executing);
+                if start.elapsed() > Duration::from_secs(60) {
+                    ulog_warn!("[heartbeat] High-priority wake timed out waiting for concurrent execution");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        } else {
             let mut executing = self.executing.lock().await;
             if *executing {
                 ulog_debug!("[heartbeat] Skipped: previous heartbeat still executing");

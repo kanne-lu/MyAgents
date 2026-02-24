@@ -707,6 +707,7 @@ export interface CronExecuteResponse {
     error?: string;
     ai_requested_exit?: boolean;
     exit_reason?: string;
+    output_text?: string;
 }
 
 /** Cron task execution provider environment */
