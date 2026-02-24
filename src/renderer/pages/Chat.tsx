@@ -95,8 +95,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Get config to find current project provider
   const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData } = useConfig();
   const currentProject = projects.find((p) => p.path === agentDir);
-  const currentProvider = currentProject?.providerId
-    ? providers.find((p) => p.id === currentProject.providerId)
+  // Local provider state: snapshot project's providerId at creation, independent thereafter.
+  // Prevents cross-tab pollution when another tab patches the shared project.
+  const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(
+    currentProject?.providerId ?? undefined
+  );
+  const currentProvider = selectedProviderId
+    ? providers.find((p) => p.id === selectedProviderId)
     : providers[0]; // Default to first provider
 
   // PERFORMANCE: Ref-stabilize object deps used in handleSendMessage
@@ -232,6 +237,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         // 3. Update local UI state to reflect Launcher choices
         if (initialMessage.permissionMode) setPermissionMode(initialMessage.permissionMode);
         if (initialMessage.model) setSelectedModel(initialMessage.model);
+        if (initialMessage.providerId) {
+          setSelectedProviderId(initialMessage.providerId);
+          providerInitRef.current = true; // suppress deferred provider-change effect
+        }
 
         // 4. Build providerEnv locally from providerId (never stored in Tab state for security)
         const provider = initialMessage.providerId
@@ -665,6 +674,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     projectSyncedRef.current = true;
     // permissionMode: null means "use global default" (per Project type contract)
     setPermissionMode(currentProject.permissionMode ?? config.defaultPermissionMode);
+    // Sync provider (useState initializer runs when currentProject is still undefined).
+    // Re-arm providerInitRef to suppress the deferred provider-change effect (fires next render)
+    // that would otherwise override the project-stored model with provider's primaryModel.
+    if (currentProject.providerId) {
+      setSelectedProviderId(currentProject.providerId);
+      providerInitRef.current = true;
+    }
     // Skip model override when joining existing sidecar — adoption effect will set the correct model
     if (currentProject.model && !joinedExistingSidecarRef.current) {
       setSelectedModel(currentProject.model);
@@ -806,21 +822,29 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Handle provider change with analytics tracking
   const handleProviderChange = useCallback((providerId: string) => {
-    // Skip if selecting the same provider
-    if (currentProject?.providerId === providerId) {
+    // Skip if selecting the same provider (compare against local state, not shared project)
+    if (selectedProviderId === providerId) {
       return;
     }
 
     // Track provider_switch event
     track('provider_switch', { provider_id: providerId });
 
-    // Update project's provider and reset model to new provider's primary model
+    // Update local state — explicitly set both provider and model.
+    // Don't rely on the provider-change effect for model cascade, because
+    // providerInitRef may be stale (re-armed by one-time sync) and suppress it.
+    setSelectedProviderId(providerId);
     const newProvider = providers.find(p => p.id === providerId);
+    if (newProvider?.primaryModel) {
+      setSelectedModel(newProvider.primaryModel);
+    }
+
+    // Write back to project (last-writer-wins for new tabs)
     if (currentProject) {
       void patchProject(currentProject.id, { providerId, model: newProvider?.primaryModel ?? null });
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.providerId to avoid recreating on unrelated project changes
-  }, [currentProject?.id, currentProject?.providerId, patchProject, providers]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps
+  }, [selectedProviderId, currentProject?.id, patchProject, providers]);
 
   // Handle model change with analytics tracking and project write-back
   const handleModelChange = useCallback((model: string) => {
