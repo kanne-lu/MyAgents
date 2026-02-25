@@ -164,7 +164,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
             )}
             {/* Text below images */}
             {hasText && (
-              <div className="text-[var(--ink)]">
+              <div className="text-[var(--ink)] whitespace-pre-wrap">
                 <Markdown preserveNewlines>{userContent}</Markdown>
               </div>
             )}
