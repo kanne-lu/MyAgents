@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.27] - 2026-02-25
+
+### Added
+- **Cron 工具 runs/status/wake 能力增强**：IM Bot 的 `cron` 工具新增三个 action
+  - `runs`：查询任务历次执行记录（JSONL 持久化，上限 500 条）
+  - `status`：查询当前 Bot 的任务统计（总数/运行中/最近执行/下次执行）
+  - `wake`：手动触发即时心跳检查，支持注入文本到 Bot Sidecar
+- **Cron 任务 `updatedAt` 字段**：记录最后活动时间（创建/启动/停止/执行/编辑），任务列表按最近操作排序
+
+### Fixed
+- **Heartbeat 502 Bad Gateway**：HeartbeatRunner 的 reqwest 客户端缺少 `.no_proxy()`，系统代理拦截 localhost 请求
+- **Cron 结果未投递到 IM**：`deliver_cron_result_to_bot()` 使用 `reqwest::Client::new()` 同样缺少 `.no_proxy()`，system-event POST 失败导致心跳触发普通提示而非 Cron 结果注入
+- **IM Bot Cron 定时任务结果投递链路三层修复**：一次性定时任务执行后立即停止导致跳过投递、heartbeat JSON 解析 `sidecar_port` 类型不匹配、Cron session_id 与 IM peer session_id 不一致
+- **Tab 间 Provider/Model 交叉污染**：`selectedProviderId` 从全局变量改为 Tab 局部状态，避免切换 Tab 时污染其他 Tab 的供应商选择
+- **用户消息气泡换行符不显示**：`<HEARTBEAT>` 标签触发 Markdown HTML block 模式，绕过 remarkBreaks，通过 `whitespace-pre-wrap` 修复
+- **任务中心列表不刷新**：重启任务后列表不更新，新增 `cron:task-started` 事件从 Rust 同步发射，前端即时监听刷新
+- **Session 消息计数归零**：Sidecar 重启后首条消息触发 `createSessionMetadata()` + `saveSessionMetadata()` 全量替换 sessions.json 条目，导致累积 stats 被清空。改为先检查已有 metadata 再决定创建或更新
+- **统一日志日期不一致**：Bun 侧 `toISOString()` 产生 UTC 日期，与 Rust 本地日期不同，UTC+8 时区下日志分散到不同文件
+
+### Changed
+- **`local_http` 模块集中化**：所有 localhost reqwest 客户端统一通过 `crate::local_http::builder()` 创建，内置 `.no_proxy()`，消除散落在 7 个文件中 11 处 `.no_proxy()` 调用的遗漏风险
+- **定时任务列表排序优化**：running 组按 nextExecutionAt 升序，stopped 组按 updatedAt 降序（最近有操作的在前）
+
+---
+
 ## [0.1.26] - 2026-02-24
 
 ### Changed
