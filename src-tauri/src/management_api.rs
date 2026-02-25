@@ -186,7 +186,7 @@ async fn create_cron_handler(
         None => req.interval_minutes.unwrap_or(30),
     };
 
-    let session_id = format!("cron-im-{}", uuid::Uuid::new_v4());
+    let session_id = uuid::Uuid::new_v4().to_string();
 
     let config = CronTaskConfig {
         workspace_path: req.workspace_path,

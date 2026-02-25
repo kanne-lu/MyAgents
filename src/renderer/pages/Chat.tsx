@@ -318,9 +318,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     onExecutionComplete: async (task, success) => {
       // Called when a single execution completes (task may still be running)
       // Refresh the session to show the latest messages
-      // Use internalSessionId (actual SDK session) when available, falling back to sessionId.
-      // For IM Bot cron tasks, sessionId is the Sidecar session key (cron-im-*) which has
-      // no conversation data — the data is stored under the internal SDK session UUID.
+      // Use internalSessionId when available, falling back to sessionId.
+      // Both point to our internal message storage key (Sidecar session ID).
       const effectiveSessionId = task.internalSessionId || task.sessionId;
       console.log('[Chat] Cron execution complete, refreshing session:', task.id, task.executionCount, 'effectiveSessionId:', effectiveSessionId, 'success:', success);
       setIsLoading(false);

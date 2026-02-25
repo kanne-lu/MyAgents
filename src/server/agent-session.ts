@@ -3439,8 +3439,36 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
   try {
     const sdkPermissionMode = mapToSdkPermissionMode(currentPermissionMode);
-    // 单一变量决策：sessionRegistered 为 true 则 resume，否则创建新 session
-    const resumeFrom = sessionRegistered ? sessionId : undefined;
+
+    // Resolve SDK-compatible session ID for resume/create.
+    // SDK requires valid UUID format for --resume (and --session-id).
+    // Our internal sessionId may have a prefix (e.g., old cron-im-{uuid} format).
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let resumeFrom: string | undefined;
+    let effectiveSdkSessionId: string;
+
+    if (sessionRegistered) {
+      // Prefer sdkSessionId from metadata (the actual ID the SDK knows)
+      const meta = getSessionMetadata(sessionId);
+      const sdkSid = meta?.sdkSessionId;
+
+      if (sdkSid && UUID_RE.test(sdkSid)) {
+        resumeFrom = sdkSid;
+        effectiveSdkSessionId = sdkSid;
+      } else if (UUID_RE.test(sessionId)) {
+        resumeFrom = sessionId;
+        effectiveSdkSessionId = sessionId;
+      } else {
+        // Non-UUID session ID (e.g., old cron-im-{uuid}) — cannot resume, start fresh
+        console.warn(`[agent] Session ${sessionId} has non-UUID ID (sdkSid=${sdkSid}), cannot resume — starting fresh`);
+        resumeFrom = undefined;
+        effectiveSdkSessionId = randomUUID();
+      }
+    } else {
+      resumeFrom = undefined;
+      // For new sessions, ensure SDK gets a valid UUID
+      effectiveSdkSessionId = UUID_RE.test(sessionId) ? sessionId : randomUUID();
+    }
     // sessionRegistered 不在此处修改 — 等待 system_init 确认
 
     // 消费 rewind 设置的对话截断点
@@ -3450,7 +3478,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     if (rewindResumeAt) pendingResumeSessionAt = undefined;
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${sessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}`);
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}`);
 
     const promptGen = messageGenerator();
 
@@ -3585,11 +3613,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     };
 
     // sessionId 和 resume 互斥（SDK 约束）
-    // 新 session：传 sessionId 让 SDK 使用我们的 UUID
+    // 新 session：传 effectiveSdkSessionId 让 SDK 使用有效 UUID
     // Resume：传 resume 恢复对话上下文
     const sessionOption = resumeFrom
       ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
-      : { sessionId: sessionId };
+      : { sessionId: effectiveSdkSessionId };
 
     try {
       querySession = query({
@@ -3602,12 +3630,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // rather than synchronously here; this catch covers the sync case if SDK validates early.
       const msg = queryError instanceof Error ? queryError.message : String(queryError);
       if (!resumeFrom && msg.includes('already in use')) {
-        console.warn(`[agent] Session ${sessionId} already exists on disk, switching to resume`);
+        console.warn(`[agent] Session ${effectiveSdkSessionId} already exists on disk, switching to resume`);
         sessionRegistered = true;
         querySession = query({
           prompt: promptGen,
           options: {
-            resume: sessionId,
+            resume: effectiveSdkSessionId,
             ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}),
             ...commonQueryOptions,
           },

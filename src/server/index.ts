@@ -1252,8 +1252,8 @@ async function main() {
 
           console.log(`[cron] execute-sync taskId=${taskId} completed, aiRequestedExit=${aiRequestedExit}, exitReason=${exitReason}`);
 
-          // Return the actual internal SDK session ID so Rust can track where
-          // conversation data is stored (may differ from the Sidecar session key)
+          // Return the Sidecar session ID (our internal storage key) so Rust can
+          // pass it to frontend for loading conversation data from our message store.
           const actualSessionId = getSessionId();
 
           const response = {
