@@ -175,6 +175,14 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             });
             unlisteners.push(u2);
 
+            const u2b = await listen('cron:task-started', () => {
+                if (!mounted) return;
+                getAllCronTasks().then(tasks => {
+                    if (mounted) setCronTasks(tasks);
+                }).catch(() => {});
+            });
+            unlisteners.push(u2b);
+
             const u3 = await listen('cron:execution-complete', () => {
                 if (!mounted) return;
                 getAllCronTasks().then(tasks => {

@@ -53,16 +53,19 @@ export default memo(function RecentTasks({
     // Top 5 sessions
     const displaySessions = useMemo(() => sessions.slice(0, DISPLAY_COUNT), [sessions]);
 
-    // Sorted cron tasks: running first, then by nextExecutionAt, take 5
+    // Sorted cron tasks: running first (by nextExecutionAt ASC), then stopped (by createdAt DESC), take 5
     const displayCronTasks = useMemo(() => {
         return [...cronTasks]
             .sort((a, b) => {
                 if (a.status === 'running' && b.status !== 'running') return -1;
                 if (a.status !== 'running' && b.status === 'running') return 1;
-                if (a.nextExecutionAt && b.nextExecutionAt) {
-                    return new Date(a.nextExecutionAt).getTime() - new Date(b.nextExecutionAt).getTime();
+                if (a.status === 'running') {
+                    if (a.nextExecutionAt && b.nextExecutionAt) {
+                        return new Date(a.nextExecutionAt).getTime() - new Date(b.nextExecutionAt).getTime();
+                    }
+                    return 0;
                 }
-                return 0;
+                return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
             })
             .slice(0, DISPLAY_COUNT);
     }, [cronTasks]);

@@ -1711,7 +1711,7 @@ pub async fn cmd_create_cron_task(config: CronTaskConfig) -> Result<CronTask, St
 /// The cron task Sidecar will be started on-demand when the first execution runs
 #[tauri::command]
 pub async fn cmd_start_cron_task(
-    _app_handle: tauri::AppHandle,
+    app_handle: tauri::AppHandle,
     task_id: String,
 ) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
@@ -1721,6 +1721,11 @@ pub async fn cmd_start_cron_task(
         "[CronTask] Started cron task {} for workspace {}",
         task.id, task.workspace_path
     );
+
+    // Emit event so frontend task list refreshes immediately
+    let _ = app_handle.emit("cron:task-started", serde_json::json!({
+        "taskId": task.id,
+    }));
 
     Ok(task)
 }
