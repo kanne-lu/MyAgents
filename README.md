@@ -35,7 +35,7 @@ MyAgents 是一款开源桌面端 AI Agent，同时具备「Claude Code」的强
 ### 核心能力
 
 - **图形界面零门槛** - Chrome 风格多标签页，每个 Tab 独立运行一个 Agent，真正的并行工作流
-- **多模型自由切换** - Anthropic、DeepSeek、Moonshot、智谱、MiniMax、火山引擎、OpenRouter 等 9+ 供应商，按需选择，成本可控
+- **多模型自由切换** - Anthropic、DeepSeek、Moonshot、智谱、MiniMax、火山方舟、OpenRouter 等 10+ 供应商，按需选择，成本可控
 - **Skills 技能系统** - 内置和自定义技能，一键触发常用操作，让 Agent 越用越懂你
 - **MCP 工具集成** - 内置 MCP 协议支持（STDIO/HTTP/SSE），连接外部工具和数据源，Agent 能力可无限扩展
 - **自定义 Agent** - 配置独立的 Prompt、工具、模型，打造专属 Agent
@@ -53,7 +53,8 @@ MyAgents 是一款开源桌面端 AI Agent，同时具备「Claude Code」的强
 | Moonshot | Kimi K2.5, K2 Thinking, K2 | API |
 | 智谱 AI | GLM 5, 4.7, 4.5 Air | API |
 | MiniMax | M2.5, M2.5 Lightning, M2.1, M2.1 Lightning | API |
-| 火山引擎 | Ark Code Latest, Doubao Seed Code | API |
+| 火山方舟 Coding Plan | Doubao Seed 2.0 Code, GLM 4.7, DeepSeek V3.2, Kimi K2.5 | API |
+| 火山方舟 API调用 | Doubao Seed 2.0 Pro, Code Preview, Lite | API |
 | ZenMux | ZenMux Auto, Gemini 3.1 Pro, Claude 4.6, Doubao Seed 2.0 等 | API |
 | 硅基流动 | Kimi K2.5, GLM 4.7, DeepSeek V3.2, Step 3.5 Flash 等 | API |
 | OpenRouter | GPT-5.2 Codex, GPT-5.2 Pro, Gemini 3 等多模型 | API |

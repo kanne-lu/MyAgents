@@ -77,7 +77,8 @@ interface Provider {
 | Moonshot | `https://api.moonshot.cn/anthropic` | 模型官方 | Anthropic 兼容 |
 | 智谱 AI | `https://open.bigmodel.cn/api/anthropic` | 模型官方 | Anthropic 兼容 |
 | MiniMax | `https://api.minimaxi.com/anthropic` | 模型官方 | Anthropic 兼容 |
-| 火山引擎 | `https://ark.cn-beijing.volces.com/api/coding` | 云服务商 | 字节跳动 |
+| 火山方舟 Coding Plan | `https://ark.cn-beijing.volces.com/api/coding` | 云服务商 | 字节跳动 |
+| 火山方舟 API调用 | `https://ark.cn-beijing.volces.com/api/compatible` | 云服务商 | 字节跳动 |
 | 硅基流动 | `https://api.siliconflow.cn/` | 云服务商 | authType: api_key |
 | ZenMux | `https://zenmux.ai/api/anthropic` | 云服务商 | 多模型聚合路由 |
 | OpenRouter | `https://openrouter.ai/api` | 云服务商 | authType: auth_token_clear_api_key |

@@ -2473,6 +2473,7 @@ fn migrate_provider_env(
         "zhipu" => "https://open.bigmodel.cn/api/anthropic",
         "minimax" => "https://api.minimaxi.com/anthropic",
         "volcengine" => "https://ark.cn-beijing.volces.com/api/coding",
+        "volcengine-api" => "https://ark.cn-beijing.volces.com/api/compatible",
         "siliconflow" => "https://api.siliconflow.cn/",
         "zenmux" => "https://zenmux.ai/api/anthropic",
         "openrouter" => "https://openrouter.ai/api",
