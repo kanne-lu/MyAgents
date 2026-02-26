@@ -1,5 +1,5 @@
 import { randomUUID } from 'crypto';
-import { existsSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, symlinkSync, readFileSync, rmSync } from 'fs';
 import { join, resolve } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
@@ -30,10 +30,12 @@ const DECORATIVE_TEXT_MAX_LENGTH = 5000;
 // This is SEPARATE from Claude CLI's ~/.claude/ directory
 // Only subscription-related features may access ~/.claude/ (handled by SDK internally)
 //
-// IMPORTANT: CLAUDE_CONFIG_DIR is set to ~/.myagents/ (see buildClaudeSessionEnv).
-// The SDK will read ~/.myagents/settings.json if it exists, auto-discovering MCP servers etc.
-// Do NOT create settings.json here — MyAgents manages MCP explicitly via config.json + mcpServers option.
+// IMPORTANT: CLAUDE_CONFIG_DIR is set to ~/.myagents/.sdk-config/ (see buildClaudeSessionEnv).
+// This staging directory contains symlinks to enabled skills only (filtered by skills-config.json).
+// The SDK reads skills from CLAUDE_CONFIG_DIR/skills/, so we control visibility via filesystem.
+// Do NOT create settings.json in .sdk-config/ — MyAgents manages MCP explicitly via config.json + mcpServers option.
 const MYAGENTS_USER_DIR = '.myagents';
+const SDK_CONFIG_SUBDIR = '.sdk-config';
 
 /**
  * Get the MyAgents user directory path
@@ -45,6 +47,95 @@ export function getMyAgentsUserDir(): string {
   // temp is now guaranteed to have a valid platform-specific fallback
   const homeDir = home || temp;
   return join(homeDir, MYAGENTS_USER_DIR);
+}
+
+/**
+ * Get the SDK config staging directory path
+ * CLAUDE_CONFIG_DIR points here. Contains symlinks to enabled skills only.
+ */
+function getSdkConfigDir(): string {
+  return join(getMyAgentsUserDir(), SDK_CONFIG_SUBDIR);
+}
+
+/**
+ * Sync the SDK config staging directory with enabled skills only.
+ *
+ * The SDK reads ALL skill folders from CLAUDE_CONFIG_DIR/skills/ with no filter API.
+ * To support enable/disable toggles, we use a staging directory (~/.myagents/.sdk-config/)
+ * that contains symlinks to only enabled skills from ~/.myagents/skills/.
+ *
+ * Structure:
+ *   ~/.myagents/.sdk-config/
+ *   ├── skills/           # Symlinks to enabled skills only
+ *   │   ├── pdf → ~/.myagents/skills/pdf
+ *   │   └── xlsx → ~/.myagents/skills/xlsx
+ *   └── commands → ~/.myagents/commands   # Symlink to real commands dir
+ *
+ * Called at session startup (buildClaudeSessionEnv) and when skills are toggled.
+ */
+export function syncSdkConfigDir(): void {
+  const myagentsDir = getMyAgentsUserDir();
+  const sdkConfigDir = getSdkConfigDir();
+  const sdkSkillsDir = join(sdkConfigDir, 'skills');
+  const userSkillsDir = join(myagentsDir, 'skills');
+  const userCommandsDir = join(myagentsDir, 'commands');
+
+  // Ensure .sdk-config/skills/ exists
+  mkdirSync(sdkSkillsDir, { recursive: true });
+
+  // Read disabled list from skills-config.json
+  let disabled: string[] = [];
+  try {
+    const configPath = join(myagentsDir, 'skills-config.json');
+    if (existsSync(configPath)) {
+      const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+      disabled = Array.isArray(raw?.disabled) ? raw.disabled : [];
+    }
+  } catch {
+    // Ignore read errors — treat all skills as enabled
+  }
+
+  // Clean existing entries in sdk skills dir
+  try {
+    for (const entry of readdirSync(sdkSkillsDir)) {
+      const fullPath = join(sdkSkillsDir, entry);
+      try {
+        rmSync(fullPath, { recursive: true, force: true });
+      } catch { /* ignore cleanup errors */ }
+    }
+  } catch { /* dir may not exist yet */ }
+
+  // Create symlinks for enabled skills only
+  const isWin = process.platform === 'win32';
+  if (existsSync(userSkillsDir)) {
+    for (const entry of readdirSync(userSkillsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.')) continue;
+      if (disabled.includes(entry.name)) continue;
+
+      const target = join(userSkillsDir, entry.name);
+      const link = join(sdkSkillsDir, entry.name);
+      try {
+        // Windows: use 'junction' (no admin privileges needed for directories)
+        symlinkSync(target, link, isWin ? 'junction' : undefined);
+      } catch (err) {
+        console.warn(`[sdk-config] Failed to symlink skill ${entry.name}:`, err);
+      }
+    }
+  }
+
+  // Symlink commands directory
+  const sdkCommandsLink = join(sdkConfigDir, 'commands');
+  try {
+    rmSync(sdkCommandsLink, { recursive: true, force: true });
+  } catch { /* doesn't exist, fine */ }
+  if (existsSync(userCommandsDir)) {
+    try {
+      symlinkSync(userCommandsDir, sdkCommandsLink, isWin ? 'junction' : undefined);
+    } catch (err) {
+      console.warn('[sdk-config] Failed to symlink commands:', err);
+    }
+  }
 }
 
 type SessionState = 'idle' | 'running' | 'error';
@@ -715,17 +806,16 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
  * Build SDK settingSources
  *
  * settingSources controls where SDK reads settings from:
- * - 'user': reads from CLAUDE_CONFIG_DIR (we set it to ~/.myagents/)
+ * - 'user': reads from CLAUDE_CONFIG_DIR (we set it to ~/.myagents/.sdk-config/)
  * - 'project': <cwd>/.claude/ (project-level config)
  *
  * We use both 'user' and 'project':
- * - 'user': enables SDK to natively read user-level skills/commands from ~/.myagents/skills/
- *   (via CLAUDE_CONFIG_DIR env var redirecting from ~/.claude/ to ~/.myagents/)
- * - 'project': enables SDK to read project's .claude/skills/, .claude/commands/, CLAUDE.md
+ * - 'user': SDK reads skills from ~/.myagents/.sdk-config/skills/ (symlinks to enabled skills only)
+ * - 'project': SDK reads project's .claude/skills/, .claude/commands/, CLAUDE.md
  *
- * CLAUDE_CONFIG_DIR is set in buildClaudeSessionEnv() to redirect the SDK's user config
- * directory from ~/.claude/ to ~/.myagents/. This avoids conflicting with Claude CLI's
- * own directory and eliminates the need for the skill copy workaround.
+ * CLAUDE_CONFIG_DIR points to ~/.myagents/.sdk-config/ (a staging directory).
+ * syncSdkConfigDir() populates it with symlinks to enabled skills from ~/.myagents/skills/,
+ * filtered by the disabled list in skills-config.json.
  */
 function buildSettingSources(): ('user' | 'project')[] {
   return ['user', 'project'];
@@ -1648,12 +1738,16 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     // MyAgents manages its own telemetry; these external connections add startup latency
     // and can timeout in restricted network environments (e.g. China).
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    // Redirect SDK's user config directory from ~/.claude/ to ~/.myagents/
-    // This makes settingSources: ['user'] read skills/commands from ~/.myagents/skills/
-    // instead of ~/.claude/skills/, keeping our config separate from Claude CLI.
-    // The SDK's DA()/U9() function uses: process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude")
-    CLAUDE_CONFIG_DIR: getMyAgentsUserDir(),
+    // Redirect SDK's user config directory to staging dir (~/.myagents/.sdk-config/).
+    // This staging dir contains symlinks to ENABLED skills only (filtered by skills-config.json).
+    // The SDK reads ALL skill folders from CLAUDE_CONFIG_DIR/skills/ with no filter API,
+    // so we control skill visibility at the filesystem level.
+    // syncSdkConfigDir() must be called before this env is used.
+    CLAUDE_CONFIG_DIR: getSdkConfigDir(),
   };
+
+  // Sync staging directory with enabled skills before session starts
+  syncSdkConfigDir();
 
   // Use provided providerEnv or fall back to currentProviderEnv
   const effectiveProviderEnv = providerEnv ?? currentProviderEnv;

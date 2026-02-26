@@ -106,6 +106,7 @@ import {
   stripPlaywrightResults,
   setSidecarPort,
   getOpenAiBridgeConfig,
+  syncSdkConfigDir,
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
@@ -3474,6 +3475,8 @@ async function main() {
             if (!config.disabled.includes(folderName)) config.disabled.push(folderName);
           }
           writeSkillsConfig(config);
+          // Re-sync SDK staging directory so the SDK sees updated skill visibility
+          syncSdkConfigDir();
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/skill/toggle-enable] Error:', error);

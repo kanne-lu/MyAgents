@@ -412,14 +412,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     pendingSkillCopiesRef.current.set(skillName, copyPromise);
   }, [apiPost, agentDir]);
 
-  // Handle user-level skill selection - trigger copy if needed
-  const handleSkillSelect = useCallback((cmd: SlashCommand) => {
-    // If it's a user-level skill, trigger copy to project
-    // Use folderName (actual folder name) instead of name (display name)
-    if (cmd.source === 'skill' && cmd.scope === 'user' && cmd.folderName) {
-      triggerSkillCopy(cmd.folderName);
-    }
-  }, [triggerSkillCopy]);
+  // Handle user-level skill selection
+  // NOTE: Skill copy is no longer needed — SDK natively reads user-level skills
+  // from ~/.myagents/skills/ via CLAUDE_CONFIG_DIR + settingSources: ['user', 'project'].
+  // The copy mechanism is preserved in code but disabled to avoid polluting project directories.
+  const handleSkillSelect = useCallback((_cmd: SlashCommand) => {
+    // No-op: SDK reads user skills natively, no need to copy to .claude/skills/
+  }, []);
 
   // Validate and add image (resize is handled server-side in enqueueUserMessage)
   const addImage = useCallback((file: File) => {
