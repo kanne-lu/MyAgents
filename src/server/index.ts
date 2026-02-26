@@ -106,7 +106,7 @@ import {
   stripPlaywrightResults,
   setSidecarPort,
   getOpenAiBridgeConfig,
-  syncSdkConfigDir,
+  syncProjectSkills,
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
@@ -3475,8 +3475,9 @@ async function main() {
             if (!config.disabled.includes(folderName)) config.disabled.push(folderName);
           }
           writeSkillsConfig(config);
-          // Re-sync SDK staging directory so the SDK sees updated skill visibility
-          syncSdkConfigDir();
+          // Re-sync project skill symlinks if this sidecar has an agentDir
+          // (Global Sidecar has no agentDir; Tab Sidecars will sync on next session start)
+          if (agentDir) syncProjectSkills(agentDir);
           return jsonResponse({ success: true });
         } catch (error) {
           console.error('[api/skill/toggle-enable] Error:', error);
