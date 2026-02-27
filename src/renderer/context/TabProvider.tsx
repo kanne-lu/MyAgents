@@ -1674,11 +1674,21 @@ export default function TabProvider({
         }
 
         // Case 4: Need to load session (initial load or session switch)
-        // Exception: if resetSession was just called (isNewSessionRef=true), the session
+        // Exception 1: if resetSession was just called (isNewSessionRef=true), the session
         // upgrade (old→new) arrives via system:init. Messages are already streaming via SSE,
         // so calling loadSession would flash isLoading=false. Skip and let SSE handle it.
         if (isNewSessionRef.current) {
             console.log(`[TabProvider ${tabId}] SessionId upgraded to ${sessionId} after resetSession, skipping loadSession (messages arriving via SSE)`);
+            initialSessionLoadedRef.current = true;
+            return;
+        }
+        // Exception 2: session is actively streaming (session ID upgrade during first message).
+        // This happens when: resetSession → sendMessage (clears isNewSessionRef) → chat:system-init
+        // assigns real sessionId → parent re-renders with new prop → useEffect fires.
+        // At this point isNewSessionRef is false but the session is actively processing.
+        // loadSession would reset isLoading/sessionState, causing stop button to briefly disappear.
+        if (isStreamingRef.current) {
+            console.log(`[TabProvider ${tabId}] SessionId changed to ${sessionId} while streaming, skipping loadSession`);
             initialSessionLoadedRef.current = true;
             return;
         }
