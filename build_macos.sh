@@ -321,6 +321,40 @@ done < <(find "$VENDOR_DIR" -type f \( -name "*.node" -o -name "rg" \) -path "*d
 echo -e "${GREEN}✓ Vendor 签名完成 (成功: ${SIGNED_COUNT}, 失败: ${FAILED_COUNT})${NC}"
 echo ""
 
+# ========================================
+# 签名 agent-browser-cli 原生二进制
+# ========================================
+echo -e "  ${CYAN}签名 agent-browser-cli 原生二进制 (.bare prebuilds)...${NC}"
+
+AB_CLI_DIR="${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
+# 删除所有非 darwin 的 prebuilds（android/ios/linux/win32 含 Mach-O 会被 Apple 公证扫描）
+find "${AB_CLI_DIR}/node_modules" -type d -name "prebuilds" 2>/dev/null | while IFS= read -r prebuild_dir; do
+    for platform_dir in "${prebuild_dir}"/*/; do
+        platform_name=$(basename "$platform_dir")
+        case "$platform_name" in
+            darwin-*) ;; # 保留 darwin
+            *) rm -rf "$platform_dir" ;; # 删除其他平台
+        esac
+    done
+done
+
+# 签名剩余的 darwin .bare 文件
+AB_SIGNED_COUNT=0
+AB_FAILED_COUNT=0
+while IFS= read -r binary; do
+    echo -e "    ${CYAN}签名: $(echo "$binary" | sed "s|.*/node_modules/||")${NC}"
+    if codesign --force --options runtime --timestamp \
+        --sign "$APPLE_SIGNING_IDENTITY" "$binary" 2>/dev/null; then
+        ((AB_SIGNED_COUNT++))
+    else
+        echo -e "    ${YELLOW}警告: 签名失败 - $binary${NC}"
+        ((AB_FAILED_COUNT++))
+    fi
+done < <(find "${AB_CLI_DIR}/node_modules" -type f -name "*.bare" -path "*darwin*" 2>/dev/null)
+
+echo -e "${GREEN}✓ agent-browser 签名完成 (成功: ${AB_SIGNED_COUNT}, 失败: ${AB_FAILED_COUNT})${NC}"
+echo ""
+
 # 构建 Tauri 应用
 echo -e "${BLUE}[7/7] 构建 Tauri 应用 (Release + 签名 + 公证)...${NC}"
 echo -e "${YELLOW}这可能需要 5-10 分钟 (包含公证等待时间)...${NC}"
