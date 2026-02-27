@@ -66,10 +66,15 @@ export default function CustomTitleBar({
         checkWindowState();
 
         // Use resize event listener with debounce instead of polling
+        // macOS fullscreen exit animation takes ~500-700ms, so we do a
+        // second delayed check to catch the final state after animation.
         let resizeTimeout: NodeJS.Timeout;
+        let animationTimeout: NodeJS.Timeout;
         const onResize = () => {
             clearTimeout(resizeTimeout);
-            resizeTimeout = setTimeout(checkWindowState, 200);
+            clearTimeout(animationTimeout);
+            resizeTimeout = setTimeout(checkWindowState, 150);
+            animationTimeout = setTimeout(checkWindowState, 700);
         };
 
         window.addEventListener('resize', onResize);
@@ -78,6 +83,7 @@ export default function CustomTitleBar({
             mounted = false;
             window.removeEventListener('resize', onResize);
             clearTimeout(resizeTimeout);
+            clearTimeout(animationTimeout);
         };
     }, []);
 
