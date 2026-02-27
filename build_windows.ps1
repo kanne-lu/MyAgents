@@ -336,6 +336,19 @@ try {
     Write-Host "  预装 agent-browser CLI..." -ForegroundColor Cyan
     $agentBrowserDir = Join-Path $ProjectDir "src-tauri\resources\agent-browser-cli"
     $lockfileDir = Join-Path $ProjectDir "src\server\agent-browser-lockfile"
+    # 版本一致性校验：index.ts 的 AGENT_BROWSER_VERSION 必须与 lockfile 的 package.json 一致
+    $indexTs = Get-Content (Join-Path $ProjectDir "src\server\index.ts") -Raw
+    if ($indexTs -match "const AGENT_BROWSER_VERSION = '([^']+)'") {
+        $codeVersion = $Matches[1]
+    } else {
+        throw "无法从 index.ts 读取 AGENT_BROWSER_VERSION"
+    }
+    $lockPkg = Get-Content (Join-Path $lockfileDir "package.json") -Raw | ConvertFrom-Json
+    $lockVersion = $lockPkg.dependencies.'agent-browser'
+    if ($codeVersion -ne $lockVersion) {
+        throw "版本不一致! index.ts: $codeVersion, lockfile: $lockVersion — 请同步更新 src/server/agent-browser-lockfile/"
+    }
+    Write-Host "  版本: $codeVersion" -ForegroundColor Cyan
     if (Test-Path $agentBrowserDir) {
         Remove-Item -Recurse -Force $agentBrowserDir
     }

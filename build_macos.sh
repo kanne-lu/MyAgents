@@ -230,6 +230,15 @@ cp -R "${SDK_SRC}/vendor" "${SDK_DEST}/"
 echo -e "  ${CYAN}预装 agent-browser CLI...${NC}"
 AGENT_BROWSER_DIR="${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
 LOCKFILE_DIR="${PROJECT_DIR}/src/server/agent-browser-lockfile"
+# 版本一致性校验：index.ts 的 AGENT_BROWSER_VERSION 必须与 lockfile 的 package.json 一致
+CODE_VERSION=$(grep "const AGENT_BROWSER_VERSION" "${PROJECT_DIR}/src/server/index.ts" | sed "s/.*= '//;s/'.*//" )
+LOCK_VERSION=$(python3 -c "import json; print(json.load(open('${LOCKFILE_DIR}/package.json'))['dependencies']['agent-browser'])")
+if [ "$CODE_VERSION" != "$LOCK_VERSION" ]; then
+    echo -e "${RED}✗ 版本不一致! index.ts: ${CODE_VERSION}, lockfile: ${LOCK_VERSION}${NC}"
+    echo -e "${YELLOW}  请同步更新 src/server/agent-browser-lockfile/ (参见其 README.md)${NC}"
+    exit 1
+fi
+echo -e "  版本: ${CODE_VERSION}"
 rm -rf "${AGENT_BROWSER_DIR}"
 mkdir -p "${AGENT_BROWSER_DIR}"
 # 复制预生成的 package.json + bun.lock（跳过依赖解析，秒级安装）
@@ -352,7 +361,11 @@ while IFS= read -r binary; do
     fi
 done < <(find "${AB_CLI_DIR}/node_modules" -type f -name "*.bare" -path "*darwin*" 2>/dev/null)
 
-echo -e "${GREEN}✓ agent-browser 签名完成 (成功: ${AB_SIGNED_COUNT}, 失败: ${AB_FAILED_COUNT})${NC}"
+if [ $AB_FAILED_COUNT -gt 0 ]; then
+    echo -e "${RED}错误: agent-browser 原生二进制签名失败 (${AB_FAILED_COUNT} 个)，公证必定失败${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ agent-browser 签名完成 (${AB_SIGNED_COUNT} 个文件)${NC}"
 echo ""
 
 # 构建 Tauri 应用
