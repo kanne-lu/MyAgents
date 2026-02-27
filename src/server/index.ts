@@ -1,6 +1,6 @@
 import { appendFileSync, copyFileSync, cpSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
 import { mkdir, rename, rm, stat } from 'fs/promises';
-import { basename, dirname, join, relative, resolve, extname } from 'path';
+import { basename, dirname, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir } from 'os';
 import AdmZip from 'adm-zip';
 import {
@@ -438,7 +438,7 @@ function isValidAgentDir(dir: string): { valid: boolean; reason?: string } {
   ];
 
   for (const forbidden of forbiddenPaths) {
-    if (resolved === forbidden || resolved.startsWith(forbidden + '/')) {
+    if (resolved === forbidden || resolved.startsWith(forbidden + sep)) {
       return { valid: false, reason: `Access to ${forbidden} is not allowed` };
     }
   }
@@ -453,7 +453,7 @@ function isValidAgentDir(dir: string): { valid: boolean; reason?: string } {
   ];
 
   const isUnderAllowed = allowedParents.some(
-    parent => parent && resolved.startsWith(parent)
+    parent => parent && (resolved === parent || resolved.startsWith(parent + sep))
   );
 
   if (!isUnderAllowed) {
@@ -464,9 +464,11 @@ function isValidAgentDir(dir: string): { valid: boolean; reason?: string } {
 }
 
 function resolveAgentPath(root: string, relativePath: string): string | null {
-  const normalized = relativePath.replace(/^\/+/, '');
+  // Strip leading slashes (both / and \ for Windows compatibility)
+  const normalized = relativePath.replace(/^[/\\]+/, '');
   const resolved = resolve(root, normalized);
-  if (!resolved.startsWith(root)) {
+  // Use root + sep to prevent prefix collision (e.g. /agent matching /agent-other)
+  if (resolved !== root && !resolved.startsWith(root + sep)) {
     return null;
   }
   return resolved;
@@ -890,7 +892,7 @@ async function main() {
           }
           const resolvedOutputFile = resolve(outputFile);
           const homeDir = getHomeDirOrNull() || '';
-          const isUnderHome = homeDir && resolvedOutputFile.startsWith(homeDir + '/');
+          const isUnderHome = homeDir && resolvedOutputFile.startsWith(homeDir + sep);
           if (!isUnderHome || !resolvedOutputFile.endsWith('.output')) {
             return jsonResponse({ success: false, error: 'Invalid outputFile path' }, 400);
           }
@@ -1615,7 +1617,7 @@ async function main() {
           }
           // Security: Validate that targetPath doesn't escape currentAgentDir (prevent path traversal)
           const resolvedTarget = resolve(currentAgentDir, targetPath);
-          if (!resolvedTarget.startsWith(currentAgentDir + '/') && resolvedTarget !== currentAgentDir) {
+          if (!resolvedTarget.startsWith(currentAgentDir + sep) && resolvedTarget !== currentAgentDir) {
             return jsonResponse({ error: 'Invalid path: access denied' }, 403);
           }
           console.log('[agent] dir/expand:', targetPath);
@@ -1949,7 +1951,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
           }
 
-          const parentDir = resolvedOld.substring(0, resolvedOld.lastIndexOf('/'));
+          const parentDir = dirname(resolvedOld);
           const resolvedNew = join(parentDir, newName);
 
           if (!existsSync(resolvedOld)) {
@@ -2026,8 +2028,7 @@ async function main() {
             Bun.spawn(['explorer', '/select,', resolved]);
           } else {
             // Linux: open parent directory
-            const parentDir = resolved.substring(0, resolved.lastIndexOf('/'));
-            Bun.spawn(['xdg-open', parentDir]);
+            Bun.spawn(['xdg-open', dirname(resolved)]);
           }
 
           return jsonResponse({ success: true });
@@ -2052,11 +2053,13 @@ async function main() {
           // Security: Only allow paths under home directory or temp directories
           const homeDir = getHomeDirOrNull() || '';
           const resolvedPath = resolve(fullPath);
-          // Normalize both paths for comparison (handles Windows paths)
-          const normalizedResolved = resolvedPath.toLowerCase().replace(/\\/g, '/');
-          const normalizedHome = homeDir.toLowerCase().replace(/\\/g, '/');
-          const isUnderHome = normalizedHome && normalizedResolved.startsWith(normalizedHome);
-          const isUnderTmp = normalizedResolved.startsWith('/tmp') || normalizedResolved.includes('/temp/');
+          // Cross-platform path comparison: case-insensitive on Windows (drive letter casing)
+          const ci = process.platform === 'win32';
+          const pathEq = (a: string, b: string) => ci ? a.toLowerCase() === b.toLowerCase() : a === b;
+          const pathStartsWith = (p: string, prefix: string) => ci ? p.toLowerCase().startsWith(prefix.toLowerCase()) : p.startsWith(prefix);
+          const isUnderHome = homeDir && (pathStartsWith(resolvedPath, homeDir + sep) || pathEq(resolvedPath, homeDir));
+          const systemTmpDir = tmpdir();
+          const isUnderTmp = pathStartsWith(resolvedPath, systemTmpDir + sep) || pathEq(resolvedPath, systemTmpDir);
           if (!isUnderHome && !isUnderTmp) {
             return jsonResponse({ success: false, error: 'Path not allowed.' }, 403);
           }
@@ -2073,8 +2076,7 @@ async function main() {
           } else if (isWin) {
             Bun.spawn(['explorer', '/select,', resolvedPath]);
           } else {
-            const parentDir = resolvedPath.substring(0, resolvedPath.lastIndexOf('/'));
-            Bun.spawn(['xdg-open', parentDir]);
+            Bun.spawn(['xdg-open', dirname(resolvedPath)]);
           }
 
           return jsonResponse({ success: true });
@@ -5119,7 +5121,7 @@ async function main() {
           // --- Gate: Read HEARTBEAT.md from workspace root ---
           // The actual checklist lives in HEARTBEAT.md, not in config.
           // If the file is empty/missing AND no system events AND not high-priority → skip AI call.
-          const heartbeatMdPath = `${currentAgentDir}/HEARTBEAT.md`;
+          const heartbeatMdPath = join(currentAgentDir, 'HEARTBEAT.md');
           let heartbeatMdContent = '';
           try {
             heartbeatMdContent = readFileSync(heartbeatMdPath, 'utf-8').trim();
