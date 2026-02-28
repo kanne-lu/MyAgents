@@ -937,17 +937,22 @@ fn is_port_available(port: u16) -> bool {
     std::net::TcpListener::bind(format!("127.0.0.1:{}", port)).is_ok()
 }
 
-/// Strip the Windows `\\?\` extended-length path prefix.
-/// Tauri's resource_dir() returns canonicalized paths with this prefix on Windows,
-/// but Bun cannot handle `\\?\` prefixed paths — it silently hangs without executing JS.
-#[cfg(target_os = "windows")]
-fn strip_win_prefix(path: PathBuf) -> PathBuf {
-    let s = path.to_string_lossy();
-    if let Some(stripped) = s.strip_prefix("\\\\?\\") {
-        PathBuf::from(stripped)
-    } else {
-        path
+/// Normalize a path for use with external processes.
+///
+/// On Windows, Tauri's `resource_dir()` and Rust's `current_exe()` / `canonicalize()`
+/// return paths with the `\\?\` extended-length prefix. Most external tools (Bun, Node,
+/// npm) cannot handle this prefix — they silently hang or fail.
+///
+/// This function strips the prefix on Windows; on other platforms it's a no-op.
+fn normalize_external_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let s = path.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix("\\\\?\\") {
+            return PathBuf::from(stripped);
+        }
     }
+    path
 }
 
 /// Helper: check if bun exists at the given directory with platform-specific names
@@ -966,8 +971,13 @@ fn check_bun_in_dir(dir: &std::path::Path, label: &str) -> Option<PathBuf> {
     None
 }
 
-/// Find the bun executable path
+/// Find the bun executable path.
+/// Returns a normalized path safe for `Command::new()` (no `\\?\` prefix on Windows).
 fn find_bun_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
+    find_bun_executable_inner(app_handle).map(normalize_external_path)
+}
+
+fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
     // First, try to find bundled bun via resource_dir
     match app_handle.path().resource_dir() {
         Ok(resource_dir) => {
@@ -1132,8 +1142,13 @@ fn find_bun_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf>
     }
 }
 
-/// Find the server script path
-fn find_server_script<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<PathBuf> {
+/// Find the server script path.
+/// Returns a normalized path safe for `Command::new()` (no `\\?\` prefix on Windows).
+fn find_server_script<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
+    find_server_script_inner(app_handle).map(normalize_external_path)
+}
+
+fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<PathBuf> {
     // 1. First check for bundled server-dist.js (Production)
     // Modified: Only check bundled script in Release mode, so Dev mode uses source
     #[cfg(debug_assertions)]
@@ -1283,12 +1298,6 @@ pub fn start_tab_sidecar<R: Runtime>(
         .ok_or_else(|| "Bun executable not found".to_string())?;
     let script_path = find_server_script(app_handle)
         .ok_or_else(|| "Server script not found".to_string())?;
-
-    // Windows: strip \\?\ prefix — Bun silently hangs on extended-length paths
-    #[cfg(target_os = "windows")]
-    let bun_path = strip_win_prefix(bun_path);
-    #[cfg(target_os = "windows")]
-    let script_path = strip_win_prefix(script_path);
 
     // Allocate port
     let port = manager_guard.allocate_port()?;
@@ -1771,12 +1780,6 @@ fn create_new_session_sidecar<R: Runtime>(
         .ok_or_else(|| "Bun executable not found".to_string())?;
     let script_path = find_server_script(app_handle)
         .ok_or_else(|| "Server script not found".to_string())?;
-
-    // Windows: strip \\?\ prefix — Bun silently hangs on extended-length paths
-    #[cfg(target_os = "windows")]
-    let bun_path = strip_win_prefix(bun_path);
-    #[cfg(target_os = "windows")]
-    let script_path = strip_win_prefix(script_path);
 
     // Allocate port
     let port = manager_guard.allocate_port()?;
