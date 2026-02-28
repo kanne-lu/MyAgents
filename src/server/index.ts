@@ -1,4 +1,4 @@
-import { appendFileSync, copyFileSync, cpSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
 import { mkdir, rename, rm, stat } from 'fs/promises';
 import { basename, dirname, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
@@ -116,6 +116,7 @@ import {
 } from './agent-session';
 import { getHomeDirOrNull } from './utils/platform';
 import { getScriptDir, getAgentBrowserCliPath, getBundledRuntimePath, getPackageManagerPath } from './utils/runtime';
+import { ensureBrowserStealthConfig } from './utils/browser-stealth';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
 import {
   createSession,
@@ -452,8 +453,21 @@ function writeAgentBrowserWrapper(cliPath: string): boolean {
   // matching the agent-browser wrapper's unconditional-write behavior above.
   const nodeShimPath = join(binDir, 'node');
   if (isWin) {
+    // Windows: create node.exe as a hardlink to bun.exe.
+    // Windows PATH resolves .exe before .cmd (PATHEXT order). Using .exe avoids
+    // cmd.exe being invoked for node.cmd, which would create a visible console window.
+    const nodeExePath = join(binDir, 'node.exe');
+    try {
+      if (existsSync(nodeExePath)) unlinkSync(nodeExePath);
+      linkSync(bunPath, nodeExePath);
+    } catch {
+      // Hardlink failed (cross-volume?) — fall back to copy
+      try { copyFileSync(bunPath, nodeExePath); } catch { /* .cmd fallback below */ }
+    }
+    // .cmd fallback for cmd.exe / PowerShell manual invocation
     const escapedBun = bunPath.replace(/"/g, '""');
     writeFileSync(join(binDir, 'node.cmd'), `@"${escapedBun}" %*\r\n`);
+    // POSIX sh fallback for Git Bash
     writeFileSync(nodeShimPath, `#!/bin/sh\nexec "${shellEscape(bunPath)}" "$@"\n`);
   } else {
     writeFileSync(nodeShimPath, `#!/bin/sh\nexec "${shellEscape(bunPath)}" "$@"\n`, { mode: 0o755 });
@@ -588,6 +602,7 @@ function autoInstallAgentBrowser(): void {
     }
     writeAgentBrowserWrapper(cliPath);
     ensureChromiumInstalled(cliPath);
+    ensureBrowserStealthConfig();
     rmSync(lockFile, { force: true });
   }).catch((err) => {
     rmSync(lockFile, { force: true });
@@ -601,6 +616,7 @@ function setupAgentBrowserWrapper(): void {
     if (cliPath) {
       writeAgentBrowserWrapper(cliPath);
       ensureChromiumInstalled(cliPath);  // Background — won't block startup
+      ensureBrowserStealthConfig();
       return;
     }
 

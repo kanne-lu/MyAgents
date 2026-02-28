@@ -5,6 +5,7 @@ import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv } from './utils/platform';
+import { getAgentBrowserConfigPath } from './utils/browser-stealth';
 import { resizeImageIfNeeded } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
@@ -1821,6 +1822,12 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     // into project .claude/skills/ by syncProjectUserConfig() instead.
   };
 
+  // agent-browser: point to MyAgents-managed stealth config (headed + anti-detection)
+  const abConfigPath = getAgentBrowserConfigPath();
+  if (abConfigPath && !env.AGENT_BROWSER_CONFIG) {
+    env.AGENT_BROWSER_CONFIG = abConfigPath;
+  }
+
   // agent-browser: bypass Rust canonicalize() UNC path issue on Windows
   // https://github.com/vercel-labs/agent-browser/issues/393
   if (isWindows) {
@@ -1884,10 +1891,14 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
 
     switch (authType) {
       case 'auth_token':
-        // Only set AUTH_TOKEN, delete API_KEY
+        // Set AUTH_TOKEN for Authorization: Bearer header.
+        // MUST also set API_KEY to the SAME value to block the SDK CLI's internal
+        // key resolution chain (KH function) from falling back to keychain/config.
+        // Without this, if the user ever saved an unrelated key via `claude auth set-key`,
+        // the CLI would find that stale key and send it as x-api-key, causing 403.
         env.ANTHROPIC_AUTH_TOKEN = effectiveProviderEnv.apiKey;
-        delete env.ANTHROPIC_API_KEY;
-        console.log('[env] ANTHROPIC_AUTH_TOKEN set (authType: auth_token)');
+        env.ANTHROPIC_API_KEY = effectiveProviderEnv.apiKey;
+        console.log('[env] ANTHROPIC_AUTH_TOKEN + ANTHROPIC_API_KEY set (authType: auth_token)');
         break;
       case 'api_key':
         // Only set API_KEY, delete AUTH_TOKEN
@@ -1896,7 +1907,11 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
         console.log('[env] ANTHROPIC_API_KEY set (authType: api_key)');
         break;
       case 'auth_token_clear_api_key':
-        // Set AUTH_TOKEN and explicitly set API_KEY to empty string (required by OpenRouter)
+        // OpenRouter requires AUTH_TOKEN and API_KEY set to empty string.
+        // The empty API_KEY tells the Anthropic SDK not to send x-api-key header,
+        // while AUTH_TOKEN provides the actual credential via Authorization: Bearer.
+        // NOTE: empty string is falsy so the CLI's KH() will still fall back to keychain.
+        // This is acceptable for OpenRouter since it only checks the Bearer header.
         env.ANTHROPIC_AUTH_TOKEN = effectiveProviderEnv.apiKey;
         env.ANTHROPIC_API_KEY = '';
         console.log('[env] ANTHROPIC_AUTH_TOKEN set, ANTHROPIC_API_KEY cleared (authType: auth_token_clear_api_key)');
