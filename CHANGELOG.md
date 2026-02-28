@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP 添加面板 JSON 批量导入**：支持一次性导入多个 MCP 服务器 + DDG-Search 预设
 - **工作区右键「用默认应用打开」**：文件可用系统默认程序打开
 - **检测并清除 settings.json 环境变量覆盖**：防止 CLAUDE_CONFIG_DIR 等覆盖影响认证
+- **agent-browser 反检测默认配置 + Profile 持久化**：自动生成 headed 模式、真实 UA、持久化 Profile 的反检测配置，解决知乎/微博等网站被拦截问题
 
 ### Fixed
 - **Windows Sidecar 启动失败**：UNC 路径前缀导致 Bun 无法识别资源路径
@@ -36,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **供应商选择菜单溢出屏幕**
 - **工作区大目录无法展开**（条目上限 50000）
 - **macOS 全屏退出后 Tab 遮挡红绿灯**
+- **Provider 验证 auth 错误未正确检测**：SDK 返回 403/401 时误报验证成功
 
 ### Changed
 - **路径 normalize Pit of Success 重构**：源头统一处理，消除消费端重复 strip
