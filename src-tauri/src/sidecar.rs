@@ -86,6 +86,7 @@ const HEALTH_CHECK_DELAY_MS: u64 = 100;
 const HEALTH_CHECK_TIMEOUT_MS: u64 = 100;
 // HTTP health check for existing sidecar - shorter timeout since sidecar should respond immediately
 const HTTP_HEALTH_CHECK_TIMEOUT_MS: u64 = 500;
+#[cfg(unix)]
 const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 // Port range: 500 ports (31415-31914)
 const PORT_RANGE: u16 = 500;
