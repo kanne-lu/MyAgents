@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSyn
 import { join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledBunDir } from './utils/runtime';
+import { getScriptDir, getBundledBunDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv } from './utils/platform';
 import { resizeImageIfNeeded } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
@@ -1820,6 +1820,16 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
     // into project .claude/skills/ by syncProjectUserConfig() instead.
   };
+
+  // agent-browser: bypass Rust canonicalize() UNC path issue on Windows
+  // https://github.com/vercel-labs/agent-browser/issues/393
+  if (isWindows) {
+    const abCliPath = getAgentBrowserCliPath();
+    if (abCliPath) {
+      // cliPath = .../agent-browser/bin/agent-browser.js → HOME = .../agent-browser/
+      env.AGENT_BROWSER_HOME = resolve(abCliPath, '..', '..');
+    }
+  }
 
   // Use provided providerEnv or fall back to currentProviderEnv
   const effectiveProviderEnv = providerEnv ?? currentProviderEnv;

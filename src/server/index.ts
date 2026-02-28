@@ -445,6 +445,20 @@ function writeAgentBrowserWrapper(cliPath: string): boolean {
     writeFileSync(join(binDir, 'agent-browser'), `#!/bin/sh\nexec "${shellEscape(bunPath)}" "${shellEscape(cliPath)}" "$@"\n`, { mode: 0o755 });
   }
   console.log(`[agent-browser] Wrapper created: ${join(binDir, 'agent-browser')}${isWin ? ' (.cmd + sh)' : ''}`);
+
+  // agent-browser's Rust binary spawns daemon.js via hardcoded `node` command.
+  // Since we bundle bun (not Node.js), create a node shim that delegates to bun.
+  // Always overwrite (no existsSync guard) — bunPath may change after app update,
+  // matching the agent-browser wrapper's unconditional-write behavior above.
+  const nodeShimPath = join(binDir, 'node');
+  if (isWin) {
+    const escapedBun = bunPath.replace(/"/g, '""');
+    writeFileSync(join(binDir, 'node.cmd'), `@"${escapedBun}" %*\r\n`);
+    writeFileSync(nodeShimPath, `#!/bin/sh\nexec "${shellEscape(bunPath)}" "$@"\n`);
+  } else {
+    writeFileSync(nodeShimPath, `#!/bin/sh\nexec "${shellEscape(bunPath)}" "$@"\n`, { mode: 0o755 });
+  }
+
   return true;
 }
 
