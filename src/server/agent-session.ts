@@ -2,10 +2,10 @@ import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
-import { resizeImageIfNeeded } from './utils/imageResize';
+import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext, clearImMediaContext } from './tools/im-media-tool';
@@ -3809,6 +3809,29 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             message: '用户拒绝了此工具的使用权限'
           };
         }
+      },
+      // PostToolUse hook: resize oversized images in MCP tool results before sending to Claude API.
+      // Claude API rejects images exceeding 8000px per dimension; MCP tools (e.g. browser screenshots)
+      // can produce arbitrarily large images that bypass our user-upload resize pipeline.
+      hooks: {
+        PostToolUse: [{
+          hooks: [
+            async (input: HookInput, _toolUseId: string | undefined, _options: { signal: AbortSignal }): Promise<HookJSONOutput> => {
+              const postInput = input as PostToolUseHookInput;
+              const resized = await resizeToolImageContent(postInput.tool_response);
+              if (resized) {
+                console.log(`[image-resize] PostToolUse hook resized images for tool: ${postInput.tool_name}`);
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: 'PostToolUse' as const,
+                    updatedMCPToolOutput: resized,
+                  },
+                };
+              }
+              return { continue: true };
+            },
+          ],
+        }],
       },
     };
 
