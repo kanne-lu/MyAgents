@@ -443,7 +443,7 @@ log::info!("internal message");
 | **Rust 代理层/Sidecar 管理** | 系统日志中的 `[proxy]` `[sidecar]` `[sse-proxy]` | 系统日志文件（见上表） |
 | **前端 UI 异常**（白屏、组件报错） | 统一日志中的 React 来源日志 | `~/.myagents/logs/unified-{today}.log`，搜 `[REACT]` |
 | **配置/持久化问题** | 直接读配置文件 | `~/.myagents/config.json` |
-| **IM Bot 运行状态** | 健康状态文件 | `~/.myagents/im_{botId}_state.json` |
+| **IM Bot 运行状态** | 健康状态文件 | `~/.myagents/im_bots/{botId}/state.json` |
 
 ---
 

@@ -124,9 +124,8 @@ cmd_start_im_bot(botId, botToken, ...)
     │
     ├── 若同 botId 已在运行 → 优雅停止（等待 5s 收尾）
     │
-    ├── 迁移遗留文件
-    │     └── im_state.json → im_{botId}_state.json
-    │     └── im_buffer.json → im_{botId}_buffer.json
+    ├── 迁移遗留文件（v1/v2 → v3 子目录）
+    │     └── im_state.json / im_{botId}_*.json → im_bots/{botId}/*.json
     │
     ├── 初始化组件
     │     ├── HealthManager（加载上次状态）
@@ -300,7 +299,7 @@ pub struct SessionRouter {
 ```rust
 pub struct HealthManager {
     state: Arc<Mutex<ImHealthState>>,
-    persist_path: PathBuf,  // ~/.myagents/im_{bot_id}_state.json
+    persist_path: PathBuf,  // ~/.myagents/im_bots/{bot_id}/state.json
 }
 
 pub struct ImHealthState {
@@ -318,10 +317,11 @@ pub struct ImHealthState {
 
 **持久化**：每 5 秒写入磁盘，供前端轮询展示。
 
-**Per-Bot 文件路径**：
-- 健康状态：`~/.myagents/im_{bot_id}_state.json`
-- 消息缓冲：`~/.myagents/im_{bot_id}_buffer.json`
-- 遗留文件迁移：首次启动时 `im_state.json` → `im_{bot_id}_state.json`，原文件重命名为 `.migrated`
+**Per-Bot 文件路径**（v3 子目录结构）：
+- 健康状态：`~/.myagents/im_bots/{bot_id}/state.json`
+- 消息缓冲：`~/.myagents/im_bots/{bot_id}/buffer.json`
+- 去重缓存：`~/.myagents/im_bots/{bot_id}/dedup.json`（仅飞书）
+- 遗留文件迁移：启动时自动迁移 v1（`im_state.json`）和 v2（`im_{botId}_*.json`）到 v3 子目录，孤儿文件自动清理
 
 ### 2.8 消息缓冲
 
@@ -767,8 +767,11 @@ src/shared/types/im.ts         # ImBotConfig, ImBotStatus, DEFAULT_IM_BOT_CONFIG
 ```
 ~/.myagents/
 ├── config.json                # imBotConfigs[] 数组
-├── im_{botId}_state.json      # Per-bot 健康状态
-└── im_{botId}_buffer.json     # Per-bot 消息缓冲
+└── im_bots/                   # Per-bot 运行时数据
+    └── {botId}/
+        ├── state.json         # 健康状态
+        ├── buffer.json        # 消息缓冲
+        └── dedup.json         # 去重缓存（仅飞书）
 ```
 
 ---

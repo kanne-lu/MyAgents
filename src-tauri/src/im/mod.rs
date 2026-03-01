@@ -3062,7 +3062,9 @@ pub async fn cmd_remove_im_bot_config(
 
     let bid = botId.clone();
     tokio::task::spawn_blocking(move || {
-        remove_bot_config_from_disk(&bid)
+        remove_bot_config_from_disk(&bid)?;
+        health::cleanup_bot_data(&bid);
+        Ok::<(), String>(())
     }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
 
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));

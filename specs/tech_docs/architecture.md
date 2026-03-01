@@ -223,7 +223,7 @@ pub type ManagedImBots = Arc<Mutex<HashMap<String, ImBotInstance>>>;
 |------|------|
 | `TelegramAdapter` | Telegram Bot API 长轮询、消息收发、白名单、碎片合并 |
 | `SessionRouter` | peer → Sidecar 映射，`SidecarOwner::ImBot(session_key)` 管理生命周期 |
-| `HealthManager` | 每 5s 持久化状态到 `~/.myagents/im_{botId}_state.json` |
+| `HealthManager` | 每 5s 持久化状态到 `~/.myagents/im_bots/{botId}/state.json` |
 | `MessageBuffer` | Sidecar 不可用时缓冲消息，恢复后重放 |
 
 **Tauri Commands**：`cmd_start_im_bot`、`cmd_stop_im_bot`、`cmd_im_bot_status`、`cmd_im_all_bots_status`、`cmd_im_conversations`

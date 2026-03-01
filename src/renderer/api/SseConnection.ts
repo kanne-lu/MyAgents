@@ -392,7 +392,7 @@ export class SseConnection {
                 if (attempts > 0) {
                     console.log(`[SSE ${this.connectionId}] Reconnected after ${attempts} attempts`);
                 }
-            } catch (error) {
+            } catch (_error) {
                 // Schedule another attempt
                 if (this.shouldReconnect) {
                     this.scheduleReconnect();
@@ -453,7 +453,7 @@ export class SseConnection {
                 if (attempts > 0) {
                     console.log(`[SSE ${this.connectionId}] Reconnected after ${attempts} attempts`);
                 }
-            } catch (error) {
+            } catch (_error) {
                 if (this.shouldReconnect) {
                     this.scheduleTauriReconnect();
                 }
