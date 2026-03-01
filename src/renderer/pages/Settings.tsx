@@ -1398,21 +1398,12 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                     </button>
                     <button
                         onClick={() => setActiveSection('skills')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'skills'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'skills' || activeSection === 'agents'
                             ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
                         技能 Skills
-                    </button>
-                    <button
-                        onClick={() => setActiveSection('agents')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'agents'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
-                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                            }`}
-                    >
-                        Agent 能力
                     </button>
                     <button
                         onClick={() => setActiveSection('mcp')}
@@ -1439,7 +1430,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
-                        通用
+                        通用设置
                     </button>
                     <button
                         onClick={() => setActiveSection('about')}
@@ -1448,23 +1439,17 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
-                        关于
+                        关于&反馈
                     </button>
                 </nav>
             </div>
 
             {/* Right content area */}
             <div className="flex-1 overflow-y-auto overscroll-contain">
-                {/* Skills section uses wider layout */}
-                {activeSection === 'skills' && (
-                    <div className="mx-auto max-w-4xl px-8 py-8">
+                {/* Skills + Agents section uses wider layout */}
+                {(activeSection === 'skills' || activeSection === 'agents') && (
+                    <div className="mx-auto max-w-4xl px-8 py-8 space-y-10">
                         <GlobalSkillsPanel />
-                    </div>
-                )}
-
-                {/* Agents section uses wider layout */}
-                {activeSection === 'agents' && (
-                    <div className="mx-auto max-w-4xl px-8 py-8">
                         <GlobalAgentsPanel />
                     </div>
                 )}
@@ -2077,23 +2062,6 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                 </div>
                             </div>
 
-                            {/* Bug Report */}
-                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
-                                <div className="flex items-center justify-between">
-                                    <div>
-                                        <h3 className="text-base font-medium text-[var(--ink)]">报告问题</h3>
-                                        <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                            AI 将分析本地日志，生成结构化诊断报告并上报
-                                        </p>
-                                    </div>
-                                    <button
-                                        onClick={() => setShowBugReport(true)}
-                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-strong)]"
-                                    >
-                                        报告问题
-                                    </button>
-                                </div>
-                            </div>
                         </div>
                     )}
 
@@ -2177,6 +2145,24 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                     <p className="text-[var(--ink-muted)] italic">
                                         Claude Code 这类 Agent 让开发者首先见识到了 AGI 的雏形，那么我们希望 MyAgents 成为让更多的非开发者也能体会到创作的乐趣，体会到来自 AI 智能的推背感，成就更好的自己。
                                     </p>
+                                </div>
+                            </div>
+
+                            {/* AI Feedback */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <h3 className="text-base font-medium text-[var(--ink)]">AI 反馈答疑</h3>
+                                        <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                            AI 将分析本地日志进行答疑与上报问题或建议
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => setShowBugReport(true)}
+                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-strong)]"
+                                    >
+                                        反馈问题
+                                    </button>
                                 </div>
                             </div>
 

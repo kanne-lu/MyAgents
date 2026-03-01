@@ -50,8 +50,11 @@ export default memo(function RecentTasks({
     const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
 
-    // Top 5 sessions
-    const displaySessions = useMemo(() => sessions.slice(0, DISPLAY_COUNT), [sessions]);
+    // Top 5 sessions — filter to those with a matching visible project first, then slice
+    const displaySessions = useMemo(() => {
+        const projectPaths = new Set(projects.map(p => p.path));
+        return sessions.filter(s => projectPaths.has(s.agentDir)).slice(0, DISPLAY_COUNT);
+    }, [sessions, projects]);
 
     // Sorted cron tasks: running first (by nextExecutionAt ASC), then stopped (by updatedAt DESC), take 5
     const displayCronTasks = useMemo(() => {

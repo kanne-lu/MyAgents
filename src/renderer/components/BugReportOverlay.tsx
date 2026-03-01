@@ -193,7 +193,7 @@ export default function BugReportOverlay({
             <div className="glass-panel w-full max-w-md">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
-                    <h2 className="text-[14px] font-semibold text-[var(--ink)]">报告问题</h2>
+                    <h2 className="text-[14px] font-semibold text-[var(--ink)]">AI 反馈答疑</h2>
                     <button
                         onClick={onClose}
                         className="rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
@@ -240,7 +240,7 @@ export default function BugReportOverlay({
                             onChange={(e) => setDescription(e.target.value)}
                             onKeyDown={handleKeyDown}
                             onPaste={handlePaste}
-                            placeholder="描述你遇到的问题..."
+                            placeholder="描述您遇到的问题、提出您的意见或建议"
                             className="w-full resize-none border-0 bg-transparent px-4 py-3 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:outline-none"
                             rows={5}
                         />
