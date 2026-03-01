@@ -1,8 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, ChevronUp, Send } from 'lucide-react';
+import { X, ChevronUp, Send, ImagePlus } from 'lucide-react';
 
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
+import type { ImageAttachment } from './SimpleChatInput';
+import { ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
+import { useImagePreview } from '@/context/ImagePreviewContext';
+
+const MAX_IMAGES = 5;
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
 
 interface BugReportOverlayProps {
     onClose: () => void;
@@ -33,7 +39,9 @@ export default function BugReportOverlay({
     onClose, onNavigateToProviders, appVersion, providers, apiKeys, providerVerifyStatus,
 }: BugReportOverlayProps) {
     const [description, setDescription] = useState('');
+    const [images, setImages] = useState<ImageAttachment[]>([]);
     const [showModelMenu, _setShowModelMenu] = useState(false);
+    const [isDragging, setIsDragging] = useState(false);
     const showModelMenuRef = useRef(false);
     const setShowModelMenu = useCallback((v: boolean) => {
         showModelMenuRef.current = v;
@@ -41,6 +49,8 @@ export default function BugReportOverlay({
     }, []);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const menuRef = useRef<HTMLDivElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const { openPreview } = useImagePreview();
 
     // Default selection: first available provider's primaryModel (computed once at mount)
     const defaultProvider = () => providers.find(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
@@ -58,7 +68,25 @@ export default function BugReportOverlay({
 
     const hasValidModel = !!selectedProviderId && !!selectedModel;
     const hasText = description.trim().length > 0;
-    const canSubmit = hasText && hasValidModel;
+    const hasContent = hasText || images.length > 0;
+    const canSubmit = hasContent && hasValidModel;
+
+    const addImage = useCallback((file: File) => {
+        if (images.length >= MAX_IMAGES) return;
+        if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) return;
+        if (file.size > MAX_IMAGE_SIZE) return;
+
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const dataUrl = e.target?.result as string;
+            setImages(prev => [...prev, {
+                id: `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                file,
+                preview: dataUrl,
+            }]);
+        };
+        reader.readAsDataURL(file);
+    }, [images.length]);
 
     // Focus textarea on mount
     useEffect(() => {
@@ -100,10 +128,11 @@ export default function BugReportOverlay({
                 providerId: selectedProviderId,
                 model: selectedModel,
                 appVersion,
+                images,
             },
         }));
         onClose();
-    }, [canSubmit, description, selectedProviderId, selectedModel, appVersion, onClose]);
+    }, [canSubmit, description, selectedProviderId, selectedModel, appVersion, images, onClose]);
 
     // Ctrl/Cmd+Enter to submit
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -113,9 +142,45 @@ export default function BugReportOverlay({
         }
     }, [handleSubmit]);
 
+    const handlePaste = useCallback((e: React.ClipboardEvent) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+        for (const item of Array.from(items)) {
+            if (item.kind === 'file') {
+                const file = item.getAsFile();
+                if (file && file.type.startsWith('image/')) {
+                    e.preventDefault();
+                    addImage(file);
+                    return;
+                }
+            }
+        }
+    }, [addImage]);
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        setIsDragging(true);
+    }, []);
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        // Only clear dragging when leaving the container itself, not when entering children
+        if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+            setIsDragging(false);
+        }
+    }, []);
+
+    const handleDrop = useCallback((e: React.DragEvent) => {
+        e.preventDefault();
+        setIsDragging(false);
+        for (const file of Array.from(e.dataTransfer.files)) {
+            if (file.type.startsWith('image/')) addImage(file);
+        }
+    }, [addImage]);
+
     const isMac = navigator.platform.toLowerCase().includes('mac');
     const getSubmitTitle = () => {
-        if (!hasText) return '请输入问题描述';
+        if (!hasContent) return '请输入问题描述或添加图片';
         if (!hasValidModel) return '请先在设置中配置模型';
         return isMac ? '发送 (⌘Enter)' : '发送 (Ctrl+Enter)';
     };
@@ -139,81 +204,135 @@ export default function BugReportOverlay({
 
                 {/* Input area — matches Chat input style */}
                 <div className="px-5 py-4">
-                    <div className="rounded-2xl border border-[var(--line)] bg-[var(--paper-inset)]">
+                    <div
+                        className={`rounded-2xl border bg-[var(--paper-inset)] transition-colors ${isDragging ? 'border-[var(--accent)]' : 'border-[var(--line)]'}`}
+                        onDragOver={handleDragOver}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                    >
+                        {/* Image thumbnails */}
+                        {images.length > 0 && (
+                            <div className="flex gap-2 overflow-x-auto px-4 pb-1 pt-3">
+                                {images.map(img => (
+                                    <div key={img.id} className="group relative flex-shrink-0">
+                                        <img
+                                            src={img.preview}
+                                            alt="attachment"
+                                            className="h-16 w-16 cursor-pointer rounded-lg border border-[var(--line)] object-cover"
+                                            onDoubleClick={() => openPreview(img.preview, img.file.name)}
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setImages(prev => prev.filter(i => i.id !== img.id))}
+                                            className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--error)] text-white opacity-0 transition-opacity group-hover:opacity-100"
+                                        >
+                                            <X className="h-3 w-3" />
+                                        </button>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
                         {/* Textarea */}
                         <textarea
                             ref={textareaRef}
                             value={description}
                             onChange={(e) => setDescription(e.target.value)}
                             onKeyDown={handleKeyDown}
+                            onPaste={handlePaste}
                             placeholder="描述你遇到的问题..."
                             className="w-full resize-none border-0 bg-transparent px-4 py-3 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:outline-none"
                             rows={5}
                         />
 
+                        {/* Hidden file input */}
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept="image/png,image/jpeg,image/gif,image/webp"
+                            multiple
+                            className="hidden"
+                            onChange={(e) => {
+                                for (const file of Array.from(e.target.files || [])) addImage(file);
+                                e.target.value = '';
+                            }}
+                        />
+
                         {/* Bottom toolbar */}
                         <div className="flex items-center justify-between border-t border-[var(--line)] px-3 py-2">
-                            {/* Model selector */}
-                            <div className="relative" ref={menuRef}>
+                            <div className="flex items-center gap-1">
+                                {/* Image upload button */}
                                 <button
                                     type="button"
-                                    onClick={() => setShowModelMenu(!showModelMenu)}
-                                    className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                    onClick={() => fileInputRef.current?.click()}
+                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                    title="上传图片"
                                 >
-                                    <span className="max-w-[180px] truncate">{modelDisplayName}</span>
-                                    <ChevronUp className="h-3 w-3" />
+                                    <ImagePlus className="h-4 w-4" />
                                 </button>
 
-                                {/* Model dropdown menu — only available providers */}
-                                {showModelMenu && (() => {
-                                    const availableProviders = providers.filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
-                                    return (
-                                        <div className="absolute bottom-full left-0 mb-1 max-h-[300px] w-[260px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper)] py-1 shadow-lg">
-                                            {availableProviders.length === 0 ? (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => {
-                                                        setShowModelMenu(false);
-                                                        onNavigateToProviders();
-                                                    }}
-                                                    className="w-full px-3 py-2.5 text-left text-[12px] text-[var(--accent)] transition-colors hover:bg-[var(--paper-contrast)]"
-                                                >
-                                                    请先配置模型 →
-                                                </button>
-                                            ) : (
-                                                availableProviders.map((provider, idx) => (
-                                                    <div key={provider.id}>
-                                                        {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
-                                                        <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                                                            {provider.name}
+                                {/* Model selector */}
+                                <div className="relative" ref={menuRef}>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowModelMenu(!showModelMenu)}
+                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                    >
+                                        <span className="max-w-[180px] truncate">{modelDisplayName}</span>
+                                        <ChevronUp className="h-3 w-3" />
+                                    </button>
+
+                                    {/* Model dropdown menu — only available providers */}
+                                    {showModelMenu && (() => {
+                                        const availableProviders = providers.filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
+                                        return (
+                                            <div className="absolute bottom-full left-0 mb-1 max-h-[300px] w-[260px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper)] py-1 shadow-lg">
+                                                {availableProviders.length === 0 ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            setShowModelMenu(false);
+                                                            onNavigateToProviders();
+                                                        }}
+                                                        className="w-full px-3 py-2.5 text-left text-[12px] text-[var(--accent)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                                    >
+                                                        请先配置模型 →
+                                                    </button>
+                                                ) : (
+                                                    availableProviders.map((provider, idx) => (
+                                                        <div key={provider.id}>
+                                                            {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
+                                                            <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                                                                {provider.name}
+                                                            </div>
+                                                            {provider.models.map(model => {
+                                                                const isSelected = selectedProviderId === provider.id && selectedModel === model.model;
+                                                                return (
+                                                                    <button
+                                                                        key={model.model}
+                                                                        type="button"
+                                                                        onClick={() => {
+                                                                            setSelectedProviderId(provider.id);
+                                                                            setSelectedModel(model.model);
+                                                                            setShowModelMenu(false);
+                                                                        }}
+                                                                        className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
+                                                                            isSelected
+                                                                                ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                                                                                : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
+                                                                        }`}
+                                                                    >
+                                                                        {model.modelName}
+                                                                    </button>
+                                                                );
+                                                            })}
                                                         </div>
-                                                        {provider.models.map(model => {
-                                                            const isSelected = selectedProviderId === provider.id && selectedModel === model.model;
-                                                            return (
-                                                                <button
-                                                                    key={model.model}
-                                                                    type="button"
-                                                                    onClick={() => {
-                                                                        setSelectedProviderId(provider.id);
-                                                                        setSelectedModel(model.model);
-                                                                        setShowModelMenu(false);
-                                                                    }}
-                                                                    className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
-                                                                        isSelected
-                                                                            ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
-                                                                            : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
-                                                                    }`}
-                                                                >
-                                                                    {model.modelName}
-                                                                </button>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                ))
-                                            )}
-                                        </div>
-                                    );
-                                })()}
+                                                    ))
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
                             </div>
 
                             {/* Send button */}

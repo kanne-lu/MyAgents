@@ -19,6 +19,7 @@ import {
   type Provider,
 } from '@/config/types';
 import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
+import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
@@ -28,10 +29,10 @@ import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
 
 // ============================================================
-// Bug Report Prompt Builder
+// User Support Prompt Builder
 // ============================================================
 
-function buildBugReportPrompt(description: string, appVersion: string): string {
+function buildSupportPrompt(description: string, appVersion: string): string {
   return [
     `## 用户反馈`,
     ``,
@@ -39,7 +40,7 @@ function buildBugReportPrompt(description: string, appVersion: string): string {
     ``,
     `> ${description}`,
     ``,
-    `请使用 /report_issue skill 诊断此问题并生成报告。`,
+    `请使用 /support skill 帮助用户解决这个问题。`,
   ].join('\n');
 }
 
@@ -1270,6 +1271,7 @@ export default function App() {
       providerId?: string;
       model?: string;
       appVersion: string;
+      images?: ImageAttachment[];
     }>) => {
       const { description, appVersion } = event.detail;
       try {
@@ -1305,9 +1307,10 @@ export default function App() {
         // --- All checks passed, safe to create Tab ---
 
         const initialMessage: InitialMessage = {
-          text: buildBugReportPrompt(description, appVersion),
+          text: buildSupportPrompt(description, appVersion),
           providerId: provider.id,
           model: event.detail.model,
+          images: event.detail.images,
         };
 
         const newTab = createNewTab();
