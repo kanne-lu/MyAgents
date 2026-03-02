@@ -3919,9 +3919,9 @@ async function main() {
         }
       }
 
-      // ============= SKILLS MANAGEMENT API =============
       // Security: Validate item names to prevent path traversal attacks
       // Supports Unicode (Chinese, Japanese, etc.) while maintaining security
+      // Defined here (before Rules and Skills APIs) so all endpoints can use it
       const isValidItemName = (name: string): boolean => {
         // Reject empty names
         if (!name || name.trim().length === 0) {
@@ -3952,6 +3952,220 @@ async function main() {
         // Allow Unicode letters, numbers, hyphens, underscores, spaces, and common punctuation
         return true;
       };
+
+      // ============= RULES FILES API =============
+      // Manage .claude/rules/*.md files (system prompt rules)
+
+      // GET /api/rules - List all rule files
+      if (pathname === '/api/rules' && request.method === 'GET') {
+        try {
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          if (!existsSync(rulesDir)) {
+            return jsonResponse({ success: true, files: [] });
+          }
+          const files = readdirSync(rulesDir)
+            .filter(f => f.endsWith('.md'))
+            .sort();
+          return jsonResponse({ success: true, files });
+        } catch (error) {
+          console.error('[api/rules] Error listing:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to list rules' },
+            500
+          );
+        }
+      }
+
+      // POST /api/rules - Create a new rule file
+      if (pathname === '/api/rules' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { name: string; content?: string };
+          if (!payload.name || !payload.name.trim()) {
+            return jsonResponse({ success: false, error: 'Name is required' }, 400);
+          }
+          // Ensure .md suffix
+          let filename = payload.name.trim();
+          if (!filename.endsWith('.md')) {
+            filename = filename + '.md';
+          }
+          const nameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(nameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid file name' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          mkdirSync(rulesDir, { recursive: true });
+          const filePath = join(rulesDir, filename);
+          if (existsSync(filePath)) {
+            return jsonResponse({ success: false, error: 'File already exists' }, 409);
+          }
+          writeFileSync(filePath, payload.content || '', 'utf-8');
+          return jsonResponse({ success: true, filename });
+        } catch (error) {
+          console.error('[api/rules] Error creating:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to create rule file' },
+            500
+          );
+        }
+      }
+
+      // PUT /api/rules/:filename/rename - Rename a rule file
+      if (pathname.startsWith('/api/rules/') && pathname.endsWith('/rename') && request.method === 'PUT') {
+        try {
+          const filename = decodeURIComponent(pathname.slice('/api/rules/'.length, -'/rename'.length));
+          if (!filename || !filename.endsWith('.md')) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const oldNameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(oldNameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const payload = await request.json() as { newName: string };
+          if (!payload.newName || !payload.newName.trim()) {
+            return jsonResponse({ success: false, error: 'New name is required' }, 400);
+          }
+          let newFilename = payload.newName.trim();
+          if (!newFilename.endsWith('.md')) {
+            newFilename = newFilename + '.md';
+          }
+          const newNameWithoutExt = newFilename.replace(/\.md$/, '');
+          if (!isValidItemName(newNameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid new file name' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          const oldPath = join(rulesDir, filename);
+          const newPath = join(rulesDir, newFilename);
+          if (!existsSync(oldPath)) {
+            return jsonResponse({ success: false, error: 'File not found' }, 404);
+          }
+          if (existsSync(newPath)) {
+            return jsonResponse({ success: false, error: 'Target filename already exists' }, 409);
+          }
+          renameSync(oldPath, newPath);
+          return jsonResponse({ success: true, filename: newFilename });
+        } catch (error) {
+          console.error('[api/rules] Error renaming:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to rename rule file' },
+            500
+          );
+        }
+      }
+
+      // GET /api/rules/:filename - Read a rule file
+      if (pathname.startsWith('/api/rules/') && request.method === 'GET') {
+        try {
+          const filename = decodeURIComponent(pathname.slice('/api/rules/'.length));
+          if (!filename || !filename.endsWith('.md')) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const nameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(nameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          const filePath = join(rulesDir, filename);
+          if (!existsSync(filePath)) {
+            return jsonResponse({ success: true, exists: false, content: '' });
+          }
+          const content = readFileSync(filePath, 'utf-8');
+          return jsonResponse({ success: true, exists: true, content });
+        } catch (error) {
+          console.error('[api/rules] Error reading:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to read rule file' },
+            500
+          );
+        }
+      }
+
+      // PUT /api/rules/:filename - Update a rule file
+      if (pathname.startsWith('/api/rules/') && request.method === 'PUT') {
+        try {
+          const filename = decodeURIComponent(pathname.slice('/api/rules/'.length));
+          if (!filename || !filename.endsWith('.md')) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const nameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(nameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const payload = await request.json() as { content: string };
+          if (typeof payload.content !== 'string') {
+            return jsonResponse({ success: false, error: 'Content must be a string' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          mkdirSync(rulesDir, { recursive: true });
+          const filePath = join(rulesDir, filename);
+          writeFileSync(filePath, payload.content, 'utf-8');
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/rules] Error updating:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to update rule file' },
+            500
+          );
+        }
+      }
+
+      // DELETE /api/rules/:filename - Delete a rule file
+      if (pathname.startsWith('/api/rules/') && request.method === 'DELETE') {
+        try {
+          const filename = decodeURIComponent(pathname.slice('/api/rules/'.length));
+          if (!filename || !filename.endsWith('.md')) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const nameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(nameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          const filePath = join(rulesDir, filename);
+          if (!existsSync(filePath)) {
+            return jsonResponse({ success: false, error: 'File not found' }, 404);
+          }
+          unlinkSync(filePath);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/rules] Error deleting:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to delete rule file' },
+            500
+          );
+        }
+      }
+
+      // ============= SKILLS MANAGEMENT API =============
 
       // Cross-platform home directory for user skills/commands
       const homeDir = getHomeDirOrNull() || '';

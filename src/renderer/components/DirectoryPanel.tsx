@@ -36,7 +36,6 @@ import ConfirmDialog from './ConfirmDialog';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 import RenameDialog from './RenameDialog';
 import AgentCapabilitiesPanel from './AgentCapabilitiesPanel';
-import type { Tab as WorkspaceTab } from './WorkspaceConfigPanel';
 
 // Lazy load FilePreviewModal - it includes heavy SyntaxHighlighter
 const FilePreviewModal = lazy(() => import('./FilePreviewModal'));
@@ -73,8 +72,8 @@ interface DirectoryPanelProps {
   globalSkillFolderNames?: Set<string>;
   /** Insert /command into chat input */
   onInsertSlashCommand?: (command: string) => void;
-  /** Open settings panel to a specific tab */
-  onOpenSettings?: (tab: Extract<WorkspaceTab, 'skills-commands' | 'agents'>) => void;
+  /** Open settings panel (skills tab) */
+  onOpenSettings?: () => void;
   /** Copy a project skill to global skills */
   onSyncSkillToGlobal?: (folderName: string) => void;
 }

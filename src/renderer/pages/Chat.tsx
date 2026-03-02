@@ -200,8 +200,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     chatInputRef.current?.insertSlashCommand(command);
   }, []);
 
-  const handleOpenSettings = useCallback((tab: Extract<WorkspaceTab, 'skills-commands' | 'agents'>) => {
-    setWorkspaceConfigInitialTab(tab);
+  const handleOpenSettings = useCallback(() => {
+    setWorkspaceConfigInitialTab('skills');
     setShowWorkspaceConfig(true);
   }, []);
 

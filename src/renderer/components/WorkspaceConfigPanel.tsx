@@ -1,15 +1,15 @@
 /**
  * WorkspaceConfigPanel - Full-screen configuration overlay for workspace
- * Manages CLAUDE.md, Skills, and Commands for the current project
+ * Two tabs: 「系统提示词」(CLAUDE.md + rules) and 「技能 Skills」(skills + commands + agents)
  */
-import { X, Settings, FileText, Sparkles, Bot, ChevronLeft } from 'lucide-react';
+import { X, Settings, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
-import ClaudeMdEditor from './ClaudeMdEditor';
-import type { ClaudeMdEditorRef } from './ClaudeMdEditor';
+import SystemPromptsPanel from './SystemPromptsPanel';
+import type { SystemPromptsPanelRef } from './SystemPromptsPanel';
 import SkillsCommandsList from './SkillsCommandsList';
 import SkillDetailPanel from './SkillDetailPanel';
 import type { SkillDetailPanelRef } from './SkillDetailPanel';
@@ -28,12 +28,17 @@ interface WorkspaceConfigPanelProps {
     initialTab?: Tab;
 }
 
-export type Tab = 'claude-md' | 'skills-commands' | 'agents';
+export type Tab = 'system-prompts' | 'skills';
 type DetailView =
     | { type: 'none' }
     | { type: 'skill'; name: string; scope: 'user' | 'project'; isNewSkill?: boolean }
     | { type: 'command'; name: string; scope: 'user' | 'project' }
     | { type: 'agent'; name: string; scope: 'user' | 'project'; isNewAgent?: boolean };
+
+const TAB_ITEMS: { key: Tab; label: string; tooltip?: string }[] = [
+    { key: 'system-prompts', label: '系统提示词', tooltip: '以下所有文件内容将始终注入到 AI 的系统提示词中' },
+    { key: 'skills', label: '技能 Skills' },
+];
 
 export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab }: WorkspaceConfigPanelProps) {
     const toast = useToast();
@@ -45,7 +50,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
         toastRef.current = toast;
     }, [toast]);
 
-    const [activeTab, setActiveTab] = useState<Tab>(initialTab ?? 'claude-md');
+    const [activeTab, setActiveTab] = useState<Tab>(initialTab ?? 'system-prompts');
     const [detailView, setDetailView] = useState<DetailView>({ type: 'none' });
     const [internalRefreshKey, setInternalRefreshKey] = useState(0);
 
@@ -53,14 +58,14 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     const refreshKey = externalRefreshKey + internalRefreshKey;
 
     // Refs for checking editing state
-    const claudeMdRef = useRef<ClaudeMdEditorRef>(null);
+    const systemPromptsRef = useRef<SystemPromptsPanelRef>(null);
     const skillDetailRef = useRef<SkillDetailPanelRef>(null);
     const commandDetailRef = useRef<CommandDetailPanelRef>(null);
     const agentDetailRef = useRef<AgentDetailPanelRef>(null);
 
     // Check if any component is in editing mode
     const isAnyEditing = useCallback(() => {
-        if (activeTab === 'claude-md' && claudeMdRef.current?.isEditing()) {
+        if (activeTab === 'system-prompts' && systemPromptsRef.current?.isEditing()) {
             return true;
         }
         if (detailView.type === 'skill' && skillDetailRef.current?.isEditing()) {
@@ -149,6 +154,15 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
         setInternalRefreshKey(k => k + 1);
     }, []);
 
+    // Handle tab switch with editing check
+    const handleTabSwitch = useCallback((tab: Tab) => {
+        if (isAnyEditing()) {
+            toastRef.current.warning('请先保存或取消编辑');
+            return;
+        }
+        setActiveTab(tab);
+    }, [isAnyEditing]);
+
     // Get workspace name from path (support both / and \ separators for cross-platform)
     const workspaceName = agentDir.split(/[/\\]/).filter(Boolean).pop() || 'Workspace';
 
@@ -162,9 +176,10 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                 className="relative flex h-[90vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-2xl bg-[var(--paper)] shadow-2xl"
                 onClick={(e) => e.stopPropagation()}
             >
-                {/* Header */}
-                <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] bg-gradient-to-r from-[var(--paper-contrast)] to-[var(--paper)] px-6 py-4">
-                    <div className="flex items-center gap-3">
+                {/* Header — three zones: left (icon+title), center (tabs), right (close) */}
+                <div className="flex flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-r from-[var(--paper-contrast)] to-[var(--paper)] px-6 py-4">
+                    {/* Left zone */}
+                    <div className="flex min-w-0 items-center gap-3">
                         {detailView.type !== 'none' && (
                             <button
                                 type="button"
@@ -175,88 +190,78 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                                 <ChevronLeft className="h-5 w-5" />
                             </button>
                         )}
-                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[var(--ink)] shadow-lg">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--ink)] shadow-lg">
                             <Settings className="h-5 w-5 text-white" />
                         </div>
-                        <div>
+                        <div className="min-w-0">
                             <h2 className="text-lg font-semibold text-[var(--ink)]">项目设置</h2>
-                            <p className="text-xs text-[var(--ink-muted)]">{workspaceName}</p>
+                            <p className="truncate text-xs text-[var(--ink-muted)]">{workspaceName}</p>
                         </div>
                     </div>
+
+                    {/* Tab switcher — left-aligned after title (only in list view) */}
+                    {detailView.type === 'none' && (
+                        <div className="ml-6 flex items-center gap-1">
+                            {TAB_ITEMS.map(item => (
+                                <button
+                                    key={item.key}
+                                    type="button"
+                                    onClick={() => handleTabSwitch(item.key)}
+                                    className={`relative pb-0.5 text-sm font-medium transition-colors ${
+                                        activeTab === item.key
+                                            ? 'text-[var(--accent-warm)]'
+                                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                    } ${item.key !== TAB_ITEMS[0].key ? 'ml-4' : ''}`}
+                                    title={item.tooltip}
+                                >
+                                    {item.label}
+                                    {activeTab === item.key && (
+                                        <span className="absolute inset-x-0 -bottom-px h-0.5 rounded-full bg-[var(--accent-warm)]" />
+                                    )}
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {/* Spacer to push close button to right */}
+                    <div className="flex-1" />
+
+                    {/* Right zone */}
                     <button
                         type="button"
                         onClick={handleClose}
-                        className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="shrink-0 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
                         title="关闭 (Esc)"
                     >
                         <X className="h-5 w-5" />
                     </button>
                 </div>
 
-                {/* Tab Bar - only show when not in detail view */}
-                {detailView.type === 'none' && (
-                    <div className="flex flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper)]">
-                        <button
-                            type="button"
-                            onClick={() => setActiveTab('claude-md')}
-                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium transition-colors ${activeTab === 'claude-md'
-                                ? 'border-b-2 border-[var(--accent-warm)] text-[var(--accent-warm)]'
-                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                                }`}
-                        >
-                            <FileText className="h-4 w-4" />
-                            CLAUDE.md
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setActiveTab('skills-commands')}
-                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium transition-colors ${activeTab === 'skills-commands'
-                                ? 'border-b-2 border-[var(--accent-warm)] text-[var(--accent-warm)]'
-                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                                }`}
-                        >
-                            <Sparkles className="h-4 w-4" />
-                            Skills & Commands
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setActiveTab('agents')}
-                            className={`flex items-center gap-2 px-6 py-3 text-sm font-medium transition-colors ${activeTab === 'agents'
-                                ? 'border-b-2 border-[var(--accent-warm)] text-[var(--accent-warm)]'
-                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                                }`}
-                        >
-                            <Bot className="h-4 w-4" />
-                            Agents
-                        </button>
-                    </div>
-                )}
-
                 {/* Content Area */}
                 <div className="flex-1 overflow-hidden">
                     {detailView.type === 'none' ? (
                         <>
-                            {activeTab === 'claude-md' && (
-                                <ClaudeMdEditor ref={claudeMdRef} agentDir={agentDir} />
+                            {activeTab === 'system-prompts' && (
+                                <SystemPromptsPanel ref={systemPromptsRef} agentDir={agentDir} />
                             )}
-                            {activeTab === 'skills-commands' && (
-                                <SkillsCommandsList
-                                    scope="project"
-                                    agentDir={agentDir}
-                                    onSelectSkill={handleSelectSkill}
-                                    onSelectCommand={handleSelectCommand}
-                                    refreshKey={refreshKey}
-                                    onClose={onClose}
-                                />
-                            )}
-                            {activeTab === 'agents' && (
-                                <WorkspaceAgentsList
-                                    scope="project"
-                                    agentDir={agentDir}
-                                    onSelectAgent={handleSelectAgent}
-                                    refreshKey={refreshKey}
-                                    onClose={onClose}
-                                />
+                            {activeTab === 'skills' && (
+                                <div className="h-full overflow-auto">
+                                    <SkillsCommandsList
+                                        scope="project"
+                                        agentDir={agentDir}
+                                        onSelectSkill={handleSelectSkill}
+                                        onSelectCommand={handleSelectCommand}
+                                        refreshKey={refreshKey}
+                                        onClose={onClose}
+                                    />
+                                    <WorkspaceAgentsList
+                                        scope="project"
+                                        agentDir={agentDir}
+                                        onSelectAgent={handleSelectAgent}
+                                        refreshKey={refreshKey}
+                                        onClose={onClose}
+                                    />
+                                </div>
                             )}
                         </>
                     ) : detailView.type === 'skill' ? (
