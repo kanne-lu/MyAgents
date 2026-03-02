@@ -7,7 +7,7 @@ import type { ResponsesResponse, ResponsesStreamEvent } from './types/openai-res
 import { translateRequest } from './translate/request';
 import { translateResponse } from './translate/response';
 import { translateRequestToResponses } from './translate/request-responses';
-import { translateResponsesResponse } from './translate/response-responses';
+import { translateResponsesResponse, ResponsesApiError } from './translate/response-responses';
 import { StreamTranslator } from './translate/stream';
 import { ResponsesStreamTranslator } from './translate/stream-responses';
 import { translateError } from './translate/errors';
@@ -271,11 +271,19 @@ async function handleResponsesNonStreamResponse(
     return jsonError(502, 'api_error', 'Invalid upstream response');
   }
 
-  const anthropicResp = translateResponsesResponse(responsesResp, requestModel);
-  return new Response(JSON.stringify(anthropicResp), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
-  });
+  try {
+    const anthropicResp = translateResponsesResponse(responsesResp, requestModel);
+    return new Response(JSON.stringify(anthropicResp), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (err) {
+    if (err instanceof ResponsesApiError) {
+      log(`[bridge] Responses API failed: [${err.code}] ${err.message}`);
+      return jsonError(502, err.code, err.message);
+    }
+    throw err;
+  }
 }
 
 function handleResponsesStreamResponse(

@@ -55,6 +55,12 @@ import { shortenPathForDisplay } from '@/utils/pathDetection';
 import type { LogEntry } from '@/types/log';
 import BugReportOverlay from '@/components/BugReportOverlay';
 
+/** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
+function parsePositiveInt(value: string): number | undefined {
+  const n = parseInt(value, 10);
+  return Number.isNaN(n) || n <= 0 ? undefined : n;
+}
+
 // Settings sub-sections
 type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'im' | 'about';
 
@@ -76,6 +82,8 @@ interface CustomProviderForm {
     models: string[];  // 支持多个模型 ID
     newModelInput: string;  // 用于输入新模型的临时值
     apiKey: string;
+    maxOutputTokens: string;  // 最大输出 token（字符串便于输入，空串=不限制）
+    upstreamFormat: 'chat_completions' | 'responses';  // 上游 API 格式
 }
 
 const EMPTY_CUSTOM_FORM: CustomProviderForm = {
@@ -87,6 +95,8 @@ const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     models: [],
     newModelInput: '',
     apiKey: '',
+    maxOutputTokens: '8192',
+    upstreamFormat: 'chat_completions',
 };
 
 // Provider edit form data (for managing existing providers)
@@ -101,6 +111,8 @@ interface ProviderEditForm {
     editApiProtocol?: ApiProtocol;
     editBaseUrl?: string;
     editAuthType?: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
+    editMaxOutputTokens?: string;
+    editUpstreamFormat?: 'chat_completions' | 'responses';
 }
 
 interface SettingsProps {
@@ -1066,6 +1078,8 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
             isBuiltin: false,
             authType: customForm.authType,
             apiProtocol: customForm.apiProtocol === 'openai' ? 'openai' : undefined,
+            ...(customForm.apiProtocol === 'openai' && customForm.maxOutputTokens ? { maxOutputTokens: parsePositiveInt(customForm.maxOutputTokens) } : {}),
+            ...(customForm.apiProtocol === 'openai' && customForm.upstreamFormat !== 'chat_completions' ? { upstreamFormat: customForm.upstreamFormat } : {}),
             config: {
                 baseUrl: customForm.baseUrl,
             },
@@ -1153,6 +1167,8 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 editApiProtocol: provider.apiProtocol ?? 'anthropic',
                 editBaseUrl: provider.config.baseUrl || '',
                 editAuthType: provider.authType === 'api_key' ? 'api_key' : 'auth_token',
+                editMaxOutputTokens: provider.maxOutputTokens ? String(provider.maxOutputTokens) : '',
+                editUpstreamFormat: provider.upstreamFormat ?? 'chat_completions',
             }),
         });
     };
@@ -1249,6 +1265,8 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 cloudProvider: editCloudProvider?.trim() || '自定义',
                 authType: editAuthType ?? provider.authType ?? 'auth_token',
                 apiProtocol: editApiProtocol === 'openai' ? 'openai' : undefined,
+                maxOutputTokens: editApiProtocol === 'openai' && editingProvider?.editMaxOutputTokens ? parsePositiveInt(editingProvider.editMaxOutputTokens) : undefined,
+                upstreamFormat: editApiProtocol === 'openai' && editingProvider?.editUpstreamFormat !== 'chat_completions' ? editingProvider?.editUpstreamFormat : undefined,
                 config: {
                     ...provider.config,
                     baseUrl: editBaseUrl.trim(),
@@ -2967,6 +2985,34 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                 />
                             </div>
 
+                            {customForm.apiProtocol === 'openai' && (
+                                <>
+                                    <div className="flex gap-4">
+                                        <div className="flex-1">
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                            <input
+                                                type="number"
+                                                value={customForm.maxOutputTokens}
+                                                onChange={(e) => setCustomForm((p) => ({ ...p, maxOutputTokens: e.target.value }))}
+                                                placeholder="8192"
+                                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                            />
+                                        </div>
+                                        <div className="flex-1">
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">上游格式</label>
+                                            <select
+                                                value={customForm.upstreamFormat}
+                                                onChange={(e) => setCustomForm((p) => ({ ...p, upstreamFormat: e.target.value as 'chat_completions' | 'responses' }))}
+                                                className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                            >
+                                                <option value="chat_completions">Chat Completions</option>
+                                                <option value="responses">Responses API</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+
                             <div>
                                 <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
                                 <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
@@ -3205,6 +3251,33 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                     />
                                 )}
                             </div>
+
+                            {/* OpenAI Bridge Settings - only for custom providers with OpenAI protocol */}
+                            {!editingProvider.provider.isBuiltin && editingProvider.editApiProtocol === 'openai' && (
+                                <div className="flex gap-4">
+                                    <div className="flex-1">
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                        <input
+                                            type="number"
+                                            value={editingProvider.editMaxOutputTokens || ''}
+                                            onChange={(e) => setEditingProvider((p) => p ? { ...p, editMaxOutputTokens: e.target.value } : null)}
+                                            placeholder="8192"
+                                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                        />
+                                    </div>
+                                    <div className="flex-1">
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">上游格式</label>
+                                        <select
+                                            value={editingProvider.editUpstreamFormat || 'chat_completions'}
+                                            onChange={(e) => setEditingProvider((p) => p ? { ...p, editUpstreamFormat: e.target.value as 'chat_completions' | 'responses' } : null)}
+                                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                        >
+                                            <option value="chat_completions">Chat Completions</option>
+                                            <option value="responses">Responses API</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            )}
 
                             {/* Auth Type - only for custom providers */}
                             {!editingProvider.provider.isBuiltin && (

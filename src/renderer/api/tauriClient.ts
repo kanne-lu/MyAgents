@@ -706,6 +706,8 @@ export interface ProviderEnv {
     base_url?: string;
     api_key?: string;
     api_protocol?: 'anthropic' | 'openai';
+    max_output_tokens?: number;
+    upstream_format?: 'chat_completions' | 'responses';
 }
 
 /**
