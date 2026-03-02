@@ -7,6 +7,7 @@ import { getAllMcpServers, getEnabledMcpServerIds } from '@/config/configService
 import type { ImBotConfig, ImBotStatus } from '../../../shared/types/im';
 import telegramIcon from './assets/telegram.png';
 import feishuIcon from './assets/feishu.jpeg';
+import dingtalkIcon from './assets/dingtalk.svg';
 
 export default function ImBotList({
     configs,
@@ -107,6 +108,10 @@ export default function ImBotList({
             platform: cfg.platform,
             feishuAppId: cfg.feishuAppId || null,
             feishuAppSecret: cfg.feishuAppSecret || null,
+            dingtalkClientId: cfg.dingtalkClientId || null,
+            dingtalkClientSecret: cfg.dingtalkClientSecret || null,
+            dingtalkUseAiCard: cfg.dingtalkUseAiCard ?? false,
+            dingtalkCardTemplateId: cfg.dingtalkCardTemplateId || null,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
             botName: cfg.name || null,
         };
@@ -142,9 +147,11 @@ export default function ImBotList({
             } else {
                 const hasCredentials = cfg.platform === 'feishu'
                     ? (cfg.feishuAppId && cfg.feishuAppSecret)
-                    : cfg.botToken;
+                    : cfg.platform === 'dingtalk'
+                        ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret)
+                        : cfg.botToken;
                 if (!hasCredentials) {
-                    toastRef.current.error(cfg.platform === 'feishu' ? '请先配置应用凭证' : '请先配置 Bot Token');
+                    toastRef.current.error(cfg.platform === 'telegram' ? '请先配置 Bot Token' : '请先配置应用凭证');
                     return;
                 }
                 const params = await buildStartParams(cfg);
@@ -174,6 +181,7 @@ export default function ImBotList({
     const platformIcon = (platform: string) => {
         if (platform === 'telegram') return <img src={telegramIcon} alt="Telegram" className="h-5 w-5" />;
         if (platform === 'feishu') return <img src={feishuIcon} alt="飞书" className="h-5 w-5 rounded" />;
+        if (platform === 'dingtalk') return <img src={dingtalkIcon} alt="钉钉" className="h-5 w-5 rounded" />;
         return <span className="text-base">💬</span>;
     };
 
@@ -265,7 +273,7 @@ export default function ImBotList({
                                             </span>
                                         )}
                                         {cfg.defaultWorkspacePath && <span>·</span>}
-                                        <span className="flex-shrink-0">{cfg.platform === 'feishu' ? '飞书' : 'Telegram'}</span>
+                                        <span className="flex-shrink-0">{cfg.platform === 'feishu' ? '飞书' : cfg.platform === 'dingtalk' ? '钉钉' : 'Telegram'}</span>
                                     </div>
                                     {/* Capsule toggle button */}
                                     <button
@@ -273,7 +281,7 @@ export default function ImBotList({
                                             e.stopPropagation();
                                             toggleBot(cfg);
                                         }}
-                                        disabled={isToggling || (!(cfg.platform === 'feishu' ? (cfg.feishuAppId && cfg.feishuAppSecret) : cfg.botToken) && !isRunning)}
+                                        disabled={isToggling || (!(cfg.platform === 'feishu' ? (cfg.feishuAppId && cfg.feishuAppSecret) : cfg.platform === 'dingtalk' ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret) : cfg.botToken) && !isRunning)}
                                         className={`flex-shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
                                             isRunning
                                                 ? 'bg-[var(--error)] text-white hover:bg-[#b91c1c]'

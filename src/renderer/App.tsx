@@ -26,7 +26,8 @@ import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
-import { ensureSelfAwarenessWorkspace } from '@/config/configService';
+import { ensureSelfAwarenessWorkspace, atomicModifyConfig } from '@/config/configService';
+import { Loader2 } from 'lucide-react';
 
 // ============================================================
 // User Support Prompt Builder
@@ -390,6 +391,7 @@ export default function App() {
   // Check ~/.claude/settings.json for env overrides on startup
   // External tools (cc-switch etc.) may write ANTHROPIC_BASE_URL which overrides all providers
   useEffect(() => {
+    if (config.dismissClaudeEnvWarning) return;
     const checkClaudeEnvOverrides = async () => {
       try {
         const result = await apiGetJson<{
@@ -405,7 +407,7 @@ export default function App() {
       }
     };
     void checkClaudeEnvOverrides();
-  }, []);
+  }, [config.dismissClaudeEnvWarning]);
 
   // Update tab isGenerating state (called from TabProvider via callback)
   const updateTabGenerating = useCallback((tabId: string, isGenerating: boolean) => {
@@ -1461,26 +1463,63 @@ export default function App() {
 
       {/* Warning: ~/.claude/settings.json env overrides detected */}
       {claudeEnvOverride && (
-        <ConfirmDialog
-          title="检测到全局配置覆盖"
-          message={`~/.claude/settings.json 中检测到${claudeEnvOverride.baseUrl ? ` ANTHROPIC_BASE_URL = ${claudeEnvOverride.baseUrl.length > 60 ? claudeEnvOverride.baseUrl.slice(0, 60) + '...' : claudeEnvOverride.baseUrl}` : ''}${claudeEnvOverride.baseUrl && claudeEnvOverride.hasApiKey ? '，' : ''}${claudeEnvOverride.hasApiKey ? 'ANTHROPIC_API_KEY' : ''}，该配置会覆盖 MyAgents 的供应商设置，导致所有请求发送到非预期地址。是否清除？`}
-          confirmText="清除"
-          cancelText="取消"
-          confirmVariant="danger"
-          loading={claudeEnvClearing}
-          onConfirm={() => {
-            setClaudeEnvClearing(true);
-            void apiPostJson('/api/claude-settings/clear-env', {}).then(() => {
-              setClaudeEnvOverride(null);
-            }).catch((err) => {
-              console.error('[App] Failed to clear claude settings env:', err);
-              setClaudeEnvOverride(null);
-            }).finally(() => {
-              setClaudeEnvClearing(false);
-            });
-          }}
-          onCancel={() => setClaudeEnvOverride(null)}
-        />
+        <div
+          className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm"
+          onMouseDown={(e) => { if (e.target === e.currentTarget && !claudeEnvClearing) setClaudeEnvOverride(null); }}
+        >
+          <div className="glass-panel w-full max-w-sm">
+            <div className="border-b border-[var(--line)] px-5 py-4">
+              <div className="text-[14px] font-semibold text-[var(--ink)]">检测到全局配置覆盖</div>
+            </div>
+            <div className="px-5 py-4">
+              <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                {`~/.claude/settings.json 中检测到${claudeEnvOverride.baseUrl ? ` ANTHROPIC_BASE_URL = ${claudeEnvOverride.baseUrl.length > 60 ? claudeEnvOverride.baseUrl.slice(0, 60) + '...' : claudeEnvOverride.baseUrl}` : ''}${claudeEnvOverride.baseUrl && claudeEnvOverride.hasApiKey ? '，' : ''}${claudeEnvOverride.hasApiKey ? 'ANTHROPIC_API_KEY' : ''}，该配置会覆盖 MyAgents 的供应商设置，导致所有请求发送到非预期地址。是否清除？`}
+              </p>
+            </div>
+            <div className="flex items-center justify-between border-t border-[var(--line)] px-5 py-3">
+              <button
+                type="button"
+                disabled={claudeEnvClearing}
+                className="text-[12px] text-[var(--ink-faint)] transition-colors hover:text-[var(--ink-muted)] disabled:opacity-50"
+                onClick={() => {
+                  void atomicModifyConfig(c => ({ ...c, dismissClaudeEnvWarning: true }));
+                  setClaudeEnvOverride(null);
+                }}
+              >
+                不再提示
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setClaudeEnvOverride(null)}
+                  disabled={claudeEnvClearing}
+                  className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[12px] font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={claudeEnvClearing}
+                  className="flex items-center gap-1.5 rounded-full bg-[var(--error)] px-4 py-1.5 text-[12px] font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-50"
+                  onClick={() => {
+                    setClaudeEnvClearing(true);
+                    void apiPostJson('/api/claude-settings/clear-env', {}).then(() => {
+                      setClaudeEnvOverride(null);
+                    }).catch((err) => {
+                      console.error('[App] Failed to clear claude settings env:', err);
+                      setClaudeEnvOverride(null);
+                    }).finally(() => {
+                      setClaudeEnvClearing(false);
+                    });
+                  }}
+                >
+                  {claudeEnvClearing && <Loader2 className="h-3 w-3 animate-spin" />}
+                  清除
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

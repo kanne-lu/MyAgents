@@ -10,6 +10,7 @@ import { getProviderModels, type McpServerDefinition } from '@/config/types';
 import CustomSelect from '@/components/CustomSelect';
 import BotTokenInput from './components/BotTokenInput';
 import FeishuCredentialInput from './components/FeishuCredentialInput';
+import DingtalkCredentialInput from './components/DingtalkCredentialInput';
 import WhitelistManager from './components/WhitelistManager';
 import PermissionModeSelect from './components/PermissionModeSelect';
 import BotStatusPanel from './components/BotStatusPanel';
@@ -18,6 +19,7 @@ import BindCodePanel from './components/BindCodePanel';
 import AiConfigCard from './components/AiConfigCard';
 import McpToolsCard from './components/McpToolsCard';
 import HeartbeatConfigCard from './components/HeartbeatConfigCard';
+import DingtalkCardConfig from './components/DingtalkCardConfig';
 import GroupPermissionList from './components/GroupPermissionList';
 import type { ImBotConfig, ImBotStatus, GroupActivation } from '../../../shared/types/im';
 
@@ -60,7 +62,9 @@ export default function ImBotDetail({
     const hasCredentials = botConfig
         ? botConfig.platform === 'feishu'
             ? !!(botConfig.feishuAppId && botConfig.feishuAppSecret)
-            : !!botConfig.botToken
+            : botConfig.platform === 'dingtalk'
+                ? !!(botConfig.dingtalkClientId && botConfig.dingtalkClientSecret)
+                : !!botConfig.botToken
         : false;
     const hasUsers = (botConfig?.allowedUsers.length ?? 0) > 0;
 
@@ -218,6 +222,10 @@ export default function ImBotDetail({
             platform: cfg.platform,
             feishuAppId: cfg.feishuAppId || null,
             feishuAppSecret: cfg.feishuAppSecret || null,
+            dingtalkClientId: cfg.dingtalkClientId || null,
+            dingtalkClientSecret: cfg.dingtalkClientSecret || null,
+            dingtalkUseAiCard: cfg.dingtalkUseAiCard ?? false,
+            dingtalkCardTemplateId: cfg.dingtalkCardTemplateId || null,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
             botName: cfg.name || null,
         };
@@ -247,9 +255,11 @@ export default function ImBotDetail({
                 const cfg = botConfigRef.current;
                 const hasCredentials = cfg.platform === 'feishu'
                     ? (cfg.feishuAppId && cfg.feishuAppSecret)
-                    : cfg.botToken;
+                    : cfg.platform === 'dingtalk'
+                        ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret)
+                        : cfg.botToken;
                 if (!hasCredentials) {
-                    toastRef.current.error(cfg.platform === 'feishu' ? '请先配置应用凭证' : '请先配置 Bot Token');
+                    toastRef.current.error(cfg.platform === 'telegram' ? '请先配置 Bot Token' : '请先配置应用凭证');
                     setToggling(false);
                     return;
                 }
@@ -360,7 +370,7 @@ export default function ImBotDetail({
                 </div>
                 <button
                     onClick={toggleBot}
-                    disabled={toggling || (!(botConfig.platform === 'feishu' ? (botConfig.feishuAppId && botConfig.feishuAppSecret) : botConfig.botToken) && !isRunning)}
+                    disabled={toggling || (!(botConfig.platform === 'feishu' ? (botConfig.feishuAppId && botConfig.feishuAppSecret) : botConfig.platform === 'dingtalk' ? (botConfig.dingtalkClientId && botConfig.dingtalkClientSecret) : botConfig.botToken) && !isRunning)}
                     className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                         isRunning
                             ? 'bg-[var(--error-bg)] text-[var(--error)] hover:brightness-95'
@@ -390,7 +400,7 @@ export default function ImBotDetail({
                 >
                     <div className="flex items-center gap-2">
                         <h3 className="text-sm font-semibold text-[var(--ink)]">
-                            {botConfig.platform === 'feishu' ? '飞书应用凭证' : 'Telegram Bot'}
+                            {botConfig.platform === 'feishu' ? '飞书应用凭证' : botConfig.platform === 'dingtalk' ? '钉钉应用凭证' : 'Telegram Bot'}
                         </h3>
                         {!isCredentialsExpanded && hasCredentials && (
                             <span className="text-xs text-[var(--success)]">
@@ -402,7 +412,23 @@ export default function ImBotDetail({
                 </button>
                 {isCredentialsExpanded && (
                     <div className="px-5 pb-5">
-                        {botConfig.platform === 'feishu' ? (
+                        {botConfig.platform === 'dingtalk' ? (
+                            <DingtalkCredentialInput
+                                clientId={botConfig.dingtalkClientId ?? ''}
+                                clientSecret={botConfig.dingtalkClientSecret ?? ''}
+                                onClientIdChange={(clientId) => {
+                                    const others = (config.imBotConfigs ?? []).filter(b => b.id !== botId && b.setupCompleted);
+                                    if (others.some(b => b.dingtalkClientId === clientId)) {
+                                        toastRef.current.error('该钉钉应用凭证已被其他 Bot 使用');
+                                        return;
+                                    }
+                                    invokePatch({ dingtalkClientId: clientId });
+                                }}
+                                onClientSecretChange={(clientSecret) => invokePatch({ dingtalkClientSecret: clientSecret })}
+                                verifyStatus={verifyStatus}
+                                botName={botUsername}
+                            />
+                        ) : botConfig.platform === 'feishu' ? (
                             <FeishuCredentialInput
                                 appId={botConfig.feishuAppId ?? ''}
                                 appSecret={botConfig.feishuAppSecret ?? ''}
@@ -456,10 +482,11 @@ export default function ImBotDetail({
                 </button>
                 {isBindingExpanded && (
                     <div className="space-y-5 px-5 pb-5">
-                        {isRunning && botConfig.platform === 'feishu' && botStatus?.bindCode && (
+                        {isRunning && (botConfig.platform === 'feishu' || botConfig.platform === 'dingtalk') && botStatus?.bindCode && (
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={botConfig.allowedUsers.length > 0}
+                                platformName={botConfig.platform === 'dingtalk' ? '钉钉' : '飞书'}
                             />
                         )}
                         {isRunning && botConfig.platform === 'telegram' && botStatus?.bindUrl && (
@@ -662,6 +689,22 @@ export default function ImBotDetail({
                     });
                 }}
             />
+
+            {/* DingTalk AI Card Config */}
+            {botConfig.platform === 'dingtalk' && (
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                    <DingtalkCardConfig
+                        useAiCard={botConfig.dingtalkUseAiCard ?? false}
+                        cardTemplateId={botConfig.dingtalkCardTemplateId ?? ''}
+                        onUseAiCardChange={async (value) => {
+                            await invokePatch({ dingtalkUseAiCard: value });
+                        }}
+                        onCardTemplateIdChange={async (value) => {
+                            await invokePatch({ dingtalkCardTemplateId: value || undefined });
+                        }}
+                    />
+                </div>
+            )}
 
             {/* Heartbeat Config */}
             <HeartbeatConfigCard

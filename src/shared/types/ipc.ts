@@ -32,6 +32,10 @@ export interface SendMessagePayload {
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
     apiProtocol?: 'anthropic' | 'openai';
+    /** Max output tokens cap for OpenAI bridge (only used when apiProtocol === 'openai') */
+    maxOutputTokens?: number;
+    /** Upstream API format for OpenAI bridge (only used when apiProtocol === 'openai') */
+    upstreamFormat?: 'chat_completions' | 'responses';
   };
 }
 

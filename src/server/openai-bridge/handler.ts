@@ -3,9 +3,13 @@
 import type { BridgeConfig, UpstreamConfig } from './types/bridge';
 import type { AnthropicRequest } from './types/anthropic';
 import type { OpenAIResponse, OpenAIStreamChunk } from './types/openai';
+import type { ResponsesResponse, ResponsesStreamEvent } from './types/openai-responses';
 import { translateRequest } from './translate/request';
 import { translateResponse } from './translate/response';
+import { translateRequestToResponses } from './translate/request-responses';
+import { translateResponsesResponse, ResponsesApiError } from './translate/response-responses';
 import { StreamTranslator } from './translate/stream';
+import { ResponsesStreamTranslator } from './translate/stream-responses';
 import { translateError } from './translate/errors';
 import { SSEParser } from './utils/sse-parser';
 import { formatSSE } from './utils/sse-writer';
@@ -65,23 +69,37 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
 
     const effectiveApiKey = upstream.apiKey || apiKey;
     const baseUrl = upstream.baseUrl.replace(/\/+$/, ''); // trim trailing slashes
+    const isResponses = upstream.upstreamFormat === 'responses';
 
-    // 4. Translate request
-    const openaiReq = translateRequest(anthropicReq, {
-      modelMapping: config.modelMapping,
-      modelOverride: upstream.model,
-    });
+    // 4. Translate request (choose format based on upstream config)
+    const translatedReq = isResponses
+      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: config.modelMapping })
+      : translateRequest(anthropicReq, { modelMapping: config.modelMapping, modelOverride: upstream.model });
 
     // 4b. Cap max_tokens if configured (CLI may send Claude-scale values like 128k)
-    if (config.maxOutputTokens && openaiReq.max_tokens !== undefined && openaiReq.max_tokens > config.maxOutputTokens) {
-      log(`[bridge] Capping max_tokens: ${openaiReq.max_tokens} → ${config.maxOutputTokens}`);
-      openaiReq.max_tokens = config.maxOutputTokens;
+    const maxOutputTokensCap = upstream.maxOutputTokens ?? config.maxOutputTokens;
+    if (!isResponses && maxOutputTokensCap) {
+      const chatReq = translatedReq as { max_tokens?: number };
+      if (chatReq.max_tokens !== undefined && chatReq.max_tokens > maxOutputTokensCap) {
+        log(`[bridge] Capping max_tokens: ${chatReq.max_tokens} → ${maxOutputTokensCap}`);
+        chatReq.max_tokens = maxOutputTokensCap;
+      }
+    }
+    if (isResponses && maxOutputTokensCap) {
+      const respReq = translatedReq as { max_output_tokens?: number };
+      if (respReq.max_output_tokens !== undefined && respReq.max_output_tokens > maxOutputTokensCap) {
+        log(`[bridge] Capping max_output_tokens: ${respReq.max_output_tokens} → ${maxOutputTokensCap}`);
+        respReq.max_output_tokens = maxOutputTokensCap;
+      }
     }
 
-    log(`[bridge] ${anthropicReq.model} → ${openaiReq.model} stream=${!!anthropicReq.stream} tools=${anthropicReq.tools?.length ?? 0} max_tokens=${openaiReq.max_tokens ?? 'default'}`);
+    const logModel = (translatedReq as { model: string }).model;
+    log(`[bridge] ${anthropicReq.model} → ${logModel} stream=${!!anthropicReq.stream} tools=${anthropicReq.tools?.length ?? 0} format=${isResponses ? 'responses' : 'chat_completions'}`);
 
     // 5. Forward to upstream
-    const upstreamUrl = `${baseUrl}/chat/completions`;
+    const upstreamUrl = isResponses
+      ? `${baseUrl}/responses`
+      : `${baseUrl}/chat/completions`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
 
@@ -95,7 +113,7 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${effectiveApiKey}`,
         },
-        body: JSON.stringify(openaiReq),
+        body: JSON.stringify(translatedReq),
         signal: controller.signal,
         ...(proxyUrl ? { proxy: proxyUrl } : {}),
       } as RequestInit);
@@ -123,13 +141,25 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
       });
     }
 
-    // 7. Translate response
-    if (anthropicReq.stream) {
-      clearTimeout(timer);
-      return handleStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log);
+    clearTimeout(timer);
+
+    // 7. Detect Content-Type to handle unexpected SSE on non-stream requests
+    const contentType = upstreamResp.headers.get('content-type') ?? '';
+    const isSSEResponse = contentType.includes('text/event-stream');
+
+    // 8. Translate response
+    if (anthropicReq.stream || isSSEResponse) {
+      // Stream response (or non-stream request that got SSE back — auto-fallback)
+      if (isSSEResponse && !anthropicReq.stream) {
+        log('[bridge] Non-stream request received SSE response — auto-falling back to stream processing');
+      }
+      return isResponses
+        ? handleResponsesStreamResponse(upstreamResp, anthropicReq.model, log)
+        : handleStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log);
     } else {
-      clearTimeout(timer);
-      return handleNonStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log);
+      return isResponses
+        ? handleResponsesNonStreamResponse(upstreamResp, anthropicReq.model, log)
+        : handleNonStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log);
     }
   };
 }
@@ -140,9 +170,11 @@ async function handleNonStreamResponse(
   translateReasoning: boolean,
   log: (msg: string) => void,
 ): Promise<Response> {
+  // Use text() + manual JSON.parse to tolerate non-standard Content-Type
   let openaiResp: OpenAIResponse;
   try {
-    openaiResp = await upstreamResp.json() as OpenAIResponse;
+    const text = await upstreamResp.text();
+    openaiResp = JSON.parse(text) as OpenAIResponse;
   } catch {
     log('[bridge] Failed to parse upstream JSON response');
     return jsonError(502, 'api_error', 'Invalid upstream response');
@@ -184,6 +216,7 @@ function handleStreamResponse(
           const sseEvents = sseParser.feed(text);
 
           for (const sseEvent of sseEvents) {
+            if (sseEvent.data === '[DONE]') continue;
             let chunk: OpenAIStreamChunk;
             try {
               chunk = JSON.parse(sseEvent.data) as OpenAIStreamChunk;
@@ -201,6 +234,101 @@ function handleStreamResponse(
         log(`[bridge] Stream error: ${err}`);
       } finally {
         // Emit closing events for incomplete streams (no-op if already finished)
+        const finalEvents = translator.finalize();
+        for (const event of finalEvents) {
+          controller.enqueue(encoder.encode(formatSSE(event)));
+        }
+        controller.close();
+      }
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    },
+  });
+}
+
+// ==================== Responses API handlers ====================
+
+async function handleResponsesNonStreamResponse(
+  upstreamResp: Response,
+  requestModel: string,
+  log: (msg: string) => void,
+): Promise<Response> {
+  let responsesResp: ResponsesResponse;
+  try {
+    const text = await upstreamResp.text();
+    responsesResp = JSON.parse(text) as ResponsesResponse;
+  } catch {
+    log('[bridge] Failed to parse upstream Responses JSON');
+    return jsonError(502, 'api_error', 'Invalid upstream response');
+  }
+
+  try {
+    const anthropicResp = translateResponsesResponse(responsesResp, requestModel);
+    return new Response(JSON.stringify(anthropicResp), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (err) {
+    if (err instanceof ResponsesApiError) {
+      log(`[bridge] Responses API failed: [${err.code}] ${err.message}`);
+      return jsonError(502, err.code, err.message);
+    }
+    throw err;
+  }
+}
+
+function handleResponsesStreamResponse(
+  upstreamResp: Response,
+  requestModel: string,
+  log: (msg: string) => void,
+): Response {
+  const translator = new ResponsesStreamTranslator(requestModel);
+  const sseParser = new SSEParser();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const reader = upstreamResp.body?.getReader();
+      if (!reader) {
+        controller.close();
+        return;
+      }
+
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const text = decoder.decode(value, { stream: true });
+          const sseEvents = sseParser.feed(text);
+
+          for (const sseEvent of sseEvents) {
+            if (sseEvent.data === '[DONE]') continue;
+            let event: ResponsesStreamEvent;
+            try {
+              event = JSON.parse(sseEvent.data) as ResponsesStreamEvent;
+            } catch {
+              continue;
+            }
+
+            const anthropicEvents = translator.feed(event);
+            for (const ae of anthropicEvents) {
+              controller.enqueue(encoder.encode(formatSSE(ae)));
+            }
+          }
+        }
+      } catch (err) {
+        log(`[bridge] Responses stream error: ${err}`);
+      } finally {
         const finalEvents = translator.finalize();
         for (const event of finalEvents) {
           controller.enqueue(encoder.encode(formatSSE(event)));

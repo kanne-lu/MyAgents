@@ -4,6 +4,7 @@ import type { AnthropicResponse, AnthropicResponseContentBlock, AnthropicStopRea
 import type { OpenAIResponse } from '../types/openai';
 import { translateToolCalls } from './tools';
 import { generateMessageId } from '../utils/id';
+import { fromOpenAIUsage, toAnthropicUsage } from './usage';
 
 /** Map OpenAI finish_reason → Anthropic stop_reason */
 export function translateStopReason(reason: string | null): AnthropicStopReason | null {
@@ -57,6 +58,8 @@ export function translateResponse(
     content.push({ type: 'text', text: '' });
   }
 
+  const usage = fromOpenAIUsage(openaiResp.usage);
+
   return {
     id: generateMessageId(),
     type: 'message',
@@ -65,9 +68,6 @@ export function translateResponse(
     model: requestModel,
     stop_reason: translateStopReason(choice?.finish_reason ?? null),
     stop_sequence: null,
-    usage: {
-      input_tokens: openaiResp.usage?.prompt_tokens ?? 0,
-      output_tokens: openaiResp.usage?.completion_tokens ?? 0,
-    },
+    usage: toAnthropicUsage(usage),
   };
 }

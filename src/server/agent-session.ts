@@ -2,10 +2,10 @@ import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, type Query, type SDKUserMessage, type AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
+import { query, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getAgentBrowserCliPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
-import { resizeImageIfNeeded } from './utils/imageResize';
+import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext, clearImMediaContext } from './tools/im-media-tool';
@@ -21,6 +21,24 @@ import { localTimestamp } from '../shared/logTime';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
+
+// Max length for individual string values in SDK message logs.
+// Base64 images can be several MB; truncate to keep logs readable.
+const LOG_STRING_MAX_LEN = 500;
+
+/** JSON.stringify with long string truncation (e.g. base64 image data) for logging. */
+function logStringify(obj: unknown): string {
+  try {
+    return JSON.stringify(obj, (_key, value) => {
+      if (typeof value === 'string' && value.length > LOG_STRING_MAX_LEN) {
+        return value.slice(0, LOG_STRING_MAX_LEN) + `...(${value.length} chars)`;
+      }
+      return value;
+    });
+  } catch {
+    return '[unserializable]';
+  }
+}
 
 // Decorative text filter thresholds (for third-party API wrappers like 智谱 GLM-4.7)
 // Decorative blocks are typically 100-2000 chars; we use wider range for safety margin
@@ -356,6 +374,8 @@ export type ProviderEnv = {
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
   apiProtocol?: 'anthropic' | 'openai';
+  maxOutputTokens?: number;
+  upstreamFormat?: 'chat_completions' | 'responses';
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
 
@@ -367,6 +387,10 @@ export type OpenAiBridgeConfig = {
   apiKey: string;
   /** Target model name — bridge overrides ALL request models to this */
   model?: string;
+  /** Max output tokens cap for upstream provider */
+  maxOutputTokens?: number;
+  /** Upstream API format: 'chat_completions' (default) or 'responses' */
+  upstreamFormat?: 'chat_completions' | 'responses';
 } | null;
 
 let currentOpenAiBridgeConfig: OpenAiBridgeConfig = null;
@@ -1829,6 +1853,8 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     currentOpenAiBridgeConfig = {
       baseUrl: effectiveProviderEnv.baseUrl ?? '',
       apiKey: effectiveProviderEnv.apiKey ?? '',
+      maxOutputTokens: effectiveProviderEnv.maxOutputTokens,
+      upstreamFormat: effectiveProviderEnv.upstreamFormat,
     };
     console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);
     return env;
@@ -3810,6 +3836,29 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
       },
+      // PostToolUse hook: resize oversized images in MCP tool results before sending to Claude API.
+      // Claude API rejects images exceeding 8000px per dimension; MCP tools (e.g. browser screenshots)
+      // can produce arbitrarily large images that bypass our user-upload resize pipeline.
+      hooks: {
+        PostToolUse: [{
+          hooks: [
+            async (input: HookInput, _toolUseId: string | undefined, _options: { signal: AbortSignal }): Promise<HookJSONOutput> => {
+              const postInput = input as PostToolUseHookInput;
+              const resized = await resizeToolImageContent(postInput.tool_response);
+              if (resized) {
+                console.log(`[image-resize] PostToolUse hook resized images for tool: ${postInput.tool_name}`);
+                return {
+                  hookSpecificOutput: {
+                    hookEventName: 'PostToolUse' as const,
+                    updatedMCPToolOutput: resized,
+                  },
+                };
+              }
+              return { continue: true };
+            },
+          ],
+        }],
+      },
     };
 
     // sessionId 和 resume 互斥（SDK 约束）
@@ -3880,9 +3929,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     for await (const sdkMessage of querySession) {
       messageCount++;
-      console.debug(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}`);
+      // stream_event is high-frequency (per token delta) — skip logging entirely;
+      // other types (user/assistant/result/system_init) are low-frequency and important
+      if (sdkMessage.type !== 'stream_event') {
+        console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}`, logStringify(sdkMessage));
+      }
       try {
-        const line = `${localTimestamp()} ${JSON.stringify(sdkMessage)}`;
+        const line = `${localTimestamp()} ${logStringify(sdkMessage)}`;
         appendLogLine(line);
       } catch (error) {
         console.log('[agent][sdk] (unserializable)', error);

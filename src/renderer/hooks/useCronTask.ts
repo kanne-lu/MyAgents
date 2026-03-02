@@ -31,7 +31,7 @@ export interface CronTaskState {
     /** Permission mode (captured at task creation time) */
     permissionMode?: string;
     /** Provider environment (captured at task creation time) */
-    providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai' };
+    providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' };
   } | null;
   /** Active cron task (after creation) */
   task: CronTask | null;

@@ -2727,6 +2727,10 @@ pub struct ProviderEnv {
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_format: Option<String>,
 }
 
 /// Cron task execution response from Sidecar

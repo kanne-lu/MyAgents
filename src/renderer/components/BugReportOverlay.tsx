@@ -193,7 +193,7 @@ export default function BugReportOverlay({
             <div className="glass-panel w-full max-w-md">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
-                    <h2 className="text-[14px] font-semibold text-[var(--ink)]">AI 反馈答疑</h2>
+                    <h2 className="text-[14px] font-semibold text-[var(--ink)]">AI 小助理</h2>
                     <button
                         onClick={onClose}
                         className="rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"

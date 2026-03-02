@@ -3,6 +3,7 @@
 
 pub mod adapter;
 pub mod buffer;
+pub mod dingtalk;
 pub mod feishu;
 pub mod group_history;
 pub mod health;
@@ -53,6 +54,7 @@ type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
 pub(crate) type PeerLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
 
 use buffer::MessageBuffer;
+use dingtalk::DingtalkAdapter;
 use feishu::FeishuAdapter;
 use health::HealthManager;
 use router::{
@@ -66,6 +68,7 @@ use types::{BotConfigPatch, GroupActivation, GroupEvent, GroupPermission, GroupP
 pub(crate) enum AnyAdapter {
     Telegram(Arc<TelegramAdapter>),
     Feishu(Arc<FeishuAdapter>),
+    Dingtalk(Arc<DingtalkAdapter>),
 }
 
 impl adapter::ImAdapter for AnyAdapter {
@@ -73,48 +76,56 @@ impl adapter::ImAdapter for AnyAdapter {
         match self {
             Self::Telegram(a) => a.verify_connection().await,
             Self::Feishu(a) => a.verify_connection().await,
+            Self::Dingtalk(a) => a.verify_connection().await,
         }
     }
     async fn register_commands(&self) -> adapter::AdapterResult<()> {
         match self {
             Self::Telegram(a) => a.register_commands().await,
             Self::Feishu(a) => a.register_commands().await,
+            Self::Dingtalk(a) => a.register_commands().await,
         }
     }
     async fn listen_loop(&self, shutdown_rx: tokio::sync::watch::Receiver<bool>) {
         match self {
             Self::Telegram(a) => a.listen_loop(shutdown_rx).await,
             Self::Feishu(a) => a.listen_loop(shutdown_rx).await,
+            Self::Dingtalk(a) => a.listen_loop(shutdown_rx).await,
         }
     }
     async fn send_message(&self, chat_id: &str, text: &str) -> adapter::AdapterResult<()> {
         match self {
             Self::Telegram(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
             Self::Feishu(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
+            Self::Dingtalk(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
         }
     }
     async fn ack_received(&self, chat_id: &str, message_id: &str) {
         match self {
             Self::Telegram(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
             Self::Feishu(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
+            Self::Dingtalk(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
         }
     }
     async fn ack_processing(&self, chat_id: &str, message_id: &str) {
         match self {
             Self::Telegram(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
             Self::Feishu(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
+            Self::Dingtalk(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
         }
     }
     async fn ack_clear(&self, chat_id: &str, message_id: &str) {
         match self {
             Self::Telegram(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
             Self::Feishu(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
+            Self::Dingtalk(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
         }
     }
     async fn send_typing(&self, chat_id: &str) {
         match self {
             Self::Telegram(a) => a.send_typing(chat_id).await,
             Self::Feishu(a) => a.send_typing(chat_id).await,
+            Self::Dingtalk(a) => a.send_typing(chat_id).await,
         }
     }
 }
@@ -124,24 +135,28 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         match self {
             Self::Telegram(a) => a.send_message_returning_id(chat_id, text).await,
             Self::Feishu(a) => a.send_message_returning_id(chat_id, text).await,
+            Self::Dingtalk(a) => a.send_message_returning_id(chat_id, text).await,
         }
     }
     async fn edit_message(&self, chat_id: &str, message_id: &str, text: &str) -> adapter::AdapterResult<()> {
         match self {
             Self::Telegram(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
             Self::Feishu(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
+            Self::Dingtalk(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
         }
     }
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> adapter::AdapterResult<()> {
         match self {
             Self::Telegram(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
             Self::Feishu(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
+            Self::Dingtalk(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
         }
     }
     fn max_message_length(&self) -> usize {
         match self {
             Self::Telegram(a) => a.max_message_length(),
             Self::Feishu(a) => a.max_message_length(),
+            Self::Dingtalk(a) => a.max_message_length(),
         }
     }
     async fn send_approval_card(
@@ -154,6 +169,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         match self {
             Self::Telegram(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await.map_err(|e| e.to_string()),
             Self::Feishu(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await,
+            Self::Dingtalk(a) => adapter::ImStreamAdapter::send_approval_card(a.as_ref(), chat_id, request_id, tool_name, tool_input).await,
         }
     }
     async fn update_approval_status(
@@ -165,6 +181,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         match self {
             Self::Telegram(a) => a.update_approval_status(chat_id, message_id, status).await.map_err(|e| e.to_string()),
             Self::Feishu(a) => a.update_approval_status(message_id, status).await,
+            Self::Dingtalk(a) => adapter::ImStreamAdapter::update_approval_status(a.as_ref(), chat_id, message_id, status).await,
         }
     }
     async fn send_photo(
@@ -177,6 +194,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         match self {
             Self::Telegram(a) => a.send_photo(chat_id, data, filename, caption).await,
             Self::Feishu(a) => a.send_photo(chat_id, data, filename, caption).await,
+            Self::Dingtalk(a) => a.send_photo(chat_id, data, filename, caption).await,
         }
     }
     async fn send_file(
@@ -190,6 +208,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         match self {
             Self::Telegram(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
             Self::Feishu(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
+            Self::Dingtalk(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
         }
     }
 }
@@ -395,6 +414,17 @@ pub async fn start_im_bot<R: Runtime>(
         ImPlatform::Feishu => {
             let dedup_path = Some(health::bot_dedup_path(&bot_id));
             Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
+                &config,
+                msg_tx,
+                Arc::clone(&allowed_users),
+                approval_tx.clone(),
+                dedup_path,
+                group_event_tx.clone(),
+            ))))
+        }
+        ImPlatform::Dingtalk => {
+            let dedup_path = Some(health::bot_dedup_path(&bot_id));
+            Arc::new(AnyAdapter::Dingtalk(Arc::new(DingtalkAdapter::new(
                 &config,
                 msg_tx,
                 Arc::clone(&allowed_users),
@@ -702,7 +732,8 @@ pub async fn start_im_bot<R: Runtime>(
                     // Bind code handling: Telegram uses "/start BIND_xxx", Feishu uses plain "BIND_xxx"
                     let is_telegram_bind = text.starts_with("/start BIND_");
                     let is_feishu_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Feishu;
-                    if is_telegram_bind || is_feishu_bind {
+                    let is_dingtalk_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Dingtalk;
+                    if is_telegram_bind || is_feishu_bind || is_dingtalk_bind {
                         // If sender is already bound, silently ignore stale BIND_ messages
                         // (Feishu may re-deliver old messages after bot restart clears dedup cache)
                         let already_bound = {
@@ -1419,10 +1450,18 @@ pub async fn start_im_bot<R: Runtime>(
                                     session_key,
                                     sid.as_deref().unwrap_or("?"),
                                 );
+                                // Finalize AI Card for DingTalk (isFinalize: true)
+                                if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
+                                    dt.post_stream_cleanup(&chat_id).await;
+                                }
                                 sid
                             }
                             Err(e) => {
                                 ulog_error!("[im] Stream error for {}: {}", session_key, e);
+                                // Clean up any active AI Card on error (prevent zombie cards)
+                                if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
+                                    dt.post_stream_cleanup(&chat_id).await;
+                                }
                                 if e.should_buffer() {
                                     task_buffer.lock().await.push(&msg);
                                 }
@@ -1499,6 +1538,10 @@ pub async fn start_im_bot<R: Runtime>(
                                     .await
                                     {
                                         Ok(buf_sid) => {
+                                            // Finalize AI Card for DingTalk
+                                            if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
+                                                dt.post_stream_cleanup(&buf_chat_id).await;
+                                            }
                                             let mut router = task_router.lock().await;
                                             router.record_response(
                                                 &session_key,
@@ -1513,6 +1556,10 @@ pub async fn start_im_bot<R: Runtime>(
                                             replayed += 1;
                                         }
                                         Err(e) => {
+                                            // Clean up any active AI Card on error
+                                            if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
+                                                dt.post_stream_cleanup(&buf_chat_id).await;
+                                            }
                                             if e.should_buffer() {
                                                 task_buffer.lock().await.push(&buf_msg);
                                             }
@@ -1715,6 +1762,7 @@ pub async fn start_im_bot<R: Runtime>(
             (url, None)
         }
         ImPlatform::Feishu => (None, Some(bind_code.clone())),
+        ImPlatform::Dingtalk => (None, Some(bind_code.clone())),
     };
 
     let status = ImBotStatus {
@@ -1891,6 +1939,7 @@ pub async fn get_im_bot_status(im_state: &ManagedImBots, bot_id: &str) -> ImBotS
                 (url, None)
             }
             ImPlatform::Feishu => (None, Some(instance.bind_code.clone())),
+            ImPlatform::Dingtalk => (None, Some(instance.bind_code.clone())),
         };
 
         ImBotStatus {
@@ -1928,6 +1977,7 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
                 (url, None)
             }
             ImPlatform::Feishu => (None, Some(instance.bind_code.clone())),
+            ImPlatform::Dingtalk => (None, Some(instance.bind_code.clone())),
         };
 
         result.insert(bot_id.clone(), ImBotStatus {
@@ -1983,6 +2033,8 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         (ImPlatform::Telegram, ImSourceType::Group) => "telegram_group",
         (ImPlatform::Feishu, ImSourceType::Private) => "feishu_private",
         (ImPlatform::Feishu, ImSourceType::Group) => "feishu_group",
+        (ImPlatform::Dingtalk, ImSourceType::Private) => "dingtalk_private",
+        (ImPlatform::Dingtalk, ImSourceType::Group) => "dingtalk_group",
     };
     let mut body = json!({
         "message": msg.text,
@@ -2015,6 +2067,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         body["groupPlatform"] = json!(match gc.platform {
             ImPlatform::Telegram => "Telegram",
             ImPlatform::Feishu => "飞书",
+            ImPlatform::Dingtalk => "钉钉",
         });
         body["groupActivation"] = json!(match gc.activation {
             GroupActivation::Mention => "mention",
@@ -2397,6 +2450,10 @@ pub fn schedule_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                     config.feishu_app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
                         && config.feishu_app_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
                 }
+                ImPlatform::Dingtalk => {
+                    config.dingtalk_client_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                        && config.dingtalk_client_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                }
             };
             if config.enabled && has_credentials {
                 ulog_info!("[im] Auto-starting bot: {}", bot_id);
@@ -2552,11 +2609,16 @@ pub async fn cmd_start_im_bot(
     platform: Option<String>,
     feishuAppId: Option<String>,
     feishuAppSecret: Option<String>,
+    dingtalkClientId: Option<String>,
+    dingtalkClientSecret: Option<String>,
+    dingtalkUseAiCard: Option<bool>,
+    dingtalkCardTemplateId: Option<String>,
     heartbeatConfigJson: Option<String>,
     botName: Option<String>,
 ) -> Result<ImBotStatus, String> {
     let im_platform = match platform.as_deref() {
         Some("feishu") => ImPlatform::Feishu,
+        Some("dingtalk") => ImPlatform::Dingtalk,
         _ => ImPlatform::Telegram,
     };
     let heartbeat_config = heartbeatConfigJson
@@ -2577,6 +2639,10 @@ pub async fn cmd_start_im_bot(
         enabled: true,
         feishu_app_id: feishuAppId,
         feishu_app_secret: feishuAppSecret,
+        dingtalk_client_id: dingtalkClientId,
+        dingtalk_client_secret: dingtalkClientSecret,
+        dingtalk_use_ai_card: dingtalkUseAiCard,
+        dingtalk_card_template_id: dingtalkCardTemplateId,
         provider_id: None, // Not needed here — frontend passes providerEnvJson directly
         model,
         provider_env_json: providerEnvJson,
@@ -2703,6 +2769,14 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
     apply_string_field!(bot_token, "botToken");
     apply_string_field!(feishu_app_id, "feishuAppId");
     apply_string_field!(feishu_app_secret, "feishuAppSecret");
+    apply_string_field!(dingtalk_client_id, "dingtalkClientId");
+    apply_string_field!(dingtalk_client_secret, "dingtalkClientSecret");
+    apply_string_field!(dingtalk_card_template_id, "dingtalkCardTemplateId");
+
+    // dingtalk_use_ai_card → boolean field
+    if let Some(val) = patch.dingtalk_use_ai_card {
+        bot["dingtalkUseAiCard"] = serde_json::json!(val);
+    }
 
     // mcp_enabled_servers → persisted as "mcpEnabledServers"
     if let Some(ref servers) = patch.mcp_enabled_servers {
@@ -2790,6 +2864,10 @@ async fn update_bot_config_internal<R: Runtime>(
     let patch_bot_token = patch.bot_token.clone();
     let patch_feishu_id = patch.feishu_app_id.clone();
     let patch_feishu_secret = patch.feishu_app_secret.clone();
+    let patch_dingtalk_id = patch.dingtalk_client_id.clone();
+    let patch_dingtalk_secret = patch.dingtalk_client_secret.clone();
+    let patch_dingtalk_ai_card = patch.dingtalk_use_ai_card;
+    let patch_dingtalk_template = patch.dingtalk_card_template_id.clone();
     let patch_group_perms = patch.group_permissions.clone();
     let patch_group_activation = patch.group_activation.clone();
     let patch_group_tools_deny = patch.group_tools_deny.clone();
@@ -2808,6 +2886,10 @@ async fn update_bot_config_internal<R: Runtime>(
         bot_token: patch_bot_token,
         feishu_app_id: patch_feishu_id,
         feishu_app_secret: patch_feishu_secret,
+        dingtalk_client_id: patch_dingtalk_id,
+        dingtalk_client_secret: patch_dingtalk_secret,
+        dingtalk_use_ai_card: patch_dingtalk_ai_card,
+        dingtalk_card_template_id: patch_dingtalk_template,
         enabled: patch_enabled,
         setup_completed: patch_setup,
         group_permissions: patch_group_perms.clone(),

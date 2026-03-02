@@ -45,11 +45,39 @@ export function translateToolCalls(toolCalls: OpenAIToolCall[]): {
   }));
 }
 
-function safeParseJson(str: string): Record<string, unknown> {
+/** Robust JSON parser for tool call arguments from various providers */
+export function safeParseJson(str: string): Record<string, unknown> {
+  // Empty or whitespace-only → empty object
+  if (!str || !str.trim()) return {};
+
+  const trimmed = str.trim();
+
+  // First attempt: direct parse
   try {
-    return JSON.parse(str);
+    const parsed = JSON.parse(trimmed);
+    // Ensure result is an object (not array, string, number, etc.)
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { value: parsed };
+    }
+    return parsed;
   } catch {
-    console.warn('[bridge] Failed to parse tool arguments:', str.slice(0, 200));
-    return {};
+    // Fall through to recovery attempts
   }
+
+  // Second attempt: truncate trailing garbage (some providers emit extra tokens after valid JSON)
+  const lastBrace = trimmed.lastIndexOf('}');
+  if (lastBrace > 0) {
+    try {
+      const parsed = JSON.parse(trimmed.slice(0, lastBrace + 1));
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+      return { value: parsed };
+    } catch {
+      // Fall through
+    }
+  }
+
+  console.warn('[bridge] Failed to parse tool arguments:', trimmed.slice(0, 200));
+  return {};
 }

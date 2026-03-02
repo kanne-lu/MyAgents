@@ -16,8 +16,9 @@ export interface BridgeConfig {
   /** Translate OpenAI reasoning_content to Anthropic thinking block. Default true */
   translateReasoning?: boolean;
 
-  /** Cap max_tokens sent to upstream. CLI may send Claude-scale values (128k) that
-   *  exceed OpenAI-compatible provider limits. Default: no cap. */
+  /** Global cap for max_tokens sent to upstream. CLI may send Claude-scale values (128k)
+   *  that exceed OpenAI-compatible provider limits. Per-request UpstreamConfig.maxOutputTokens
+   *  takes priority over this. Default: no cap. */
   maxOutputTokens?: number;
 }
 
@@ -28,4 +29,8 @@ export interface UpstreamConfig {
   apiKey?: string;
   /** Override model name (optional, higher priority than modelMapping) */
   model?: string;
+  /** Per-request max output tokens cap (takes priority over BridgeConfig.maxOutputTokens) */
+  maxOutputTokens?: number;
+  /** Upstream API format: 'chat_completions' (default) or 'responses' (OpenAI Responses API) */
+  upstreamFormat?: 'chat_completions' | 'responses';
 }

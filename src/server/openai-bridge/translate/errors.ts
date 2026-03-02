@@ -20,21 +20,47 @@ function statusToErrorType(status: number): string {
   }
 }
 
-/** Translate an upstream error to Anthropic error format */
-export function translateError(status: number, body: string): { status: number; body: AnthropicErrorResponse } {
-  let message = `Upstream error (${status})`;
+/** Extract error message from various upstream response formats */
+function extractErrorMessage(body: string, status: number): string {
+  const fallback = `Upstream error (${status})`;
 
   try {
     const parsed = JSON.parse(body);
+
     // OpenAI format: { error: { message, type, code } }
     if (parsed?.error?.message) {
-      message = parsed.error.message;
-    } else if (typeof parsed?.message === 'string') {
-      message = parsed.message;
+      return parsed.error.message;
     }
+
+    // FastAPI / some providers: { detail: "..." } or { detail: [{ msg: "..." }] }
+    if (parsed?.detail) {
+      if (typeof parsed.detail === 'string') return parsed.detail;
+      if (Array.isArray(parsed.detail) && parsed.detail[0]?.msg) {
+        return parsed.detail.map((d: { msg: string }) => d.msg).join('; ');
+      }
+    }
+
+    // Simple format: { message: "..." }
+    if (typeof parsed?.message === 'string') {
+      return parsed.message;
+    }
+
+    // Nested error object: { error: "string" }
+    if (typeof parsed?.error === 'string') {
+      return parsed.error;
+    }
+
+    return fallback;
   } catch {
-    if (body) message = body.slice(0, 500);
+    // Not JSON — use raw body (truncated)
+    if (body) return body.slice(0, 500);
+    return fallback;
   }
+}
+
+/** Translate an upstream error to Anthropic error format */
+export function translateError(status: number, body: string): { status: number; body: AnthropicErrorResponse } {
+  const message = extractErrorMessage(body, status);
 
   // Map OpenAI status codes to Anthropic equivalents
   const anthropicStatus = status === 402 ? 400 : status;

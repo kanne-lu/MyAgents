@@ -53,7 +53,7 @@ export interface CronTask {
   exitReason?: string;
   permissionMode?: string;
   model?: string;
-  providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai' };
+  providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' };
   lastError?: string;
   /** Source IM Bot ID that created this task */
   sourceBotId?: string;
@@ -78,6 +78,8 @@ export interface CronTaskProviderEnv {
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
   apiProtocol?: 'anthropic' | 'openai';
+  maxOutputTokens?: number;
+  upstreamFormat?: 'chat_completions' | 'responses';
 }
 
 /**

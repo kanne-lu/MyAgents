@@ -200,8 +200,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     chatInputRef.current?.insertSlashCommand(command);
   }, []);
 
-  const handleOpenSettings = useCallback((tab: Extract<WorkspaceTab, 'skills-commands' | 'agents'>) => {
-    setWorkspaceConfigInitialTab(tab);
+  const handleOpenSettings = useCallback(() => {
+    setWorkspaceConfigInitialTab('skills');
     setShowWorkspaceConfig(true);
   }, []);
 
@@ -252,6 +252,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           apiKey: apiKeys[provider.id],
           authType: provider.authType,
           apiProtocol: provider.apiProtocol,
+          maxOutputTokens: provider.maxOutputTokens,
+          upstreamFormat: provider.upstreamFormat,
         } : undefined;
 
         // 5. Send message
@@ -310,6 +312,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         apiKey: apiKeys[currentProvider.id],
         authType: currentProvider.authType,
         apiProtocol: currentProvider.apiProtocol,
+        maxOutputTokens: currentProvider.maxOutputTokens,
+        upstreamFormat: currentProvider.upstreamFormat,
       } : undefined;
       await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv, true /* isCron */);
     },
@@ -932,6 +936,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         apiKey: keys[provider.id], // Get from stored apiKeys, not provider object
         authType: provider.authType,
         apiProtocol: provider.apiProtocol,
+        maxOutputTokens: provider.maxOutputTokens,
+        upstreamFormat: provider.upstreamFormat,
       } : undefined;
 
       // If cron mode is enabled and task hasn't started yet, start the task
@@ -1424,6 +1430,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             apiKey: apiKeys[currentProvider.id],
             authType: currentProvider.authType,
             apiProtocol: currentProvider.apiProtocol,
+            maxOutputTokens: currentProvider.maxOutputTokens,
+            upstreamFormat: currentProvider.upstreamFormat,
           } : undefined;
 
           // If task is already running, only update config (preserves task state)

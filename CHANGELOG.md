@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.33] - 2026-03-03
+
+### Added
+- **钉钉 Bot 集成**：新增钉钉机器人 IM 渠道，支持私聊和群聊；Windows 单实例防护避免多开冲突
+- **OpenAI Bridge Responses API**：兼容 OpenAI Responses API 格式 (`upstreamFormat: 'responses'`)，支持 `maxOutputTokens` 配置上限
+- **全局 Token 使用统计**：Settings 页新增使用统计面板，含 5 项汇总卡片、每日用量趋势 SVG 柱状图、模型用量分布表，支持 7 天 / 30 天 / 60 天时间范围切换
+- **项目设置重构**：双 Tab 布局（系统提示词 + 项目设置），支持多文件系统提示词管理
+- **MCP 运行环境弹窗**：增加「让 AI 小助理安装」按钮，一键委托 AI 安装 MCP 依赖
+- **全局配置覆盖弹窗**：增加「不再提示」选项，避免重复确认
+
+### Fixed
+- **MCP 超尺寸图片**：工具返回超大 base64 图片导致 Claude API 400 错误，增加尺寸检测与压缩
+- **供应商验证竞态**：并发验证请求中，超时的过期请求覆盖已成功的验证状态，使用 generation counter 丢弃过期结果
+- **OpenAI 协议验证 max_tokens 超限**：验证流程未传递 `maxOutputTokens` 导致 Bridge 无法限制默认 token 上限
+- **cron_task ProviderEnv 构造补全**：定时任务缺失 provider 环境变量字段
+- **日志降噪**：恢复重要 SDK 消息日志，截断超长字符串；AI 反馈答疑文案改为"AI 小助理"
+- **项目设置 Overlay**：删除文件后编辑态未重置 + tooltip 被 overflow 裁切不可见
+
+### Changed
+- **GitHub Release 上传脚本拆分**：发布上传逻辑拆分为独立脚本，`publish_release.sh` / `publish_windows.ps1` 调用
+- **CLAUDE.md 精简**：从 562 行精简至 126 行最佳实践
+- **OpenAI Bridge 代码清理**：重构 Bridge 模块 + Settings UI 优化
+
+---
+
 ## [0.1.32] - 2026-03-02
 
 ### Added

@@ -54,7 +54,7 @@ export default function GroupPermissionList({
                             <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm font-medium text-[var(--ink)]">{g.groupName}</p>
                                 <p className="text-xs text-[var(--ink-muted)]">
-                                    {g.platform === 'telegram' ? 'Telegram' : '飞书'}
+                                    {g.platform === 'telegram' ? 'Telegram' : g.platform === 'dingtalk' ? '钉钉' : '飞书'}
                                     {g.addedBy && ` · 由 ${g.addedBy} 添加`}
                                 </p>
                             </div>
@@ -93,7 +93,7 @@ export default function GroupPermissionList({
                             <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm text-[var(--ink)]">{g.groupName}</p>
                                 <p className="text-xs text-[var(--ink-muted)]">
-                                    {g.platform === 'telegram' ? 'Telegram' : '飞书'}
+                                    {g.platform === 'telegram' ? 'Telegram' : g.platform === 'dingtalk' ? '钉钉' : '飞书'}
                                 </p>
                             </div>
                             <button

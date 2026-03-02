@@ -208,15 +208,6 @@ async fn connect_sse(
             Some(Ok(chunk)) => {
                 chunk_count += 1;
                 let text = String::from_utf8_lossy(&chunk);
-                
-                // Debug log for first few chunks and periodically
-                if chunk_count <= 3 || chunk_count % 100 == 0 {
-                    logger::debug(app, format!(
-                        "[sse-proxy] Tab {} chunk #{}: {} bytes",
-                        tab_id, chunk_count, chunk.len()
-                    ));
-                }
-                
                 buffer.push_str(&text);
 
                 // Process complete SSE events (end with \n\n)
@@ -335,7 +326,12 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use crate::logger;
     
-    let is_unified_log = request.url.contains("/api/unified-log");
+    // Skip logging for high-frequency polling paths (matches Bun-side skip list).
+    // Extract path (before '?') from full URL for precise matching.
+    let url_path = request.url.split('?').next().unwrap_or(&request.url);
+    let is_noisy_path = url_path.ends_with("/api/unified-log")
+        || url_path.ends_with("/agent/dir")
+        || url_path.ends_with("/sessions");
     let start = std::time::Instant::now();
 
     // Build client with configurable timeout
@@ -441,8 +437,8 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
         (text, false)
     };
 
-    // Log: single line for success, skip unified-log endpoint entirely
-    if !is_unified_log {
+    // Log: single line for success, skip noisy polling endpoints entirely
+    if !is_noisy_path {
         let elapsed = start.elapsed().as_millis();
         if status >= 200 && status < 300 {
             logger::debug(&app, format!("[proxy] {} {} -> {} ({}B, {}ms)",

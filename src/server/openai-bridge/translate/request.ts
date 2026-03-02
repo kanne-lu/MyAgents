@@ -5,6 +5,7 @@ import type { OpenAIRequest } from '../types/openai';
 import type { BridgeConfig } from '../types/bridge';
 import { translateMessages } from './messages';
 import { translateToolDefinitions, translateToolChoice } from './tools';
+import { budgetToReasoningEffort } from './usage';
 
 export interface TranslateRequestOptions {
   modelMapping?: BridgeConfig['modelMapping'];
@@ -34,10 +35,18 @@ export function translateRequest(
   const messages = translateMessages(req.system, req.messages);
 
   // 3. Build request
+  let maxTokens = req.max_tokens;
+
+  // Token budget overflow protection: if thinking.budget_tokens >= max_tokens,
+  // auto-increase max_tokens so the model has room for non-thinking output
+  if (req.thinking?.type === 'enabled' && req.thinking.budget_tokens >= maxTokens) {
+    maxTokens = req.thinking.budget_tokens + 4096;
+  }
+
   const openaiReq: OpenAIRequest = {
     model,
     messages,
-    max_tokens: req.max_tokens,
+    max_tokens: maxTokens,
   };
 
   // 4. Optional parameters
@@ -55,12 +64,21 @@ export function translateRequest(
   }
   if (req.tool_choice) {
     openaiReq.tool_choice = translateToolChoice(req.tool_choice);
+    // Map disable_parallel_tool_use → parallel_tool_calls
+    if ('disable_parallel_tool_use' in req.tool_choice && req.tool_choice.disable_parallel_tool_use) {
+      openaiReq.parallel_tool_calls = false;
+    }
   }
 
   // 6. Stream
   if (req.stream) {
     openaiReq.stream = true;
     openaiReq.stream_options = { include_usage: true };
+  }
+
+  // 7. Thinking → reasoning_effort
+  if (req.thinking?.type === 'enabled') {
+    openaiReq.reasoning_effort = budgetToReasoningEffort(req.thinking.budget_tokens);
   }
 
   return openaiReq;

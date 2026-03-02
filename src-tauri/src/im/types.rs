@@ -25,6 +25,11 @@ pub struct BotConfigPatch {
     pub bot_token: Option<String>,
     pub feishu_app_id: Option<String>,
     pub feishu_app_secret: Option<String>,
+    // ===== DingTalk-specific credentials =====
+    pub dingtalk_client_id: Option<String>,
+    pub dingtalk_client_secret: Option<String>,
+    pub dingtalk_use_ai_card: Option<bool>,
+    pub dingtalk_card_template_id: Option<String>,
     pub enabled: Option<bool>,
     pub setup_completed: Option<bool>,
     pub group_permissions: Option<Vec<GroupPermission>>,
@@ -38,6 +43,7 @@ pub struct BotConfigPatch {
 pub enum ImPlatform {
     Telegram,
     Feishu,
+    Dingtalk,
 }
 
 impl std::fmt::Display for ImPlatform {
@@ -45,6 +51,7 @@ impl std::fmt::Display for ImPlatform {
         match self {
             Self::Telegram => write!(f, "telegram"),
             Self::Feishu => write!(f, "feishu"),
+            Self::Dingtalk => write!(f, "dingtalk"),
         }
     }
 }
@@ -217,6 +224,15 @@ pub struct ImConfig {
     pub feishu_app_id: Option<String>,
     #[serde(default)]
     pub feishu_app_secret: Option<String>,
+    // ===== DingTalk-specific credentials =====
+    #[serde(default)]
+    pub dingtalk_client_id: Option<String>,
+    #[serde(default)]
+    pub dingtalk_client_secret: Option<String>,
+    #[serde(default)]
+    pub dingtalk_use_ai_card: Option<bool>,
+    #[serde(default)]
+    pub dingtalk_card_template_id: Option<String>,
     // ===== AI config =====
     #[serde(default)]
     pub provider_id: Option<String>,
@@ -254,6 +270,10 @@ impl Default for ImConfig {
             enabled: false,
             feishu_app_id: None,
             feishu_app_secret: None,
+            dingtalk_client_id: None,
+            dingtalk_client_secret: None,
+            dingtalk_use_ai_card: None,
+            dingtalk_card_template_id: None,
             provider_id: None,
             model: None,
             provider_env_json: None,

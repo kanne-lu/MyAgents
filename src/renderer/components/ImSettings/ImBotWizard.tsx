@@ -8,17 +8,23 @@ import { shortenPathForDisplay } from '@/utils/pathDetection';
 import CustomSelect from '@/components/CustomSelect';
 import BotTokenInput from './components/BotTokenInput';
 import FeishuCredentialInput from './components/FeishuCredentialInput';
+import DingtalkCredentialInput from './components/DingtalkCredentialInput';
 import BindQrPanel from './components/BindQrPanel';
 import BindCodePanel from './components/BindCodePanel';
 import WhitelistManager from './components/WhitelistManager';
 import type { ImBotConfig, ImBotStatus, ImPlatform } from '../../../shared/types/im';
-import { DEFAULT_IM_BOT_CONFIG, DEFAULT_FEISHU_BOT_CONFIG } from '../../../shared/types/im';
+import { DEFAULT_IM_BOT_CONFIG, DEFAULT_FEISHU_BOT_CONFIG, DEFAULT_DINGTALK_BOT_CONFIG } from '../../../shared/types/im';
 import telegramBotAddImg from './assets/telegram_bot_add.png';
 import feishuStep1Img from './assets/feishu_step1.png';
 import feishuStep2PermImg from './assets/feishu_step2_permissions.png';
 import feishuStep2EventImg from './assets/feishu_step2_events.png';
 import feishuStep2AddBotImg from './assets/feishu_step2_5_add_bot.png';
 import feishuStep2PublishImg from './assets/feishu_setp2_6_publish.png';
+import dingtalkStep1CreateAppImg from './assets/dingtalk_step1_create_app.png';
+import dingtalkStep1CredentialsImg from './assets/dingtalk_step1_credentials.png';
+import dingtalkStep2AddRobotImg from './assets/dingtalk_step2_add_robot.png';
+import dingtalkStep2StreamModeImg from './assets/dingtalk_step2_stream_mode.png';
+import dingtalkStep2PublishImg from './assets/dingtalk_step2_publish.png';
 
 const FEISHU_PERMISSIONS_JSON = `{
   "scopes": {
@@ -70,11 +76,13 @@ export default function ImBotWizard({
     const isMountedRef = useRef(true);
 
     const isFeishu = platform === 'feishu';
+    const isDingtalk = platform === 'dingtalk';
     // Telegram: credentials(1) → workspace(2) → binding(3)
     // Feishu:   credentials(1) → permissions(2) → workspace(3) → binding(4)
-    const totalSteps = isFeishu ? 4 : 3;
-    const workspaceStep = isFeishu ? 3 : 2;
-    const bindingStep = isFeishu ? 4 : 3;
+    // DingTalk: credentials(1) → permissions(2) → workspace(3) → binding(4)
+    const totalSteps = (isFeishu || isDingtalk) ? 4 : 3;
+    const workspaceStep = (isFeishu || isDingtalk) ? 3 : 2;
+    const bindingStep = (isFeishu || isDingtalk) ? 4 : 3;
 
     const [step, setStep] = useState(1);
     // Telegram credentials
@@ -82,6 +90,9 @@ export default function ImBotWizard({
     // Feishu credentials
     const [feishuAppId, setFeishuAppId] = useState('');
     const [feishuAppSecret, setFeishuAppSecret] = useState('');
+    // DingTalk credentials
+    const [dingtalkClientId, setDingtalkClientId] = useState('');
+    const [dingtalkClientSecret, setDingtalkClientSecret] = useState('');
 
     const [verifyStatus, setVerifyStatus] = useState<'idle' | 'verifying' | 'valid' | 'invalid'>('idle');
     const [botUsername, setBotUsername] = useState<string | undefined>();
@@ -169,7 +180,9 @@ export default function ImBotWizard({
     // Check if credentials are filled
     const hasCredentials = isFeishu
         ? feishuAppId.trim() && feishuAppSecret.trim()
-        : botToken.trim();
+        : isDingtalk
+            ? dingtalkClientId.trim() && dingtalkClientSecret.trim()
+            : botToken.trim();
 
     // Build start params — providerEnvJson is already persisted on disk by Rust,
     // so we read it directly from the config instead of rebuilding from React state.
@@ -193,6 +206,10 @@ export default function ImBotWizard({
             platform: cfg.platform,
             feishuAppId: cfg.feishuAppId || null,
             feishuAppSecret: cfg.feishuAppSecret || null,
+            dingtalkClientId: cfg.dingtalkClientId || null,
+            dingtalkClientSecret: cfg.dingtalkClientSecret || null,
+            dingtalkUseAiCard: cfg.dingtalkUseAiCard ?? false,
+            dingtalkCardTemplateId: cfg.dingtalkCardTemplateId || null,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
             botName: cfg.name || null,
         };
@@ -200,8 +217,8 @@ export default function ImBotWizard({
 
     // Handle "Next" for all steps
     const handleNext = useCallback(async () => {
-        // Feishu step 2 -> step 3 (permissions guide -> workspace)
-        if (isFeishu && step === 2) {
+        // Feishu/DingTalk step 2 -> step 3 (permissions guide -> workspace)
+        if ((isFeishu || isDingtalk) && step === 2) {
             setStep(3);
             return;
         }
@@ -218,7 +235,7 @@ export default function ImBotWizard({
                         newWorkspacePath = createdWorkspacePathRef.current;
                     } else if (isTauriEnvironment()) {
                         // Create a new dedicated workspace for this bot
-                        const wsName = botUsername || (isFeishu ? '飞书Bot' : 'TelegramBot');
+                        const wsName = botUsername || (isDingtalk ? '钉钉Bot' : isFeishu ? '飞书Bot' : 'TelegramBot');
                         const { invoke } = await import('@tauri-apps/api/core');
                         const result = await invoke<{ path: string; is_new: boolean }>('cmd_create_bot_workspace', {
                             workspaceName: wsName,
@@ -230,7 +247,7 @@ export default function ImBotWizard({
                         await refreshConfig();
                     } else {
                         // Browser dev mode fallback
-                        const wsName = botUsername || (isFeishu ? '飞书Bot' : 'TelegramBot');
+                        const wsName = botUsername || (isDingtalk ? '钉钉Bot' : isFeishu ? '飞书Bot' : 'TelegramBot');
                         newWorkspacePath = `/mock/projects/${wsName}`;
                     }
                 } else {
@@ -284,7 +301,11 @@ export default function ImBotWizard({
 
         // Step 1 -> Step 2: validate credentials and start bot
         if (!hasCredentials) {
-            toastRef.current.error(isFeishu ? '请输入 App ID 和 App Secret' : '请输入 Bot Token');
+            toastRef.current.error(
+                isFeishu ? '请输入 App ID 和 App Secret'
+                    : isDingtalk ? '请输入 Client ID 和 Client Secret'
+                        : '请输入 Bot Token'
+            );
             return;
         }
 
@@ -293,6 +314,11 @@ export default function ImBotWizard({
         if (isFeishu) {
             if (completedBots.some(b => b.feishuAppId === feishuAppId.trim())) {
                 toastRef.current.error('该飞书应用凭证已被其他 Bot 使用');
+                return;
+            }
+        } else if (isDingtalk) {
+            if (completedBots.some(b => b.dingtalkClientId === dingtalkClientId.trim())) {
+                toastRef.current.error('该钉钉应用凭证已被其他 Bot 使用');
                 return;
             }
         } else {
@@ -307,16 +333,18 @@ export default function ImBotWizard({
 
         try {
             // Create the bot config — use mino temporarily for credential verification
-            const defaultConfig = isFeishu ? DEFAULT_FEISHU_BOT_CONFIG : DEFAULT_IM_BOT_CONFIG;
+            const defaultConfig = isDingtalk ? DEFAULT_DINGTALK_BOT_CONFIG : isFeishu ? DEFAULT_FEISHU_BOT_CONFIG : DEFAULT_IM_BOT_CONFIG;
             const mino = projects.find(p => p.path.replace(/\\/g, '/').endsWith('/mino'));
             const newConfig: ImBotConfig = {
                 ...defaultConfig,
                 id: botId,
-                name: isFeishu ? '飞书 Bot' : 'Telegram Bot',
+                name: isDingtalk ? '钉钉 Bot' : isFeishu ? '飞书 Bot' : 'Telegram Bot',
                 platform,
-                botToken: isFeishu ? '' : botToken.trim(),
+                botToken: (isFeishu || isDingtalk) ? '' : botToken.trim(),
                 feishuAppId: isFeishu ? feishuAppId.trim() : undefined,
                 feishuAppSecret: isFeishu ? feishuAppSecret.trim() : undefined,
+                dingtalkClientId: isDingtalk ? dingtalkClientId.trim() : undefined,
+                dingtalkClientSecret: isDingtalk ? dingtalkClientSecret.trim() : undefined,
                 allowedUsers: [],
                 setupCompleted: false,
                 enabled: true,
@@ -343,7 +371,7 @@ export default function ImBotWizard({
                 setBotStatus(status);
                 // Save bot name from verification
                 if (status.botUsername) {
-                    const displayName = isFeishu ? status.botUsername : `@${status.botUsername}`;
+                    const displayName = platform === 'telegram' ? `@${status.botUsername}` : status.botUsername;
                     await invoke('cmd_update_im_bot_config', { botId, patch: { name: displayName } });
                     await refreshConfig();
                 }
@@ -359,7 +387,7 @@ export default function ImBotWizard({
                 setStarting(false);
             }
         }
-    }, [hasCredentials, isFeishu, step, workspaceStep, bindingStep, botToken, feishuAppId, feishuAppSecret, botId, platform, config.imBotConfigs, projects, saveBotConfig, refreshConfig, workspaceChoice, selectedExistingPath, botUsername, buildStartParams]);
+    }, [hasCredentials, isFeishu, isDingtalk, step, workspaceStep, bindingStep, botToken, feishuAppId, feishuAppSecret, dingtalkClientId, dingtalkClientSecret, botId, platform, config.imBotConfigs, projects, saveBotConfig, refreshConfig, workspaceChoice, selectedExistingPath, botUsername, buildStartParams]);
 
     // Complete wizard — merge local users with any Rust-persisted users to avoid
     // overwriting binds that happened while the frontend listener was inactive
@@ -426,23 +454,29 @@ export default function ImBotWizard({
         }
     }, []);
 
-    const platformLabel = isFeishu ? '飞书' : 'Telegram';
-    const platformColor = isFeishu ? '#3370ff' : '#0088cc';
+    const platformLabel = isDingtalk ? '钉钉' : isFeishu ? '飞书' : 'Telegram';
+    const platformColor = isDingtalk ? '#0089FF' : isFeishu ? '#3370ff' : '#0088cc';
 
     const stepLabel = (() => {
-        if (!isFeishu) {
-            if (step === 1) return '配置 Bot Token';
-            if (step === 2) return '设置工作区';
-            return '绑定你的 Telegram 账号';
+        if (isDingtalk) {
+            if (step === 1) return '配置应用凭证';
+            if (step === 2) return '配置权限与能力';
+            if (step === 3) return '设置工作区';
+            return '绑定你的钉钉账号';
         }
-        if (step === 1) return '配置应用凭证';
-        if (step === 2) return '配置权限与事件';
-        if (step === 3) return '设置工作区';
-        return '绑定你的飞书账号';
+        if (isFeishu) {
+            if (step === 1) return '配置应用凭证';
+            if (step === 2) return '配置权限与事件';
+            if (step === 3) return '设置工作区';
+            return '绑定你的飞书账号';
+        }
+        if (step === 1) return '配置 Bot Token';
+        if (step === 2) return '设置工作区';
+        return '绑定你的 Telegram 账号';
     })();
 
     // Derive workspace display name from bot username
-    const workspaceName = botUsername || (isFeishu ? '飞书Bot' : 'TelegramBot');
+    const workspaceName = botUsername || (isDingtalk ? '钉钉Bot' : isFeishu ? '飞书Bot' : 'TelegramBot');
 
     return (
         <div className="space-y-6">
@@ -484,7 +518,47 @@ export default function ImBotWizard({
             {step === 1 && (
                 <div className="space-y-6">
                     {/* Platform-specific tutorial + input */}
-                    {isFeishu ? (
+                    {isDingtalk ? (
+                        <div className="space-y-6">
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <DingtalkCredentialInput
+                                    clientId={dingtalkClientId}
+                                    clientSecret={dingtalkClientSecret}
+                                    onClientIdChange={setDingtalkClientId}
+                                    onClientSecretChange={setDingtalkClientSecret}
+                                    verifyStatus={verifyStatus}
+                                    botName={botUsername}
+                                    showGuide={false}
+                                />
+                            </div>
+                            {/* Step 1 guide: create app + get credentials */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <p className="text-sm font-medium text-[var(--ink)]">如何获取钉钉应用凭证？</p>
+                                <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                                    <li>1. 登录<a
+                                        href="https://open-dev.dingtalk.com"
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="mx-0.5 inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
+                                    >
+                                        钉钉开放平台
+                                    </a>，进入 <span className="font-medium text-[var(--ink)]">应用开发</span> &gt; <span className="font-medium text-[var(--ink)]">钉钉应用</span></li>
+                                    <li>2. 点击右上角 <span className="font-medium text-[var(--ink)]">创建应用</span>，填写应用名称和描述</li>
+                                    <li>3. 创建后进入应用详情，在左侧菜单 <span className="font-medium text-[var(--ink)]">凭证与基础信息</span> 页获取 Client ID 和 Client Secret</li>
+                                </ol>
+                                <img
+                                    src={dingtalkStep1CreateAppImg}
+                                    alt="钉钉开放平台 - 创建应用"
+                                    className="mt-4 w-full rounded-lg border border-[var(--line)]"
+                                />
+                                <img
+                                    src={dingtalkStep1CredentialsImg}
+                                    alt="钉钉凭证与基础信息 - 获取 Client ID 和 Client Secret"
+                                    className="mt-4 w-full rounded-lg border border-[var(--line)]"
+                                />
+                            </div>
+                        </div>
+                    ) : isFeishu ? (
                         <div className="space-y-6">
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <FeishuCredentialInput
@@ -578,6 +652,74 @@ export default function ImBotWizard({
                             ) : (
                                 <ArrowRight className="h-4 w-4" />
                             )}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Step 2 (DingTalk): Permissions & Capabilities guide */}
+            {isDingtalk && step === 2 && (
+                <div className="space-y-6">
+                    {/* Add robot capability */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">4. 添加机器人能力</h3>
+                        <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                            <li>在应用详情页，左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span></li>
+                            <li>找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击 <span className="font-medium text-[var(--ink)]">+ 添加</span></li>
+                        </ol>
+                        <img
+                            src={dingtalkStep2AddRobotImg}
+                            alt="钉钉添加应用能力 - 机器人"
+                            className="mt-4 w-full rounded-lg border border-[var(--line)]"
+                        />
+                    </div>
+
+                    {/* Configure robot + Stream mode */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">5. 配置机器人</h3>
+                        <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">机器人</span>，开启 <span className="font-medium text-[var(--ink)]">机器人配置</span> 开关</li>
+                            <li>填写机器人名称和简介</li>
+                            <li>消息接收模式选择 <span className="font-medium text-[var(--ink)]">Stream 模式</span>（无需公网服务器，推荐）</li>
+                            <li>点击 <span className="font-medium text-[var(--ink)]">发布</span> 保存机器人配置</li>
+                        </ol>
+                        <img
+                            src={dingtalkStep2StreamModeImg}
+                            alt="钉钉机器人配置 - Stream 模式"
+                            className="mt-4 w-full rounded-lg border border-[var(--line)]"
+                        />
+                    </div>
+
+                    {/* Publish version */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">6. 创建版本并发布</h3>
+                        <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                            <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span></li>
+                            <li>点击右上角 <span className="font-medium text-[var(--ink)]">创建新版本</span>，填写版本号和描述</li>
+                            <li>设置 <span className="font-medium text-[var(--ink)]">应用可用范围</span>（建议选择<span className="font-medium text-[var(--ink)]">全部员工</span>或目标范围）</li>
+                            <li>保存后提交发布，管理员审批通过后即可使用</li>
+                        </ol>
+                        <img
+                            src={dingtalkStep2PublishImg}
+                            alt="钉钉版本管理与发布"
+                            className="mt-4 w-full rounded-lg border border-[var(--line)]"
+                        />
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex justify-between">
+                        <button
+                            onClick={() => setStep(1)}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                        >
+                            上一步
+                        </button>
+                        <button
+                            onClick={handleNext}
+                            className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                        >
+                            下一步
+                            <ArrowRight className="h-4 w-4" />
                         </button>
                     </div>
                 </div>
@@ -771,7 +913,7 @@ export default function ImBotWizard({
                     {/* Actions */}
                     <div className="flex justify-between">
                         <button
-                            onClick={() => setStep(isFeishu ? 2 : 1)}
+                            onClick={() => setStep((isFeishu || isDingtalk) ? 2 : 1)}
                             className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
                         >
                             上一步
@@ -796,11 +938,12 @@ export default function ImBotWizard({
             {step === bindingStep && (
                 <div className="space-y-6">
                     {/* Platform-specific binding panel */}
-                    {isFeishu ? (
+                    {(isFeishu || isDingtalk) ? (
                         botStatus?.bindCode && (
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={allowedUsers.length > 0}
+                                platformName={isDingtalk ? '钉钉' : '飞书'}
                             />
                         )
                     ) : (
@@ -822,8 +965,8 @@ export default function ImBotWizard({
                         </>
                     )}
 
-                    {/* Feishu: show bound users read-only */}
-                    {isFeishu && allowedUsers.length > 0 && (
+                    {/* Feishu/DingTalk: show bound users read-only */}
+                    {(isFeishu || isDingtalk) && allowedUsers.length > 0 && (
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                             <WhitelistManager
                                 users={allowedUsers}

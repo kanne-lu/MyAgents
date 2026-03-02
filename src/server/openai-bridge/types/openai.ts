@@ -11,6 +11,8 @@ export interface OpenAIRequest {
   stream_options?: { include_usage?: boolean };
   tools?: OpenAIToolDefinition[];
   tool_choice?: OpenAIToolChoice;
+  parallel_tool_calls?: boolean;
+  reasoning_effort?: 'low' | 'medium' | 'high';
 }
 
 export type OpenAIMessage =
@@ -95,6 +97,12 @@ export interface OpenAIUsage {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+  };
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+  };
 }
 
 // Streaming types

@@ -4,6 +4,7 @@ import type { AnthropicStreamEvent, AnthropicResponse } from '../types/anthropic
 import type { OpenAIStreamChunk, OpenAIStreamToolCall } from '../types/openai';
 import { translateStopReason } from './response';
 import { generateMessageId, generateToolUseId } from '../utils/id';
+import { emptyUsage, mergeUsage, toAnthropicUsage, type UsageSnapshot } from './usage';
 
 interface ToolCallBuffer {
   id: string;
@@ -17,8 +18,7 @@ export class StreamTranslator {
   private contentIndex = 0;
   private activeBlockType: 'text' | 'thinking' | 'tool_use' | null = null;
   private toolCallBuffers = new Map<number, ToolCallBuffer>();
-  private inputTokens = 0;
-  private outputTokens = 0;
+  private usage: UsageSnapshot = emptyUsage();
   private hasEmittedStart = false;
   private hasFinished = false;
   private translateReasoning: boolean;
@@ -41,8 +41,7 @@ export class StreamTranslator {
 
     // Track usage
     if (chunk.usage) {
-      this.inputTokens = chunk.usage.prompt_tokens ?? this.inputTokens;
-      this.outputTokens = chunk.usage.completion_tokens ?? this.outputTokens;
+      this.usage = mergeUsage(this.usage, chunk.usage);
     }
 
     const choice = chunk.choices?.[0];
@@ -107,7 +106,7 @@ export class StreamTranslator {
           stop_reason: translateStopReason(choice.finish_reason),
           stop_sequence: null,
         },
-        usage: { output_tokens: this.outputTokens },
+        usage: { output_tokens: this.usage.outputTokens },
       });
       events.push({ type: 'message_stop' });
     }
@@ -161,7 +160,7 @@ export class StreamTranslator {
     events.push({
       type: 'message_delta',
       delta: { stop_reason: 'end_turn', stop_sequence: null },
-      usage: { output_tokens: this.outputTokens },
+      usage: { output_tokens: this.usage.outputTokens },
     });
     events.push({ type: 'message_stop' });
     return events;
@@ -184,7 +183,7 @@ export class StreamTranslator {
       model: this.requestModel,
       stop_reason: null,
       stop_sequence: null,
-      usage: { input_tokens: 0, output_tokens: 0 },
+      usage: toAnthropicUsage(this.usage),
     };
     return { type: 'message_start', message };
   }

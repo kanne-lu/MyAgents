@@ -3,6 +3,7 @@ import { ArrowLeft } from 'lucide-react';
 import type { ImPlatform } from '../../../shared/types/im';
 import telegramIcon from './assets/telegram.png';
 import feishuIcon from './assets/feishu.jpeg';
+import dingtalkIcon from './assets/dingtalk.svg';
 
 const platforms: { id: ImPlatform; name: string; description: string; icon: string }[] = [
     {
@@ -16,6 +17,12 @@ const platforms: { id: ImPlatform; name: string; description: string; icon: stri
         name: '飞书',
         description: '通过飞书自建应用 Bot 远程使用 AI Agent',
         icon: feishuIcon,
+    },
+    {
+        id: 'dingtalk',
+        name: '钉钉',
+        description: '通过钉钉自建应用 Bot 远程使用 AI Agent',
+        icon: dingtalkIcon,
     },
 ];
 

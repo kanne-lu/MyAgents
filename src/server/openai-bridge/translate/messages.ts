@@ -26,10 +26,22 @@ export function translateMessages(
     }
   }
 
-  // 2. Translate each message
+  // 2. Collect known tool_use_ids from assistant messages for orphan detection
+  const knownToolUseIds = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_use') {
+          knownToolUseIds.add(block.id);
+        }
+      }
+    }
+  }
+
+  // 3. Translate each message
   for (const msg of messages) {
     if (msg.role === 'user') {
-      translateUserMessage(msg, result);
+      translateUserMessage(msg, result, knownToolUseIds);
     } else if (msg.role === 'assistant') {
       translateAssistantMessage(msg, result);
     }
@@ -38,7 +50,11 @@ export function translateMessages(
   return result;
 }
 
-function translateUserMessage(msg: AnthropicMessage, result: OpenAIMessage[]): void {
+function translateUserMessage(
+  msg: AnthropicMessage,
+  result: OpenAIMessage[],
+  knownToolUseIds: Set<string>,
+): void {
   // String content → simple user message
   if (typeof msg.content === 'string') {
     result.push({ role: 'user', content: msg.content });
@@ -47,11 +63,16 @@ function translateUserMessage(msg: AnthropicMessage, result: OpenAIMessage[]): v
 
   // Block array: split tool_result blocks into separate tool messages
   const toolResults: AnthropicToolResultBlock[] = [];
+  const orphanToolResults: AnthropicToolResultBlock[] = [];
   const otherBlocks: AnthropicContentBlock[] = [];
 
   for (const block of msg.content) {
     if (block.type === 'tool_result') {
-      toolResults.push(block);
+      if (knownToolUseIds.has(block.tool_use_id)) {
+        toolResults.push(block);
+      } else {
+        orphanToolResults.push(block);
+      }
     } else if (block.type !== 'thinking') {
       // Filter out thinking blocks
       otherBlocks.push(block);
@@ -65,6 +86,17 @@ function translateUserMessage(msg: AnthropicMessage, result: OpenAIMessage[]): v
       tool_call_id: tr.tool_use_id,
       content: extractToolResultContent(tr),
     });
+  }
+
+  // Convert orphan tool_results to user text (session rewind can leave orphan references)
+  for (const tr of orphanToolResults) {
+    const content = extractToolResultContent(tr);
+    if (content) {
+      otherBlocks.push({
+        type: 'text',
+        text: `[Previous tool result]:\n${content}`,
+      });
+    }
   }
 
   // Emit remaining content as user message (if any)
@@ -120,12 +152,26 @@ function translateAssistantMessage(msg: AnthropicMessage, result: OpenAIMessage[
 }
 
 function extractToolResultContent(tr: AnthropicToolResultBlock): string {
-  if (!tr.content) return '';
-  if (typeof tr.content === 'string') return tr.content;
-  return tr.content
-    .filter((c): c is { type: 'text'; text: string } => c.type === 'text')
-    .map(c => c.text)
-    .join('\n');
+  const isError = tr.is_error === true;
+
+  if (!tr.content) return isError ? '<error></error>' : '';
+
+  let text: string;
+  if (typeof tr.content === 'string') {
+    text = tr.content;
+  } else {
+    const parts: string[] = [];
+    for (const c of tr.content) {
+      if (c.type === 'text') {
+        parts.push(c.text);
+      } else if (c.type === 'image') {
+        parts.push('[Image content omitted - tool returned an image]');
+      }
+    }
+    text = parts.join('\n');
+  }
+
+  return isError ? `<error>${text}</error>` : text;
 }
 
 function convertToOpenAIParts(blocks: AnthropicContentBlock[]): OpenAIContentPart[] {

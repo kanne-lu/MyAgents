@@ -178,6 +178,8 @@ type SendMessagePayload = {
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
     apiProtocol?: 'anthropic' | 'openai';
+    maxOutputTokens?: number;
+    upstreamFormat?: 'chat_completions' | 'responses';
   };
 };
 
@@ -196,6 +198,8 @@ type CronExecutePayload = {
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
     apiProtocol?: 'anthropic' | 'openai';
+    maxOutputTokens?: number;
+    upstreamFormat?: 'chat_completions' | 'responses';
   };
   /** Run mode: "single_session" (keep context) or "new_session" (fresh each time) */
   runMode?: 'single_session' | 'new_session';
@@ -1028,9 +1032,14 @@ async function main() {
     getUpstreamConfig: () => {
       const config = getOpenAiBridgeConfig();
       if (!config) throw new Error('Bridge not active');
-      return { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model };
+      return {
+        baseUrl: config.baseUrl,
+        apiKey: config.apiKey,
+        model: config.model,
+        maxOutputTokens: config.maxOutputTokens,
+        upstreamFormat: config.upstreamFormat,
+      };
     },
-    maxOutputTokens: 8192,
     logger: (msg) => console.log(msg),
   });
 
@@ -1651,6 +1660,140 @@ async function main() {
         }
       }
 
+      // ============= GLOBAL STATS API =============
+
+      // GET /api/global-stats?range=7d|30d|60d - Aggregated token usage across all sessions
+      if (pathname === '/api/global-stats' && request.method === 'GET') {
+        try {
+          const range = url.searchParams.get('range') || '30d';
+          if (!['7d', '30d', '60d'].includes(range)) {
+            return jsonResponse({ success: false, error: 'Invalid range. Use 7d, 30d, or 60d.' }, 400);
+          }
+
+          const allSessions = getAllSessionMetadata();
+
+          // Filter sessions by time range using lastActiveAt as a coarse pre-filter
+          const now = Date.now();
+          const rangeDays = range === '7d' ? 7 : range === '30d' ? 30 : 60;
+          const cutoff = now - rangeDays * 86400_000;
+
+          const sessions = allSessions.filter(s => new Date(s.lastActiveAt).getTime() >= cutoff);
+
+          // Aggregate summary from metadata.stats (fast, no JSONL reads)
+          const totalSessions = sessions.length;
+          let messageCount = 0;
+          let totalInputTokens = 0;
+          let totalOutputTokens = 0;
+          let totalCacheReadTokens = 0;
+          let totalCacheCreationTokens = 0;
+
+          for (const s of sessions) {
+            const stats = s.stats;
+            if (stats) {
+              messageCount += stats.messageCount ?? 0;
+              totalInputTokens += stats.totalInputTokens ?? 0;
+              totalOutputTokens += stats.totalOutputTokens ?? 0;
+              totalCacheReadTokens += stats.totalCacheReadTokens ?? 0;
+              totalCacheCreationTokens += stats.totalCacheCreationTokens ?? 0;
+            }
+          }
+
+          // Helper: convert ISO timestamp to local date string "YYYY-MM-DD"
+          const toLocalDate = (isoStr: string): string => {
+            const d = new Date(isoStr);
+            const y = d.getFullYear();
+            const mo = String(d.getMonth() + 1).padStart(2, '0');
+            const day = String(d.getDate()).padStart(2, '0');
+            return `${y}-${mo}-${day}`;
+          };
+
+          // Single pass through messages: aggregate both daily + byModel
+          const dailyMap: Record<string, { inputTokens: number; outputTokens: number; messageCount: number }> = {};
+          const byModel: Record<string, {
+            inputTokens: number;
+            outputTokens: number;
+            cacheReadTokens: number;
+            cacheCreationTokens: number;
+            count: number;
+          }> = {};
+
+          // Track the current user message date for daily bucketing
+          for (const s of sessions) {
+            const sessionData = getSessionData(s.id);
+            if (!sessionData) continue;
+
+            let lastUserDate = toLocalDate(s.createdAt); // fallback date for first assistant msg
+
+            for (const msg of sessionData.messages) {
+              if (msg.role === 'user') {
+                // Use user message timestamp for the date of this conversation turn
+                lastUserDate = msg.timestamp ? toLocalDate(msg.timestamp) : lastUserDate;
+              } else if (msg.role === 'assistant' && msg.usage) {
+                // Daily aggregation: attribute tokens to the date of the preceding user message
+                const date = msg.timestamp ? toLocalDate(msg.timestamp) : lastUserDate;
+                if (!dailyMap[date]) {
+                  dailyMap[date] = { inputTokens: 0, outputTokens: 0, messageCount: 0 };
+                }
+                dailyMap[date].inputTokens += msg.usage.inputTokens ?? 0;
+                dailyMap[date].outputTokens += msg.usage.outputTokens ?? 0;
+                dailyMap[date].messageCount++;
+
+                // byModel aggregation
+                if (msg.usage.modelUsage) {
+                  for (const [model, mu] of Object.entries(msg.usage.modelUsage)) {
+                    if (!byModel[model]) {
+                      byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
+                    }
+                    byModel[model].inputTokens += mu.inputTokens ?? 0;
+                    byModel[model].outputTokens += mu.outputTokens ?? 0;
+                    byModel[model].cacheReadTokens += mu.cacheReadTokens ?? 0;
+                    byModel[model].cacheCreationTokens += mu.cacheCreationTokens ?? 0;
+                    byModel[model].count++;
+                  }
+                } else {
+                  const model = msg.usage.model || 'unknown';
+                  if (!byModel[model]) {
+                    byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
+                  }
+                  byModel[model].inputTokens += msg.usage.inputTokens ?? 0;
+                  byModel[model].outputTokens += msg.usage.outputTokens ?? 0;
+                  byModel[model].cacheReadTokens += msg.usage.cacheReadTokens ?? 0;
+                  byModel[model].cacheCreationTokens += msg.usage.cacheCreationTokens ?? 0;
+                  byModel[model].count++;
+                }
+              }
+            }
+          }
+
+          // Sort daily entries chronologically
+          const daily = Object.entries(dailyMap)
+            .map(([date, d]) => ({ date, ...d }))
+            .sort((a, b) => a.date.localeCompare(b.date));
+
+          return jsonResponse({
+            success: true,
+            stats: {
+              summary: {
+                totalSessions,
+                messageCount,
+                totalInputTokens,
+                totalOutputTokens,
+                totalCacheReadTokens,
+                totalCacheCreationTokens,
+              },
+              daily,
+              byModel,
+            },
+          });
+        } catch (error) {
+          console.error('[global-stats] Error:', error);
+          return jsonResponse({
+            success: false,
+            error: error instanceof Error ? error.message : 'Unknown error',
+          }, 500);
+        }
+      }
+
       // ============= SESSION API =============
 
       // GET /sessions - List all sessions or filter by agentDir
@@ -1963,7 +2106,6 @@ async function main() {
 
       if (pathname === '/agent/dir' && request.method === 'GET') {
         try {
-          console.log('[agent] dir');
           const info = await buildDirectoryTree(currentAgentDir);
           return jsonResponse(info);
         } catch (error) {
@@ -2942,9 +3084,11 @@ async function main() {
             model?: string;
             authType?: string;
             apiProtocol?: string;
+            maxOutputTokens?: number;
+            upstreamFormat?: string;
           };
 
-          const { baseUrl, apiKey, model, authType, apiProtocol } = payload;
+          const { baseUrl, apiKey, model, authType, apiProtocol, maxOutputTokens, upstreamFormat } = payload;
 
           if (!baseUrl || !apiKey) {
             return jsonResponse({ success: false, error: 'baseUrl and apiKey are required.' }, 400);
@@ -2956,6 +3100,7 @@ async function main() {
           console.log(`[api/provider/verify] model: ${model ?? 'default'}`);
           console.log(`[api/provider/verify] authType: ${authType ?? 'both'}`);
           console.log(`[api/provider/verify] apiProtocol: ${apiProtocol ?? 'anthropic'}`);
+          console.log(`[api/provider/verify] maxOutputTokens: ${maxOutputTokens ?? 'none'}`);
 
           // Unified SDK verification for all protocols (Anthropic + OpenAI)
           // For OpenAI protocol: SDK → CLI → bridge loopback → upstream (end-to-end)
@@ -2963,6 +3108,8 @@ async function main() {
           const result = await verifyProviderViaSdk(
             baseUrl, apiKey, authType ?? 'both', model || undefined,
             apiProtocol === 'openai' ? 'openai' : undefined,
+            maxOutputTokens,
+            upstreamFormat === 'responses' ? 'responses' : undefined,
           );
 
           console.log(`[api/provider/verify] result:`, JSON.stringify(result));
@@ -3774,9 +3921,9 @@ async function main() {
         }
       }
 
-      // ============= SKILLS MANAGEMENT API =============
       // Security: Validate item names to prevent path traversal attacks
       // Supports Unicode (Chinese, Japanese, etc.) while maintaining security
+      // Defined here (before Rules and Skills APIs) so all endpoints can use it
       const isValidItemName = (name: string): boolean => {
         // Reject empty names
         if (!name || name.trim().length === 0) {
@@ -3807,6 +3954,220 @@ async function main() {
         // Allow Unicode letters, numbers, hyphens, underscores, spaces, and common punctuation
         return true;
       };
+
+      // ============= RULES FILES API =============
+      // Manage .claude/rules/*.md files (system prompt rules)
+
+      // GET /api/rules - List all rule files
+      if (pathname === '/api/rules' && request.method === 'GET') {
+        try {
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          if (!existsSync(rulesDir)) {
+            return jsonResponse({ success: true, files: [] });
+          }
+          const files = readdirSync(rulesDir)
+            .filter(f => f.endsWith('.md'))
+            .sort();
+          return jsonResponse({ success: true, files });
+        } catch (error) {
+          console.error('[api/rules] Error listing:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to list rules' },
+            500
+          );
+        }
+      }
+
+      // POST /api/rules - Create a new rule file
+      if (pathname === '/api/rules' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { name: string; content?: string };
+          if (!payload.name || !payload.name.trim()) {
+            return jsonResponse({ success: false, error: 'Name is required' }, 400);
+          }
+          // Ensure .md suffix
+          let filename = payload.name.trim();
+          if (!filename.endsWith('.md')) {
+            filename = filename + '.md';
+          }
+          const nameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(nameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid file name' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          mkdirSync(rulesDir, { recursive: true });
+          const filePath = join(rulesDir, filename);
+          if (existsSync(filePath)) {
+            return jsonResponse({ success: false, error: 'File already exists' }, 409);
+          }
+          writeFileSync(filePath, payload.content || '', 'utf-8');
+          return jsonResponse({ success: true, filename });
+        } catch (error) {
+          console.error('[api/rules] Error creating:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to create rule file' },
+            500
+          );
+        }
+      }
+
+      // PUT /api/rules/:filename/rename - Rename a rule file
+      if (pathname.startsWith('/api/rules/') && pathname.endsWith('/rename') && request.method === 'PUT') {
+        try {
+          const filename = decodeURIComponent(pathname.slice('/api/rules/'.length, -'/rename'.length));
+          if (!filename || !filename.endsWith('.md')) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const oldNameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(oldNameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const payload = await request.json() as { newName: string };
+          if (!payload.newName || !payload.newName.trim()) {
+            return jsonResponse({ success: false, error: 'New name is required' }, 400);
+          }
+          let newFilename = payload.newName.trim();
+          if (!newFilename.endsWith('.md')) {
+            newFilename = newFilename + '.md';
+          }
+          const newNameWithoutExt = newFilename.replace(/\.md$/, '');
+          if (!isValidItemName(newNameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid new file name' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          const oldPath = join(rulesDir, filename);
+          const newPath = join(rulesDir, newFilename);
+          if (!existsSync(oldPath)) {
+            return jsonResponse({ success: false, error: 'File not found' }, 404);
+          }
+          if (existsSync(newPath)) {
+            return jsonResponse({ success: false, error: 'Target filename already exists' }, 409);
+          }
+          renameSync(oldPath, newPath);
+          return jsonResponse({ success: true, filename: newFilename });
+        } catch (error) {
+          console.error('[api/rules] Error renaming:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to rename rule file' },
+            500
+          );
+        }
+      }
+
+      // GET /api/rules/:filename - Read a rule file
+      if (pathname.startsWith('/api/rules/') && request.method === 'GET') {
+        try {
+          const filename = decodeURIComponent(pathname.slice('/api/rules/'.length));
+          if (!filename || !filename.endsWith('.md')) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const nameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(nameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          const filePath = join(rulesDir, filename);
+          if (!existsSync(filePath)) {
+            return jsonResponse({ success: true, exists: false, content: '' });
+          }
+          const content = readFileSync(filePath, 'utf-8');
+          return jsonResponse({ success: true, exists: true, content });
+        } catch (error) {
+          console.error('[api/rules] Error reading:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to read rule file' },
+            500
+          );
+        }
+      }
+
+      // PUT /api/rules/:filename - Update a rule file
+      if (pathname.startsWith('/api/rules/') && request.method === 'PUT') {
+        try {
+          const filename = decodeURIComponent(pathname.slice('/api/rules/'.length));
+          if (!filename || !filename.endsWith('.md')) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const nameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(nameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const payload = await request.json() as { content: string };
+          if (typeof payload.content !== 'string') {
+            return jsonResponse({ success: false, error: 'Content must be a string' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          mkdirSync(rulesDir, { recursive: true });
+          const filePath = join(rulesDir, filename);
+          writeFileSync(filePath, payload.content, 'utf-8');
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/rules] Error updating:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to update rule file' },
+            500
+          );
+        }
+      }
+
+      // DELETE /api/rules/:filename - Delete a rule file
+      if (pathname.startsWith('/api/rules/') && request.method === 'DELETE') {
+        try {
+          const filename = decodeURIComponent(pathname.slice('/api/rules/'.length));
+          if (!filename || !filename.endsWith('.md')) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const nameWithoutExt = filename.replace(/\.md$/, '');
+          if (!isValidItemName(nameWithoutExt)) {
+            return jsonResponse({ success: false, error: 'Invalid filename' }, 400);
+          }
+          const queryAgentDir = url.searchParams.get('agentDir');
+          if (queryAgentDir && !isValidAgentDir(queryAgentDir).valid) {
+            return jsonResponse({ success: false, error: 'Invalid agentDir' }, 400);
+          }
+          const targetDir = queryAgentDir || currentAgentDir;
+          const rulesDir = join(targetDir, '.claude', 'rules');
+          const filePath = join(rulesDir, filename);
+          if (!existsSync(filePath)) {
+            return jsonResponse({ success: false, error: 'File not found' }, 404);
+          }
+          unlinkSync(filePath);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/rules] Error deleting:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to delete rule file' },
+            500
+          );
+        }
+      }
+
+      // ============= SKILLS MANAGEMENT API =============
 
       // Cross-platform home directory for user skills/commands
       const homeDir = getHomeDirOrNull() || '';

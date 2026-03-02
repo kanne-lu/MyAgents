@@ -4,9 +4,11 @@ import { Check, Copy, MessageSquare } from 'lucide-react';
 export default function BindCodePanel({
     bindCode,
     hasWhitelistUsers,
+    platformName = '飞书',
 }: {
     bindCode: string;
     hasWhitelistUsers: boolean;
+    platformName?: string;
 }) {
     const [copied, setCopied] = useState(false);
     const copyTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -39,7 +41,7 @@ export default function BindCodePanel({
             </div>
 
             <p className="mb-4 text-xs text-[var(--ink-muted)]">
-                在飞书中私聊 Bot 发送以下口令，即可自动绑定你的账号到白名单。
+                在{platformName}中私聊 Bot 发送以下口令，即可自动绑定你的账号到白名单。
             </p>
 
             {/* Bind code display */}
@@ -60,7 +62,7 @@ export default function BindCodePanel({
             <div className="mt-4 space-y-2 text-xs text-[var(--ink-muted)]">
                 <div className="flex items-start gap-2">
                     <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-[10px] font-bold text-[var(--button-primary-text)]">1</span>
-                    <span>在飞书中找到并打开 Bot 的私聊</span>
+                    <span>在{platformName}中找到并打开 Bot 的私聊</span>
                 </div>
                 <div className="flex items-start gap-2">
                     <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-[10px] font-bold text-[var(--button-primary-text)]">2</span>

@@ -3,12 +3,12 @@
 /**
  * IM platform type
  */
-export type ImPlatform = 'telegram' | 'feishu';
+export type ImPlatform = 'telegram' | 'feishu' | 'dingtalk';
 
 /**
  * Message source identifier
  */
-export type MessageSource = 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
+export type MessageSource = 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group' | 'dingtalk_private' | 'dingtalk_group';
 
 /**
  * Metadata attached to each message indicating its origin
@@ -68,6 +68,12 @@ export interface ImBotConfig {
   // ===== Feishu-specific credentials =====
   feishuAppId?: string;
   feishuAppSecret?: string;
+
+  // ===== DingTalk-specific credentials =====
+  dingtalkClientId?: string;
+  dingtalkClientSecret?: string;
+  dingtalkUseAiCard?: boolean;
+  dingtalkCardTemplateId?: string;
 
   // ===== AI config (independent from Desktop client) =====
   providerId?: string;          // Provider ID (e.g. 'anthropic-sub', 'deepseek')
@@ -212,6 +218,26 @@ export const DEFAULT_FEISHU_BOT_CONFIG: ImBotConfig = {
 };
 
 /**
+ * Default DingTalk Bot configuration
+ */
+export const DEFAULT_DINGTALK_BOT_CONFIG: ImBotConfig = {
+  id: '',           // Generated on creation
+  name: '钉钉 Bot',
+  platform: 'dingtalk',
+  botToken: '',     // Not used for DingTalk
+  allowedUsers: [],
+  dingtalkClientId: '',
+  dingtalkClientSecret: '',
+  dingtalkUseAiCard: false,
+  providerId: undefined,
+  model: undefined,
+  permissionMode: 'fullAgency',
+  mcpEnabledServers: undefined,
+  enabled: false,
+  setupCompleted: false,
+};
+
+/**
  * Source display labels
  */
 export const SOURCE_LABELS: Record<MessageSource, string> = {
@@ -220,6 +246,8 @@ export const SOURCE_LABELS: Record<MessageSource, string> = {
   telegram_group: 'Telegram 群聊',
   feishu_private: '飞书私聊',
   feishu_group: '飞书群聊',
+  dingtalk_private: '钉钉私聊',
+  dingtalk_group: '钉钉群聊',
 };
 
 /**
@@ -231,4 +259,6 @@ export const SOURCE_ICONS: Record<MessageSource, string> = {
   telegram_group: '👥',
   feishu_private: '📱',
   feishu_group: '👥',
+  dingtalk_private: '📱',
+  dingtalk_group: '👥',
 };

@@ -151,3 +151,43 @@ export async function getSessionStats(sessionId: string): Promise<SessionDetaile
         return null;
     }
 }
+
+// ============= Global Stats =============
+
+export interface GlobalStats {
+    summary: {
+        totalSessions: number;
+        messageCount: number;
+        totalInputTokens: number;
+        totalOutputTokens: number;
+        totalCacheReadTokens: number;
+        totalCacheCreationTokens: number;
+    };
+    daily: Array<{
+        date: string;
+        inputTokens: number;
+        outputTokens: number;
+        messageCount: number;
+    }>;
+    byModel: Record<string, {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens: number;
+        cacheCreationTokens: number;
+        count: number;
+    }>;
+}
+
+/**
+ * Get global token usage statistics
+ */
+export async function getGlobalStats(range: '7d' | '30d' | '60d'): Promise<GlobalStats | null> {
+    try {
+        const result = await apiGetJson<{ success: boolean; stats: GlobalStats }>(
+            `/api/global-stats?range=${range}`
+        );
+        return result.stats ?? null;
+    } catch {
+        return null;
+    }
+}

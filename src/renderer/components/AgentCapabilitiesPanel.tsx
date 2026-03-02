@@ -15,7 +15,6 @@ import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
-import type { Tab as WorkspaceTab } from './WorkspaceConfigPanel';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 
 interface CapabilityItem {
@@ -32,8 +31,8 @@ interface AgentCapabilitiesPanelProps {
     enabledCommands?: CapabilityItem[];
     /** Insert /command into chat input */
     onInsertSlashCommand?: (command: string) => void;
-    /** Open settings panel to a specific tab */
-    onOpenSettings?: (tab: Extract<WorkspaceTab, 'skills-commands' | 'agents'>) => void;
+    /** Open settings panel (skills tab) */
+    onOpenSettings?: () => void;
     /** Set of global skill folderNames (for hiding "sync to global" on already-global skills) */
     globalSkillFolderNames?: Set<string>;
     /** Copy a project skill to global skills */
@@ -172,13 +171,13 @@ export default memo(function AgentCapabilitiesPanel({
     }, []);
 
     // Navigate to the correct settings panel based on scope
-    const openSettingsForScope = useCallback((scope: 'user' | 'project' | undefined, projectTab: Extract<WorkspaceTab, 'skills-commands' | 'agents'>, globalSection: string) => {
+    const openSettingsForScope = useCallback((scope: 'user' | 'project' | undefined, globalSection: string) => {
         if (scope === 'user') {
             // Global items → open global Settings page
             window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, { detail: { section: globalSection } }));
         } else {
-            // Project items → open project WorkspaceConfigPanel
-            onOpenSettings?.(projectTab);
+            // Project items → open project WorkspaceConfigPanel (skills tab)
+            onOpenSettings?.();
         }
         setCtxMenu(null);
     }, [onOpenSettings]);
@@ -190,7 +189,7 @@ export default memo(function AgentCapabilitiesPanel({
         const items: ContextMenuItem[] = [
             {
                 label: '设置',
-                onClick: () => openSettingsForScope(scope, 'agents', 'agents'),
+                onClick: () => openSettingsForScope(scope, 'agents'),
             },
         ];
         setCtxMenu({ x: e.clientX, y: e.clientY, items });
@@ -202,7 +201,7 @@ export default memo(function AgentCapabilitiesPanel({
         const items: ContextMenuItem[] = [
             {
                 label: '设置',
-                onClick: () => openSettingsForScope(scope, 'skills-commands', 'skills'),
+                onClick: () => openSettingsForScope(scope, 'skills'),
             },
         ];
         // Project skills can be synced to global (hide if already exists globally)

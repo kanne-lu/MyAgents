@@ -85,10 +85,10 @@ export interface AnthropicToolDefinition {
 }
 
 export type AnthropicToolChoice =
-  | { type: 'auto' }
-  | { type: 'any' }
+  | { type: 'auto'; disable_parallel_tool_use?: boolean }
+  | { type: 'any'; disable_parallel_tool_use?: boolean }
   | { type: 'none' }
-  | { type: 'tool'; name: string };
+  | { type: 'tool'; name: string; disable_parallel_tool_use?: boolean };
 
 // Response types
 

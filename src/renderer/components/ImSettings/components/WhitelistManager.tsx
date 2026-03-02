@@ -28,8 +28,8 @@ export default function WhitelistManager({
         onChange(users.filter(u => u !== user));
     }, [users, onChange]);
 
-    // Feishu: read-only display (users can't know their Open ID)
-    if (platform === 'feishu') {
+    // Feishu/DingTalk: read-only display (users can't know their internal ID)
+    if (platform === 'feishu' || platform === 'dingtalk') {
         return (
             <div className="space-y-3">
                 <label className="text-sm font-medium text-[var(--ink)]">已绑定用户</label>

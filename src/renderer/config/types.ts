@@ -119,6 +119,15 @@ export interface Provider {
   // API 协议 (默认 'anthropic')
   apiProtocol?: ApiProtocol;
 
+  // 上游 API 格式（仅 apiProtocol === 'openai' 时生效）
+  // 'chat_completions' (默认): OpenAI Chat Completions API
+  // 'responses': OpenAI Responses API
+  upstreamFormat?: 'chat_completions' | 'responses';
+
+  // 最大输出 token 数限制（仅 apiProtocol === 'openai' 时生效）
+  // Bridge 会将 SDK 发送的 max_tokens 截断到此值
+  maxOutputTokens?: number;
+
   // 官网链接 (用于"去官网"入口)
   websiteUrl?: string;
 
@@ -273,6 +282,9 @@ export interface AppConfig {
   imBotConfig?: import('../../shared/types/im').ImBotConfig;
   // Multi-bot configuration (v0.1.19+)
   imBotConfigs?: import('../../shared/types/im').ImBotConfig[];
+
+  // ===== Dismiss Flags =====
+  dismissClaudeEnvWarning?: boolean; // 不再提示 ~/.claude/settings.json env 覆盖警告
 
   // ===== Global Provider Cache (v0.1.26) =====
   /** Pre-built available providers JSON for IM Bot /provider and /model commands.

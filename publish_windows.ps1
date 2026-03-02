@@ -484,40 +484,16 @@ else {
 Write-Host ""
 
 # ========================================
-# 上传到 GitHub Release
+# 上传到 GitHub Release (调用独立脚本)
 # ========================================
 Write-Host "上传到 GitHub Release..." -ForegroundColor Cyan
 
-$ghCmd = Get-Command gh -ErrorAction SilentlyContinue
-if ($ghCmd) {
-    $ghFiles = @()
-    if ($NsisExe) { $ghFiles += $NsisExe.FullName }
-    if ($PortableZip) { $ghFiles += $PortableZip.FullName }
-
-    if ($ghFiles.Count -gt 0) {
-        # 检查 Release 是否存在
-        $releaseCheck = & gh release view "v$Version" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "  上传 $($ghFiles.Count) 个文件到 GitHub Release v$Version..." -ForegroundColor Cyan
-            & gh release upload "v$Version" @ghFiles --clobber
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "  [OK] GitHub Release 上传完成" -ForegroundColor Green
-                foreach ($f in $ghFiles) {
-                    Write-Host "    - $(Split-Path $f -Leaf)" -ForegroundColor White
-                }
-            } else {
-                Write-Host "  [!] GitHub Release 上传失败，请手动上传" -ForegroundColor Yellow
-            }
-        } else {
-            Write-Host "  [!] GitHub Release v$Version 不存在，跳过上传" -ForegroundColor Yellow
-            Write-Host "      请先通过 merge-release 流程创建 Release" -ForegroundColor Yellow
-        }
-    } else {
-        Write-Host "  [!] 无文件可上传" -ForegroundColor Yellow
-    }
-} else {
-    Write-Host "  [!] gh CLI 未安装，跳过 GitHub Release 上传" -ForegroundColor Yellow
-    Write-Host "      安装: winget install --id GitHub.cli" -ForegroundColor Yellow
+$ghScript = Join-Path $ProjectDir "upload_github_release_win.ps1"
+try {
+    & $ghScript
+    Write-Host "  [OK] GitHub Release 上传完成" -ForegroundColor Green
+} catch {
+    Write-Host "  [!] GitHub Release 上传失败，可稍后运行 .\upload_github_release_win.ps1 重试" -ForegroundColor Yellow
 }
 
 Write-Host ""

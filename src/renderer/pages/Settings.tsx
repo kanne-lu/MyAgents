@@ -14,6 +14,7 @@ import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
 import GlobalAgentsPanel from '@/components/GlobalAgentsPanel';
 import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import { ImSettings } from '@/components/ImSettings';
+import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
     getModelsDisplay,
     PRESET_PROVIDERS,
@@ -29,6 +30,7 @@ import {
     PROXY_DEFAULTS,
     isValidProxyHost,
     getPresetMcpServer,
+    type ProviderVerifyStatus,
 } from '@/config/types';
 import {
     getAllMcpServers,
@@ -50,13 +52,21 @@ import {
     UNLOCK_CONFIG,
 } from '@/utils/developerMode';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
+import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { getPlatform } from '@/analytics/device';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import type { LogEntry } from '@/types/log';
 import BugReportOverlay from '@/components/BugReportOverlay';
 
+/** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
+function parsePositiveInt(value: string): number | undefined {
+  const n = parseInt(value, 10);
+  return Number.isNaN(n) || n <= 0 ? undefined : n;
+}
+
 // Settings sub-sections
-type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'im' | 'about';
+type SettingsSection = 'general' | 'providers' | 'mcp' | 'skills' | 'agents' | 'im' | 'usage-stats' | 'about';
 
 import type { SubscriptionStatusWithVerify } from '@/types/subscription';
 
@@ -76,6 +86,23 @@ interface CustomProviderForm {
     models: string[];  // 支持多个模型 ID
     newModelInput: string;  // 用于输入新模型的临时值
     apiKey: string;
+    maxOutputTokens: string;  // 最大输出 token（字符串便于输入，空串=不限制）
+    upstreamFormat: 'chat_completions' | 'responses';  // 上游 API 格式
+}
+
+/** Check if a provider is usable (duplicated from BugReportOverlay — only 2 call sites) */
+function isProviderAvailable(
+    provider: Provider,
+    apiKeys: Record<string, string>,
+    verifyStatus: Record<string, ProviderVerifyStatus>,
+): boolean {
+    if (provider.type === 'subscription') {
+        const status = verifyStatus[provider.id];
+        return status?.status === 'valid' && !!status.accountEmail;
+    }
+    const hasKey = !!apiKeys[provider.id];
+    const isInvalid = verifyStatus[provider.id]?.status === 'invalid';
+    return hasKey && !isInvalid;
 }
 
 const EMPTY_CUSTOM_FORM: CustomProviderForm = {
@@ -87,6 +114,8 @@ const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     models: [],
     newModelInput: '',
     apiKey: '',
+    maxOutputTokens: '8192',
+    upstreamFormat: 'chat_completions',
 };
 
 // Provider edit form data (for managing existing providers)
@@ -101,6 +130,8 @@ interface ProviderEditForm {
     editApiProtocol?: ApiProtocol;
     editBaseUrl?: string;
     editAuthType?: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
+    editMaxOutputTokens?: string;
+    editUpstreamFormat?: 'chat_completions' | 'responses';
 }
 
 interface SettingsProps {
@@ -124,7 +155,7 @@ interface SettingsProps {
     onRestartAndUpdate?: () => void;
 }
 
-const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'im', 'about'];
+const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'agents', 'im', 'usage-stats', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
 const ModelTagList = React.memo(function ModelTagList({
@@ -438,6 +469,8 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
     // Ref for verify timeout cleanup
     const verifyTimeoutRef = useRef<Record<string, NodeJS.Timeout>>({});
+    // Per-provider generation counter to prevent stale verify results from overwriting newer ones
+    const verifyGenRef = useRef<Record<string, number>>({});
 
     // MCP state
     const [mcpServers, setMcpServersState] = useState<McpServerDefinition[]>([]);
@@ -450,7 +483,45 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         show: boolean;
         runtimeName?: string;
         downloadUrl?: string;
+        command?: string;
     }>({ show: false });
+
+    // Whether any provider is available (for "AI 小助理安装" button)
+    const showAiInstallButton = useMemo(
+        () => providers.some(p => p.models.length > 0 && isProviderAvailable(p, apiKeys, providerVerifyStatus)),
+        [providers, apiKeys, providerVerifyStatus],
+    );
+
+    const handleAiInstallRuntime = useCallback(() => {
+        const { runtimeName, command, downloadUrl } = runtimeDialog;
+        setRuntimeDialog({ show: false });
+
+        const platform = getPlatform();
+        const osName = platform.startsWith('darwin') ? 'macOS'
+            : platform.startsWith('windows') ? 'Windows'
+            : platform.startsWith('linux') ? 'Linux'
+            : platform;
+
+        const prompt = [
+            `## 依赖安装请求`,
+            ``,
+            `用户尝试启用一个 MCP 服务，但系统缺少必要的运行环境。`,
+            ``,
+            `- **缺少的运行环境**: ${runtimeName || command || '未知'}`,
+            `- **缺少的命令**: \`${command || '未知'}\``,
+            ...(downloadUrl ? [`- **官方下载地址**: ${downloadUrl}`] : []),
+            `- **操作系统**: ${osName}`,
+            ``,
+            `请帮助用户安装 \`${command}\`，安装完成后告知用户回到设置页面重新启用 MCP 服务。`,
+        ].join('\n');
+
+        const availableProvider = providers.find(p => p.models.length > 0 && isProviderAvailable(p, apiKeys, providerVerifyStatus));
+
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
+            detail: { description: prompt, providerId: availableProvider?.id, appVersion },
+        }));
+    }, [runtimeDialog, appVersion, providers, apiKeys, providerVerifyStatus]);
+
     // Builtin MCP settings dialog state
     const [builtinMcpSettings, setBuiltinMcpSettings] = useState<{
         server: McpServerDefinition;
@@ -577,6 +648,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                         show: true,
                         runtimeName: result.error.runtimeName,
                         downloadUrl: result.error.downloadUrl,
+                        command: result.error.command,
                     });
                 } else {
                     // Show toast for other errors
@@ -982,8 +1054,12 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
             return;
         }
 
+        // Bump generation counter — any in-flight verify for this provider becomes stale
+        const gen = (verifyGenRef.current[provider.id] ?? 0) + 1;
+        verifyGenRef.current[provider.id] = gen;
+
         console.log('[verifyProvider] ========================');
-        console.log('[verifyProvider] Provider:', provider.id, provider.name);
+        console.log('[verifyProvider] Provider:', provider.id, provider.name, `(gen=${gen})`);
         console.log('[verifyProvider] baseUrl:', provider.config.baseUrl);
         console.log('[verifyProvider] model:', provider.primaryModel);
         console.log('[verifyProvider] apiKey:', apiKey.slice(0, 10) + '...');
@@ -998,7 +1074,15 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 model: provider.primaryModel,
                 authType: provider.authType,
                 apiProtocol: provider.apiProtocol,
+                maxOutputTokens: provider.maxOutputTokens,
+                upstreamFormat: provider.upstreamFormat,
             });
+
+            // Stale check: if a newer verify was triggered while we were waiting, discard this result
+            if (verifyGenRef.current[provider.id] !== gen) {
+                console.log(`[verifyProvider] Discarding stale result (gen=${gen}, current=${verifyGenRef.current[provider.id]})`);
+                return;
+            }
 
             console.log('[verifyProvider] Result:', JSON.stringify(result, null, 2));
             console.log('[verifyProvider] ========================');
@@ -1013,6 +1097,9 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 toastRef.current.error(`${provider.name}: ${errorMsg}`);
             }
         } catch (err) {
+            // Stale check on error path too
+            if (verifyGenRef.current[provider.id] !== gen) return;
+
             console.error('[verifyProvider] Exception:', err);
             await saveProviderVerifyStatus(provider.id, 'invalid');
             const errorMsg = err instanceof Error ? err.message : '验证失败';
@@ -1022,7 +1109,10 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
             }));
             toastRef.current.error(`${provider.name}: ${errorMsg}`);
         } finally {
-            setVerifyLoading((prev) => ({ ...prev, [provider.id]: false }));
+            // Only clear loading if this is still the latest generation
+            if (verifyGenRef.current[provider.id] === gen) {
+                setVerifyLoading((prev) => ({ ...prev, [provider.id]: false }));
+            }
         }
     }, [saveProviderVerifyStatus]);
 
@@ -1066,6 +1156,8 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
             isBuiltin: false,
             authType: customForm.authType,
             apiProtocol: customForm.apiProtocol === 'openai' ? 'openai' : undefined,
+            ...(customForm.apiProtocol === 'openai' && customForm.maxOutputTokens ? { maxOutputTokens: parsePositiveInt(customForm.maxOutputTokens) } : {}),
+            ...(customForm.apiProtocol === 'openai' && customForm.upstreamFormat !== 'chat_completions' ? { upstreamFormat: customForm.upstreamFormat } : {}),
             config: {
                 baseUrl: customForm.baseUrl,
             },
@@ -1153,6 +1245,8 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 editApiProtocol: provider.apiProtocol ?? 'anthropic',
                 editBaseUrl: provider.config.baseUrl || '',
                 editAuthType: provider.authType === 'api_key' ? 'api_key' : 'auth_token',
+                editMaxOutputTokens: String(provider.maxOutputTokens ?? 8192),
+                editUpstreamFormat: provider.upstreamFormat ?? 'chat_completions',
             }),
         });
     };
@@ -1249,6 +1343,8 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 cloudProvider: editCloudProvider?.trim() || '自定义',
                 authType: editAuthType ?? provider.authType ?? 'auth_token',
                 apiProtocol: editApiProtocol === 'openai' ? 'openai' : undefined,
+                maxOutputTokens: editApiProtocol === 'openai' && editingProvider?.editMaxOutputTokens ? parsePositiveInt(editingProvider.editMaxOutputTokens) : undefined,
+                upstreamFormat: editApiProtocol === 'openai' && editingProvider?.editUpstreamFormat !== 'chat_completions' ? editingProvider?.editUpstreamFormat : undefined,
                 config: {
                     ...provider.config,
                     baseUrl: editBaseUrl.trim(),
@@ -1424,6 +1520,15 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                         聊天机器人 Bot
                     </button>
                     <button
+                        onClick={() => setActiveSection('usage-stats')}
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'usage-stats'
+                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                    >
+                        使用统计
+                    </button>
+                    <button
                         onClick={() => setActiveSection('general')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'general'
                             ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
@@ -1458,6 +1563,13 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 {activeSection === 'im' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
                         <ImSettings />
+                    </div>
+                )}
+
+                {/* Usage Stats section */}
+                {activeSection === 'usage-stats' && (
+                    <div className="mx-auto max-w-4xl px-8 py-8">
+                        <UsageStatsPanel />
                     </div>
                 )}
 
@@ -2152,9 +2264,9 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                 <div className="flex items-center justify-between">
                                     <div>
-                                        <h3 className="text-base font-medium text-[var(--ink)]">AI 反馈答疑</h3>
+                                        <h3 className="text-base font-medium text-[var(--ink)]">AI 小助理</h3>
                                         <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                            AI 将分析本地日志进行答疑与上报问题或建议
+                                            AI 小助理将分析本地日志进行功能答疑、上报问题或建议
                                         </p>
                                     </div>
                                     <button
@@ -2938,7 +3050,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                             onChange={() => setCustomForm((p) => ({ ...p, apiProtocol: 'anthropic', authType: 'auth_token' }))}
                                             className="accent-[var(--ink)]"
                                         />
-                                        <span className="text-sm text-[var(--ink)]">Anthropic 兼容</span>
+                                        <span className="text-sm text-[var(--ink)]">Anthropic 协议</span>
                                     </label>
                                     <label className="flex items-center gap-2 cursor-pointer">
                                         <input
@@ -2949,7 +3061,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                             onChange={() => setCustomForm((p) => ({ ...p, apiProtocol: 'openai', authType: 'api_key' }))}
                                             className="accent-[var(--ink)]"
                                         />
-                                        <span className="text-sm text-[var(--ink)]">OpenAI 兼容</span>
+                                        <span className="text-sm text-[var(--ink)]">OpenAI 协议</span>
                                     </label>
                                 </div>
                             </div>
@@ -2967,36 +3079,81 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                 />
                             </div>
 
-                            <div>
-                                <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
-                                <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
-                                    请根据供应商认证参数进行选择
-                                </p>
-                                <div className="flex gap-4">
-                                    <label className="flex items-center gap-2 cursor-pointer">
+                            {customForm.apiProtocol === 'openai' && (
+                                <>
+                                    <div>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
                                         <input
-                                            type="radio"
-                                            name="create-authType"
-                                            value="auth_token"
-                                            checked={customForm.authType === 'auth_token'}
-                                            onChange={() => setCustomForm((p) => ({ ...p, authType: 'auth_token' }))}
-                                            className="accent-[var(--ink)]"
+                                            type="number"
+                                            value={customForm.maxOutputTokens}
+                                            onChange={(e) => setCustomForm((p) => ({ ...p, maxOutputTokens: e.target.value }))}
+                                            placeholder="8192"
+                                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
                                         />
-                                        <span className="text-sm text-[var(--ink)]">AUTH_TOKEN</span>
-                                    </label>
-                                    <label className="flex items-center gap-2 cursor-pointer">
-                                        <input
-                                            type="radio"
-                                            name="create-authType"
-                                            value="api_key"
-                                            checked={customForm.authType === 'api_key'}
-                                            onChange={() => setCustomForm((p) => ({ ...p, authType: 'api_key' }))}
-                                            className="accent-[var(--ink)]"
-                                        />
-                                        <span className="text-sm text-[var(--ink)]">API_KEY</span>
-                                    </label>
+                                    </div>
+                                    <div>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">接口格式</label>
+                                        <div className="flex gap-4">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input
+                                                    type="radio"
+                                                    name="create-upstreamFormat"
+                                                    value="chat_completions"
+                                                    checked={customForm.upstreamFormat === 'chat_completions'}
+                                                    onChange={() => setCustomForm((p) => ({ ...p, upstreamFormat: 'chat_completions' }))}
+                                                    className="accent-[var(--ink)]"
+                                                />
+                                                <span className="text-sm text-[var(--ink)]">Chat Completions</span>
+                                            </label>
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input
+                                                    type="radio"
+                                                    name="create-upstreamFormat"
+                                                    value="responses"
+                                                    checked={customForm.upstreamFormat === 'responses'}
+                                                    onChange={() => setCustomForm((p) => ({ ...p, upstreamFormat: 'responses' }))}
+                                                    className="accent-[var(--ink)]"
+                                                />
+                                                <span className="text-sm text-[var(--ink)]">Responses API</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+
+                            {/* Auth Type - only meaningful for Anthropic protocol (controls x-api-key vs Authorization header) */}
+                            {customForm.apiProtocol !== 'openai' && (
+                                <div>
+                                    <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
+                                    <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
+                                        请根据供应商认证参数进行选择
+                                    </p>
+                                    <div className="flex gap-4">
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="radio"
+                                                name="create-authType"
+                                                value="auth_token"
+                                                checked={customForm.authType === 'auth_token'}
+                                                onChange={() => setCustomForm((p) => ({ ...p, authType: 'auth_token' }))}
+                                                className="accent-[var(--ink)]"
+                                            />
+                                            <span className="text-sm text-[var(--ink)]">AUTH_TOKEN</span>
+                                        </label>
+                                        <label className="flex items-center gap-2 cursor-pointer">
+                                            <input
+                                                type="radio"
+                                                name="create-authType"
+                                                value="api_key"
+                                                checked={customForm.authType === 'api_key'}
+                                                onChange={() => setCustomForm((p) => ({ ...p, authType: 'api_key' }))}
+                                                className="accent-[var(--ink)]"
+                                            />
+                                            <span className="text-sm text-[var(--ink)]">API_KEY</span>
+                                        </label>
+                                    </div>
                                 </div>
-                            </div>
+                            )}
 
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
@@ -3169,7 +3326,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                                 onChange={() => setEditingProvider((p) => p ? { ...p, editApiProtocol: 'anthropic', editAuthType: 'auth_token' } : null)}
                                                 className="accent-[var(--ink)]"
                                             />
-                                            <span className="text-sm text-[var(--ink)]">Anthropic 兼容</span>
+                                            <span className="text-sm text-[var(--ink)]">Anthropic 协议</span>
                                         </label>
                                         <label className="flex items-center gap-2 cursor-pointer">
                                             <input
@@ -3180,7 +3337,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                                 onChange={() => setEditingProvider((p) => p ? { ...p, editApiProtocol: 'openai', editAuthType: 'api_key' } : null)}
                                                 className="accent-[var(--ink)]"
                                             />
-                                            <span className="text-sm text-[var(--ink)]">OpenAI 兼容</span>
+                                            <span className="text-sm text-[var(--ink)]">OpenAI 协议</span>
                                         </label>
                                     </div>
                                 </div>
@@ -3206,8 +3363,51 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                 )}
                             </div>
 
-                            {/* Auth Type - only for custom providers */}
-                            {!editingProvider.provider.isBuiltin && (
+                            {/* OpenAI Bridge Settings - only for custom providers with OpenAI protocol */}
+                            {!editingProvider.provider.isBuiltin && editingProvider.editApiProtocol === 'openai' && (
+                                <>
+                                    <div>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                        <input
+                                            type="number"
+                                            value={editingProvider.editMaxOutputTokens || ''}
+                                            onChange={(e) => setEditingProvider((p) => p ? { ...p, editMaxOutputTokens: e.target.value } : null)}
+                                            placeholder="8192"
+                                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">接口格式</label>
+                                        <div className="flex gap-4">
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input
+                                                    type="radio"
+                                                    name="edit-upstreamFormat"
+                                                    value="chat_completions"
+                                                    checked={(editingProvider.editUpstreamFormat || 'chat_completions') === 'chat_completions'}
+                                                    onChange={() => setEditingProvider((p) => p ? { ...p, editUpstreamFormat: 'chat_completions' } : null)}
+                                                    className="accent-[var(--ink)]"
+                                                />
+                                                <span className="text-sm text-[var(--ink)]">Chat Completions</span>
+                                            </label>
+                                            <label className="flex items-center gap-2 cursor-pointer">
+                                                <input
+                                                    type="radio"
+                                                    name="edit-upstreamFormat"
+                                                    value="responses"
+                                                    checked={editingProvider.editUpstreamFormat === 'responses'}
+                                                    onChange={() => setEditingProvider((p) => p ? { ...p, editUpstreamFormat: 'responses' } : null)}
+                                                    className="accent-[var(--ink)]"
+                                                />
+                                                <span className="text-sm text-[var(--ink)]">Responses API</span>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+
+                            {/* Auth Type - only for custom providers with Anthropic protocol */}
+                            {!editingProvider.provider.isBuiltin && editingProvider.editApiProtocol !== 'openai' && (
                                 <div>
                                     <label className="mb-0.5 block text-sm font-medium text-[var(--ink)]">认证方式</label>
                                     <p className="mb-1.5 text-xs text-[var(--ink-muted)]">
@@ -3353,33 +3553,48 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
             {/* Runtime not found dialog */}
             {runtimeDialog.show && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-                    <div className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
+                    onClick={() => setRuntimeDialog({ show: false })}
+                >
+                    <div
+                        className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl"
+                        onClick={e => e.stopPropagation()}
+                    >
                         <div className="flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--warning-bg)]">
                                 <AlertCircle className="h-5 w-5 text-[var(--warning)]" />
                             </div>
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">缺少运行环境</h3>
+                            <h3 className="flex-1 text-lg font-semibold text-[var(--ink)]">缺少运行环境</h3>
+                            <button
+                                onClick={() => setRuntimeDialog({ show: false })}
+                                aria-label="关闭"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            >
+                                <X className="h-4 w-4" />
+                            </button>
                         </div>
                         <p className="mt-4 text-sm text-[var(--ink-muted)]">
                             此 MCP 服务依赖 <span className="font-medium text-[var(--ink)]">{runtimeDialog.runtimeName}</span> 运行，请先安装后再启用。
                         </p>
                         <div className="mt-6 flex gap-3">
-                            <button
-                                onClick={() => setRuntimeDialog({ show: false })}
-                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
-                            >
-                                取消
-                            </button>
-                            <div onClick={() => setRuntimeDialog({ show: false })} className="flex-1">
+                            <div className="flex-1" onClick={() => setRuntimeDialog({ show: false })}>
                                 <ExternalLink
                                     href={runtimeDialog.downloadUrl || '#'}
-                                    className="flex w-full items-center justify-center gap-2 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-strong)]"
+                                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
                                 >
                                     去官网下载
                                     <ExternalLinkIcon className="h-3.5 w-3.5" />
                                 </ExternalLink>
                             </div>
+                            {showAiInstallButton && (
+                                <button
+                                    onClick={handleAiInstallRuntime}
+                                    className="flex-1 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-strong)]"
+                                >
+                                    让 AI 小助理安装
+                                </button>
+                            )}
                         </div>
                     </div>
                 </div>
