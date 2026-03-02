@@ -1068,6 +1068,8 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 model: provider.primaryModel,
                 authType: provider.authType,
                 apiProtocol: provider.apiProtocol,
+                maxOutputTokens: provider.maxOutputTokens,
+                upstreamFormat: provider.upstreamFormat,
             });
 
             console.log('[verifyProvider] Result:', JSON.stringify(result, null, 2));
@@ -1225,7 +1227,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 editApiProtocol: provider.apiProtocol ?? 'anthropic',
                 editBaseUrl: provider.config.baseUrl || '',
                 editAuthType: provider.authType === 'api_key' ? 'api_key' : 'auth_token',
-                editMaxOutputTokens: provider.maxOutputTokens ? String(provider.maxOutputTokens) : '',
+                editMaxOutputTokens: String(provider.maxOutputTokens ?? 8192),
                 editUpstreamFormat: provider.upstreamFormat ?? 'chat_completions',
             }),
         });

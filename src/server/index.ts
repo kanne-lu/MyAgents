@@ -3084,9 +3084,11 @@ async function main() {
             model?: string;
             authType?: string;
             apiProtocol?: string;
+            maxOutputTokens?: number;
+            upstreamFormat?: string;
           };
 
-          const { baseUrl, apiKey, model, authType, apiProtocol } = payload;
+          const { baseUrl, apiKey, model, authType, apiProtocol, maxOutputTokens, upstreamFormat } = payload;
 
           if (!baseUrl || !apiKey) {
             return jsonResponse({ success: false, error: 'baseUrl and apiKey are required.' }, 400);
@@ -3098,6 +3100,7 @@ async function main() {
           console.log(`[api/provider/verify] model: ${model ?? 'default'}`);
           console.log(`[api/provider/verify] authType: ${authType ?? 'both'}`);
           console.log(`[api/provider/verify] apiProtocol: ${apiProtocol ?? 'anthropic'}`);
+          console.log(`[api/provider/verify] maxOutputTokens: ${maxOutputTokens ?? 'none'}`);
 
           // Unified SDK verification for all protocols (Anthropic + OpenAI)
           // For OpenAI protocol: SDK → CLI → bridge loopback → upstream (end-to-end)
@@ -3105,6 +3108,8 @@ async function main() {
           const result = await verifyProviderViaSdk(
             baseUrl, apiKey, authType ?? 'both', model || undefined,
             apiProtocol === 'openai' ? 'openai' : undefined,
+            maxOutputTokens,
+            upstreamFormat === 'responses' ? 'responses' : undefined,
           );
 
           console.log(`[api/provider/verify] result:`, JSON.stringify(result));

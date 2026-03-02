@@ -210,13 +210,17 @@ export async function verifyProviderViaSdk(
   authType: string,
   model?: string,
   apiProtocol?: 'anthropic' | 'openai',
+  maxOutputTokens?: number,
+  upstreamFormat?: 'chat_completions' | 'responses',
 ): Promise<{ success: boolean; error?: string }> {
-  console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}, apiProtocol=${apiProtocol ?? 'anthropic'}`);
+  console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}, apiProtocol=${apiProtocol ?? 'anthropic'}, maxOutputTokens=${maxOutputTokens ?? 'none'}`);
   const env = buildClaudeSessionEnv({
     baseUrl,
     apiKey,
     authType: authType as 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key',
     apiProtocol,
+    maxOutputTokens,
+    upstreamFormat,
   });
   return verifyViaSdk(env, {
     model,
