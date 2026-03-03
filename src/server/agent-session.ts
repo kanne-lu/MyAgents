@@ -4443,6 +4443,38 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             }
           }
         }
+
+        // Handle non-streamed text content from assistant messages.
+        // Some providers (OpenAI-compatible, third-party Anthropic proxies) return responses
+        // without streaming content_block_delta text events — the text only appears in the
+        // final assistant message. Without this, currentTurnHasOutput stays false and the
+        // result handler erroneously shows normal responses as agent-error banners.
+        // Skip error-wrapped messages (SDK sets "error" field on synthetic error responses)
+        // — these should be surfaced via the result handler's agent-error banner instead.
+        const isErrorWrapped = !!(sdkMessage as Record<string, unknown>).error;
+        if (!sdkMessage.parent_tool_use_id && !currentTurnHasOutput && !isErrorWrapped && assistantMessage.content) {
+          const nonStreamedParts: string[] = [];
+          for (const block of assistantMessage.content) {
+            if (
+              typeof block === 'object' &&
+              block !== null &&
+              'type' in block &&
+              block.type === 'text' &&
+              'text' in block
+            ) {
+              const text = String((block as { text: string }).text || '');
+              if (text) nonStreamedParts.push(text);
+            }
+          }
+          const nonStreamedText = nonStreamedParts.join('');
+          if (nonStreamedText) {
+            console.log(`[agent] Non-streamed assistant text detected (${nonStreamedText.length} chars), broadcasting as message-chunk`);
+            broadcast('chat:message-chunk', nonStreamedText);
+            appendTextChunk(nonStreamedText);
+            currentTurnHasOutput = true;
+            imStreamCallback?.('delta', nonStreamedText);
+          }
+        }
       } else if (sdkMessage.type === 'result') {
         // Extract token usage from result message
         // SDK result contains modelUsage (per-model stats) and/or usage (aggregate)
@@ -4495,14 +4527,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Surface SDK-level errors that produced no assistant output (e.g. "Unknown skill: xxx").
         // These results have non-empty result text but no visible assistant text was streamed.
         // Without this, the user sees nothing — the message just silently completes.
-        // Always use chat:agent-error (banner) instead of chat:message-chunk, because
-        // message-chunk + message-complete fire in the same tick and React batching
-        // can swallow the streaming message before it renders.
+        // Only show agent-error for is_error results — non-error results from non-streaming
+        // providers are handled in the assistant message handler above.
         const resultText = resultMessage.result || '';
         if (resultText && !currentTurnHasOutput && !currentTurnToolCount) {
-          console.warn('[agent] SDK returned result with no API output, surfacing to user:', resultText);
-          broadcast('chat:agent-error', { message: resultText });
-          // Also forward to IM callback (prevents "(No Response)" for non-is_error SDK failures)
+          if (resultMessage.is_error) {
+            console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultText);
+            broadcast('chat:agent-error', { message: resultText });
+          } else {
+            // Non-error result text that wasn't captured by streaming or assistant handler
+            // (safety net — should rarely trigger after the assistant handler fix above)
+            console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
+            broadcast('chat:message-chunk', resultText);
+            appendTextChunk(resultText);
+          }
+          // Forward to IM callback (prevents "(No Response)" for SDK failures)
           if (imStreamCallback) {
             imStreamCallback('complete', resultText);
             imStreamCallback = null;
