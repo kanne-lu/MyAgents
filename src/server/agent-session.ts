@@ -2760,6 +2760,17 @@ function clearMessageState(): void {
   pendingConfigRestart = false;
 }
 
+/** 排空消息队列，逐条广播 queue:cancelled。用于 session 意外死亡时通知前端清除队列 UI。 */
+function drainQueueWithCancellation(): void {
+  if (messageQueue.length === 0) return;
+  console.log(`[agent] Draining ${messageQueue.length} queued messages (session dead)`);
+  for (const item of messageQueue) {
+    item.resolve();
+    broadcast('queue:cancelled', { queueId: item.id });
+  }
+  messageQueue.length = 0;
+}
+
 /**
  * Load persisted messages from SessionMessage[] into in-memory messages[].
  * Sets messageSequence to continue from the last stored message ID.
@@ -3392,6 +3403,7 @@ export async function enqueueUserMessage(
   if (!isSessionActive()) {
     // 无活跃 session（pre-warm 失败或首次启动）→ 先入队再启动 session
     console.log('[agent] starting session (idle -> running)');
+    preWarmFailCount = 0; // 用户主动操作重置重试计数
     messageQueue.push(queueItem);
     startStreamingSession().catch((error) => {
       console.error('[agent] failed to start session', error);
@@ -3521,8 +3533,18 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
     messageQueue.unshift(item);
   }
 
-  // Interrupt current AI response — messageGenerator will naturally yield the queue front
-  await interruptCurrentResponse();
+  if (isSessionActive()) {
+    // Session 存活：中断当前响应，generator 会自然消费队列头部
+    await interruptCurrentResponse();
+  } else {
+    // Session 已死：generator 不存在，无人消费队列。
+    // 启动新 session 来处理队列中的消息。
+    console.log('[agent] forceExecuteQueueItem: session dead, starting new session');
+    preWarmFailCount = 0;
+    startStreamingSession().catch((error) => {
+      console.error('[agent] forceExecuteQueueItem: failed to start session', error);
+    });
+  }
   return true;
 }
 
@@ -4717,6 +4739,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     }
     signalTurnComplete();
 
+    // 防御：确保 isStreamingMessage 在 session 退出时被重置。
+    // 正常路径由 handleMessageComplete/Stopped/Error 处理，但 subprocess
+    // 崩溃可能导致这些 handler 未执行，标志孤立为 true。
+    // 孤立的 true 会让所有新消息走 queue 路径（line 3350）且无人消费。
+    if (isStreamingMessage) {
+      console.warn('[agent] isStreamingMessage orphaned after session exit, resetting');
+      isStreamingMessage = false;
+    }
+
+    // Session 意外死亡时排空队列，通知前端清除 "排队中" UI。
+    // 不在主动 abort 时排空 — 调用方（resetSession/switchToSession 等）有自己的清理流程。
+    if (!wasPreWarming && !shouldAbortSession && messageQueue.length > 0) {
+      drainQueueWithCancellation();
+    }
+
     // 安全关闭 SDK session
     const session = querySession;
     querySession = null;
@@ -4750,9 +4787,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       if (!preWarmStartedOk || shouldAbortSession) {
         schedulePreWarm();
       }
-    } else if (!shouldAbortSession && sessionRegistered && sessionState !== 'error') {
-      // 非主动中止的意外退出（subprocess crash）→ 安排恢复
+    } else if (!shouldAbortSession && sessionRegistered) {
+      // 非主动中止的意外退出（subprocess crash / error）→ 安排恢复。
+      // 包含 sessionState === 'error' 的情况 — session 刚死，必须恢复，
+      // 否则用户再发消息时无可用 subprocess。
+      // Error 已通过 catch block 广播给前端（line 4702），用户已知出错。
       console.log('[agent] Unexpected session exit, scheduling recovery pre-warm');
+      preWarmFailCount = 0; // 新的故障上下文，重置重试计数
       schedulePreWarm();
     }
   }
