@@ -164,6 +164,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
   const { openPreview } = useImagePreview();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const [userHovered, setUserHovered] = useState(false);
 
   useEffect(() => {
     return () => {
@@ -209,8 +210,10 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
     const isImMessage = imSource && imSource !== 'desktop';
 
     return (
-      <div className="group/user flex justify-end px-1 select-none"
-           data-role="user" data-message-id={message.id}>
+      <div className="flex justify-end px-1 select-none"
+           data-role="user" data-message-id={message.id}
+           onMouseEnter={() => setUserHovered(true)}
+           onMouseLeave={() => setUserHovered(false)}>
         <div className="flex w-full flex-col items-end">
           {/* IM source indicator */}
           {isImMessage && (
@@ -239,7 +242,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
             )}
           </article>
           {/* 操作栏：时间 + 图标按钮，hover 淡入 */}
-          <div className="mr-2 mt-1 flex items-center gap-2 opacity-0 transition-opacity group-hover/user:opacity-100">
+          <div className={`mr-2 mt-1 flex items-center gap-2 transition-opacity ${userHovered ? 'opacity-100' : 'opacity-0'}`}>
             <span className="text-[11px] text-[var(--ink-muted)] mr-1">{formatTimestamp(message.timestamp)}</span>
             {!isStreaming && onRewind && (
               <Tip label="时间回溯">
