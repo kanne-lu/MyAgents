@@ -45,6 +45,7 @@ interface MessageListProps {
   systemStatus?: string | null;  // SDK system status (e.g., 'compacting')
   isStreaming?: boolean;          // AI 回复中（传递给 Message 隐藏回溯按钮）
   onRewind?: (messageId: string) => void;
+  onRetry?: (assistantMessageId: string) => void;
 }
 
 // Enable CSS scroll anchoring for smoother streaming experience
@@ -147,6 +148,7 @@ const MessageList = memo(function MessageList({
   systemStatus,
   isStreaming,
   onRewind,
+  onRetry,
 }: MessageListProps) {
   const containerStyle: CSSProperties | undefined =
     bottomPadding ? { paddingBottom: bottomPadding } : undefined;
@@ -205,6 +207,7 @@ const MessageList = memo(function MessageList({
             isLoading={false}
             isStreaming={isStreaming}
             onRewind={onRewind}
+            onRetry={onRetry}
             exitPlanModeSlot={message.id === exitPlanModeAnchorId ? exitPlanModeSlot : undefined}
           />
         ))}
@@ -216,6 +219,7 @@ const MessageList = memo(function MessageList({
             isLoading={isLoading}
             isStreaming={isStreaming}
             onRewind={onRewind}
+            onRetry={onRetry}
             exitPlanModeSlot={streamingMessage.id === exitPlanModeAnchorId ? exitPlanModeSlot : undefined}
           />
         )}
