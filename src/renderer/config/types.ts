@@ -602,6 +602,7 @@ export interface McpServerDefinition {
 
   // Metadata
   isBuiltin: boolean;      // Is a preset MCP
+  isFree?: boolean;        // No API key / paid service required
   requiresConfig?: string[];  // Required config fields (e.g., API keys)
 }
 
@@ -638,15 +639,27 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
     command: 'npx',
     args: ['@playwright/mcp@latest'],
     isBuiltin: true,
+    isFree: true,
   },
   {
     id: 'ddg-search',
-    name: 'DDG-Search',
-    description: 'DuckDuckGo 全网搜索，免费快速',
+    name: 'DuckDuckGo 搜索引擎',
+    description: '全网搜索，免费快速',
     type: 'stdio',
     command: 'uvx',
     args: ['duckduckgo-mcp-server'],
     isBuiltin: true,
+    isFree: true,
+  },
+  {
+    id: 'gemini-image',
+    name: 'Nano Banana 图片生成',
+    description: '支持图片生成与多轮编辑（基于 Gemini Nano Banana）',
+    type: 'stdio',
+    command: '__builtin__',
+    args: [],
+    isBuiltin: true,
+    requiresConfig: ['GEMINI_API_KEY'],
   },
 ];
 

@@ -1868,8 +1868,13 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     <Globe className="h-4 w-4 shrink-0 text-[var(--accent-warm)]/70" />
                                                     <h3 className="truncate font-semibold text-[var(--ink)]">{server.name}</h3>
                                                     {server.isBuiltin && (
-                                                        <span className="shrink-0 rounded bg-[var(--info-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--info)]">
+                                                        <span className="shrink-0 rounded-full border border-[var(--info)]/20 bg-[var(--info-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--info)]">
                                                             预设
+                                                        </span>
+                                                    )}
+                                                    {server.isFree && (
+                                                        <span className="shrink-0 rounded-full border border-[var(--success)]/20 bg-[var(--success-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--success)]">
+                                                            免费
                                                         </span>
                                                     )}
                                                     {/* Status indicator */}
