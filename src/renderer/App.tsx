@@ -56,6 +56,7 @@ interface TabContentProps {
   isLoading: boolean;
   error: string | null;
   settingsInitialSection: string | undefined;
+  settingsInitialMcpId: string | undefined;
   // Launcher callbacks
   onLaunchProject: (project: Project, provider: Provider, sessionId?: string, initialMessage?: InitialMessage) => void;
   // Chat callbacks
@@ -81,7 +82,7 @@ const MemoizedTabContent = memo(function TabContent({
   onLaunchProject, onBack, onSwitchSession, onNewSession,
   onUpdateGenerating, onUpdateSessionId, onClearInitialMessage,
   onClearJoinedExistingSidecar,
-  settingsInitialSection, onSettingsSectionChange,
+  settingsInitialSection, settingsInitialMcpId, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading,
   onCheckForUpdate, onRestartAndUpdate,
 }: TabContentProps) {
@@ -100,6 +101,7 @@ const MemoizedTabContent = memo(function TabContent({
       ) : tab.view === 'settings' ? (
         <Settings
           initialSection={settingsInitialSection}
+          initialMcpId={settingsInitialMcpId}
           onSectionChange={onSettingsSectionChange}
           isActive={isActive}
           updateReady={updateReady}
@@ -140,6 +142,7 @@ const MemoizedTabContent = memo(function TabContent({
     prev.isLoading === next.isLoading &&
     prev.error === next.error &&
     prev.settingsInitialSection === next.settingsInitialSection &&
+    prev.settingsInitialMcpId === next.settingsInitialMcpId &&
     prev.updateReady === next.updateReady &&
     prev.updateVersion === next.updateVersion &&
     prev.updateChecking === next.updateChecking &&
@@ -165,6 +168,7 @@ export default function App() {
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
+  const [settingsInitialMcpId, setSettingsInitialMcpId] = useState<string | undefined>(undefined);
 
   // Multi-tab state
   const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
@@ -1199,12 +1203,13 @@ export default function App() {
 
   // Open Settings as a new tab (or switch to existing one)
   // Optional initialSection parameter to open a specific section (e.g., 'providers')
-  const handleOpenSettings = useCallback(async (initialSection?: string) => {
+  const handleOpenSettings = useCallback(async (initialSection?: string, mcpServerId?: string) => {
     // Track settings_open event
     track('settings_open', { section: initialSection ?? null });
 
     // Set initial section for Settings component
     setSettingsInitialSection(initialSection);
+    setSettingsInitialMcpId(mcpServerId);
 
     // Check if there's already a Settings tab
     const currentTabs = tabsRef.current;
@@ -1237,8 +1242,8 @@ export default function App() {
 
   // Listen for OPEN_SETTINGS custom event from child components
   useEffect(() => {
-    const handleOpenSettingsEvent = (event: CustomEvent<{ section?: string }>) => {
-      handleOpenSettings(event.detail?.section);
+    const handleOpenSettingsEvent = (event: CustomEvent<{ section?: string; mcpServerId?: string }>) => {
+      handleOpenSettings(event.detail?.section, event.detail?.mcpServerId);
     };
     window.addEventListener(CUSTOM_EVENTS.OPEN_SETTINGS, handleOpenSettingsEvent as EventListener);
     return () => {
@@ -1348,6 +1353,7 @@ export default function App() {
   // Stable callback for Settings onSectionChange — avoids inline arrow creating new ref every render
   const handleSettingsSectionChange = useCallback(() => {
     setSettingsInitialSection(undefined);
+    setSettingsInitialMcpId(undefined);
   }, []);
 
   // System tray event handling (minimize to tray, exit confirmation)
@@ -1415,6 +1421,7 @@ export default function App() {
             onClearInitialMessage={clearInitialMessage}
             onClearJoinedExistingSidecar={clearJoinedExistingSidecar}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
+            settingsInitialMcpId={tab.view === 'settings' ? settingsInitialMcpId : undefined}
             onSettingsSectionChange={handleSettingsSectionChange}
             updateReady={updateReady}
             updateVersion={updateVersion}

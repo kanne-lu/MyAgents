@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse } from 'lucide-react';
+import { ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse, Settings2 } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
@@ -1471,6 +1471,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   </div>
                                 )}
                               </div>
+                              <button
+                                type="button"
+                                title="设置"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setShowToolMenu(false);
+                                  window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, { detail: { section: 'mcp', mcpServerId: server.id } }));
+                                }}
+                                className="ml-2 shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                              >
+                                <Settings2 className="h-3.5 w-3.5" />
+                              </button>
                               <button
                                 type="button"
                                 onClick={(e) => {

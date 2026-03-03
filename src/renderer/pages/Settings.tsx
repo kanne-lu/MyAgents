@@ -137,6 +137,8 @@ interface ProviderEditForm {
 interface SettingsProps {
     /** Initial section to display (e.g., 'providers') */
     initialSection?: string;
+    /** MCP server ID to auto-open config dialog for */
+    initialMcpId?: string;
     /** Callback when section changes (to clear initialSection) */
     onSectionChange?: () => void;
     /** Whether this tab is currently active/visible */
@@ -241,7 +243,7 @@ async function getPlaywrightDefaultArgs(): Promise<string[]> {
     return [`--user-data-dir=${profilePath}`];
 }
 
-export default function Settings({ initialSection, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
+export default function Settings({ initialSection, initialMcpId, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -522,6 +524,9 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         }));
     }, [runtimeDialog, appVersion, providers, apiKeys, providerVerifyStatus]);
 
+    // Track which MCP servers need configuration (missing required fields)
+    const [mcpNeedsConfig, setMcpNeedsConfig] = useState<Record<string, boolean>>({});
+
     // Builtin MCP settings dialog state
     const [builtinMcpSettings, setBuiltinMcpSettings] = useState<{
         server: McpServerDefinition;
@@ -529,6 +534,19 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         newArg: string;
         env: Record<string, string>;
         newEnvKey: string;
+    } | null>(null);
+
+    // Gemini Image MCP custom settings dialog
+    const [geminiImageSettings, setGeminiImageSettings] = useState<{
+        apiKey: string;
+        baseUrl: string;
+        model: string;
+        aspectRatio: string;
+        imageSize: string;
+        thinkingLevel: string;
+        searchGrounding: boolean;
+        maxContextTurns: number;
+        saveToProject: boolean;
     } | null>(null);
 
     const [mcpFormMode, setMcpFormMode] = useState<'form' | 'json'>('form');
@@ -561,6 +579,19 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         newHeaderKey: '',
     });
 
+    // Check which MCP servers need configuration (missing required fields)
+    const checkMcpConfigStatus = async (servers: McpServerDefinition[]) => {
+        const needs: Record<string, boolean> = {};
+        for (const server of servers) {
+            if (server.requiresConfig && server.requiresConfig.length > 0) {
+                const savedEnv = await getMcpServerEnv(server.id);
+                const missing = server.requiresConfig.some(key => !savedEnv?.[key]?.trim());
+                if (missing) needs[server.id] = true;
+            }
+        }
+        setMcpNeedsConfig(needs);
+    };
+
     // Load MCP config on mount
     useEffect(() => {
         const loadMcp = async () => {
@@ -569,6 +600,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 const enabledIds = await getEnabledMcpServerIds();
                 setMcpServersState(servers);
                 setMcpEnabledIds(enabledIds);
+                await checkMcpConfigStatus(servers);
             } catch (err) {
                 console.error('[Settings] Failed to load MCP config:', err);
             }
@@ -591,6 +623,7 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                 const enabledIds = await getEnabledMcpServerIds();
                 setMcpServersState(servers);
                 setMcpEnabledIds(enabledIds);
+                await checkMcpConfigStatus(servers);
             } catch (err) {
                 console.warn('[Settings] Failed to reload MCP servers on activation:', err);
             }
@@ -607,6 +640,18 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
             setMcpEnabledIds(prev => prev.filter(id => id !== server.id));
             toast.success('MCP 已禁用');
             return;
+        }
+
+        // Validate required config before enabling (e.g., API keys)
+        if (server.requiresConfig && server.requiresConfig.length > 0) {
+            const savedEnv = await getMcpServerEnv(server.id);
+            const missingKeys = server.requiresConfig.filter(key => !savedEnv?.[key]?.trim());
+            if (missingKeys.length > 0) {
+                toast.error(`请先配置 ${server.name}（点击 ⚙️ 设置）`);
+                // Auto-open settings dialog for convenience
+                handleEditBuiltinMcp(server);
+                return;
+            }
         }
 
         // Set loading state
@@ -676,6 +721,23 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
 
     // Edit builtin MCP server settings (extra args + env)
     const handleEditBuiltinMcp = async (server: McpServerDefinition) => {
+        // Gemini Image: open custom config dialog
+        if (server.id === 'gemini-image') {
+            const savedEnv = await getMcpServerEnv(server.id);
+            setGeminiImageSettings({
+                apiKey: savedEnv?.GEMINI_API_KEY || '',
+                baseUrl: savedEnv?.GEMINI_BASE_URL || '',
+                model: savedEnv?.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image',
+                aspectRatio: savedEnv?.GEMINI_DEFAULT_ASPECT_RATIO || 'auto',
+                imageSize: savedEnv?.GEMINI_DEFAULT_IMAGE_SIZE || 'auto',
+                thinkingLevel: savedEnv?.GEMINI_THINKING_LEVEL || 'auto',
+                searchGrounding: savedEnv?.GEMINI_SEARCH_GROUNDING === 'true',
+                maxContextTurns: parseInt(savedEnv?.MAX_CONTEXT_TURNS || '20', 10),
+                saveToProject: savedEnv?.SAVE_TO_PROJECT !== 'false',
+            });
+            return;
+        }
+
         const savedArgs = await getMcpServerArgs(server.id);
         const savedEnv = await getMcpServerEnv(server.id);
 
@@ -720,6 +782,34 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         }
     };
 
+    const handleSaveGeminiImage = async () => {
+        if (!geminiImageSettings) return;
+        try {
+            const env: Record<string, string> = {
+                GEMINI_API_KEY: geminiImageSettings.apiKey,
+                GEMINI_BASE_URL: geminiImageSettings.baseUrl,
+                GEMINI_IMAGE_MODEL: geminiImageSettings.model,
+                GEMINI_DEFAULT_ASPECT_RATIO: geminiImageSettings.aspectRatio,
+                GEMINI_DEFAULT_IMAGE_SIZE: geminiImageSettings.imageSize,
+                GEMINI_THINKING_LEVEL: geminiImageSettings.thinkingLevel,
+                GEMINI_SEARCH_GROUNDING: geminiImageSettings.searchGrounding ? 'true' : 'false',
+                MAX_CONTEXT_TURNS: String(geminiImageSettings.maxContextTurns),
+                SAVE_TO_PROJECT: geminiImageSettings.saveToProject ? 'true' : 'false',
+            };
+            await atomicModifyConfig(config => ({
+                ...config,
+                mcpServerEnv: { ...(config.mcpServerEnv ?? {}), 'gemini-image': env },
+            }));
+            const servers = await getAllMcpServers();
+            setMcpServersState(servers);
+            await checkMcpConfigStatus(servers);
+            setGeminiImageSettings(null);
+            toast.success('Gemini 图片生成设置已保存');
+        } catch {
+            toast.error('保存失败');
+        }
+    };
+
     // Edit custom MCP server - populate form and open modal
     const handleEditMcp = (server: McpServerDefinition) => {
         setMcpForm({
@@ -738,6 +828,21 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
         setEditingMcpId(server.id);
         setShowMcpForm(true);
     };
+
+    // Auto-open MCP config dialog when initialMcpId is provided (from Chat tool popup)
+    useEffect(() => {
+        if (!initialMcpId || mcpServers.length === 0) return;
+        const server = mcpServers.find(s => s.id === initialMcpId);
+        if (server) {
+            if (server.isBuiltin) {
+                void handleEditBuiltinMcp(server);
+            } else {
+                handleEditMcp(server);
+            }
+        }
+        // Clear parent state so the same ID can be dispatched again
+        onSectionChangeRef.current?.();
+    }, [initialMcpId, mcpServers]);
 
     // Add custom MCP server - auto-install after adding
     const handleAddMcp = async () => {
@@ -1777,9 +1882,16 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                                                         {server.description}
                                                     </p>
                                                 )}
-                                                <p className="mt-2 truncate font-mono text-[10px] text-[var(--ink-muted)]">
-                                                    {server.command} {server.args?.join(' ')}
-                                                </p>
+                                                {mcpNeedsConfig[server.id] && (
+                                                    <p className="mt-1 text-xs text-[var(--warning)]">
+                                                        ⚠️ 需要配置 API Key
+                                                    </p>
+                                                )}
+                                                {server.command !== '__builtin__' && (
+                                                    <p className="mt-2 truncate font-mono text-[10px] text-[var(--ink-muted)]">
+                                                        {server.command} {server.args?.join(' ')}
+                                                    </p>
+                                                )}
                                             </div>
                                             <div className="flex shrink-0 items-center gap-2">
                                                 <button
@@ -2567,6 +2679,215 @@ export default function Settings({ initialSection, onSectionChange, isActive, up
                             <button
                                 onClick={handleSaveBuiltinMcp}
                                 className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90"
+                            >
+                                保存
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Gemini Image Settings Modal */}
+            {geminiImageSettings && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+                    <div className="mx-4 w-full max-w-lg rounded-2xl bg-[var(--paper-elevated)] shadow-xl max-h-[85vh] flex flex-col">
+                        {/* Header */}
+                        <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
+                            <h2 className="text-lg font-semibold text-[var(--ink)]">Gemini 图片生成 设置</h2>
+                            <button onClick={() => setGeminiImageSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]">
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        {/* Content */}
+                        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
+                            {/* API Key */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">API Key *</label>
+                                <input
+                                    type="password"
+                                    value={geminiImageSettings.apiKey}
+                                    onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, apiKey: e.target.value } : null)}
+                                    placeholder="AIzaSy..."
+                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
+                                />
+                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">
+                                    从 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">aistudio.google.com</a> 免费获取
+                                </p>
+                            </div>
+
+                            {/* Base URL */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">API Base URL</label>
+                                <input
+                                    type="text"
+                                    value={geminiImageSettings.baseUrl}
+                                    onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, baseUrl: e.target.value } : null)}
+                                    placeholder="留空使用官方端点"
+                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
+                                />
+                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">留空使用官方端点。支持兼容 Gemini 原生协议的第三方中转</p>
+                            </div>
+
+                            {/* Model */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">模型</label>
+                                <div className="flex flex-wrap gap-2">
+                                    {[
+                                        { id: 'gemini-2.5-flash-image', label: 'Nano Banana', desc: 'Stable · 速度快 · 免费额度多' },
+                                        { id: 'gemini-3-pro-image-preview', label: 'Nano Banana Pro', desc: 'Preview · 质量最高 · 文字渲染最佳' },
+                                        { id: 'gemini-3.1-flash-image-preview', label: 'Nano Banana 2', desc: 'Preview · 速度+质量平衡（推荐）' },
+                                    ].map(m => (
+                                        <button
+                                            key={m.id}
+                                            onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, model: m.id } : null)}
+                                            className={`rounded-lg border px-3 py-2 text-left text-xs transition-colors ${
+                                                geminiImageSettings.model === m.id
+                                                    ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
+                                                    : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--ink-muted)]'
+                                            }`}
+                                        >
+                                            <div className="font-medium">{m.label}</div>
+                                            <div className="text-[10px] opacity-70">{m.desc}</div>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Aspect Ratio */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">默认宽高比</label>
+                                <div className="flex flex-wrap gap-1.5">
+                                    {['auto', '1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2', '4:5', '5:4', '21:9'].map(r => (
+                                        <button
+                                            key={r}
+                                            onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, aspectRatio: r } : null)}
+                                            className={`rounded-md px-2.5 py-1 text-xs transition-colors ${r !== 'auto' ? 'font-mono' : ''} ${
+                                                geminiImageSettings.aspectRatio === r
+                                                    ? 'bg-[var(--accent)] text-white'
+                                                    : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                            }`}
+                                        >
+                                            {r === 'auto' ? '自动' : r}
+                                        </button>
+                                    ))}
+                                </div>
+                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1:1）</p>
+                            </div>
+
+                            {/* Resolution */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">默认分辨率</label>
+                                <div className="flex gap-2">
+                                    {['auto', '1K', '2K', '4K'].map(s => (
+                                        <button
+                                            key={s}
+                                            onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, imageSize: s } : null)}
+                                            className={`rounded-md px-3 py-1.5 text-xs transition-colors ${
+                                                geminiImageSettings.imageSize === s
+                                                    ? 'bg-[var(--accent)] text-white'
+                                                    : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                            }`}
+                                        >
+                                            {s === 'auto' ? '自动' : s}
+                                        </button>
+                                    ))}
+                                </div>
+                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1K）</p>
+                            </div>
+
+                            {/* Advanced Section Divider */}
+                            <div className="border-t border-[var(--line)] pt-4">
+                                <span className="text-xs font-medium text-[var(--ink-muted)]">高级设置</span>
+                            </div>
+
+                            {/* Thinking Level */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">推理深度</label>
+                                <div className="flex gap-2">
+                                    {[
+                                        { id: 'auto', label: '自动', desc: '不传参数 · 由模型决定' },
+                                        { id: 'minimal', label: '快速', desc: '速度优先（模型默认值）' },
+                                        { id: 'high', label: '高质量', desc: '推理更深 · 生成更精细但更慢' },
+                                    ].map(t => (
+                                        <button
+                                            key={t.id}
+                                            onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, thinkingLevel: t.id } : null)}
+                                            className={`rounded-lg border px-3 py-1.5 text-xs transition-colors ${
+                                                geminiImageSettings.thinkingLevel === t.id
+                                                    ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
+                                                    : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--ink-muted)]'
+                                            }`}
+                                        >
+                                            {t.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+
+                            {/* Search Grounding */}
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <div className="text-xs font-medium text-[var(--ink)]">搜索增强</div>
+                                    <div className="text-[10px] text-[var(--ink-muted)]">生成前搜索 Google 获取实时信息（人物、事件、天气等）</div>
+                                </div>
+                                <button
+                                    onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, searchGrounding: !prev.searchGrounding } : null)}
+                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+                                        geminiImageSettings.searchGrounding ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                    }`}
+                                >
+                                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                        geminiImageSettings.searchGrounding ? 'translate-x-5' : 'translate-x-0'
+                                    }`} />
+                                </button>
+                            </div>
+
+                            {/* Max Context Turns */}
+                            <div>
+                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">单次图片会话最大编辑轮次</label>
+                                <input
+                                    type="number"
+                                    min={2}
+                                    max={50}
+                                    value={geminiImageSettings.maxContextTurns}
+                                    onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, maxContextTurns: parseInt(e.target.value, 10) || 20 } : null)}
+                                    className="w-20 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                                />
+                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">超过后自动开始新会话（防止请求体过大）</p>
+                            </div>
+
+                            {/* Save to Project */}
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <div className="text-xs font-medium text-[var(--ink)]">保存图片到项目目录</div>
+                                    <div className="text-[10px] text-[var(--ink-muted)]">保存副本到项目 .myagents-images/ 目录</div>
+                                </div>
+                                <button
+                                    onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, saveToProject: !prev.saveToProject } : null)}
+                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+                                        geminiImageSettings.saveToProject ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                    }`}
+                                >
+                                    <span className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                        geminiImageSettings.saveToProject ? 'translate-x-5' : 'translate-x-0'
+                                    }`} />
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div className="flex justify-end gap-3 border-t border-[var(--line)] px-6 py-4">
+                            <button
+                                onClick={() => setGeminiImageSettings(null)}
+                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                            >
+                                取消
+                            </button>
+                            <button
+                                onClick={handleSaveGeminiImage}
+                                disabled={!geminiImageSettings.apiKey.trim()}
+                                className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white hover:bg-[var(--accent)]/90 disabled:opacity-40"
                             >
                                 保存
                             </button>
