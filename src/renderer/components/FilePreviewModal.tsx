@@ -236,7 +236,7 @@ export default function FilePreviewModal({
         // Use same background as content area to avoid color flash during transition
         if (isLoading || !isContentReady) {
             return (
-                <div className="flex h-full items-center justify-center bg-[var(--paper-reading)] text-[var(--ink-muted)]">
+                <div className="flex h-full items-center justify-center bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
                     <Loader2 className="h-5 w-5 animate-spin" />
                 </div>
             );
@@ -256,7 +256,7 @@ export default function FilePreviewModal({
         // - isEditorReady defers mounting to next frame on every edit (avoids blocking click microtask)
         if (isEditing) {
             const editorLoading = (
-                <div className="flex h-full items-center justify-center bg-[var(--paper-reading)] text-[var(--ink-muted)]">
+                <div className="flex h-full items-center justify-center bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
                     <Loader2 className="h-5 w-5 animate-spin" />
                 </div>
             );
@@ -265,7 +265,7 @@ export default function FilePreviewModal({
             }
             return (
                 <Suspense fallback={editorLoading}>
-                    <div className="h-full bg-[var(--paper-reading)]">
+                    <div className="h-full bg-[var(--paper-elevated)]">
                         <MonacoEditor
                             value={editContent}
                             onChange={setEditContent}
@@ -280,7 +280,7 @@ export default function FilePreviewModal({
         // Use raw mode to skip streaming preprocessing (which can break valid markdown)
         if (isMarkdown) {
             return (
-                <div className="h-full overflow-auto p-6 bg-[var(--paper-reading)]">
+                <div className="h-full overflow-auto p-6 bg-[var(--paper-elevated)]">
                     <div className="prose prose-stone max-w-none dark:prose-invert">
                         <Markdown raw basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined}>{previewContent}</Markdown>
                     </div>
@@ -290,7 +290,7 @@ export default function FilePreviewModal({
 
         // Preview mode: Code files with syntax highlighting (memoized)
         return (
-            <div className="h-full overflow-auto bg-[var(--paper-reading)]">
+            <div className="h-full overflow-auto bg-[var(--paper-elevated)]">
                 {syntaxHighlightedContent}
             </div>
         );
@@ -313,10 +313,10 @@ export default function FilePreviewModal({
                 >
                     {/* Header */}
                     <div
-                        className="flex flex-shrink-0 items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4 bg-[var(--paper-reading)]"
+                        className="flex flex-shrink-0 items-start justify-between gap-4 border-b border-[var(--line)] px-5 py-4 bg-[var(--paper-elevated)]"
                     >
                         <div className="flex items-center gap-3 min-w-0">
-                            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--accent-bg)]">
+                            <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm-muted)]">
                                 <FileText className="h-4 w-4 text-[var(--accent)]" />
                             </div>
                             <div className="min-w-0">
@@ -336,7 +336,7 @@ export default function FilePreviewModal({
                                     <button
                                         type="button"
                                         onClick={handleOpenInFinder}
-                                        className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                        className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                         title="打开所在文件夹"
                                     >
                                         <FolderOpen className="h-3.5 w-3.5" />
@@ -352,7 +352,7 @@ export default function FilePreviewModal({
                                     <button
                                         type="button"
                                         onClick={handleCancel}
-                                        className="inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98]"
+                                        className="inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[11px] font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98]"
                                     >
                                         <X className="h-3.5 w-3.5" />
                                         取消
@@ -361,7 +361,7 @@ export default function FilePreviewModal({
                                         type="button"
                                         onClick={handleSave}
                                         disabled={isSaving || !hasUnsavedChanges}
-                                        className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm transition-all duration-150 hover:bg-[var(--accent-strong)] hover:shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+                                        className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm transition-all duration-150 hover:bg-[var(--accent-warm-hover)] hover:shadow focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                                     >
                                         {isSaving ? (
                                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -377,7 +377,7 @@ export default function FilePreviewModal({
                                     type="button"
                                     onClick={handleEdit}
                                     disabled={isLoading || !!error}
-                                    className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--ink)] px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm transition-all duration-150 hover:bg-[var(--ink-strong)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+                                    className="inline-flex items-center justify-center gap-1.5 rounded-md bg-[var(--ink)] px-3 py-1.5 text-[11px] font-semibold text-white shadow-sm transition-all duration-150 hover:bg-[var(--ink-secondary)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                                 >
                                     <Edit2 className="h-3.5 w-3.5" />
                                     编辑
@@ -386,7 +386,7 @@ export default function FilePreviewModal({
                             <button
                                 type="button"
                                 onClick={handleClose}
-                                className="inline-flex items-center justify-center rounded-md border border-[var(--line-strong)] bg-[var(--paper-button)] px-3 py-1.5 text-[11px] font-semibold text-[var(--ink)] shadow-sm transition-all duration-150 hover:bg-[var(--paper-button-hover)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98]"
+                                className="inline-flex items-center justify-center rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-[11px] font-semibold text-[var(--ink)] shadow-sm transition-all duration-150 hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98]"
                             >
                                 关闭
                             </button>

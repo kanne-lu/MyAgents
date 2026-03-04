@@ -272,7 +272,7 @@ export default function SkillsCommandsList({
                         <h3 className="text-base font-semibold text-[var(--ink)]">
                             {scope === 'project' ? '项目技能' : '技能 Skills'}
                         </h3>
-                        <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
+                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                             {skills.length}
                         </span>
                     </div>
@@ -326,7 +326,7 @@ export default function SkillsCommandsList({
                         <h3 className="text-base font-semibold text-[var(--ink)]">
                             {scope === 'project' ? '项目指令' : '指令 Commands'}
                         </h3>
-                        <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
+                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                             {commands.length}
                         </span>
                     </div>
@@ -432,7 +432,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
     const isDisabled = skill.enabled === false;
     return (
         <div
-            className={`group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm ${isDisabled ? 'opacity-50' : ''}`}
+            className={`group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px] ${isDisabled ? 'opacity-50' : ''}`}
             onClick={onClick}
         >
             {/* Title with badge */}
@@ -479,7 +479,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
 export function CommandCard({ command, onClick }: { command: CommandItem; onClick: () => void }) {
     return (
         <div
-            className="group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
+            className="group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px]"
             onClick={onClick}
         >
             {/* Title with badge */}
@@ -504,7 +504,7 @@ export function CommandCard({ command, onClick }: { command: CommandItem; onClic
 // Empty State Component
 function EmptyState({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }) {
     return (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-contrast)]/30 py-8">
+        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8">
             <div className="text-[var(--ink-muted)]/30">{icon}</div>
             <p className="mt-3 text-sm font-medium text-[var(--ink-muted)]">{title}</p>
             <p className="mt-1 text-xs text-[var(--ink-muted)]">{description}</p>

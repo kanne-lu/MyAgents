@@ -64,7 +64,7 @@ export default function AttachmentPreviewList({
         return (
           <div
             key={attachment.id}
-            className={`relative ${compact ? 'rounded-lg' : 'rounded-2xl'} border border-[var(--line)] bg-[var(--paper-strong)] shadow-[var(--shadow-soft)] ${cardClassName}`}
+            className={`relative ${compact ? 'rounded-lg' : 'rounded-2xl'} border border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg ${cardClassName}`}
           >
             {showImagePreview ?
               <div
@@ -79,13 +79,13 @@ export default function AttachmentPreviewList({
                   loading="lazy"
                 />
                 {!compact && (
-                  <div className="absolute inset-x-1 bottom-1 rounded-md bg-[var(--ink)]/70 px-1 py-0.5 text-[10px] font-medium text-[var(--paper-strong)]">
+                  <div className="absolute inset-x-1 bottom-1 rounded-md bg-[var(--ink)]/70 px-1 py-0.5 text-[10px] font-medium text-[var(--paper-elevated)]">
                     <span className="block truncate">{attachment.name}</span>
                   </div>
                 )}
               </div>
               : <div className="flex min-w-[14rem] items-center gap-3 px-3 py-2">
-                <div className="rounded-full bg-[var(--paper-contrast)] p-2 text-[var(--ink)]">
+                <div className="rounded-full bg-[var(--paper-inset)] p-2 text-[var(--ink)]">
                   <Paperclip className="h-4 w-4" />
                 </div>
                 <div className="min-w-0">
@@ -111,7 +111,7 @@ export default function AttachmentPreviewList({
                 type="button"
                 aria-label={`Remove ${attachment.name}`}
                 onClick={() => handleRemove(attachment.id)}
-                className="absolute top-1.5 right-1.5 rounded-full bg-[var(--paper-strong)]/95 p-1 text-[var(--ink)] shadow-sm transition hover:bg-[var(--paper-strong)]"
+                className="absolute top-1.5 right-1.5 rounded-full bg-[var(--paper-elevated)]/95 p-1 text-[var(--ink)] shadow-sm transition hover:bg-[var(--paper-elevated)]"
               >
                 <X className="h-3.5 w-3.5" />
               </button>

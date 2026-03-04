@@ -138,7 +138,7 @@ function AssistantActions({ message, onRetry, className = '' }: {
             if (timerRef.current) clearTimeout(timerRef.current);
             timerRef.current = setTimeout(() => setCopied(false), 1500);
           }}
-          className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]">
+          className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
         </button>
       </Tip>
@@ -147,7 +147,7 @@ function AssistantActions({ message, onRetry, className = '' }: {
           <button type="button"
             aria-label="重试"
             onClick={() => onRetry(message.id)}
-            className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]">
+            className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <RotateCcw className="size-3.5" />
           </button>
         </Tip>
@@ -225,7 +225,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
               )}
             </div>
           )}
-          <article className="relative w-fit max-w-[66%] rounded-2xl border border-[var(--line)] bg-[var(--paper-strong)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-[var(--shadow-soft)] select-text">
+          <article className="relative w-fit max-w-[66%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-lg select-text">
             {hasAttachments && (
               <div className={hasText ? 'mb-2' : ''}>
                 <AttachmentPreviewList
@@ -249,7 +249,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
                 <button type="button"
                   aria-label="时间回溯"
                   onClick={() => onRewind(message.id)}
-                  className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]">
+                  className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                   <Undo2 className="size-3.5" />
                 </button>
               </Tip>
@@ -263,7 +263,7 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
                   if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
                   copiedTimerRef.current = setTimeout(() => setCopied(false), 1500);
                 }}
-                className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]">
+                className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                 {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
               </button>
             </Tip>

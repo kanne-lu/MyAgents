@@ -32,7 +32,8 @@ export function translateRequest(
   }
 
   // 2. Messages (system extraction + role mapping + tool_result splitting)
-  const messages = translateMessages(req.system, req.messages);
+  const thinkingEnabled = req.thinking?.type === 'enabled';
+  const messages = translateMessages(req.system, req.messages, thinkingEnabled);
 
   // 3. Build request
   let maxTokens = req.max_tokens;

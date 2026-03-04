@@ -400,7 +400,7 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
       {description && <div className="text-xs text-[var(--ink-muted)]">{description}</div>}
 
       {inputText && (
-        <div className="relative overflow-hidden rounded-md bg-[var(--paper-contrast)] border border-[var(--line-subtle)]">
+        <div className="relative overflow-hidden rounded-md bg-[var(--paper-inset)] border border-[var(--line-subtle)]">
           <pre className="max-h-32 overflow-y-auto p-2 font-mono text-[10px] text-[var(--ink-secondary)] whitespace-pre-wrap break-words">
             {inputText}
           </pre>
@@ -410,7 +410,7 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
       {call.result && (
         <div className="mt-1">
           <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]">结果</div>
-          <pre className="max-h-48 overflow-y-auto rounded-md bg-[var(--paper-contrast)]/50 p-2 font-mono text-[10px] text-[var(--ink-secondary)] whitespace-pre-wrap">
+          <pre className="max-h-48 overflow-y-auto rounded-md bg-[var(--paper-inset)]/50 p-2 font-mono text-[10px] text-[var(--ink-secondary)] whitespace-pre-wrap">
             {call.result}
           </pre>
         </div>
@@ -555,7 +555,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
 
       {/* 3. 生成的结果 (第三块) */}
       {textContent && (
-        <div className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-contrast)]/50 p-3">
+        <div className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 p-3">
           <CollapsibleContent maxLines={DEFAULT_MAX_LINES}>
             <div className="text-sm text-[var(--ink)] select-text">
               <Markdown>{textContent}</Markdown>
@@ -568,7 +568,7 @@ export default function TaskTool({ tool }: TaskToolProps) {
       {tool.result && !parsedResult && (
         <div className="space-y-1.5">
           <div className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">输出</div>
-          <div className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-contrast)] p-3">
+          <div className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)] p-3">
             <CollapsibleContent maxLines={DEFAULT_MAX_LINES}>
               <pre className="font-mono text-sm text-[var(--ink)] whitespace-pre-wrap">
                 {tool.result}

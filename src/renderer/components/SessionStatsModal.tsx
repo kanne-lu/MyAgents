@@ -83,7 +83,7 @@ export default function SessionStatsModal({
                 {/* Header */}
                 <div className="flex flex-shrink-0 items-center justify-between gap-4 border-b border-[var(--line)] px-5 py-4">
                     <div className="flex items-center gap-3 min-w-0">
-                        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--accent-bg)]">
+                        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm-muted)]">
                             <BarChart2 className="h-4 w-4 text-[var(--accent)]" />
                         </div>
                         <div className="min-w-0">
@@ -98,7 +98,7 @@ export default function SessionStatsModal({
                     <button
                         type="button"
                         onClick={onClose}
-                        className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     >
                         <X className="h-4 w-4" />
                     </button>
@@ -119,7 +119,7 @@ export default function SessionStatsModal({
                         <div className="space-y-6">
                             {/* Summary Cards */}
                             <div className="grid grid-cols-3 gap-4">
-                                <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                     <div className="flex items-center gap-2 text-[var(--ink-muted)]">
                                         <MessageSquare className="h-4 w-4" />
                                         <span className="text-xs">消息数</span>
@@ -128,7 +128,7 @@ export default function SessionStatsModal({
                                         {stats.summary.messageCount}
                                     </div>
                                 </div>
-                                <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                     <div className="flex items-center gap-2 text-[var(--ink-muted)]">
                                         <BarChart2 className="h-4 w-4" />
                                         <span className="text-xs">总 Tokens</span>
@@ -141,7 +141,7 @@ export default function SessionStatsModal({
                                         {formatTokens(stats.summary.totalOutputTokens)}
                                     </div>
                                 </div>
-                                <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                     <div className="flex items-center gap-2 text-[var(--ink-muted)]">
                                         <Clock className="h-4 w-4" />
                                         <span className="text-xs">输入缓存</span>
@@ -163,7 +163,7 @@ export default function SessionStatsModal({
                                     </h3>
                                     <div className="overflow-hidden rounded-lg border border-[var(--line)]">
                                         <table className="w-full text-sm">
-                                            <thead className="bg-[var(--paper-contrast)]">
+                                            <thead className="bg-[var(--paper-inset)]">
                                                 <tr>
                                                     <th className="px-4 py-2 text-left text-xs font-medium text-[var(--ink-muted)]">
                                                         模型
@@ -219,7 +219,7 @@ export default function SessionStatsModal({
                                     <div className="overflow-hidden rounded-lg border border-[var(--line)]">
                                         <div className="max-h-64 overflow-y-auto">
                                             <table className="w-full text-sm">
-                                                <thead className="sticky top-0 bg-[var(--paper-contrast)]">
+                                                <thead className="sticky top-0 bg-[var(--paper-inset)]">
                                                     <tr>
                                                         <th className="px-4 py-2 text-left text-xs font-medium text-[var(--ink-muted)]">
                                                             问题
@@ -291,7 +291,7 @@ export default function SessionStatsModal({
                     <button
                         type="button"
                         onClick={onClose}
-                        className="rounded-md border border-[var(--line-strong)] bg-[var(--paper-button)] px-4 py-2 text-sm font-medium text-[var(--ink)] hover:bg-[var(--paper-button-hover)]"
+                        className="rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-4 py-2 text-sm font-medium text-[var(--ink)] hover:bg-[var(--button-secondary-bg-hover)]"
                     >
                         关闭
                     </button>

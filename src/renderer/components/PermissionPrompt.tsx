@@ -87,7 +87,7 @@ export function PermissionPrompt({ request, onDecision }: PermissionPromptProps)
                         onClick={() => handleDecision('deny')}
                         disabled={isResponding}
                         className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg
-                            text-[var(--ink-muted)] hover:text-[var(--ink)] hover:bg-[var(--paper-contrast)]
+                            text-[var(--ink-muted)] hover:text-[var(--ink)] hover:bg-[var(--paper-inset)]
                             border border-[var(--line-subtle)] hover:border-[var(--line)]
                             transition-colors disabled:opacity-50"
                     >

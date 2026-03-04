@@ -39,7 +39,7 @@ export default function SlashCommandMenu({
     // Empty state: show "未找到指令" when no matches
     if (isEmpty || commands.length === 0) {
         return (
-            <div className="absolute left-4 bottom-full mb-2 w-[26rem] max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl">
+            <div className="absolute left-4 bottom-full mb-2 w-80 max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
                 <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
                     未找到指令
                 </div>
@@ -48,20 +48,20 @@ export default function SlashCommandMenu({
     }
 
     return (
-        <div className="absolute left-4 bottom-full mb-2 w-[26rem] max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl">
+        <div className="absolute left-4 bottom-full mb-2 w-80 max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
             {commands.map((cmd, index) => (
                 <div
                     key={`${cmd.source}-${cmd.name}`}
                     ref={index === selectedIndex ? selectedItemRef : null}
                     className={`flex items-center gap-3 px-3 py-2 cursor-pointer text-sm ${index === selectedIndex
                         ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
-                        : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]'
+                        : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
                         }`}
                     onClick={() => onSelect(cmd)}
                 >
                     <span className="font-medium text-[var(--ink)] whitespace-nowrap">/{cmd.name}</span>
                     {cmd.source === 'skill' && (
-                        <span className="text-[10px] text-[var(--ink-muted)]/60 bg-[var(--paper-contrast)] px-1.5 py-0.5 rounded shrink-0">
+                        <span className="text-[10px] text-[var(--ink-muted)]/60 bg-[var(--paper-inset)] px-1.5 py-0.5 rounded shrink-0">
                             skill
                         </span>
                     )}

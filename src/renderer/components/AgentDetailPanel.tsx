@@ -112,7 +112,7 @@ function TagInput({
                     {tags.map(tag => (
                         <span
                             key={tag}
-                            className="inline-flex items-center gap-1 rounded-md bg-[var(--paper-contrast)] px-2 py-1 text-xs text-[var(--ink)]"
+                            className="inline-flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs text-[var(--ink)]"
                         >
                             {tag}
                             <button
@@ -151,7 +151,7 @@ function TagInput({
                 <button
                     onClick={() => { if (inputValue.trim()) addTag(inputValue); }}
                     disabled={!inputValue.trim()}
-                    className="shrink-0 rounded-lg border border-[var(--line)] p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-30"
+                    className="shrink-0 rounded-lg border border-[var(--line)] p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-30"
                 >
                     <Plus className="h-3.5 w-3.5" />
                 </button>
@@ -173,8 +173,8 @@ function TagInput({
                                 onMouseEnter={() => setHighlightIndex(i)}
                                 className={`block w-full px-3 py-1.5 text-left text-xs text-[var(--ink)] ${
                                     i === highlightIndex
-                                        ? 'bg-[var(--paper-contrast)]'
-                                        : 'hover:bg-[var(--paper-contrast)]'
+                                        ? 'bg-[var(--paper-inset)]'
+                                        : 'hover:bg-[var(--paper-inset)]'
                                 }`}
                             >
                                 {s}
@@ -487,7 +487,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                             <div className="ml-4 flex items-center gap-2">
                                 <button
                                     onClick={() => handleEdit()}
-                                    className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                    className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                 >
                                     <Edit2 className="h-3.5 w-3.5" />
                                     编辑
@@ -503,22 +503,22 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                         {/* Badges */}
                         <div className="mt-2 flex flex-wrap items-center gap-2">
                             {model && isAnthropicProvider && (
-                                <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
+                                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                                     模型: {model}
                                 </span>
                             )}
                             {permissionMode && (
-                                <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
+                                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                                     权限: {PERMISSION_MODES.find(m => m.sdkValue === permissionMode)?.label ?? permissionMode}
                                 </span>
                             )}
                             {toolsTags.length > 0 && (
-                                <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
+                                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                                     工具: {toolsTags.length}
                                 </span>
                             )}
                             {skillsTags.length > 0 && (
-                                <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
+                                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                                     Skills: {skillsTags.length}
                                 </span>
                             )}
@@ -563,7 +563,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                         <div className="flex items-center gap-2">
                             <button
                                 onClick={handleCancel}
-                                className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                                className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
                                 <X className="h-3.5 w-3.5" />
                                 取消

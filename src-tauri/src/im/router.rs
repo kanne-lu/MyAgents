@@ -78,8 +78,8 @@ pub fn create_sidecar_http_client() -> Client {
 
 /// HTTP client for SSE streaming (read_timeout as idle timeout, not overall timeout).
 /// No overall timeout — the stream stays open until the turn completes.
-/// read_timeout acts as idle timeout: if no bytes arrive within 60s, the connection drops.
-/// Heartbeat from Sidecar is 15s, so 60s provides comfortable margin.
+/// read_timeout acts as idle timeout: if no bytes arrive within 300s, the connection drops.
+/// Heartbeat from Sidecar is 15s; 300s margin covers cold-start SDK initialization.
 pub fn create_sidecar_stream_client() -> Client {
     crate::local_http::sse_client()
 }

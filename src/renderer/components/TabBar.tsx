@@ -173,7 +173,7 @@ export default memo(function TabBar({
             {/* New tab button - hidden when at max tabs */}
             {canAddTab && (
                 <button
-                    className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md transition-all duration-150 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]/60 hover:text-[var(--ink)]"
+                    className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md transition-all duration-150 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]/60 hover:text-[var(--ink)]"
                     onClick={onNewTab}
                     title="新建标签页"
                 >

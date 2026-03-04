@@ -17,12 +17,15 @@ type ViewState =
     | { type: 'list' }
     | { type: 'agent-detail'; name: string; isNewAgent?: boolean };
 
-export default function GlobalAgentsPanel() {
+export default function GlobalAgentsPanel({ onDetailChange }: { onDetailChange?: (inDetail: boolean) => void }) {
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
     const [viewState, setViewState] = useState<ViewState>({ type: 'list' });
+    const onDetailChangeRef = useRef(onDetailChange);
+    onDetailChangeRef.current = onDetailChange;
+    useEffect(() => { onDetailChangeRef.current?.(viewState.type !== 'list'); }, [viewState.type]);
     const [loading, setLoading] = useState(true);
     const [agents, setAgents] = useState<AgentItem[]>([]);
     const [refreshKey, setRefreshKey] = useState(0);
@@ -239,7 +242,7 @@ export default function GlobalAgentsPanel() {
                         {canSyncFromClaude && (
                             <button
                                 onClick={handleSyncFromClaude}
-                                className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             >
                                 从 Claude Code 同步 ({syncableCount})
                             </button>
@@ -267,7 +270,7 @@ export default function GlobalAgentsPanel() {
                         ))}
                     </div>
                 ) : (
-                    <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-contrast)]/30 py-8 text-center">
+                    <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8 text-center">
                         <Bot className="mx-auto h-10 w-10 text-[var(--ink-muted)]/30" />
                         <p className="mt-2 text-sm text-[var(--ink-muted)]">还没有用户 Agent</p>
                         <p className="mt-1 text-xs text-[var(--ink-muted)]">
@@ -299,7 +302,7 @@ export default function GlobalAgentsPanel() {
                         <p className="mt-2 text-sm text-[var(--ink-muted)]">
                             以下 {syncConflicts.length} 个 Agent 已存在，请选择处理方式：
                         </p>
-                        <div className="mt-3 max-h-32 overflow-y-auto rounded-lg bg-[var(--paper-contrast)] p-2">
+                        <div className="mt-3 max-h-32 overflow-y-auto rounded-lg bg-[var(--paper-inset)] p-2">
                             {syncConflicts.map(name => (
                                 <div key={name} className="px-2 py-1 text-xs text-[var(--ink-muted)]">{name}</div>
                             ))}
@@ -307,13 +310,13 @@ export default function GlobalAgentsPanel() {
                         <div className="mt-4 flex justify-end gap-2">
                             <button
                                 onClick={() => setShowSyncConflictDialog(false)}
-                                className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                                className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
                                 取消
                             </button>
                             <button
                                 onClick={() => doSync('skip')}
-                                className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink)] hover:bg-[var(--paper-contrast)]"
+                                className="rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm text-[var(--ink)] hover:bg-[var(--paper-inset)]"
                             >
                                 跳过已存在
                             </button>

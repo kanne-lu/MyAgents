@@ -51,14 +51,18 @@ pub fn json_client(timeout: Duration) -> reqwest::Client {
 ///
 /// Pre-configured with:
 /// - `.no_proxy()` — bypass system proxy for localhost
-/// - `.read_timeout(60s)` — idle timeout (no bytes for 60s → drop connection)
+/// - `.read_timeout(300s)` — idle timeout (no bytes for 300s → drop connection)
 /// - `.tcp_nodelay(true)` — disable Nagle's algorithm for low-latency events
 /// - `.http1_only()` — force HTTP/1.1 for SSE compatibility
 ///
 /// No overall timeout — streams stay open until the AI turn completes.
+/// read_timeout is 300s (not 60s) because on fresh Sidecar startup, the SDK's
+/// query() can block the Bun event loop for minutes during session resume +
+/// MCP server initialization, preventing heartbeat SSE comments from being sent.
+/// The Bun-side heartbeat is 15s, so 300s provides comfortable margin.
 pub fn sse_client() -> reqwest::Client {
     builder()
-        .read_timeout(Duration::from_secs(60))
+        .read_timeout(Duration::from_secs(300))
         .tcp_nodelay(true)
         .http1_only()
         .build()

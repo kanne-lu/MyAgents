@@ -89,6 +89,7 @@ IM Bot 配置通过 Rust 命令 `cmd_update_im_bot_config` 写盘，写盘后 MU
 | 新增 SSE 事件不注册白名单 | 前端静默丢弃该事件 | 在 `SseConnection.ts` 的 `JSON_EVENTS` 注册 |
 | Sidecar 用 `__dirname` / `readFileSync` | bun build 硬编码路径，生产环境出错 | 内联常量或 `getScriptDir()` |
 | 日志日期用 UTC `toISOString` | 与本地日期文件名不匹配 | 统一用 `localDate()`（`src/shared/logTime.ts`） |
+| UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 design_guide.md |
 
 ---
 
@@ -124,3 +125,4 @@ IM Bot 配置通过 Rust 命令 `cmd_update_im_bot_config` 写盘，写盘后 MU
 - Session ID 架构：@specs/tech_docs/session_id_architecture.md
 - 代理配置：@specs/tech_docs/proxy_config.md
 - Windows 平台适配：@specs/tech_docs/windows_platform_guide.md
+- 设计系统（Token/组件/页面规范）：@specs/guides/design_guide.md

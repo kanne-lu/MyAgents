@@ -16,7 +16,7 @@ export default function PermissionModeSelect({
                         key={mode.value}
                         className={`flex cursor-pointer items-center gap-3 rounded-lg border p-3 transition-colors ${
                             value === mode.value
-                                ? 'border-[var(--button-primary-bg)] bg-[var(--paper-contrast)]'
+                                ? 'border-[var(--button-primary-bg)] bg-[var(--paper-inset)]'
                                 : 'border-[var(--line)] hover:border-[var(--line-strong)]'
                         }`}
                     >

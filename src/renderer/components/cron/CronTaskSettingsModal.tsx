@@ -262,22 +262,22 @@ function CronTaskSettingsForm({
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-black/50"
+        className="absolute inset-0 bg-black/30 backdrop-blur-sm"
         onMouseDown={handleBackdropMouseDown}
         onClick={handleBackdropClick}
       />
 
       {/* Modal */}
-      <div className="relative z-10 w-full max-w-lg rounded-xl bg-[var(--paper)] p-6 shadow-xl">
+      <div className="relative z-10 w-full max-w-lg rounded-xl bg-[var(--paper-elevated)] p-6 shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <HeartPulse className="h-5 w-5 text-red-500" />
+            <HeartPulse className="h-5 w-5 text-[var(--heartbeat)]" />
             <h2 className="text-lg font-semibold text-[var(--ink)]">心跳循环</h2>
           </div>
           <button
             onClick={onClose}
-            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
           >
             <X className="h-5 w-5" />
           </button>
@@ -285,7 +285,7 @@ function CronTaskSettingsForm({
 
         <div className="mt-4 space-y-5">
           {/* Feature Introduction */}
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] p-4">
             <p className="text-sm leading-relaxed text-[var(--ink-secondary)]">
               心跳循环将赋予 AI 按照时间间隔，循环执行任务的能力。
             </p>
@@ -309,7 +309,7 @@ function CronTaskSettingsForm({
                   className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
                     !isCustomInterval && intervalMinutes === preset.value
                       ? 'bg-[var(--accent)] text-white'
-                      : 'bg-[var(--paper-contrast)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+                      : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
                   }`}
                 >
                   {preset.label}
@@ -321,7 +321,7 @@ function CronTaskSettingsForm({
                 className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
                   isCustomInterval
                     ? 'bg-[var(--accent)] text-white'
-                    : 'bg-[var(--paper-contrast)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+                    : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
                 }`}
               >
                 自定义
@@ -362,7 +362,7 @@ function CronTaskSettingsForm({
                 className={`rounded-lg border px-4 py-2 text-sm font-medium transition ${
                   endMode === 'conditional'
                     ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
-                    : 'border-[var(--line)] bg-[var(--paper-contrast)] text-[var(--ink)] hover:border-[var(--line-strong)]'
+                    : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:border-[var(--line-strong)] hover:bg-[var(--paper-inset)]'
                 }`}
               >
                 条件循环
@@ -373,7 +373,7 @@ function CronTaskSettingsForm({
                 className={`rounded-lg border px-4 py-2 text-sm font-medium transition ${
                   endMode === 'forever'
                     ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
-                    : 'border-[var(--line)] bg-[var(--paper-contrast)] text-[var(--ink)] hover:border-[var(--line-strong)]'
+                    : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:border-[var(--line-strong)] hover:bg-[var(--paper-inset)]'
                 }`}
               >
                 永久循环
@@ -382,7 +382,7 @@ function CronTaskSettingsForm({
 
             {/* Conditional End Options */}
             {endMode === 'conditional' && (
-              <div className="space-y-0 rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)]">
+              <div className="space-y-0 rounded-lg border border-[var(--line)] bg-[var(--paper)]">
                 {/* Deadline */}
                 <div
                   className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
@@ -465,7 +465,7 @@ function CronTaskSettingsForm({
           </div>
 
           {/* Notification Toggle */}
-          <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-3">
+          <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] p-3">
             <div className="flex items-center gap-2">
               <Bell className="h-4 w-4 text-[var(--ink-secondary)]" />
               <label className="text-sm text-[var(--ink)]">
@@ -492,7 +492,7 @@ function CronTaskSettingsForm({
         <div className="mt-6 flex justify-end gap-3">
           <button
             onClick={onClose}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-secondary)] transition hover:bg-[var(--paper-contrast)]"
+            className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-secondary)] transition hover:bg-[var(--paper-inset)]"
           >
             取消
           </button>

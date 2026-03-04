@@ -26,7 +26,7 @@ import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
-import { ensureSelfAwarenessWorkspace, atomicModifyConfig } from '@/config/configService';
+import { ensureSelfAwarenessWorkspace } from '@/config/configService';
 import { Loader2 } from 'lucide-react';
 
 // ============================================================
@@ -164,7 +164,7 @@ export default function App() {
 
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
-  const { config, providers: appProviders, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const { config, isLoading: configLoading, updateConfig, providers: appProviders, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
@@ -395,6 +395,7 @@ export default function App() {
   // Check ~/.claude/settings.json for env overrides on startup
   // External tools (cc-switch etc.) may write ANTHROPIC_BASE_URL which overrides all providers
   useEffect(() => {
+    if (configLoading) return; // Wait for config to load from disk before checking
     if (config.dismissClaudeEnvWarning) return;
     const checkClaudeEnvOverrides = async () => {
       try {
@@ -411,7 +412,7 @@ export default function App() {
       }
     };
     void checkClaudeEnvOverrides();
-  }, [config.dismissClaudeEnvWarning]);
+  }, [configLoading, config.dismissClaudeEnvWarning]);
 
   // Update tab isGenerating state (called from TabProvider via callback)
   const updateTabGenerating = useCallback((tabId: string, isGenerating: boolean) => {
@@ -1489,7 +1490,7 @@ export default function App() {
                 disabled={claudeEnvClearing}
                 className="text-[12px] text-[var(--ink-faint)] transition-colors hover:text-[var(--ink-muted)] disabled:opacity-50"
                 onClick={() => {
-                  void atomicModifyConfig(c => ({ ...c, dismissClaudeEnvWarning: true }));
+                  void updateConfig({ dismissClaudeEnvWarning: true });
                   setClaudeEnvOverride(null);
                 }}
               >

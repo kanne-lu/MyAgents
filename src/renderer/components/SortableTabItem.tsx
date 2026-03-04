@@ -59,8 +59,8 @@ export default memo(function SortableTabItem({
                 rounded-lg px-3 transition-colors duration-150 flex-shrink-0
                 ${isDragging ? 'shadow-lg ring-2 ring-[var(--accent)]/30' : ''}
                 ${isActive
-                    ? 'bg-[var(--paper-contrast)] text-[var(--ink)] shadow-sm'
-                    : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]/60 hover:text-[var(--ink)]'
+                    ? 'bg-[var(--paper-inset)] text-[var(--ink)] shadow-sm'
+                    : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]/60 hover:text-[var(--ink)]'
                 }
             `}
             onMouseDown={(e) => {

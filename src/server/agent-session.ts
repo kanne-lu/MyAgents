@@ -2388,7 +2388,10 @@ function handleMessageComplete(): void {
   imTextBlockIndices.clear();
 
   clearCronTaskContext();
-  clearImMediaContext();
+  // NOTE: Do NOT clearImMediaContext() here — im-media is per-Sidecar context (re-set on each
+  // /api/im/chat call). Clearing it between turns causes im-media to be missing from
+  // buildSdkMcpServers() if the session restarts (MCP change, error recovery, etc.).
+  // It is still cleared on full session termination (see below).
 
   // Only transition to idle if no queued messages waiting.
   if (messageQueue.length === 0) {
@@ -3452,9 +3455,16 @@ export async function enqueueUserMessage(
     console.log('[agent] starting session (idle -> running)');
     preWarmFailCount = 0; // 用户主动操作重置重试计数
     messageQueue.push(queueItem);
-    startStreamingSession().catch((error) => {
-      console.error('[agent] failed to start session', error);
-    });
+    // CRITICAL: Defer to next event loop tick via setTimeout(0).
+    // SDK query() can block the event loop for minutes during session resume
+    // (subprocess spawn + MCP server initialization). If called synchronously,
+    // the /api/im/chat handler can't return its SSE Response, causing Rust's
+    // read_timeout to fire. setTimeout(0) lets the handler return first.
+    setTimeout(() => {
+      startStreamingSession().catch((error) => {
+        console.error('[agent] failed to start session', error);
+      });
+    }, 0);
   } else {
     // Session 已在运行（generator 在 waitForMessage 中等待）→ 直接投递
     wakeGenerator(queueItem);
@@ -3588,9 +3598,12 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
     // 启动新 session 来处理队列中的消息。
     console.log('[agent] forceExecuteQueueItem: session dead, starting new session');
     preWarmFailCount = 0;
-    startStreamingSession().catch((error) => {
-      console.error('[agent] forceExecuteQueueItem: failed to start session', error);
-    });
+    // Defer to next tick (same reason as enqueueUserMessage: prevent event loop blocking)
+    setTimeout(() => {
+      startStreamingSession().catch((error) => {
+        console.error('[agent] forceExecuteQueueItem: failed to start session', error);
+      });
+    }, 0);
   }
   return true;
 }

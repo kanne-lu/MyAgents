@@ -40,7 +40,7 @@ export default function BashTool({ tool }: BashToolProps) {
           <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Output</div>
           <pre className={`overflow-x-auto rounded-lg border p-3 font-mono text-xs shadow-sm transition-colors whitespace-pre-wrap ${tool.isError
             ? 'border-[var(--error)]/30 bg-[var(--error-bg)] text-[var(--error)]'
-            : 'border-[var(--line-subtle)] bg-[var(--paper-contrast)]/50 text-[var(--ink-secondary)]'
+            : 'border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 text-[var(--ink-secondary)]'
             }`}>
             {tool.result}
           </pre>

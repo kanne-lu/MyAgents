@@ -88,7 +88,7 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
         </span>
       )}
       {parsed.voice && (
-        <span className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)] font-mono">
+        <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)] font-mono">
           {parsed.voice}
         </span>
       )}
@@ -138,7 +138,7 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
       {parsed.filePath && !parsed.error && (
         <div className="mt-2">
           {audioError ? (
-            <div className="rounded-lg bg-[var(--paper-contrast)] px-3 py-2 text-xs text-[var(--error)]">
+            <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs text-[var(--error)]">
               音频加载失败
             </div>
           ) : (
@@ -166,7 +166,7 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
 
       {/* Voice list result */}
       {parsed.isVoiceList && tool.result && (
-        <pre className="overflow-x-auto overflow-y-auto max-h-[300px] rounded bg-[var(--paper-contrast)]/50 px-2 py-1.5 font-mono text-[10px] whitespace-pre-wrap text-[var(--ink-secondary)]">
+        <pre className="overflow-x-auto overflow-y-auto max-h-[300px] rounded bg-[var(--paper-inset)]/50 px-2 py-1.5 font-mono text-[10px] whitespace-pre-wrap text-[var(--ink-secondary)]">
           {tool.result}
         </pre>
       )}

@@ -974,12 +974,12 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
     <div
       ref={panelRef}
       tabIndex={0}
-      className={`flex flex-col border-l border-[var(--line)] bg-[var(--paper-strong)] outline-none overscroll-none ${isNarrowMode && isCollapsed ? 'h-12' : 'h-full'
+      className={`flex flex-col bg-[var(--paper-elevated)] outline-none overscroll-none ${isNarrowMode && isCollapsed ? 'h-12' : 'h-full'
         }`}
     >
       {/* Title bar - aligned with left panel header */}
       <div
-        className={`flex h-12 flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-4 select-none ${isNarrowMode ? 'cursor-pointer hover:bg-[var(--paper-contrast)]/50' : ''
+        className={`flex h-12 flex-shrink-0 items-center justify-between px-4 select-none ${isNarrowMode ? 'cursor-pointer hover:bg-[var(--hover-bg)]' : ''
           }`}
         onClick={isNarrowMode ? () => setIsCollapsed(!isCollapsed) : undefined}
       >
@@ -989,7 +989,7 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
             <button
               type="button"
               onClick={onCollapse}
-              className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
               title="收起工作区"
             >
               <PanelRightClose className="h-4 w-4" />
@@ -1006,7 +1006,7 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                 e.stopPropagation();
                 onOpenConfig();
               }}
-              className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               title="打开项目设置"
             >
               <Settings className="h-4 w-4" />
@@ -1021,7 +1021,7 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                 e.stopPropagation();
                 setIsCollapsed(!isCollapsed);
               }}
-              className="flex h-6 w-6 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="flex h-6 w-6 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
               title={isCollapsed ? '展开工作区' : '折叠工作区'}
             >
               <ChevronUp className={`h-4 w-4 transition-transform ${isCollapsed ? 'rotate-180' : ''}`} />
@@ -1033,26 +1033,29 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
       {/* Collapsible content - hidden in narrow mode when collapsed */}
       {!(isNarrowMode && isCollapsed) && (
         <>
+          {/* Inset divider: header → folder info */}
+          <div className="mx-4 border-b border-[var(--line-subtle)]" />
+
           {/* Folder header with name, path, stats - two row layout */}
-          <div className="border-b border-[var(--line)] px-4 py-3">
+          <div className="px-4 pb-2 pt-3">
             {/* First row: folder icon, name, git branch, and stats */}
             <div className="flex items-center gap-2">
               <FolderOpen className="h-4 w-4 flex-shrink-0 text-[var(--accent-warm)]" />
               <span className="truncate text-sm font-semibold text-[var(--ink)]">{folderName}</span>
               {gitBranch && (
-                <span className="flex items-center gap-1 rounded bg-[var(--paper-strong)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                <span className="flex items-center gap-1 rounded bg-[var(--paper-elevated)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
                   <GitBranch className="h-3 w-3" />
                   {gitBranch}
                 </span>
               )}
               {directoryInfo && (
-                <span className="ml-auto flex-shrink-0 text-[10px] text-[var(--ink-muted)]">
+                <span className="ml-auto flex-shrink-0 text-[11px] text-[var(--ink-muted)]">
                   {directoryInfo.summary.totalFiles} 文件 · {directoryInfo.summary.totalDirs} 文件夹
                 </span>
               )}
             </div>
             {/* Second row: full path (shortened for display) */}
-            <div className="mt-1 truncate pl-6 text-[10px] text-[var(--ink-muted)]">{shortenPathForDisplay(agentDir)}</div>
+            <div className="mt-1 truncate pl-6 text-[11px] text-[var(--ink-muted)]">{shortenPathForDisplay(agentDir)}</div>
             {/* Hidden file input for import functionality */}
             <input
               ref={importInputRef}
@@ -1207,12 +1210,12 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                     <div
                       style={style}
                       data-tree-row
-                      className={`flex h-full cursor-pointer items-center gap-2 px-3 text-[11px] transition-colors select-none ${
+                      className={`flex h-full cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${
                         isDropTarget
                           ? 'ring-2 ring-inset ring-[var(--accent)]/50 bg-[var(--accent)]/10'
                           : isSelected
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
-                            : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
+                            ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                         }`}
                       onClick={handleRowClick}
                       onContextMenu={(e) => handleContextMenu(e, data)}

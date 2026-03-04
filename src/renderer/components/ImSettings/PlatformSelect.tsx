@@ -39,7 +39,7 @@ export default function PlatformSelect({
             <div className="flex items-center gap-3">
                 <button
                     onClick={onCancel}
-                    className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                    className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                 >
                     <ArrowLeft className="h-4 w-4" />
                 </button>

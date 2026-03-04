@@ -169,7 +169,7 @@ const ProcessRow = memo(function ProcessRow({
                 type="button"
                 onClick={handleToggle}
                 disabled={!hasContent}
-                className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${hasContent ? 'cursor-pointer hover:bg-[var(--paper-contrast)]' : 'cursor-default'
+                className={`flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors ${hasContent ? 'cursor-pointer hover:bg-[var(--hover-bg)]' : 'cursor-default'
                     }`}
             >
                 {/* Left indicator dot - smaller */}

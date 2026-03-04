@@ -23,7 +23,7 @@ export default function TitleBar({ onOpenHistory, onNewChat }: TitleBarProps) {
             {onOpenHistory && (
               <button
                 onClick={onOpenHistory}
-                className="flex items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] shadow-sm transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--paper-contrast)]"
+                className="flex items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] shadow-sm transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--paper-inset)]"
                 title="Open chat history"
                 aria-label="Open chat history"
               >
@@ -35,7 +35,7 @@ export default function TitleBar({ onOpenHistory, onNewChat }: TitleBarProps) {
             {onNewChat && (
               <button
                 onClick={onNewChat}
-                className="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--paper-contrast)]"
+                className="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm transition-colors hover:border-[var(--line-strong)] hover:bg-[var(--paper-inset)]"
                 title="Start new chat"
                 aria-label="Start new chat"
               >

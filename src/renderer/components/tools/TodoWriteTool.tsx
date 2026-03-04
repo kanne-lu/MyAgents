@@ -37,7 +37,7 @@ export default function TodoWriteTool({ tool }: TodoWriteToolProps) {
               key={index}
               className={`flex items-start gap-3 rounded-lg px-3 py-2 transition-colors ${isInProgress
                   ? 'bg-[var(--accent)]/10'
-                  : 'hover:bg-[var(--paper-contrast)]'
+                  : 'hover:bg-[var(--paper-inset)]'
                 }`}
             >
               {/* Checkbox */}

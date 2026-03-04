@@ -229,7 +229,7 @@ export default function WorkspaceAgentsList({
             </div>
 
             {!hasAny && availableForImport.length === 0 ? (
-                <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-contrast)]/30 py-8 text-center">
+                <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8 text-center">
                     <Bot className="mx-auto h-10 w-10 text-[var(--ink-muted)]/30" />
                     <p className="mt-2 text-sm text-[var(--ink-muted)]">暂无 Agent</p>
                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
@@ -288,14 +288,14 @@ export default function WorkspaceAgentsList({
                                 <h4 className="text-sm font-medium text-[var(--ink-muted)]">引入全局 Agent</h4>
                                 <button
                                     onClick={() => setShowImportPicker(!showImportPicker)}
-                                    className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-2.5 py-1 text-xs text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                    className="flex items-center gap-1 rounded-lg border border-[var(--line)] px-2.5 py-1 text-xs text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                 >
                                     <Link2 className="h-3 w-3" />
                                     {showImportPicker ? '收起' : '引入'}
                                 </button>
                             </div>
                             {showImportPicker && (
-                                <div className="space-y-1.5 rounded-lg border border-dashed border-[var(--line)] bg-[var(--paper-contrast)]/30 p-3">
+                                <div className="space-y-1.5 rounded-lg border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 p-3">
                                     {availableForImport.map(agent => (
                                         <div key={agent.folderName} className="flex items-center justify-between rounded-md px-3 py-2 hover:bg-[var(--paper-elevated)]">
                                             <div className="min-w-0 flex-1">
@@ -385,7 +385,7 @@ function AgentRow({
                     <span className="truncate text-sm font-medium text-[var(--ink)]">{agent.name}</span>
                     <Bot className="h-3.5 w-3.5 shrink-0 text-violet-500" />
                     {isGlobalRef && (
-                        <span className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
+                        <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
                             全局
                         </span>
                     )}
@@ -399,7 +399,7 @@ function AgentRow({
             {isGlobalRef && onRemoveRef && (
                 <button
                     onClick={e => { e.stopPropagation(); onRemoveRef(); }}
-                    className="shrink-0 rounded-md p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                    className="shrink-0 rounded-md p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     title="移除引用"
                 >
                     <XIcon className="h-3.5 w-3.5" />

@@ -73,7 +73,7 @@ export default function ToolUse({ tool }: ToolUseProps) {
       const expandedContent =
         tool.inputJson ?
           <div className="ml-5">
-            <pre className="overflow-x-auto rounded bg-[var(--paper-contrast)]/50 px-2 py-1.5 font-mono text-sm wrap-break-word whitespace-pre-wrap text-[var(--ink-secondary)]">
+            <pre className="overflow-x-auto rounded bg-[var(--paper-inset)]/50 px-2 py-1.5 font-mono text-sm wrap-break-word whitespace-pre-wrap text-[var(--ink-secondary)]">
               {tool.inputJson}
             </pre>
           </div>

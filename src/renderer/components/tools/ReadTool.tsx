@@ -23,12 +23,12 @@ export default function ReadTool({ tool }: ReadToolProps) {
       <ToolHeader tool={tool} toolName={tool.name} />
       <FilePath path={input.file_path} />
       {input.offset !== undefined && (
-        <span className="rounded border border-[var(--line-subtle)] bg-[var(--paper-contrast)]/50 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--ink-muted)] uppercase">
+        <span className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--ink-muted)] uppercase">
           offset {input.offset}
         </span>
       )}
       {input.limit !== undefined && (
-        <span className="rounded border border-[var(--line-subtle)] bg-[var(--paper-contrast)]/50 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--ink-muted)] uppercase">
+        <span className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--ink-muted)] uppercase">
           limit {input.limit}
         </span>
       )}
@@ -37,7 +37,7 @@ export default function ReadTool({ tool }: ReadToolProps) {
 
   const expandedContent =
     tool.result ?
-      <pre className="max-h-72 overflow-x-auto rounded bg-[var(--paper-contrast)]/50 px-2 py-1 font-mono text-sm wrap-break-word whitespace-pre-wrap text-[var(--ink-secondary)]">
+      <pre className="max-h-72 overflow-x-auto rounded bg-[var(--paper-inset)]/50 px-2 py-1 font-mono text-sm wrap-break-word whitespace-pre-wrap text-[var(--ink-secondary)]">
         {tool.result}
       </pre>
     : null;

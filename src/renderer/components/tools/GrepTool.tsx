@@ -30,7 +30,7 @@ export default function GrepTool({ tool }: GrepToolProps) {
 
   const expandedContent =
     tool.result ?
-      <pre className="overflow-x-auto rounded bg-[var(--paper-contrast)]/50 px-2 py-1 font-mono text-sm wrap-break-word whitespace-pre-wrap text-[var(--ink-secondary)]">
+      <pre className="overflow-x-auto rounded bg-[var(--paper-inset)]/50 px-2 py-1 font-mono text-sm wrap-break-word whitespace-pre-wrap text-[var(--ink-secondary)]">
         {tool.result}
       </pre>
     : null;

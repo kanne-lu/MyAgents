@@ -125,7 +125,7 @@ export default function CustomTitleBar({
 
     return (
         <div
-            className="custom-titlebar flex h-11 flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-b from-[var(--paper)] to-[var(--paper-contrast)]/30"
+            className="custom-titlebar flex h-11 flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-b from-[var(--paper)] to-[var(--paper-inset)]/30"
         >
             {/* macOS traffic lights spacer - DRAGGABLE (hidden on Windows) */}
             {!isWindows && !isFullscreen && (
@@ -176,7 +176,7 @@ export default function CustomTitleBar({
                 )}
                 <button
                     onClick={onSettingsClick || (() => console.log('Settings clicked - TODO'))}
-                    className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                    className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     title="设置"
                 >
                     <Settings className="h-4 w-4" />
@@ -189,14 +189,14 @@ export default function CustomTitleBar({
                 <div className="flex h-full items-stretch" data-no-drag>
                     <button
                         onClick={handleMinimize}
-                        className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] transition-colors"
+                        className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] transition-colors"
                         title="最小化"
                     >
                         <Minus className="h-4 w-4" />
                     </button>
                     <button
                         onClick={handleMaximize}
-                        className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] transition-colors"
+                        className="flex w-11 items-center justify-center text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] transition-colors"
                         title={isMaximized ? "还原" : "最大化"}
                     >
                         {isMaximized ? (

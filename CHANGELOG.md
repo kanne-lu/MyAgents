@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.35] - 2026-03-05
+
+### Fixed
+- **「不再提示」全局配置覆盖弹窗**：重启应用后弹窗仍然显示，修复持久化逻辑
+- **Bridge thinking 模式 tool_call**：thinking 模式下 tool_call 消息缺失 reasoning_content
+- **IM Bot im-media 工具丢失**：IM 频道发送图片/文件时工具不可用 + 首消息 SSE 超时
+- **AI 小助理面板圆角**：底部圆角被子元素背景色遮挡，添加 overflow-hidden
+
+### Changed
+- **Design Polish v2.2**：CSS Token 重建 + 组件样式统一 + 页面视觉打磨
+- **模型选择器重构**：从两级菜单（先选供应商 → 再选模型）改为单级分组菜单，按供应商分组平铺所有可用模型；空状态显示引导跳转设置页
+- **Settings 文案修正**："工具 & MCP" → "工具 MCP"
+
+---
+
 ## [0.1.34] - 2026-03-04
 
 ### Added

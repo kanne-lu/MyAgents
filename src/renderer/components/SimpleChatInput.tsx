@@ -4,7 +4,7 @@ import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, use
 import { useToast } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabApiOptional, type SessionState } from '@/context/TabContext';
-import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName, PRESET_PROVIDERS } from '@/config/types';
+import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
 import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
@@ -242,7 +242,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Mode and Model dropdown menus
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
-  const [showProviderSubmenu, setShowProviderSubmenu] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
 
   // Derive current model ID from prop or provider default
@@ -279,7 +278,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     setShowPlusMenu(false);
     setShowModeMenu(false);
     setShowModelMenu(false);
-    setShowProviderSubmenu(false);
     setShowToolMenu(false);
   }, []);
 
@@ -1091,7 +1089,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         <div
           className="pointer-events-none absolute inset-x-0 bottom-0 h-32"
           style={{
-            background: 'linear-gradient(to bottom, transparent, var(--paper-strong) 60%)'
+            background: 'linear-gradient(to bottom, transparent, var(--paper-elevated) 60%)'
           }}
         />
       )}
@@ -1119,7 +1117,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
           />
         )}
 
-        <div className={`relative border border-[var(--line)] bg-[var(--paper-reading)] shadow-xl ${
+        <div className={`relative border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl ${
           cronModeEnabled && !cronTask && cronConfig
             ? 'rounded-b-2xl rounded-t-none border-t-0'  // StatusBar visible: no top rounded, no top border
             : 'rounded-2xl'  // Normal: fully rounded
@@ -1193,7 +1191,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
             {/* @file search popup */}
             {showFileSearch && (
-              <div className="absolute left-4 bottom-full mb-2 w-80 max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl">
+              <div className="absolute left-4 bottom-full mb-2 w-80 max-h-64 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl">
                 {fileSearchQuery.length === 0 ? (
                   <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
                     输入文件名搜索...
@@ -1212,7 +1210,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       key={file.path}
                       className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-sm ${idx === selectedFileIndex
                         ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
-                        : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]'
+                        : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
                         }`}
                       onClick={() => {
                         if (atPosition !== null) {
@@ -1246,7 +1244,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             <button
               type="button"
               onClick={toggleExpand}
-              className="absolute right-2 top-1.5 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="absolute right-2 top-1.5 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
               title={isExpanded ? '收起' : '展开'}
             >
               {isExpanded ? (
@@ -1277,13 +1275,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     setShowToolMenu(false);
                     setShowPlusMenu(!showPlusMenu);
                   }}
-                  className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                  className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                   title="添加上下文"
                 >
                   <Plus className="h-4 w-4" />
                 </button>
                 {showPlusMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-40 rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl py-1">
+                  <div className="absolute left-0 bottom-full mb-1 w-48 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
                     {!isLauncherMode && (
                     <button
                       type="button"
@@ -1303,7 +1301,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         }
                         setShowPlusMenu(false);
                       }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                     >
                       <AtSign className="h-4 w-4" />
                       引用文件
@@ -1329,7 +1327,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         }
                         setShowPlusMenu(false);
                       }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                     >
                       <span className="inline-flex h-4 w-4 items-center justify-center font-medium text-[var(--ink-muted)]">/</span>
                       使用技能
@@ -1341,7 +1339,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         e.stopPropagation();
                         fileInputRef.current?.click();
                       }}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                     >
                       <Paperclip className="h-4 w-4" />
                       上传文件
@@ -1370,7 +1368,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     setShowPlusMenu(false);
                     setShowToolMenu(false);
                   }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                   title="切换执行模式"
                 >
                   <span>{PERMISSION_MODES.find(m => m.value === permissionMode)?.icon}</span>
@@ -1378,7 +1376,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <ChevronUp className="h-3 w-3" />
                 </button>
                 {showModeMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-72 rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl py-1">
+                  <div className="absolute left-0 bottom-full mb-1 w-72 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
                     <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--line)]">
                       <span className="text-xs font-medium text-[var(--ink-muted)]">会话模式</span>
                       {onOpenAgentSettings && (
@@ -1389,7 +1387,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             setShowModeMenu(false);
                             onOpenAgentSettings();
                           }}
-                          className="text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-strong)] transition-colors"
+                          className="text-xs font-medium text-[var(--accent)] hover:text-[var(--accent-warm-hover)] transition-colors"
                         >
                           Agent 设置
                         </button>
@@ -1409,7 +1407,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         }}
                         className={`flex w-full flex-col items-start px-3 py-2 text-left ${permissionMode === mode.value
                           ? 'bg-[var(--accent)]/10'
-                          : 'hover:bg-[var(--paper-contrast)]'
+                          : 'hover:bg-[var(--hover-bg)]'
                           }`}
                       >
                         <span className={`text-sm font-medium flex items-center gap-1.5 ${permissionMode === mode.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
@@ -1435,7 +1433,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     setShowModelMenu(false);
                     setShowPlusMenu(false);
                   }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                   title="使用工具"
                 >
                   <Wrench className="h-3.5 w-3.5" />
@@ -1447,7 +1445,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   )}
                 </button>
                 {showToolMenu && (
-                  <div className="absolute left-0 bottom-full mb-1 w-64 rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl py-1">
+                  <div className="absolute left-0 bottom-full mb-1 w-64 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
                     <div className="px-3 py-2 text-xs font-medium text-[var(--ink-muted)] border-b border-[var(--line)]">
                       工具 (在此对话中启用)
                     </div>
@@ -1466,7 +1464,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   {server.name}
                                 </div>
                                 {server.description && (
-                                  <div className="text-[10px] text-[var(--ink-muted)] truncate">
+                                  <div className="text-xs text-[var(--ink-muted)] truncate">
                                     {server.description}
                                   </div>
                                 )}
@@ -1479,7 +1477,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   setShowToolMenu(false);
                                   window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, { detail: { section: 'mcp', mcpServerId: server.id } }));
                                 }}
-                                className="ml-2 shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                className="ml-2 shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                               >
                                 <Settings2 className="h-3.5 w-3.5" />
                               </button>
@@ -1532,8 +1530,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   }}
                   className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${
                     cronModeEnabled
-                      ? 'bg-red-500/15 text-red-500 hover:bg-red-500/25'
-                      : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
+                      ? 'bg-[var(--heartbeat-bg)] text-[var(--heartbeat)] hover:bg-[var(--heartbeat)]/20'
+                      : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
                   title={cronModeEnabled ? '心跳循环已启用' : '开启心跳循环'}
                 >
@@ -1555,103 +1553,71 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     setShowModelMenu(willOpen);
                     setShowModeMenu(false);
                     setShowPlusMenu(false);
-                    setShowProviderSubmenu(false);
                     setShowToolMenu(false);
                     // Refresh providers data when opening menu
                     if (willOpen && onRefreshProviders) {
                       onRefreshProviders();
                     }
                   }}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                   title="切换模型"
                 >
                   <span>{currentModelName}</span>
                   <ChevronUp className="h-3 w-3" />
                 </button>
-                {showModelMenu && (
-                  <div className="absolute right-0 bottom-full mb-1 w-64 rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl py-1">
-                    {/* Provider selector in header */}
-                    <div className="relative px-3 py-2 border-b border-[var(--line)]">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-medium text-[var(--ink-muted)]">选择模型</span>
-                        {providers.length > 0 && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setShowProviderSubmenu(!showProviderSubmenu);
-                            }}
-                            className="flex items-center gap-1 rounded px-2 py-1.5 text-[10px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
-                          >
-                            <span>{provider?.name ?? '选择供应商'}</span>
-                            <ChevronDown className="h-2.5 w-2.5" />
-                          </button>
-                        )}
-                      </div>
-                      {/* Provider submenu - opens upward */}
-                      {showProviderSubmenu && providers.length > 0 && (
-                        <div className="absolute right-0 bottom-full mb-1 w-56 max-h-56 overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--paper)] shadow-xl py-1 z-10">
-                          {providers.map((p) => {
-                            const available = isProviderAvailable(p);
-                            return (
-                              <button
-                                key={p.id}
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (!available) return; // Don't switch if unavailable
-                                  onProviderChange?.(p.id);
-                                  setShowProviderSubmenu(false);
-                                  // Auto-select first model of new provider
-                                  if (p.primaryModel) {
-                                    onModelChange?.(p.primaryModel);
-                                  }
-                                }}
-                                disabled={!available}
-                                className={`flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm ${!available
-                                  ? 'opacity-50 cursor-not-allowed text-[var(--ink-muted)]'
-                                  : provider?.id === p.id
-                                    ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
-                                    : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
+                {showModelMenu && (() => {
+                  const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p));
+                  return (
+                    <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
+                      {availableProviders.length === 0 ? (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setShowModelMenu(false);
+                            window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+                              detail: { section: 'providers' }
+                            }));
+                          }}
+                          className="w-full px-3 py-2.5 text-left text-[13px] text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
+                        >
+                          请先设置模型服务 →
+                        </button>
+                      ) : (
+                        availableProviders.map((p, idx) => (
+                          <div key={p.id}>
+                            {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
+                            <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                              {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
+                            </div>
+                            {p.models.map(model => {
+                              const isSelected = provider?.id === p.id && currentModelId === model.model;
+                              return (
+                                <button
+                                  key={model.model}
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (provider?.id !== p.id) onProviderChange?.(p.id);
+                                    onModelChange?.(model.model);
+                                    setShowModelMenu(false);
+                                  }}
+                                  className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                                    isSelected
+                                      ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                                      : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                                   }`}
-                                title={!available
-                                  ? (p.type === 'subscription' ? '请在设置页面验证订阅状态' : '请在设置面板配置您的 API-Key')
-                                  : p.name}
-                              >
-                                <span className="font-medium truncate">{p.name}</span>
-                                <span className="text-[9px] text-[var(--ink-muted)] bg-[var(--paper-contrast)] px-1 py-0.5 rounded shrink-0">
-                                  {p.cloudProvider}
-                                </span>
-                              </button>
-                            );
-                          })}
-                        </div>
+                                >
+                                  {model.modelName}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ))
                       )}
                     </div>
-                    {/* Dynamic models from provider.models */}
-                    {(provider?.models ?? PRESET_PROVIDERS[0].models).map((model) => (
-                      <button
-                        key={model.model}
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onModelChange?.(model.model);
-                          setShowModelMenu(false);
-                          setShowProviderSubmenu(false);
-                        }}
-                        className={`flex w-full items-center px-3 py-2 text-left ${currentModelId === model.model
-                          ? 'bg-[var(--accent)]/10'
-                          : 'hover:bg-[var(--paper-contrast)]'
-                          }`}
-                      >
-                        <span className={`text-sm font-medium ${currentModelId === model.model ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
-                          }`}>
-                          {model.modelName}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
+                  );
+                })()}
               </div>
 
               {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
@@ -1691,7 +1657,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   type="button"
                   onClick={handleSend}
                   disabled={!isCurrentProviderAvailable || (!inputValue.trim() && images.length === 0)}
-                  className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-strong)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
+                  className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
                   title={!isCurrentProviderAvailable ? '请前往设置页面设置模型供应商' : '发送'}
                 >
                   <Send className="h-4 w-4" />

@@ -1222,16 +1222,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [onNewSession, resetSession]);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden overscroll-none bg-[var(--paper-strong)] text-[var(--ink)] md:flex-row">
+    <div className="flex h-full flex-col overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)] md:flex-row">
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden border-b border-[var(--line-subtle)] md:border-r md:border-b-0 ${showWorkspace ? 'w-full md:w-3/4' : 'w-full'}`}>
         {/* Compact header - single row */}
-        <div className="flex h-12 flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-4">
+        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)]/60 after:to-transparent">
           <div className="flex items-center gap-2">
             {onBack && (
               <button
                 type="button"
                 onClick={onBack}
-                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="Back to projects"
               >
                 <ArrowLeft className="h-4 w-4" />
@@ -1249,7 +1249,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             <button
               type="button"
               onClick={handleNewSession}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               title="新建对话"
             >
               <Plus className="h-3.5 w-3.5" />
@@ -1262,8 +1262,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => setShowHistory((prev) => !prev)}
                 className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors ${showHistory
-                  ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
-                  : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
+                  ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+                  : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
               >
                 <History className="h-3.5 w-3.5" />
@@ -1285,8 +1285,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                   type="button"
                   onClick={() => setShowLogs((prev) => !prev)}
                   className={`rounded-lg px-2.5 py-1 text-[13px] font-medium transition-colors ${showLogs
-                    ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
-                    : 'text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]'
+                    ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+                    : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                     }`}
                 >
                   Logs
@@ -1298,7 +1298,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               <button
                 type="button"
                 onClick={() => setShowWorkspace(true)}
-                className="hidden md:flex items-center gap-1 rounded-lg px-2 py-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                className="hidden md:flex items-center gap-1 rounded-lg px-2 py-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="展开工作区"
               >
                 <PanelRightOpen className="h-4 w-4" />
@@ -1331,7 +1331,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           )}
 
           {agentError && (
-            <div className="flex-shrink-0 border-b border-[var(--line)] bg-[#f5e4d9]/80 px-4 py-2 text-[11px] text-[var(--ink)]">
+            <div className="flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)]/80 px-4 py-2 text-[11px] text-[var(--ink)]">
               <div className="mx-auto flex max-w-3xl items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                 <div className="flex-1">
@@ -1341,7 +1341,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 <button
                   type="button"
                   onClick={() => setAgentError(null)}
-                  className="flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                  className="flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]"
                 >
                   Dismiss
                 </button>

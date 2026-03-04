@@ -13,6 +13,7 @@ import { translateImageBlock } from './multimodal';
 export function translateMessages(
   system: string | AnthropicSystemBlock[] | undefined,
   messages: AnthropicMessage[],
+  thinkingEnabled = false,
 ): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
 
@@ -43,7 +44,7 @@ export function translateMessages(
     if (msg.role === 'user') {
       translateUserMessage(msg, result, knownToolUseIds);
     } else if (msg.role === 'assistant') {
-      translateAssistantMessage(msg, result);
+      translateAssistantMessage(msg, result, thinkingEnabled);
     }
   }
 
@@ -110,7 +111,7 @@ function translateUserMessage(
   }
 }
 
-function translateAssistantMessage(msg: AnthropicMessage, result: OpenAIMessage[]): void {
+function translateAssistantMessage(msg: AnthropicMessage, result: OpenAIMessage[], thinkingEnabled: boolean): void {
   if (typeof msg.content === 'string') {
     result.push({ role: 'assistant', content: msg.content });
     return;
@@ -141,10 +142,17 @@ function translateAssistantMessage(msg: AnthropicMessage, result: OpenAIMessage[
     }
   }
 
+  // When thinking is enabled, some upstream models (e.g. Kimi) require reasoning_content
+  // on ALL assistant messages that contain tool_calls. The SDK may strip thinking blocks
+  // with empty signatures, leaving tool_call messages without reasoning_content.
+  // Provide an empty reasoning_content to satisfy this validation.
+  const needsReasoningContent = thinkingParts.length > 0
+    || (thinkingEnabled && toolCalls.length > 0);
+
   const assistantMsg: OpenAIAssistantMessage = {
     role: 'assistant',
     content: textParts.length > 0 ? textParts.join('') : null,
-    ...(thinkingParts.length > 0 ? { reasoning_content: thinkingParts.join('\n') } : {}),
+    ...(needsReasoningContent ? { reasoning_content: thinkingParts.join('\n') } : {}),
     ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
   };
 

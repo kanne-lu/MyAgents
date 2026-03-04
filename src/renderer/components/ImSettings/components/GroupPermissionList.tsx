@@ -70,7 +70,7 @@ export default function GroupPermissionList({
                                 <button
                                     onClick={() => handleAction(() => onReject(g.groupId), g.groupId)}
                                     disabled={loading === g.groupId}
-                                    className="rounded-md bg-[var(--paper-contrast)] p-1.5 text-[var(--ink-muted)] transition-colors hover:text-[var(--error)] disabled:opacity-50"
+                                    className="rounded-md bg-[var(--paper-inset)] p-1.5 text-[var(--ink-muted)] transition-colors hover:text-[var(--error)] disabled:opacity-50"
                                     title="拒绝"
                                 >
                                     <X className="h-3.5 w-3.5" />
@@ -88,7 +88,7 @@ export default function GroupPermissionList({
                     {approved.map(g => (
                         <div
                             key={g.groupId}
-                            className="group flex items-center justify-between rounded-lg bg-[var(--paper-contrast)] px-3 py-2"
+                            className="group flex items-center justify-between rounded-lg bg-[var(--paper-inset)] px-3 py-2"
                         >
                             <div className="min-w-0 flex-1">
                                 <p className="truncate text-sm text-[var(--ink)]">{g.groupName}</p>

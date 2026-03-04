@@ -6009,7 +6009,7 @@ async function main() {
               // (Bun buffers the response until the first body chunk is written)
               controller.enqueue(encoder.encode(': connected\n\n'));
 
-              // 15s heartbeat (keep-alive during tool calls; Rust read_timeout=60s)
+              // 15s heartbeat (keep-alive during tool calls; Rust read_timeout=300s)
               heartbeatTimer = setInterval(() => {
                 try { if (!closed) controller.enqueue(encoder.encode(': ping\n\n')); }
                 catch { /* stream closed */ }

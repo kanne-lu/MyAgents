@@ -349,7 +349,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
         return (
             <div className="flex h-full flex-col">
                 {/* File Tab Bar */}
-                <div className="flex flex-shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--line)] bg-[var(--paper-contrast)]/50 px-4 py-1.5">
+                <div className="flex flex-shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--line)] bg-[var(--paper-inset)]/50 px-4 py-1.5">
                     {/* CLAUDE.md tab - always first, not deletable */}
                     <button
                         type="button"
@@ -491,7 +491,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
 
                 {/* Action Bar */}
                 {!loading && (exists || isEditing) && (
-                    <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] bg-[var(--paper-contrast)]/30 px-6 py-2">
+                    <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] bg-[var(--paper-inset)]/30 px-6 py-2">
                         <div className="flex items-center gap-2">
                             <FileText className="h-4 w-4 text-[var(--accent-warm)]" />
                             <span className="text-sm font-medium text-[var(--ink)]">{activeFilename}</span>
@@ -513,7 +513,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     <button
                                         type="button"
                                         onClick={handleCancel}
-                                        className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                                        className="flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                                     >
                                         <X className="h-3.5 w-3.5" />
                                         取消
@@ -532,7 +532,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                 <button
                                     type="button"
                                     onClick={handleEdit}
-                                    className="flex items-center gap-1 rounded-lg bg-[var(--ink)] px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-[var(--ink-strong)]"
+                                    className="flex items-center gap-1 rounded-lg bg-[var(--ink)] px-2.5 py-1 text-xs font-medium text-white transition-colors hover:bg-[var(--ink-secondary)]"
                                 >
                                     <Edit2 className="h-3.5 w-3.5" />
                                     编辑
@@ -577,7 +577,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                             />
                         </div>
                     ) : (
-                        <div className="h-full overflow-auto bg-[var(--paper-reading)] p-6">
+                        <div className="h-full overflow-auto bg-[var(--paper-elevated)] p-6">
                             {content ? (
                                 <div className="prose prose-stone max-w-none dark:prose-invert">
                                     <Markdown raw>{content}</Markdown>
