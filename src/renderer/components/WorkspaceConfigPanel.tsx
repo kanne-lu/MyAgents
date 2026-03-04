@@ -173,18 +173,18 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
         >
             {/* Main Panel */}
             <div
-                className="relative flex h-[90vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-2xl bg-[var(--paper)] shadow-2xl"
+                className="relative flex h-[90vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-2xl bg-[var(--paper-elevated)] shadow-2xl"
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header — three zones: left (icon+title), center (tabs), right (close) */}
-                <div className="flex flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-r from-[var(--paper-contrast)] to-[var(--paper)] px-6 py-4">
+                <div className="flex flex-shrink-0 items-center border-b border-[var(--line)] bg-gradient-to-r from-[var(--paper-inset)] to-[var(--paper)] px-6 py-4">
                     {/* Left zone */}
                     <div className="flex min-w-0 items-center gap-3">
                         {detailView.type !== 'none' && (
                             <button
                                 type="button"
                                 onClick={handleBackFromDetail}
-                                className="mr-2 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                className="mr-2 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                 title="返回列表"
                             >
                                 <ChevronLeft className="h-5 w-5" />
@@ -229,7 +229,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                     <button
                         type="button"
                         onClick={handleClose}
-                        className="shrink-0 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="shrink-0 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                         title="关闭 (Esc)"
                     >
                         <X className="h-5 w-5" />
@@ -299,7 +299,7 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
                 </div>
 
                 {/* Footer hint */}
-                <div className="flex-shrink-0 border-t border-[var(--line)] bg-[var(--paper-contrast)] px-6 py-2">
+                <div className="flex-shrink-0 border-t border-[var(--line)] bg-[var(--paper-inset)] px-6 py-2">
                     <p className="text-center text-xs text-[var(--ink-muted)]">
                         按 Esc 关闭 · 配置修改会立即生效
                     </p>

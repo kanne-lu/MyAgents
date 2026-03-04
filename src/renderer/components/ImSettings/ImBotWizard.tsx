@@ -485,7 +485,7 @@ export default function ImBotWizard({
             <div className="flex items-center gap-3">
                 <button
                     onClick={handleCancel}
-                    className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                    className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                 >
                     <ArrowLeft className="h-4 w-4" />
                 </button>
@@ -624,7 +624,7 @@ export default function ImBotWizard({
                                     />
                                     <ol className="flex-1 space-y-2 text-sm text-[var(--ink-muted)]">
                                         <li>1. 扫左侧二维码，或在 Telegram 中搜索 <span className="font-medium text-[var(--ink)]">@BotFather</span></li>
-                                        <li>2. 发送 <code className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-xs">/newbot</code> 创建新 Bot</li>
+                                        <li>2. 发送 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">/newbot</code> 创建新 Bot</li>
                                         <li>3. 按提示设置 Bot 名称和用户名</li>
                                         <li>4. 复制返回的 <span className="font-medium text-[var(--ink)]">HTTP API Token</span></li>
                                         <li>5. 粘贴到上方的 Bot Token 输入框</li>
@@ -638,7 +638,7 @@ export default function ImBotWizard({
                     <div className="flex justify-between">
                         <button
                             onClick={handleCancel}
-                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
                             取消
                         </button>
@@ -711,7 +711,7 @@ export default function ImBotWizard({
                     <div className="flex justify-between">
                         <button
                             onClick={() => setStep(1)}
-                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
                             上一步
                         </button>
@@ -740,12 +740,12 @@ export default function ImBotWizard({
                         <div className="mt-3 relative">
                             <button
                                 onClick={handleCopyPermJson}
-                                className="absolute right-2 top-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                className="absolute right-2 top-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                 title="复制 JSON"
                             >
                                 {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
                             </button>
-                            <pre className="overflow-x-auto rounded-lg bg-[var(--paper-contrast)] p-3 text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                            <pre className="overflow-x-auto rounded-lg bg-[var(--paper-inset)] p-3 text-[11px] leading-relaxed text-[var(--ink-muted)]">
                                 {FEISHU_PERMISSIONS_JSON}
                             </pre>
                         </div>
@@ -762,7 +762,7 @@ export default function ImBotWizard({
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
                             <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
                             <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
-                            <li>添加事件：搜索 <code className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[11px]">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                            <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px]">im.message.receive_v1</code>（接收消息），勾选添加</li>
                         </ol>
                         <img
                             src={feishuStep2EventImg}
@@ -789,7 +789,7 @@ export default function ImBotWizard({
                     <div className="flex justify-between">
                         <button
                             onClick={() => setStep(1)}
-                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
                             上一步
                         </button>
@@ -915,7 +915,7 @@ export default function ImBotWizard({
                     <div className="flex justify-between">
                         <button
                             onClick={() => setStep((isFeishu || isDingtalk) ? 2 : 1)}
-                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
                             上一步
                         </button>
@@ -981,7 +981,7 @@ export default function ImBotWizard({
                     <div className="flex justify-between">
                         <button
                             onClick={() => setStep(workspaceStep)}
-                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                         >
                             上一步
                         </button>

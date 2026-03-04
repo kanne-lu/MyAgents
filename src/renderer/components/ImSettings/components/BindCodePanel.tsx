@@ -46,12 +46,12 @@ export default function BindCodePanel({
 
             {/* Bind code display */}
             <div className="flex items-center gap-3">
-                <code className="flex-1 rounded-lg bg-[var(--paper-contrast)] px-4 py-3 text-center text-lg font-mono font-bold text-[var(--ink)] tracking-wider">
+                <code className="flex-1 rounded-lg bg-[var(--paper-inset)] px-4 py-3 text-center text-lg font-mono font-bold text-[var(--ink)] tracking-wider">
                     {bindCode}
                 </code>
                 <button
                     onClick={handleCopy}
-                    className="flex-shrink-0 rounded-lg border border-[var(--line)] p-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                    className="flex-shrink-0 rounded-lg border border-[var(--line)] p-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     title="复制口令"
                 >
                     {copied ? <Check className="h-4 w-4 text-[var(--success)]" /> : <Copy className="h-4 w-4" />}

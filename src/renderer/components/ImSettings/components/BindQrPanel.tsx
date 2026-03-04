@@ -91,7 +91,7 @@ export default function BindQrPanel({
                     <div className="pt-1">
                         <p className="mb-1 text-[10px] text-[var(--ink-muted)]">或在桌面版 Telegram 中直接打开：</p>
                         <div className="flex items-center gap-1.5 overflow-hidden">
-                            <code className="min-w-0 flex-1 truncate rounded bg-[var(--paper-contrast)] px-2 py-1 text-[11px] text-[var(--ink)]">
+                            <code className="min-w-0 flex-1 truncate rounded bg-[var(--paper-inset)] px-2 py-1 text-[11px] text-[var(--ink)]">
                                 {bindUrl}
                             </code>
                             <button

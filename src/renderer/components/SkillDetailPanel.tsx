@@ -383,7 +383,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
         return (
             <div className="flex h-full flex-col">
                 {/* Header */}
-                <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] bg-[var(--paper-contrast)]/50 px-6 py-2">
+                <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] bg-[var(--paper-inset)]/50 px-6 py-2">
                     <div className="min-w-0 flex-1">
                         <h3 className="text-base font-semibold text-[var(--ink)]">{skillName || name}</h3>
                         <div className="mt-0.5 flex items-center gap-2">
@@ -400,7 +400,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 type="button"
                                 onClick={handleOpenInFinder}
                                 disabled={pathChanged}
-                                className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="flex-shrink-0 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50 disabled:cursor-not-allowed"
                                 title={pathChanged ? "保存后可打开新位置" : "在 Finder 中打开"}
                             >
                                 <FolderOpen className="h-3.5 w-3.5" />
@@ -421,7 +421,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 <button
                                     type="button"
                                     onClick={handleCancel}
-                                    className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                                    className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                                 >
                                     <X className="h-4 w-4" />
                                     取消
@@ -441,7 +441,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 key="view"
                                 type="button"
                                 onClick={() => handleEdit('name')}
-                                className="flex items-center gap-1.5 rounded-lg bg-[var(--ink)] px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-strong)]"
+                                className="flex items-center gap-1.5 rounded-lg bg-[var(--ink)] px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-[var(--ink-secondary)]"
                             >
                                 <Edit2 className="h-4 w-4" />
                                 编辑
@@ -459,7 +459,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                             <div className={`w-full rounded-lg border px-4 py-2.5 ${
                                 isEditing
                                     ? 'border-[var(--line)] bg-[var(--paper)] focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20'
-                                    : 'border-[var(--line)] bg-[var(--paper-reading)]'
+                                    : 'border-[var(--line)] bg-[var(--paper-elevated)]'
                             }`}>
                                 {isEditing ? (
                                     <input
@@ -485,7 +485,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 className={`w-full rounded-lg border px-4 py-2.5 ${
                                     isEditing
                                         ? 'border-[var(--line)] bg-[var(--paper)] focus-within:border-[var(--accent)] focus-within:ring-2 focus-within:ring-[var(--accent)]/20'
-                                        : 'border-[var(--line)] bg-[var(--paper-reading)]'
+                                        : 'border-[var(--line)] bg-[var(--paper-elevated)]'
                                 }`}
                             >
                                 {/* Fixed height container: min 1 line, max 4 lines (22px line-height * 4 = 88px) */}
@@ -529,7 +529,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                 className={`overflow-hidden rounded-lg border ${
                                     isEditing
                                         ? 'border-[var(--line)] bg-[var(--paper)]'
-                                        : 'border-[var(--line)] bg-[var(--paper-reading)]'
+                                        : 'border-[var(--line)] bg-[var(--paper-elevated)]'
                                 }`}
                                 style={{ height: 'max(300px, calc(100vh - 420px))' }}
                             >
@@ -566,7 +566,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
 
                         {/* Advanced Settings */}
                         {showAdvanced && (
-                            <div className="space-y-4 rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)]/30 p-4">
+                            <div className="space-y-4 rounded-xl border border-[var(--line)] bg-[var(--paper-inset)]/30 p-4">
                                 {/* Invocation Mode - 调用模式单选 */}
                                 <div>
                                     <label className="mb-2 block text-sm font-medium text-[var(--ink)]">调用模式</label>
@@ -617,7 +617,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none"
                                         />
                                     ) : (
-                                        <div onClick={() => handleEdit()} className="w-full cursor-pointer rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)]/30 px-3 py-2 text-sm transition-colors hover:border-[var(--ink-muted)]/50">
+                                        <div onClick={() => handleEdit()} className="w-full cursor-pointer rounded-lg border border-[var(--line)] bg-[var(--paper-inset)]/30 px-3 py-2 text-sm transition-colors hover:border-[var(--ink-muted)]/50">
                                             {allowedTools || <span className="text-[var(--ink-muted)]/60">未设置 (不限制)</span>}
                                         </div>
                                     )}
@@ -639,7 +639,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                                 }
                                             }}
                                             className={`flex w-full items-center justify-between rounded-lg border border-[var(--line)] px-3 py-2 text-left text-sm transition-colors ${
-                                                isEditing ? 'bg-[var(--paper)] hover:border-[var(--ink-muted)]/50' : 'bg-[var(--paper-contrast)]/30 opacity-70'
+                                                isEditing ? 'bg-[var(--paper)] hover:border-[var(--ink-muted)]/50' : 'bg-[var(--paper-inset)]/30 opacity-70'
                                             }`}
                                         >
                                             <span className={context ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
@@ -648,7 +648,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                             <ChevronDown className="h-4 w-4 text-[var(--ink-muted)]" />
                                         </button>
                                         {showContextMenu && isEditing && (
-                                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper-strong)] py-1 shadow-lg">
+                                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-lg">
                                                 {[
                                                     { value: '', label: '默认 (主会话上下文)', desc: '在当前对话上下文中执行' },
                                                     { value: 'fork', label: 'fork (独立子代理)', desc: '在独立的子代理中执行' },
@@ -660,7 +660,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                                             setContext(option.value);
                                                             setShowContextMenu(false);
                                                         }}
-                                                        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-contrast)] ${
+                                                        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-inset)] ${
                                                             context === option.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
                                                         }`}
                                                     >
@@ -692,7 +692,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                                 }
                                             }}
                                             className={`flex w-full items-center justify-between rounded-lg border border-[var(--line)] px-3 py-2 text-left text-sm transition-colors ${
-                                                isEditing ? 'bg-[var(--paper)] hover:border-[var(--ink-muted)]/50' : 'bg-[var(--paper-contrast)]/30 opacity-70'
+                                                isEditing ? 'bg-[var(--paper)] hover:border-[var(--ink-muted)]/50' : 'bg-[var(--paper-inset)]/30 opacity-70'
                                             }`}
                                         >
                                             <span className={agent ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
@@ -704,7 +704,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                             <ChevronDown className="h-4 w-4 text-[var(--ink-muted)]" />
                                         </button>
                                         {showAgentMenu && isEditing && (
-                                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper-strong)] py-1 shadow-lg">
+                                            <div className="absolute left-0 top-full z-50 mt-1 w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-lg">
                                                 {[
                                                     { value: '', label: '默认 (自动选择)', desc: '由 Claude 根据任务自动选择' },
                                                     { value: 'Explore', label: 'Explore (探索代理)', desc: '适合代码搜索和探索任务' },
@@ -718,7 +718,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                                             setAgent(option.value);
                                                             setShowAgentMenu(false);
                                                         }}
-                                                        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-contrast)] ${
+                                                        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--paper-inset)] ${
                                                             agent === option.value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'
                                                         }`}
                                                     >
@@ -746,7 +746,7 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
                                             className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none"
                                         />
                                     ) : (
-                                        <div onClick={() => handleEdit()} className="w-full cursor-pointer rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)]/30 px-3 py-2 text-sm transition-colors hover:border-[var(--ink-muted)]/50">
+                                        <div onClick={() => handleEdit()} className="w-full cursor-pointer rounded-lg border border-[var(--line)] bg-[var(--paper-inset)]/30 px-3 py-2 text-sm transition-colors hover:border-[var(--ink-muted)]/50">
                                             {argumentHint || <span className="text-[var(--ink-muted)]/60">未设置</span>}
                                         </div>
                                     )}

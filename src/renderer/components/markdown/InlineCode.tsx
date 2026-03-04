@@ -12,7 +12,7 @@ interface InlineCodeProps {
 }
 
 const BASE_CLASS = 'rounded bg-[var(--paper-inset)] px-1.5 py-0.5 font-mono text-[0.9em] text-[var(--ink)]';
-const INTERACTIVE_CLASS = `${BASE_CLASS} border-b border-dashed border-[var(--ink-muted)] cursor-pointer hover:bg-[var(--paper-contrast)] transition-colors`;
+const INTERACTIVE_CLASS = `${BASE_CLASS} border-b border-dashed border-[var(--ink-muted)] cursor-pointer hover:bg-[var(--accent-warm-subtle)] transition-colors`;
 
 /** Extract plain text from React children (handles string / number / nested spans). */
 function extractText(node: React.ReactNode): string {

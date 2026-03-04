@@ -114,7 +114,7 @@ export default function WebSearchTool({ tool }: WebSearchToolProps) {
               key={item.url}
               href={item.url}
               onClick={handleResultClick(item.url)}
-              className="flex items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--paper-contrast)] [&:hover_.result-title]:text-[var(--accent)] [&:hover_.result-icon]:opacity-100"
+              className="flex items-center gap-2.5 rounded-md px-2 py-1.5 transition-colors hover:bg-[var(--paper-inset)] [&:hover_.result-title]:text-[var(--accent)] [&:hover_.result-icon]:opacity-100"
             >
               {/* Globe icon */}
               <Globe className="size-4 shrink-0 text-[var(--ink-muted)]" />
@@ -146,7 +146,7 @@ export default function WebSearchTool({ tool }: WebSearchToolProps) {
       {showRawResult && (
         <div className="space-y-2">
           <div className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Tool Output</div>
-          <div className="rounded-lg bg-[var(--paper-contrast)] p-3 font-mono text-xs text-[var(--ink-secondary)] overflow-x-auto border border-[var(--line-subtle)] select-text">
+          <div className="rounded-lg bg-[var(--paper-inset)] p-3 font-mono text-xs text-[var(--ink-secondary)] overflow-x-auto border border-[var(--line-subtle)] select-text">
             {tool.result}
           </div>
         </div>

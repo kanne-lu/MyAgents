@@ -10,6 +10,7 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import type { ImBotStatus } from '../../shared/types/im';
 
 import SessionStatsModal from './SessionStatsModal';
+import SessionTagBadge from './SessionTagBadge';
 
 interface SessionHistoryDropdownProps {
     agentDir: string;
@@ -259,7 +260,7 @@ export default function SessionHistoryDropdown({
                                     key={session.id}
                                     className={`group flex cursor-pointer items-start gap-3 px-4 py-3 transition-colors ${isCurrent
                                         ? 'bg-[var(--accent)]/10'
-                                        : 'hover:bg-[var(--paper-contrast)]'
+                                        : 'hover:bg-[var(--hover-bg)]'
                                         }`}
                                     onClick={() => {
                                         if (!isCurrent) {
@@ -276,14 +277,10 @@ export default function SessionHistoryDropdown({
                                                 </span>
                                             )}
                                             {sessionImBotMap.has(session.id) && (
-                                                <span className="flex-shrink-0 rounded bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
-                                                    {sessionImBotMap.get(session.id)}
-                                                </span>
+                                                <SessionTagBadge tag={{ type: 'im', platform: sessionImBotMap.get(session.id)! }} />
                                             )}
                                             {sessionCronTaskMap.has(session.id) && (
-                                                <span className="flex-shrink-0 rounded bg-red-500/20 px-1.5 py-0.5 text-[10px] font-medium text-red-600 dark:text-red-400">
-                                                    心跳
-                                                </span>
+                                                <SessionTagBadge tag={{ type: 'cron' }} />
                                             )}
                                             <span className={`truncate text-sm ${isCurrent ? 'font-medium text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
                                                 {session.title}
@@ -315,7 +312,7 @@ export default function SessionHistoryDropdown({
                                                     确认
                                                 </button>
                                                 <button
-                                                    className="flex h-6 items-center justify-center rounded bg-[var(--paper-contrast)] px-2 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--line)]"
+                                                    className="flex h-6 items-center justify-center rounded bg-[var(--paper-inset)] px-2 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--line)]"
                                                     onClick={(e) => { e.stopPropagation(); handleCancelDelete(); }}
                                                 >
                                                     取消
@@ -324,7 +321,7 @@ export default function SessionHistoryDropdown({
                                         ) : (
                                             <>
                                                 <button
-                                                    className="flex h-6 w-6 items-center justify-center rounded text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] group-hover:opacity-100"
+                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper)] hover:text-[var(--ink)] group-hover:opacity-100"
                                                     onClick={(e) => handleShowStats(e, session)}
                                                     title="查看统计"
                                                 >
@@ -333,19 +330,19 @@ export default function SessionHistoryDropdown({
                                                 {/* Disable delete for sessions with running cron tasks */}
                                                 {sessionCronTaskMap.has(session.id) ? (
                                                     <button
-                                                        className="flex h-6 w-6 cursor-not-allowed items-center justify-center rounded opacity-0 group-hover:opacity-50"
+                                                        className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 group-hover:opacity-40"
                                                         disabled
                                                         title="请先停止心跳循环后再删除"
                                                     >
-                                                        <Trash2 className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
+                                                        <Trash2 className="h-3.5 w-3.5" />
                                                     </button>
                                                 ) : (
                                                     <button
-                                                        className="flex h-6 w-6 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--error-bg)] group-hover:opacity-100"
+                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--error-bg)] hover:text-[var(--error)] group-hover:opacity-100"
                                                         onClick={(e) => handleDeleteClick(e, session.id)}
                                                         title="删除"
                                                     >
-                                                        <Trash2 className="h-3.5 w-3.5 text-[var(--error)]" />
+                                                        <Trash2 className="h-3.5 w-3.5" />
                                                     </button>
                                                 )}
                                             </>

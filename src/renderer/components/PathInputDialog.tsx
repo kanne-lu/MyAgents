@@ -57,7 +57,7 @@ export default function PathInputDialog({
                     </h2>
                     <button
                         onClick={onCancel}
-                        className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     >
                         <X className="h-5 w-5" />
                     </button>
@@ -89,7 +89,7 @@ export default function PathInputDialog({
                 <div className="flex justify-end gap-3">
                     <button
                         onClick={onCancel}
-                        className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     >
                         取消
                     </button>

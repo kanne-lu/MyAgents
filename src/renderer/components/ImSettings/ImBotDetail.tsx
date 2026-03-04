@@ -363,7 +363,7 @@ export default function ImBotDetail({
                 <div className="flex items-center gap-3">
                     <button
                         onClick={onBack}
-                        className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     >
                         <ArrowLeft className="h-4 w-4" />
                     </button>
@@ -551,7 +551,7 @@ export default function ImBotDetail({
                                                 : '收到所有群消息，AI 自行判断是否回复'}
                                         </p>
                                     </div>
-                                    <div className="flex rounded-lg bg-[var(--paper-contrast)] p-0.5">
+                                    <div className="flex rounded-lg bg-[var(--paper-inset)] p-0.5">
                                         {(['mention', 'always'] as GroupActivation[]).map(mode => (
                                             <button
                                                 key={mode}
@@ -600,7 +600,7 @@ export default function ImBotDetail({
                     <div className="flex-1 pr-4">
                         <p className="text-sm font-medium text-[var(--ink)]">Bot 默认工作区</p>
                         <p className="text-xs text-[var(--ink-muted)]">
-                            新对话默认关联的工作区，可通过 <code className="rounded bg-[var(--paper-contrast)] px-1 py-0.5 text-[10px]">/workspace</code> 命令切换
+                            新对话默认关联的工作区，可通过 <code className="rounded bg-[var(--paper-inset)] px-1 py-0.5 text-[10px]">/workspace</code> 命令切换
                         </p>
                     </div>
                     <CustomSelect

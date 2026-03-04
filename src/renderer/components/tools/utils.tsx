@@ -87,7 +87,7 @@ export function MonoText({
 
 export function FilePath({ path }: { path: string }) {
   return (
-    <MonoText className="rounded border border-[var(--line-subtle)] bg-[var(--paper-contrast)]/50 px-1.5 py-0.5">
+    <MonoText className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5">
       {path}
     </MonoText>
   );
@@ -95,7 +95,7 @@ export function FilePath({ path }: { path: string }) {
 
 export function InlineCode({ children }: { children: ReactNode }) {
   return (
-    <MonoText className="rounded border border-[var(--line-subtle)] bg-[var(--paper-contrast)]/50 px-1.5 py-0.5">
+    <MonoText className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5">
       {children}
     </MonoText>
   );

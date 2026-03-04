@@ -201,14 +201,14 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
             onClick={handleBackdropClick}
         >
             <div
-                className="flex h-[90vh] w-[95vw] max-w-6xl flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--paper)] shadow-2xl"
+                className="flex h-[90vh] w-[95vw] max-w-6xl flex-col overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] shadow-2xl"
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-3">
                     <div className="flex items-center gap-4">
                         <h2 className="text-lg font-semibold text-[var(--ink)]">Logs</h2>
-                        <span className="rounded-full bg-[var(--paper-contrast)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
+                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)]">
                             {filteredLogs.length} / {allLogs.length}
                         </span>
                     </div>
@@ -217,7 +217,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         {/* Download button */}
                         <button
                             onClick={handleDownload}
-                            className="rounded p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            className="rounded p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             title="导出日志"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -227,7 +227,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         {/* Clear button */}
                         <button
                             onClick={handleClearAll}
-                            className="rounded p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            className="rounded p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             title="清空日志"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -237,7 +237,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         {/* Close button */}
                         <button
                             onClick={onClose}
-                            className="rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            className="rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             aria-label="Close"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -259,7 +259,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                     onClick={() => setFilter(value)}
                                     className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${filter === value
                                         ? 'bg-[var(--accent)] text-white'
-                                        : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
+                                        : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
                                 >
                                     {label}
@@ -280,7 +280,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                     onClick={() => setLevelFilter(value)}
                                     className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${levelFilter === value
                                         ? 'bg-[var(--ink)] text-[var(--paper)]'
-                                        : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
+                                        : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
                                 >
                                     {label}
@@ -301,7 +301,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                     onClick={() => toggleHideFilter(value)}
                                     className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${hideFilters.has(value)
                                         ? 'bg-[var(--warning)]/15 text-[var(--warning)]'
-                                        : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
+                                        : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
                                 >
                                     {label}
@@ -315,7 +315,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                 <div
                     ref={scrollRef}
                     onScroll={handleScroll}
-                    className="flex-1 overflow-y-auto bg-[var(--paper-strong)] p-4 font-mono text-xs leading-relaxed"
+                    className="flex-1 overflow-y-auto bg-[var(--paper-elevated)] p-4 font-mono text-xs leading-relaxed"
                 >
                     {filteredLogs.length === 0 ? (
                         <div className="flex h-full items-center justify-center text-[var(--ink-muted)]">
@@ -326,7 +326,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                             {filteredLogs.map((log, index) => (
                                 <div
                                     key={`${log.timestamp}-${index}`}
-                                    className={`flex gap-3 rounded px-2 py-1 hover:bg-[var(--paper-contrast)] ${LOG_LEVEL_COLORS[log.level]}`}
+                                    className={`flex gap-3 rounded px-2 py-1 hover:bg-[var(--paper-inset)] ${LOG_LEVEL_COLORS[log.level]}`}
                                 >
                                     {/* Source badge */}
                                     <span
@@ -359,7 +359,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                 </div>
 
                 {/* Footer */}
-                <div className="flex items-center justify-between border-t border-[var(--line)] bg-[var(--paper-contrast)] px-6 py-2 text-xs text-[var(--ink-muted)]">
+                <div className="flex items-center justify-between border-t border-[var(--line)] bg-[var(--paper-inset)] px-6 py-2 text-xs text-[var(--ink-muted)]">
                     <div className="flex gap-3">
                         <span className="text-blue-600 dark:text-blue-400">REACT: {logCounts.react}</span>
                         <span className="text-green-600 dark:text-green-400">BUN: {logCounts.bun}</span>
@@ -367,7 +367,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         <span className="text-[var(--ink-muted)]">Total: {allLogs.length}</span>
                     </div>
                     <div>
-                        Press <kbd className="rounded bg-[var(--paper-strong)] px-1.5 py-0.5 font-mono text-[10px]">ESC</kbd> to close
+                        Press <kbd className="rounded bg-[var(--paper-elevated)] px-1.5 py-0.5 font-mono text-[10px]">ESC</kbd> to close
                     </div>
                 </div>
             </div>

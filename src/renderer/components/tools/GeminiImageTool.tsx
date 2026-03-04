@@ -100,7 +100,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
         <span className="text-[10px] text-[var(--ink-muted)] animate-pulse">生成中...</span>
       )}
       {parsed.isEdit && parsed.editCount && (
-        <span className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
+        <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
           #{parsed.editCount}
         </span>
       )}
@@ -144,12 +144,12 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
             onClick={handleImageClick}
           >
             {!imageLoaded && !imageError && (
-              <div className="w-[300px] h-[200px] bg-[var(--paper-contrast)] animate-pulse rounded-lg flex items-center justify-center">
+              <div className="w-[300px] h-[200px] bg-[var(--paper-inset)] animate-pulse rounded-lg flex items-center justify-center">
                 <span className="text-xs text-[var(--ink-muted)]">加载中...</span>
               </div>
             )}
             {imageError && (
-              <div className="w-[300px] h-[200px] bg-[var(--paper-contrast)] rounded-lg flex items-center justify-center">
+              <div className="w-[300px] h-[200px] bg-[var(--paper-inset)] rounded-lg flex items-center justify-center">
                 <span className="text-xs text-[var(--error)]">图片加载失败</span>
               </div>
             )}

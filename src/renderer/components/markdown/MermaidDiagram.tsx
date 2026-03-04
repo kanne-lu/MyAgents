@@ -307,7 +307,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
 
         // Initial loading state
         return (
-            <div className="flex h-20 items-center justify-center bg-[var(--paper-contrast)]/50">
+            <div className="flex h-20 items-center justify-center bg-[var(--paper-inset)]/50">
                 <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
                     <RefreshCw className="size-4 animate-spin" />
                     <span>渲染图表...</span>

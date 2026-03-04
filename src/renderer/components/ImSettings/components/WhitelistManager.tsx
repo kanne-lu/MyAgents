@@ -38,7 +38,7 @@ export default function WhitelistManager({
                         {users.map((user) => (
                             <span
                                 key={user}
-                                className="inline-flex items-center gap-1 rounded-full bg-[var(--paper-contrast)] px-2.5 py-1 text-xs text-[var(--ink)]"
+                                className="inline-flex items-center gap-1 rounded-full bg-[var(--paper-inset)] px-2.5 py-1 text-xs text-[var(--ink)]"
                             >
                                 {user}
                                 <button
@@ -86,7 +86,7 @@ export default function WhitelistManager({
                     {users.map((user) => (
                         <span
                             key={user}
-                            className="inline-flex items-center gap-1 rounded-full bg-[var(--paper-contrast)] px-2.5 py-1 text-xs text-[var(--ink)]"
+                            className="inline-flex items-center gap-1 rounded-full bg-[var(--paper-inset)] px-2.5 py-1 text-xs text-[var(--ink)]"
                         >
                             {user}
                             <button

@@ -206,7 +206,7 @@ export default memo(function TaskCenterOverlay({
                                         className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
                                             statusFilter === opt.key
                                                 ? 'bg-[var(--button-primary-bg)] text-[var(--button-primary-text)]'
-                                                : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]'
+                                                : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
                                         }`}
                                     >
                                         {opt.label}
@@ -247,7 +247,7 @@ export default memo(function TaskCenterOverlay({
                                                 key={session.id}
                                                 role="button"
                                                 onClick={() => onOpenTask(session, project)}
-                                                className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--paper-inset)]"
+                                                className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                             >
                                                 <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
                                                     <Clock className="h-2.5 w-2.5" />
@@ -334,7 +334,7 @@ export default memo(function TaskCenterOverlay({
                                             <button
                                                 key={task.id}
                                                 onClick={() => onOpenCronDetail(task)}
-                                                className="group flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--paper-inset)]"
+                                                className="group flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                             >
                                                 <div className="flex items-center gap-2">
                                                     <span

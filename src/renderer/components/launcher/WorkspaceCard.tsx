@@ -72,22 +72,22 @@ export default memo(function WorkspaceCard({
                 onClick={() => !isLoading && onLaunch(project)}
                 onContextMenu={handleContextMenu}
                 disabled={isLoading}
-                className={`group flex w-full items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3.5 text-left transition-all duration-150 ease-out hover:border-[var(--line-strong)] hover:shadow-sm active:scale-[0.97] ${
+                className={`group flex w-full items-center gap-3 rounded-[14px] border border-[var(--line)] bg-[var(--paper-elevated)] p-3.5 text-left shadow-xs transition-all duration-150 ease-out hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px] active:scale-[0.97] ${
                     isLoading ? 'pointer-events-none opacity-60' : 'cursor-pointer'
                 }`}
             >
-                {/* Folder icon */}
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--accent-warm)]/8 transition-colors group-hover:bg-[var(--accent-warm)]/15">
+                {/* Folder icon — no container bg, just the icon */}
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center">
                     {isLoading ? (
-                        <Loader2 className="h-4 w-4 animate-spin text-[var(--accent-warm)]/70" />
+                        <Loader2 className="h-5 w-5 animate-spin text-[var(--ink-subtle)]" />
                     ) : (
-                        <FolderOpen className="h-4 w-4 text-[var(--accent-warm)]/70 transition-colors group-hover:text-[var(--accent-warm)]" />
+                        <FolderOpen className="h-5 w-5 text-[var(--ink-subtle)] transition-colors group-hover:text-[var(--accent-warm)]" />
                     )}
                 </div>
 
                 {/* Text */}
                 <div className="min-w-0 flex-1">
-                    <h3 className="truncate text-[13px] font-medium text-[var(--ink)]">
+                    <h3 className="truncate text-[13px] font-medium text-[var(--ink)] transition-colors group-hover:text-[var(--accent-warm)]">
                         {getFolderName(project.path)}
                     </h3>
                     <p className="mt-0.5 truncate text-[11px] font-light text-[var(--ink-muted)]/60">
@@ -112,7 +112,7 @@ export default memo(function WorkspaceCard({
                             setContextMenu(null);
                             onRemove(project);
                         }}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--error)] transition-colors hover:bg-[var(--paper-contrast)]"
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-[var(--error)] transition-colors hover:bg-[var(--paper-inset)]"
                     >
                         <Trash2 className="h-3.5 w-3.5" />
                         移除

@@ -106,7 +106,7 @@ export default function HeartbeatConfigCard({
                                     className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
                                         config.intervalMinutes === preset.value
                                             ? 'bg-[var(--accent)] text-white'
-                                            : 'bg-[var(--paper-contrast)] text-[var(--ink-secondary)] hover:bg-[var(--ink-faint)]'
+                                            : 'bg-[var(--paper-inset)] text-[var(--ink-secondary)] hover:bg-[var(--ink-faint)]'
                                     }`}
                                 >
                                     {preset.label}
@@ -138,7 +138,7 @@ export default function HeartbeatConfigCard({
                     </div>
 
                     {/* Checklist file hint */}
-                    <div className="rounded-lg bg-[var(--paper-contrast)] px-3 py-2">
+                    <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2">
                         <p className="text-xs text-[var(--ink-secondary)]">
                             巡检清单存放在工作区根目录的 <code className="rounded bg-[var(--paper)] px-1 py-0.5 text-[var(--accent)]">HEARTBEAT.md</code> 文件中。
                             启用心跳后会自动创建该文件，编辑文件内容即可定义 AI 的巡检任务。

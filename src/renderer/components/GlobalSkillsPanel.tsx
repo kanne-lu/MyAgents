@@ -20,13 +20,16 @@ type ViewState =
     | { type: 'skill-detail'; name: string; isNewSkill?: boolean }
     | { type: 'command-detail'; name: string };
 
-export default function GlobalSkillsPanel() {
+export default function GlobalSkillsPanel({ onDetailChange }: { onDetailChange?: (inDetail: boolean) => void }) {
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
     const [viewState, setViewState] = useState<ViewState>({ type: 'list' });
+    const onDetailChangeRef = useRef(onDetailChange);
+    onDetailChangeRef.current = onDetailChange;
+    useEffect(() => { onDetailChangeRef.current?.(viewState.type !== 'list'); }, [viewState.type]);
     const [loading, setLoading] = useState(true);
     const [skills, setSkills] = useState<SkillItem[]>([]);
     const [commands, setCommands] = useState<CommandItem[]>([]);
@@ -364,7 +367,7 @@ export default function GlobalSkillsPanel() {
                         ))}
                     </div>
                 ) : (
-                    <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-contrast)]/30 py-8 text-center">
+                    <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8 text-center">
                         <Sparkles className="mx-auto h-10 w-10 text-[var(--ink-muted)]/30" />
                         <p className="mt-2 text-sm text-[var(--ink-muted)]">还没有用户技能</p>
                     </div>
@@ -398,7 +401,7 @@ export default function GlobalSkillsPanel() {
                         ))}
                     </div>
                 ) : (
-                    <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-contrast)]/30 py-8 text-center">
+                    <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-8 text-center">
                         <Terminal className="mx-auto h-10 w-10 text-[var(--ink-muted)]/30" />
                         <p className="mt-2 text-sm text-[var(--ink-muted)]">还没有用户指令</p>
                     </div>

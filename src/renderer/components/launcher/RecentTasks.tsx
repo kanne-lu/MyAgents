@@ -24,6 +24,8 @@ import {
 import type { Project } from '@/config/types';
 
 const DISPLAY_COUNT = 5;
+/** Fixed min-height for 5 rows (each ~36px + 2px gap) to prevent layout shift */
+const LIST_MIN_HEIGHT = 'min-h-[188px]';
 
 interface RecentTasksProps {
     projects: Project[];
@@ -119,7 +121,9 @@ export default memo(function RecentTasks({
         return (
             <div className="mb-8">
                 <TabHeader activeTab={activeTab} onTabChange={setActiveTab} />
-                <div className="py-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</div>
+                <div className={`${LIST_MIN_HEIGHT} flex items-center`}>
+                    <div className="py-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</div>
+                </div>
             </div>
         );
     }
@@ -128,16 +132,18 @@ export default memo(function RecentTasks({
         return (
             <div className="mb-8">
                 <TabHeader activeTab={activeTab} onTabChange={setActiveTab} />
-                <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
-                    <AlertCircle className="mx-auto mb-2 h-4 w-4 text-amber-500/70" />
-                    <p className="mb-2 text-[13px] text-[var(--ink-muted)]">{error}</p>
-                    <button
-                        onClick={refresh}
-                        className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    >
-                        <RefreshCw className="h-3.5 w-3.5" />
-                        重试
-                    </button>
+                <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
+                    <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
+                        <AlertCircle className="mx-auto mb-2 h-4 w-4 text-amber-500/70" />
+                        <p className="mb-2 text-[13px] text-[var(--ink-muted)]">{error}</p>
+                        <button
+                            onClick={refresh}
+                            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                        >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            重试
+                        </button>
+                    </div>
                 </div>
             </div>
         );
@@ -149,11 +155,13 @@ export default memo(function RecentTasks({
 
             {/* Sessions tab */}
             {activeTab === 'sessions' && (
-                <div>
+                <div className={LIST_MIN_HEIGHT}>
                     {displaySessions.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
-                            <MessageSquare className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
-                            <p className="text-[13px] text-[var(--ink-muted)]/70">暂无对话记录</p>
+                        <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
+                            <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
+                                <MessageSquare className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
+                                <p className="text-[13px] text-[var(--ink-muted)]/70">暂无对话记录</p>
+                            </div>
                         </div>
                     ) : (
                         <div className="space-y-0.5">
@@ -170,7 +178,7 @@ export default memo(function RecentTasks({
                                         key={session.id}
                                         role="button"
                                         onClick={() => onOpenTask(session, project)}
-                                        className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--paper-inset)]"
+                                        className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                     >
                                         <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
                                             <Clock className="h-2.5 w-2.5" />
@@ -234,11 +242,13 @@ export default memo(function RecentTasks({
 
             {/* CronTasks tab */}
             {activeTab === 'cron' && (
-                <div>
+                <div className={LIST_MIN_HEIGHT}>
                     {displayCronTasks.length === 0 ? (
-                        <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
-                            <Timer className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
-                            <p className="text-[13px] text-[var(--ink-muted)]/70">暂无定时任务</p>
+                        <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
+                            <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
+                                <Timer className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
+                                <p className="text-[13px] text-[var(--ink-muted)]/70">暂无定时任务</p>
+                            </div>
                         </div>
                     ) : (
                         <div className="space-y-0.5">
@@ -254,7 +264,7 @@ export default memo(function RecentTasks({
                                     <button
                                         key={task.id}
                                         onClick={() => onOpenCronDetail(task)}
-                                        className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--paper-inset)]"
+                                        className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                     >
                                         <span
                                             className={`w-14 shrink-0 text-[11px] font-medium ${getCronStatusColor(task.status)}`}
@@ -286,7 +296,7 @@ export default memo(function RecentTasks({
             <div className="mt-2 flex justify-center">
                 <button
                     onClick={onOpenOverlay}
-                    className="inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-[12px] text-[var(--ink-muted)]/60 transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink-muted)]"
+                    className="inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-[12px] text-[var(--ink-muted)]/60 transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink-muted)]"
                 >
                     查看全部
                     <ArrowRight className="h-3 w-3" />

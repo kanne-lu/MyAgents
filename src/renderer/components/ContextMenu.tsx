@@ -68,7 +68,7 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
     return (
         <div
             ref={menuRef}
-            className="fixed z-50 min-w-[160px] rounded-xl border border-[var(--line)] bg-[var(--paper-strong)] py-1.5 shadow-lg backdrop-blur"
+            className="fixed z-50 min-w-[160px] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1.5 shadow-lg backdrop-blur"
             style={{ left: x, top: y }}
         >
             {items.map((item, index) =>
@@ -89,7 +89,7 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
                                 ? 'cursor-not-allowed text-[var(--ink-muted)]/50'
                                 : item.danger
                                     ? 'text-[var(--error)] hover:bg-[var(--error-bg)]'
-                                    : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
+                                    : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
                             }`}
                     >
                         {item.icon && <span className="h-4 w-4">{item.icon}</span>}

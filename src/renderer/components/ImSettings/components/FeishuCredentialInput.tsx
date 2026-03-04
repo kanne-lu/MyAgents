@@ -101,7 +101,7 @@ export default function FeishuCredentialInput({
 
             {/* Tutorial */}
             {showGuide && (
-                <div className="rounded-lg bg-[var(--paper-contrast)] p-3">
+                <div className="rounded-lg bg-[var(--paper-inset)] p-3">
                     <p className="text-xs font-medium text-[var(--ink)]">如何获取飞书应用凭证？</p>
                     <ol className="mt-2 space-y-1.5 text-xs text-[var(--ink-muted)]">
                         <li>1. 登录<a

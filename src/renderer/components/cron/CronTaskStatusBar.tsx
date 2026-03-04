@@ -15,12 +15,12 @@ export default function CronTaskStatusBar({
 }: CronTaskStatusBarProps) {
   return (
     <div
-      className="flex items-center justify-between rounded-t-lg border border-b-0 border-red-500/20 px-3 py-2"
-      style={{ backgroundColor: 'color-mix(in srgb, var(--paper) 92%, rgb(239 68 68))' }}
+      className="flex items-center justify-between rounded-t-lg border border-b-0 border-[var(--heartbeat-border)] px-3 py-2"
+      style={{ backgroundColor: 'color-mix(in srgb, var(--paper) 92%, var(--heartbeat))' }}
     >
       <div className="flex items-center gap-2">
-        <HeartPulse className="h-4 w-4 text-red-500" />
-        <span className="text-sm font-medium text-red-500">
+        <HeartPulse className="h-4 w-4 text-[var(--heartbeat)]" />
+        <span className="text-sm font-medium text-[var(--heartbeat)]">
           心跳循环模式
         </span>
         <span className="text-sm text-[var(--ink-muted)]">
@@ -31,7 +31,7 @@ export default function CronTaskStatusBar({
         <button
           type="button"
           onClick={onSettings}
-          className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-red-500/10 hover:text-red-500"
+          className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--heartbeat-bg)] hover:text-[var(--heartbeat)]"
           title="修改设置"
         >
           <Settings2 className="h-4 w-4" />
@@ -39,7 +39,7 @@ export default function CronTaskStatusBar({
         <button
           type="button"
           onClick={onCancel}
-          className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-red-500/10 hover:text-red-500"
+          className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--heartbeat-bg)] hover:text-[var(--heartbeat)]"
           title="取消心跳循环"
         >
           <X className="h-4 w-4" />

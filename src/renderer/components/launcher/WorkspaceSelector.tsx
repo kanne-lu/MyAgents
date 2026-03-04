@@ -65,7 +65,7 @@ export default function WorkspaceSelector({
         return (
             <button
                 onClick={onAddFolder}
-                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--accent)]"
+                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--accent)]"
             >
                 <Plus className="h-3.5 w-3.5" />
                 <span>选择工作区</span>
@@ -78,7 +78,7 @@ export default function WorkspaceSelector({
             {/* Trigger — toolbar-compatible style */}
             <button
                 onClick={() => setIsOpen(!isOpen)}
-                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-left text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
             >
                 <FolderOpen className="h-3.5 w-3.5 shrink-0" />
                 <span className="max-w-[120px] truncate">
@@ -101,7 +101,7 @@ export default function WorkspaceSelector({
                                 className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
                                     selectedProject?.id === defaultProject.id
                                         ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
-                                        : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
+                                        : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                                 }`}
                             >
                                 <Star className="h-3.5 w-3.5 shrink-0" />
@@ -128,7 +128,7 @@ export default function WorkspaceSelector({
                                     className={`flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm transition-colors ${
                                         selectedProject?.id === project.id
                                             ? 'bg-[var(--accent)]/10 text-[var(--accent)]'
-                                            : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
+                                            : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                                     }`}
                                 >
                                     <FolderOpen className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
@@ -150,7 +150,7 @@ export default function WorkspaceSelector({
                                 setIsOpen(false);
                                 onAddFolder();
                             }}
-                            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                         >
                             <Plus className="h-3.5 w-3.5" />
                             <span>选择文件夹...</span>

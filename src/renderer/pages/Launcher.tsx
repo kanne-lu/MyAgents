@@ -478,15 +478,16 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     </div>
 
                     {/* Workspaces Header */}
-                    <div className="flex flex-shrink-0 items-center justify-between border-t border-[var(--line)] px-6 py-4">
-                        <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
+                    <div className="mx-6 border-t border-[var(--line)]" />
+                    <div className="flex flex-shrink-0 items-center justify-between px-6 py-4">
+                        <h2 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                             工作区
                         </h2>
                         <div className="flex items-center gap-3">
                             {config.showDevTools && (
                                 <button
                                     onClick={() => setShowLogs(true)}
-                                    className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                    className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                                     title="查看 Rust 日志"
                                 >
                                     Logs
@@ -495,7 +496,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                             {visibleProjects.length > 0 && (
                                 <button
                                     onClick={handleAddProject}
-                                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                    className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                                 >
                                     <Plus className="h-3.5 w-3.5" />
                                     添加

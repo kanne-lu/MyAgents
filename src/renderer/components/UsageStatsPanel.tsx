@@ -59,7 +59,7 @@ export default function UsageStatsPanel() {
                     <h2 className="text-lg font-semibold text-[var(--ink)]">使用统计</h2>
                     <p className="mt-1 text-sm text-[var(--ink-muted)]">全局 Token 消耗统计</p>
                 </div>
-                <div className="flex gap-1 rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-1">
+                <div className="flex gap-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-1">
                     {(Object.keys(RANGE_LABELS) as TimeRange[]).map((r) => (
                         <button
                             key={r}
@@ -137,7 +137,7 @@ function SummaryCards({ stats, totalTokens }: { stats: GlobalStats; totalTokens:
             {cards.map((card) => (
                 <div
                     key={card.label}
-                    className="rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-4"
+                    className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-4"
                 >
                     <div className="flex items-center gap-2 text-[var(--ink-muted)]">
                         <card.icon className="h-4 w-4" />
@@ -227,7 +227,7 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
             </div>
             <div
                 ref={containerRef}
-                className="relative rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-4"
+                className="relative rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-4"
                 onMouseLeave={handleMouseLeave}
             >
                 <svg
@@ -266,7 +266,7 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
                                     width={barWidth}
                                     height={inputH}
                                     rx={0}
-                                    fill={isHovered ? 'var(--accent)' : 'var(--accent-bg)'}
+                                    fill={isHovered ? 'var(--accent)' : 'var(--accent-warm-muted)'}
                                     pointerEvents="none"
                                     style={{ transition: 'fill 0.15s' }}
                                 />
@@ -320,7 +320,7 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
                 {/* Legend */}
                 <div className="mt-2 flex items-center justify-center gap-4 text-xs text-[var(--ink-muted)]">
                     <div className="flex items-center gap-1.5">
-                        <div className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: 'var(--accent-bg)' }} />
+                        <div className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: 'var(--accent-warm-muted)' }} />
                         <span>输入</span>
                     </div>
                     <div className="flex items-center gap-1.5">
@@ -359,7 +359,7 @@ function ModelTable({ byModel, totalTokens }: { byModel: GlobalStats['byModel'];
             </div>
             <div className="overflow-x-auto rounded-lg border border-[var(--line)]">
                 <table className="w-full text-sm">
-                    <thead className="bg-[var(--paper-contrast)]">
+                    <thead className="bg-[var(--paper-elevated)]">
                         <tr>
                             <th className="px-4 py-2 text-left text-xs font-medium text-[var(--ink-muted)]">
                                 模型

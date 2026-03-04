@@ -193,7 +193,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                     </div>
                     <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                            <span className="text-xs font-medium text-[var(--ink-muted)] px-1.5 py-0.5 bg-[var(--paper-contrast)] rounded">
+                            <span className="text-xs font-medium text-[var(--ink-muted)] px-1.5 py-0.5 bg-[var(--paper-inset)] rounded">
                                 {currentQuestion.header}
                             </span>
                             {totalQuestions > 1 && (
@@ -221,7 +221,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                 className={`w-full text-left px-4 py-3 rounded-lg border transition-all
                                     ${isSelected
                                         ? 'border-[var(--accent)] bg-[var(--accent)]/5 ring-1 ring-[var(--accent)]/20'
-                                        : 'border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-contrast)]'
+                                        : 'border-[var(--line-subtle)] hover:border-[var(--line)] hover:bg-[var(--paper-inset)]'
                                     }
                                     disabled:opacity-50 disabled:cursor-not-allowed`}
                             >
@@ -320,7 +320,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                 )}
 
                 {/* Action buttons */}
-                <div className="flex items-center justify-between gap-2 px-4 py-3 bg-[var(--paper-contrast)] border-t border-[var(--line-subtle)]">
+                <div className="flex items-center justify-between gap-2 px-4 py-3 bg-[var(--paper-inset)] border-t border-[var(--line-subtle)]">
                     <button
                         onClick={handleCancel}
                         disabled={isSubmitting}

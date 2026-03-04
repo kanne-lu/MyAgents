@@ -8,7 +8,7 @@ import type { AgentItem } from '../../shared/agentTypes';
 export function AgentCard({ agent, onClick }: { agent: AgentItem; onClick: () => void }) {
     return (
         <div
-            className="group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
+            className="group flex cursor-pointer flex-col rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px]"
             onClick={onClick}
         >
             {/* Title with badge */}
@@ -24,7 +24,7 @@ export function AgentCard({ agent, onClick }: { agent: AgentItem; onClick: () =>
             </p>
             {/* Footer - scope badge + synced badge */}
             <div className="flex h-4 items-center gap-1.5 text-xs text-[var(--ink-muted)]/70">
-                <span className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[11px]">
+                <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px]">
                     {agent.scope === 'user' ? '全局' : '项目'}
                 </span>
                 {agent.synced && (

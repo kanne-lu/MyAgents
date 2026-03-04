@@ -101,16 +101,16 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onClick={onClose} />
 
       {/* Panel */}
-      <div className="relative z-10 w-full max-w-2xl rounded-xl bg-[var(--paper)] shadow-xl">
+      <div className="relative z-10 w-full max-w-2xl rounded-xl bg-[var(--paper-elevated)] shadow-xl">
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
           <div className="flex items-center gap-2">
             <HeartPulse className="h-5 w-5 text-[var(--accent)]" />
             <h2 className="text-base font-semibold text-[var(--ink)]">心跳循环调试面板</h2>
-            <span className="rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+            <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
               DEV
             </span>
           </div>
@@ -118,14 +118,14 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
             <button
               onClick={loadTasks}
               disabled={isLoading}
-              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
               title="刷新"
             >
               <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
             </button>
             <button
               onClick={onClose}
-              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               ✕
             </button>
@@ -154,7 +154,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
               {tasks.map((task) => (
                 <div
                   key={task.id}
-                  className="rounded-lg border border-[var(--line)] bg-[var(--paper-contrast)] p-4"
+                  className="rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] p-4"
                 >
                   {/* Task header */}
                   <div className="mb-2 flex items-start justify-between">
@@ -187,7 +187,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
                           </button>
                           <button
                             onClick={handleCancelStop}
-                            className="rounded-lg bg-[var(--paper-contrast)] px-2 py-1 text-xs font-medium text-[var(--ink-muted)] transition hover:bg-[var(--line)]"
+                            className="rounded-lg bg-[var(--paper-inset)] px-2 py-1 text-xs font-medium text-[var(--ink-muted)] transition hover:bg-[var(--line)]"
                           >
                             取消
                           </button>

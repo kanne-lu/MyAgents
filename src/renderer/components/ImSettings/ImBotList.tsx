@@ -243,7 +243,7 @@ export default function ImBotList({
                             <div
                                 key={cfg.id}
                                 onClick={() => onSelect(cfg.id)}
-                                className="cursor-pointer rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-colors hover:border-[var(--line-strong)]"
+                                className="cursor-pointer rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px]"
                             >
                                 {/* Top row: icon + name + status */}
                                 <div className="flex items-start justify-between">
@@ -266,7 +266,7 @@ export default function ImBotList({
                                 </div>
 
                                 {/* Bottom row: workspace + toggle */}
-                                <div className="mt-2.5 flex items-center justify-between text-xs text-[var(--ink-muted)]">
+                                <div className="mt-3 flex items-center justify-between text-xs text-[var(--ink-muted)]">
                                     <div className="flex items-center gap-1.5 min-w-0 truncate">
                                         {cfg.defaultWorkspacePath && (
                                             <span className="truncate">
@@ -285,8 +285,8 @@ export default function ImBotList({
                                         disabled={isToggling || (!(cfg.platform === 'feishu' ? (cfg.feishuAppId && cfg.feishuAppSecret) : cfg.platform === 'dingtalk' ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret) : cfg.botToken) && !isRunning)}
                                         className={`flex-shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
                                             isRunning
-                                                ? 'bg-[var(--error)] text-white hover:bg-[#b91c1c]'
-                                                : 'bg-[var(--button-primary-bg)] text-white hover:bg-[var(--button-primary-bg-hover)]'
+                                                ? 'border border-[var(--error)]/40 text-[var(--error)] hover:bg-[var(--error)]/10'
+                                                : 'bg-[var(--button-primary-bg)] text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]'
                                         }`}
                                     >
                                         {isToggling ? (

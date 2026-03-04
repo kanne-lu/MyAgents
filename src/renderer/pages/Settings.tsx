@@ -197,18 +197,18 @@ const ModelTagList = React.memo(function ModelTagList({
                         key={model.model}
                         className={`group flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[var(--ink)] ${
                             canDelete
-                                ? 'bg-[var(--paper-contrast)] hover:bg-[var(--paper-inset)]'
-                                : 'bg-[var(--paper-contrast)]'
+                                ? 'bg-[var(--paper-inset)] hover:bg-[var(--paper)]'
+                                : 'bg-[var(--paper-inset)]'
                         }`}
                     >
                         <span>{model.modelName}</span>
                         {isPresetModel ? (
-                            <span className="text-[9px] text-[var(--ink-muted)]">预设</span>
+                            <span className="text-[10px] text-[var(--ink-muted)]">预设</span>
                         ) : (
                             <button
                                 type="button"
                                 onClick={() => onRemove(model.model)}
-                                className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] group-hover:opacity-100"
+                                className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
                             >
                                 <X className="h-3 w-3" />
                             </button>
@@ -220,13 +220,13 @@ const ModelTagList = React.memo(function ModelTagList({
             {customModels.map((model) => (
                 <div
                     key={`custom-${model}`}
-                    className="group flex items-center gap-1 rounded-md bg-[var(--paper-contrast)] px-2 py-1 text-xs font-medium text-[var(--ink)] hover:bg-[var(--paper-inset)]"
+                    className="group flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-medium text-[var(--ink)] hover:bg-[var(--paper-inset)]"
                 >
                     <span>{model}</span>
                     <button
                         type="button"
                         onClick={() => onRemoveCustomModel(model)}
-                        className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] group-hover:opacity-100"
+                        className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
                     >
                         <X className="h-3 w-3" />
                     </button>
@@ -282,6 +282,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     };
 
     const [activeSection, setActiveSection] = useState<SettingsSection>(getInitialSection);
+    // Track whether Skills/Agents panels are in detail view (to hide the other panel)
+    const [skillsInDetail, setSkillsInDetail] = useState(false);
+    const [agentsInDetail, setAgentsInDetail] = useState(false);
 
     // Stable callback ref for onSectionChange (avoids unnecessary effect triggers)
     const onSectionChangeRef = useRef(onSectionChange);
@@ -1769,7 +1772,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         type="button"
                         onClick={() => verifyProvider(provider, apiKeys[provider.id])}
                         disabled={isLoading}
-                        className="flex h-10 w-10 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                        className="flex h-10 w-10 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
                         title="重新验证"
                     >
                         <RefreshCw className={`h-4 w-4 ${isLoading ? 'animate-spin' : ''}`} />
@@ -1796,7 +1799,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     {config.showDevTools && (
                         <button
                             onClick={() => setShowLogs(true)}
-                            className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                            className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             title="查看 Rust 日志"
                         >
                             Logs
@@ -1807,8 +1810,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 <nav className="space-y-1">
                     <button
                         onClick={() => setActiveSection('providers')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'providers'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'providers'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
@@ -1816,8 +1819,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </button>
                     <button
                         onClick={() => setActiveSection('skills')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'skills' || activeSection === 'agents'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'skills' || activeSection === 'agents'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
@@ -1825,8 +1828,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </button>
                     <button
                         onClick={() => setActiveSection('mcp')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'mcp'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'mcp'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
@@ -1834,8 +1837,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </button>
                     <button
                         onClick={() => setActiveSection('im')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'im'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'im'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
@@ -1843,8 +1846,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </button>
                     <button
                         onClick={() => setActiveSection('usage-stats')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'usage-stats'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'usage-stats'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
@@ -1852,8 +1855,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </button>
                     <button
                         onClick={() => setActiveSection('general')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'general'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'general'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
@@ -1861,8 +1864,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     </button>
                     <button
                         onClick={() => setActiveSection('about')}
-                        className={`w-full rounded-lg px-3 py-2.5 text-left text-[15px] font-medium transition-colors ${activeSection === 'about'
-                            ? 'bg-[var(--paper-contrast)] text-[var(--ink)]'
+                        className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'about'
+                            ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
@@ -1876,8 +1879,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 {/* Skills + Agents section uses wider layout */}
                 {(activeSection === 'skills' || activeSection === 'agents') && (
                     <div className="mx-auto max-w-4xl px-8 py-8 space-y-10">
-                        <GlobalSkillsPanel />
-                        <GlobalAgentsPanel />
+                        {!agentsInDetail && <GlobalSkillsPanel onDetailChange={setSkillsInDetail} />}
+                        {!skillsInDetail && <GlobalAgentsPanel onDetailChange={setAgentsInDetail} />}
                     </div>
                 )}
 
@@ -1925,11 +1928,11 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-2">
                                                 <h3 className="truncate font-semibold text-[var(--ink)]">{provider.name}</h3>
-                                                <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
                                                     {provider.cloudProvider}
                                                 </span>
                                                 {provider.apiProtocol === 'openai' && (
-                                                    <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
                                                         OpenAI 协议
                                                     </span>
                                                 )}
@@ -1942,14 +1945,14 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             {provider.websiteUrl && (
                                                 <ExternalLink
                                                     href={provider.websiteUrl}
-                                                    className="rounded-lg px-1.5 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                    className="rounded-lg px-1.5 py-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                                 >
                                                     去官网
                                                 </ExternalLink>
                                             )}
                                             <button
                                                 onClick={() => openProviderManage(provider)}
-                                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                                 title="管理"
                                             >
                                                 <Settings2 className="h-4 w-4" />
@@ -2003,7 +2006,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                                     type="button"
                                                                     onClick={handleReVerifySubscription}
                                                                     disabled={subscriptionVerifying}
-                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
                                                                     title="重新验证"
                                                                 >
                                                                     <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
@@ -2018,7 +2021,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                                     type="button"
                                                                     onClick={handleReVerifySubscription}
                                                                     disabled={subscriptionVerifying}
-                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)] disabled:opacity-50"
+                                                                    className="ml-1 rounded p-0.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
                                                                     title="重新验证"
                                                                 >
                                                                     <RefreshCw className={`h-3 w-3 ${subscriptionVerifying ? 'animate-spin' : ''}`} />
@@ -2118,7 +2121,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             <div className="flex shrink-0 items-center gap-2">
                                                 <button
                                                     onClick={() => server.isBuiltin ? handleEditBuiltinMcp(server) : handleEditMcp(server)}
-                                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                                     title="设置"
                                                 >
                                                     <Settings2 className="h-4 w-4" />
@@ -2146,7 +2149,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         </div>
 
                         {/* Discovery links */}
-                        <div className="mt-8 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                        <div className="mt-8 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)] p-4">
                             <p className="text-sm text-[var(--ink-muted)]">
                                 更多 MCP 可以在以下网站寻找：
                             </p>
@@ -2491,7 +2494,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             }
                                         }}
                                         disabled={logExporting}
-                                        className="flex items-center gap-1.5 rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-strong)] disabled:opacity-50"
+                                        className="flex items-center gap-1.5 rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-elevated)] disabled:opacity-50"
                                     >
                                         {logExporting ? (
                                             <>
@@ -2514,10 +2517,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     {activeSection === 'about' && (
                         <div className="space-y-6">
                             {/* Brand Header */}
-                            <div className="rounded-2xl border border-[var(--line)] bg-gradient-to-br from-[var(--paper-contrast)] to-[var(--paper)] p-8">
+                            <div className="rounded-2xl border border-[var(--line)] bg-gradient-to-br from-[var(--paper-inset)] to-[var(--paper)] p-8">
                                 <div className="flex flex-col items-center text-center">
                                     <h1
-                                        className="text-[3rem] font-light tracking-tight text-[var(--ink)] cursor-default select-none"
+                                        className="brand-title text-[3rem] text-[var(--ink)] cursor-default select-none"
                                         onClick={handleLogoTap}
                                     >
                                         MyAgents
@@ -2544,7 +2547,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     }
                                                 }}
                                                 disabled={updateChecking}
-                                                className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-strong)] disabled:opacity-50"
+                                                className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-elevated)] disabled:opacity-50"
                                             >
                                                 {updateChecking ? (
                                                     <span className="flex items-center gap-1">
@@ -2605,7 +2608,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     </div>
                                     <button
                                         onClick={() => setShowBugReport(true)}
-                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-strong)]"
+                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-elevated)]"
                                     >
                                         反馈问题
                                     </button>
@@ -2730,7 +2733,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 </div>
                                                 <button
                                                     onClick={() => setShowCronDebugPanel(true)}
-                                                    className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-strong)]"
+                                                    className="rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 text-xs font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-elevated)]"
                                                 >
                                                     打开面板
                                                 </button>
@@ -2758,7 +2761,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <h2 className="text-lg font-semibold text-[var(--ink)]">{builtinMcpSettings.server.name} 设置</h2>
-                            <button onClick={() => setBuiltinMcpSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]">
+                            <button onClick={() => setBuiltinMcpSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
@@ -2767,20 +2770,20 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
                             {/* Preset command (read-only) */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">预设命令</label>
-                                <div className="rounded-lg bg-[var(--paper-contrast)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">预设命令</label>
+                                <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
                                     {builtinMcpSettings.server.command} {(getPresetMcpServer(builtinMcpSettings.server.id)?.args ?? []).join(' ')}
                                 </div>
                             </div>
 
                             {/* Extra Args */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">额外参数</label>
-                                <p className="text-[10px] text-[var(--ink-muted)] mb-2">以下参数将追加到预设命令之后</p>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">额外参数</label>
+                                <p className="text-xs text-[var(--ink-muted)] mb-2">以下参数将追加到预设命令之后</p>
                                 <div className="space-y-2">
                                     {builtinMcpSettings.extraArgs.map((arg, idx) => (
                                         <div key={idx} className="flex items-center gap-2">
-                                            <span className="flex-1 rounded-lg bg-[var(--paper-contrast)] px-3 py-1.5 font-mono text-xs text-[var(--ink)] break-all">
+                                            <span className="flex-1 rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 font-mono text-xs text-[var(--ink)] break-all">
                                                 {arg}
                                             </span>
                                             <button
@@ -2809,7 +2812,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 }
                                             }}
                                             placeholder="输入参数，如 --headless"
-                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
+                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <button
                                             onClick={() => {
@@ -2832,11 +2835,11 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Environment Variables */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">环境变量</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">环境变量</label>
                                 <div className="space-y-2">
                                     {Object.entries(builtinMcpSettings.env).map(([key, value]) => (
                                         <div key={key} className="flex items-center gap-2">
-                                            <span className="shrink-0 rounded bg-[var(--paper-contrast)] px-2 py-1 font-mono text-[10px] text-[var(--ink)]">
+                                            <span className="shrink-0 rounded bg-[var(--paper-inset)] px-2 py-1 font-mono text-[10px] text-[var(--ink)]">
                                                 {key}
                                             </span>
                                             <input
@@ -2846,7 +2849,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     ...prev,
                                                     env: { ...prev.env, [key]: e.target.value },
                                                 } : null)}
-                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1 font-mono text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1 font-mono text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
                                             />
                                             <button
                                                 onClick={() => setBuiltinMcpSettings(prev => {
@@ -2867,7 +2870,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             value={builtinMcpSettings.newEnvKey}
                                             onChange={e => setBuiltinMcpSettings(prev => prev ? { ...prev, newEnvKey: e.target.value } : null)}
                                             placeholder="变量名"
-                                            className="w-1/3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
+                                            className="w-1/3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <button
                                             onClick={() => {
@@ -2894,7 +2897,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         <div className="flex justify-end gap-3 border-t border-[var(--line)] px-6 py-4">
                             <button
                                 onClick={() => setBuiltinMcpSettings(null)}
-                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
                                 取消
                             </button>
@@ -2916,7 +2919,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <h2 className="text-lg font-semibold text-[var(--ink)]">Gemini 图片生成 设置</h2>
-                            <button onClick={() => setGeminiImageSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]">
+                            <button onClick={() => setGeminiImageSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
@@ -2925,35 +2928,35 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-5">
                             {/* API Key */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">API Key *</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">API Key *</label>
                                 <input
                                     type="password"
                                     value={geminiImageSettings.apiKey}
                                     onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, apiKey: e.target.value } : null)}
                                     placeholder="AIzaSy..."
-                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
+                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                 />
-                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                     从 <a href="https://aistudio.google.com/apikey" target="_blank" rel="noreferrer" className="text-[var(--accent)] hover:underline">aistudio.google.com</a> 免费获取
                                 </p>
                             </div>
 
                             {/* Base URL */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">API Base URL</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">API Base URL</label>
                                 <input
                                     type="text"
                                     value={geminiImageSettings.baseUrl}
                                     onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, baseUrl: e.target.value } : null)}
                                     placeholder="留空使用官方端点"
-                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
+                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                 />
-                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">留空使用官方端点。支持兼容 Gemini 原生协议的第三方中转</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">留空使用官方端点。支持兼容 Gemini 原生协议的第三方中转</p>
                             </div>
 
                             {/* Model */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">模型</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">模型</label>
                                 <div className="flex flex-wrap gap-2">
                                     {[
                                         { id: 'gemini-2.5-flash-image', label: 'Nano Banana', desc: 'Stable · 速度快 · 免费额度多' },
@@ -2978,7 +2981,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Aspect Ratio */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">默认宽高比</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">默认宽高比</label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {['auto', '1:1', '3:4', '4:3', '9:16', '16:9', '2:3', '3:2', '4:5', '5:4', '21:9'].map(r => (
                                         <button
@@ -2987,19 +2990,19 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             className={`rounded-md px-2.5 py-1 text-xs transition-colors ${r !== 'auto' ? 'font-mono' : ''} ${
                                                 geminiImageSettings.aspectRatio === r
                                                     ? 'bg-[var(--accent)] text-white'
-                                                    : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                    : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
                                             {r === 'auto' ? '自动' : r}
                                         </button>
                                     ))}
                                 </div>
-                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1:1）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1:1）</p>
                             </div>
 
                             {/* Resolution */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">默认分辨率</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">默认分辨率</label>
                                 <div className="flex gap-2">
                                     {['auto', '1K', '2K', '4K'].map(s => (
                                         <button
@@ -3008,24 +3011,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             className={`rounded-md px-3 py-1.5 text-xs transition-colors ${
                                                 geminiImageSettings.imageSize === s
                                                     ? 'bg-[var(--accent)] text-white'
-                                                    : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                    : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
                                             {s === 'auto' ? '自动' : s}
                                         </button>
                                     ))}
                                 </div>
-                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1K）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">自动 = 不传参数，由模型决定（默认 1K）</p>
                             </div>
 
                             {/* Advanced Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-xs font-medium text-[var(--ink-muted)]">高级设置</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">高级设置</span>
                             </div>
 
                             {/* Thinking Level */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">推理深度</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">推理深度</label>
                                 <div className="flex gap-2">
                                     {[
                                         { id: 'auto', label: '自动', desc: '不传参数 · 由模型决定' },
@@ -3050,8 +3053,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             {/* Search Grounding */}
                             <div className="flex items-center justify-between">
                                 <div>
-                                    <div className="text-xs font-medium text-[var(--ink)]">搜索增强</div>
-                                    <div className="text-[10px] text-[var(--ink-muted)]">生成前搜索 Google 获取实时信息（人物、事件、天气等）</div>
+                                    <div className="text-sm font-medium text-[var(--ink)]">搜索增强</div>
+                                    <div className="text-xs text-[var(--ink-muted)]">生成前搜索 Google 获取实时信息（人物、事件、天气等）</div>
                                 </div>
                                 <button
                                     onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, searchGrounding: !prev.searchGrounding } : null)}
@@ -3067,23 +3070,23 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Max Context Turns */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">单次图片会话最大编辑轮次</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">单次图片会话最大编辑轮次</label>
                                 <input
                                     type="number"
                                     min={2}
                                     max={50}
                                     value={geminiImageSettings.maxContextTurns}
                                     onChange={e => setGeminiImageSettings(prev => prev ? { ...prev, maxContextTurns: parseInt(e.target.value, 10) || 20 } : null)}
-                                    className="w-20 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                                    className="w-20 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
                                 />
-                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">超过后自动开始新会话（防止请求体过大）</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">超过后自动开始新会话（防止请求体过大）</p>
                             </div>
 
                             {/* Save to Project */}
                             <div className="flex items-center justify-between">
                                 <div>
-                                    <div className="text-xs font-medium text-[var(--ink)]">保存图片到项目目录</div>
-                                    <div className="text-[10px] text-[var(--ink-muted)]">保存副本到项目 .myagents-images/ 目录</div>
+                                    <div className="text-sm font-medium text-[var(--ink)]">保存图片到项目目录</div>
+                                    <div className="text-xs text-[var(--ink-muted)]">保存副本到项目 .myagents-images/ 目录</div>
                                 </div>
                                 <button
                                     onClick={() => setGeminiImageSettings(prev => prev ? { ...prev, saveToProject: !prev.saveToProject } : null)}
@@ -3102,7 +3105,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         <div className="flex justify-end gap-3 border-t border-[var(--line)] px-6 py-4">
                             <button
                                 onClick={() => setGeminiImageSettings(null)}
-                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
                                 取消
                             </button>
@@ -3125,7 +3128,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <h2 className="text-lg font-semibold text-[var(--ink)]">Playwright 浏览器设置</h2>
-                            <button onClick={() => setPlaywrightSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]">
+                            <button onClick={() => setPlaywrightSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
@@ -3135,8 +3138,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             {/* Headless Mode */}
                             <div className="flex items-center justify-between">
                                 <div>
-                                    <div className="text-xs font-medium text-[var(--ink)]">无头模式</div>
-                                    <div className="text-[10px] text-[var(--ink-muted)]">后台运行，不弹出浏览器窗口</div>
+                                    <div className="text-sm font-medium text-[var(--ink)]">无头模式</div>
+                                    <div className="text-xs text-[var(--ink-muted)]">后台运行，不弹出浏览器窗口</div>
                                 </div>
                                 <button
                                     onClick={() => setPlaywrightSettings(prev => prev ? { ...prev, headless: !prev.headless } : null)}
@@ -3152,7 +3155,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Browser */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">浏览器</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">浏览器</label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {(() => {
                                         const knownBrowsers = [
@@ -3171,7 +3174,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
                                                     playwrightSettings.browser === b.id
                                                         ? 'bg-[var(--accent)] text-white'
-                                                        : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                        : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                                 }`}
                                             >
                                                 {b.label}
@@ -3183,7 +3186,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Device Emulation */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">设备模拟</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">设备模拟</label>
                                 <div className="flex flex-wrap gap-1.5">
                                     {[
                                         { id: '', label: '不模拟' },
@@ -3196,7 +3199,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
                                                 playwrightSettings.device === d.id
                                                     ? 'bg-[var(--accent)] text-white'
-                                                    : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                    : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
                                             {d.label}
@@ -3209,37 +3212,37 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         value={playwrightSettings.customDevice}
                                         onChange={e => setPlaywrightSettings(prev => prev ? { ...prev, customDevice: e.target.value } : null)}
                                         placeholder="输入设备名称，如 Galaxy S24"
-                                        className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
+                                        className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                     />
                                 )}
                             </div>
 
                             {/* User Data Dir */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">浏览器数据目录</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">浏览器数据目录</label>
                                 <input
                                     type="text"
                                     value={playwrightSettings.userDataDir}
                                     onChange={e => setPlaywrightSettings(prev => prev ? { ...prev, userDataDir: e.target.value } : null)}
                                     placeholder="~/.playwright-mcp-profile"
-                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
+                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                 />
-                                <p className="mt-1 text-[10px] text-[var(--ink-muted)]">持久化浏览器数据（登录态、Cookie 等）。留空则每次使用临时目录</p>
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">持久化浏览器数据（登录态、Cookie 等）。留空则每次使用临时目录</p>
                             </div>
 
                             {/* Advanced Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-xs font-medium text-[var(--ink-muted)]">高级设置</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">高级设置</span>
                             </div>
 
                             {/* Extra Args */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">额外参数</label>
-                                <p className="text-[10px] text-[var(--ink-muted)] mb-2">如 --proxy-server=... --caps=vision,pdf 等</p>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">额外参数</label>
+                                <p className="text-xs text-[var(--ink-muted)] mb-2">如 --proxy-server=... --caps=vision,pdf 等</p>
                                 <div className="space-y-2">
                                     {playwrightSettings.extraArgs.map((arg, idx) => (
                                         <div key={idx} className="flex items-center gap-2">
-                                            <span className="flex-1 rounded-lg bg-[var(--paper-contrast)] px-3 py-1.5 font-mono text-xs text-[var(--ink)] break-all">
+                                            <span className="flex-1 rounded-lg bg-[var(--paper-inset)] px-3 py-1.5 font-mono text-xs text-[var(--ink)] break-all">
                                                 {arg}
                                             </span>
                                             <button
@@ -3268,7 +3271,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 }
                                             }}
                                             placeholder="输入参数，如 --proxy-server=http://..."
-                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
+                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
                                         <button
                                             onClick={() => {
@@ -3294,7 +3297,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         <div className="flex justify-end gap-3 border-t border-[var(--line)] px-6 py-4">
                             <button
                                 onClick={() => setPlaywrightSettings(null)}
-                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
                                 取消
                             </button>
@@ -3316,7 +3319,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         {/* Header */}
                         <div className="flex items-center justify-between px-6 py-4 border-b border-[var(--line)]">
                             <h2 className="text-lg font-semibold text-[var(--ink)]">Edge TTS 语音合成 设置</h2>
-                            <button onClick={() => setEdgeTtsSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]">
+                            <button onClick={() => setEdgeTtsSettings(null)} className="rounded-lg p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]">
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
@@ -3333,13 +3336,13 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Default Voice */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-1">默认语音</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-1">默认语音</label>
                                 <input
                                     type="text"
                                     value={edgeTtsSettings.defaultVoice}
                                     onChange={e => setEdgeTtsSettings(prev => prev ? { ...prev, defaultVoice: e.target.value } : null)}
                                     placeholder="zh-CN-XiaoxiaoNeural"
-                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
+                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] font-mono"
                                 />
                                 <div className="mt-2 flex flex-wrap gap-1.5">
                                     {[
@@ -3353,10 +3356,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         <button
                                             key={v.id}
                                             onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultVoice: v.id } : null)}
-                                            className={`rounded-md px-2 py-1 text-[10px] transition-colors ${
+                                            className={`rounded-md px-2 py-1 text-xs transition-colors ${
                                                 edgeTtsSettings.defaultVoice === v.id
                                                     ? 'bg-[var(--accent)] text-white'
-                                                    : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                    : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
                                             {v.label}
@@ -3367,7 +3370,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Output Format */}
                             <div>
-                                <label className="block text-xs font-medium text-[var(--ink-muted)] mb-2">输出格式</label>
+                                <label className="block text-sm font-medium text-[var(--ink)] mb-2">输出格式</label>
                                 <div className="flex gap-2">
                                     {[
                                         { id: 'audio-24khz-48kbitrate-mono-mp3', label: 'MP3（推荐）' },
@@ -3380,7 +3383,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             className={`rounded-md px-3 py-1.5 text-xs transition-colors ${
                                                 edgeTtsSettings.defaultOutputFormat === f.id
                                                     ? 'bg-[var(--accent)] text-white'
-                                                    : 'bg-[var(--paper-contrast)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                    : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:text-[var(--ink)]'
                                             }`}
                                         >
                                             {f.label}
@@ -3391,13 +3394,13 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Voice Parameters Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-xs font-medium text-[var(--ink-muted)]">语音参数</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">语音参数</span>
                             </div>
 
                             {/* Rate Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-xs font-medium text-[var(--ink-muted)]">语速</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">语速</label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultRate >= 0 ? '+' : ''}{edgeTtsSettings.defaultRate}%</span>
                                         {edgeTtsSettings.defaultRate !== 0 && (
@@ -3428,7 +3431,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             {/* Volume Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-xs font-medium text-[var(--ink-muted)]">音量</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">音量</label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultVolume >= 0 ? '+' : ''}{edgeTtsSettings.defaultVolume}%</span>
                                         {edgeTtsSettings.defaultVolume !== 0 && (
@@ -3459,7 +3462,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             {/* Pitch Slider */}
                             <div>
                                 <div className="flex items-center justify-between mb-1">
-                                    <label className="text-xs font-medium text-[var(--ink-muted)]">音调</label>
+                                    <label className="text-sm font-medium text-[var(--ink-muted)]">音调</label>
                                     <div className="flex items-center gap-2">
                                         <span className="text-xs font-mono text-[var(--ink)]">{edgeTtsSettings.defaultPitch >= 0 ? '+' : ''}{edgeTtsSettings.defaultPitch}Hz</span>
                                         {edgeTtsSettings.defaultPitch !== 0 && (
@@ -3489,7 +3492,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
                             {/* Preview Section Divider */}
                             <div className="border-t border-[var(--line)] pt-4">
-                                <span className="text-xs font-medium text-[var(--ink-muted)]">试听</span>
+                                <span className="text-sm font-medium text-[var(--ink-muted)]">试听</span>
                             </div>
 
                             {/* Preview */}
@@ -3500,7 +3503,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         onChange={e => setTtsPreviewText(e.target.value)}
                                         rows={2}
                                         placeholder="输入试听文本..."
-                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-xs text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] resize-none"
+                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)] resize-none"
                                     />
                                     <button
                                         onClick={handlePreviewTts}
@@ -3526,7 +3529,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         <div className="flex justify-end gap-3 border-t border-[var(--line)] px-6 py-4">
                             <button
                                 onClick={() => setEdgeTtsSettings(null)}
-                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-contrast)]"
+                                className="rounded-lg px-4 py-2 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
                             >
                                 取消
                             </button>
@@ -3562,7 +3565,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 )}
                                 <button
                                     onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
-                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
                                     <X className="h-5 w-5" />
                                 </button>
@@ -3599,7 +3602,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             key={t.type}
                                             onClick={() => setMcpForm((p) => ({ ...p, type: t.type }))}
                                             className={`flex flex-col items-center rounded-xl border p-3 transition-all ${mcpForm.type === t.type
-                                                ? 'border-[var(--ink)] bg-[var(--paper-contrast)]'
+                                                ? 'border-[var(--ink)] bg-[var(--paper-inset)]'
                                                 : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
                                                 }`}
                                         >
@@ -3662,7 +3665,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         </div>
 
                                         {/* Args - array input */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                             <label className="mb-3 block text-sm font-medium text-[var(--ink)]">
                                                 参数 <span className="font-mono text-[var(--ink-muted)]">args</span>
                                             </label>
@@ -3721,7 +3724,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                         }
                                                     }}
                                                     disabled={!mcpForm.newArg.trim()}
-                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                                 >
                                                     <Plus className="h-4 w-4" />
                                                     添加
@@ -3731,7 +3734,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         </div>
 
                                         {/* Environment Variables */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                             <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
                                                 <span>🔐</span> 环境变量 <span className="font-mono text-[var(--ink-muted)]">env</span>（可选）
                                             </label>
@@ -3795,7 +3798,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                         }
                                                     }}
                                                     disabled={!mcpForm.newEnvKey}
-                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                                 >
                                                     <Plus className="h-4 w-4" />
                                                     添加
@@ -3825,7 +3828,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         </div>
 
                                         {/* HTTP Headers */}
-                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-contrast)] p-4">
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                             <label className="mb-3 flex items-center gap-2 text-sm font-medium text-[var(--ink)]">
                                                 <span>🔑</span> 请求头 <span className="font-mono text-[var(--ink-muted)]">headers</span>（可选）
                                             </label>
@@ -3889,7 +3892,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                         }
                                                     }}
                                                     disabled={!mcpForm.newHeaderKey}
-                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] disabled:opacity-50"
+                                                    className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                                 >
                                                     <Plus className="h-4 w-4" />
                                                     添加
@@ -3909,7 +3912,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         <div className="flex gap-3 px-6 py-4 border-t border-[var(--line)]">
                             <button
                                 onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
-                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
                                 取消
                             </button>
@@ -3935,7 +3938,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             <div className={editingMcpId ? 'flex gap-3' : 'flex gap-3 flex-1'}>
                                 <button
                                     onClick={() => { setShowMcpForm(false); resetMcpForm(); }}
-                                    className={`rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)] ${editingMcpId ? '' : 'flex-1'}`}
+                                    className={`rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] ${editingMcpId ? '' : 'flex-1'}`}
                                 >
                                     取消
                                 </button>
@@ -3968,7 +3971,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     setShowCustomForm(false);
                                     setCustomForm(EMPTY_CUSTOM_FORM);
                                 }}
-                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
                                 <X className="h-5 w-5" />
                             </button>
@@ -4159,7 +4162,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             }
                                         }}
                                         disabled={!customForm.newModelInput.trim()}
-                                        className="rounded-lg bg-[var(--paper-contrast)] px-3 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
+                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                     >
                                         <Plus className="h-4 w-4" />
                                     </button>
@@ -4170,7 +4173,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         {customForm.models.map((model, index) => (
                                             <div
                                                 key={model}
-                                                className="flex items-center gap-1 rounded-md bg-[var(--paper-contrast)] px-2 py-1 text-xs font-medium text-[var(--ink)]"
+                                                className="flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-medium text-[var(--ink)]"
                                             >
                                                 <span className="text-[10px] text-[var(--ink-muted)]">{index + 1}.</span>
                                                 <span>{model}</span>
@@ -4208,7 +4211,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     setShowCustomForm(false);
                                     setCustomForm(EMPTY_CUSTOM_FORM);
                                 }}
-                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
                                 取消
                             </button>
@@ -4234,7 +4237,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </h3>
                             <button
                                 onClick={() => setEditingProvider(null)}
-                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
                                 <X className="h-5 w-5" />
                             </button>
@@ -4445,7 +4448,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         type="button"
                                         onClick={addCustomModelToProvider}
                                         disabled={!editingProvider.newModelInput.trim()}
-                                        className="rounded-lg bg-[var(--paper-contrast)] px-3 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
+                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                     >
                                         <Plus className="h-4 w-4" />
                                     </button>
@@ -4470,7 +4473,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             <div className="flex gap-3">
                                 <button
                                     onClick={() => setEditingProvider(null)}
-                                    className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                    className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
                                     取消
                                 </button>
@@ -4502,13 +4505,13 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         <div className="flex gap-3">
                             <button
                                 onClick={() => setDeleteConfirmProvider(null)}
-                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                             >
                                 取消
                             </button>
                             <button
                                 onClick={confirmDeleteCustomProvider}
-                                className="flex-1 rounded-lg bg-[var(--error)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#b91c1c]"
+                                className="flex-1 rounded-lg bg-[var(--error)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--error-hover)]"
                             >
                                 删除
                             </button>
@@ -4535,7 +4538,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             <button
                                 onClick={() => setRuntimeDialog({ show: false })}
                                 aria-label="关闭"
-                                className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             >
                                 <X className="h-4 w-4" />
                             </button>
@@ -4547,7 +4550,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             <div className="flex-1" onClick={() => setRuntimeDialog({ show: false })}>
                                 <ExternalLink
                                     href={runtimeDialog.downloadUrl || '#'}
-                                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                    className="flex w-full items-center justify-center gap-2 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
                                 >
                                     去官网下载
                                     <ExternalLinkIcon className="h-3.5 w-3.5" />
@@ -4556,7 +4559,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             {showAiInstallButton && (
                                 <button
                                     onClick={handleAiInstallRuntime}
-                                    className="flex-1 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-strong)]"
+                                    className="flex-1 rounded-lg bg-[var(--accent)] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[var(--accent-warm-hover)]"
                                 >
                                     让 AI 小助理安装
                                 </button>

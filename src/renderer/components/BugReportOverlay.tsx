@@ -196,16 +196,16 @@ export default function BugReportOverlay({
                     <h2 className="text-[14px] font-semibold text-[var(--ink)]">AI 小助理</h2>
                     <button
                         onClick={onClose}
-                        className="rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                        className="rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                     >
                         <X className="h-4 w-4" />
                     </button>
                 </div>
 
                 {/* Input area — matches Chat input style */}
-                <div className="px-5 py-4">
+                <div className="bg-[var(--paper)] px-5 py-4">
                     <div
-                        className={`rounded-2xl border bg-[var(--paper-inset)] transition-colors ${isDragging ? 'border-[var(--accent)]' : 'border-[var(--line)]'}`}
+                        className={`rounded-2xl border bg-[var(--paper-elevated)] transition-colors ${isDragging ? 'border-[var(--accent)]' : 'border-[var(--line)]'}`}
                         onDragOver={handleDragOver}
                         onDragLeave={handleDragLeave}
                         onDrop={handleDrop}
@@ -265,7 +265,7 @@ export default function BugReportOverlay({
                                 <button
                                     type="button"
                                     onClick={() => fileInputRef.current?.click()}
-                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                     title="上传图片"
                                 >
                                     <ImagePlus className="h-4 w-4" />
@@ -276,7 +276,7 @@ export default function BugReportOverlay({
                                     <button
                                         type="button"
                                         onClick={() => setShowModelMenu(!showModelMenu)}
-                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-contrast)] hover:text-[var(--ink)]"
+                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                     >
                                         <span className="max-w-[180px] truncate">{modelDisplayName}</span>
                                         <ChevronUp className="h-3 w-3" />
@@ -286,7 +286,7 @@ export default function BugReportOverlay({
                                     {showModelMenu && (() => {
                                         const availableProviders = providers.filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
                                         return (
-                                            <div className="absolute bottom-full left-0 mb-1 max-h-[300px] w-[260px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper)] py-1 shadow-lg">
+                                            <div className="absolute bottom-full left-0 mb-1 max-h-[300px] w-[260px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-lg">
                                                 {availableProviders.length === 0 ? (
                                                     <button
                                                         type="button"
@@ -294,7 +294,7 @@ export default function BugReportOverlay({
                                                             setShowModelMenu(false);
                                                             onNavigateToProviders();
                                                         }}
-                                                        className="w-full px-3 py-2.5 text-left text-[12px] text-[var(--accent)] transition-colors hover:bg-[var(--paper-contrast)]"
+                                                        className="w-full px-3 py-2.5 text-left text-[12px] text-[var(--accent)] transition-colors hover:bg-[var(--paper-inset)]"
                                                     >
                                                         请先配置模型 →
                                                     </button>
@@ -319,7 +319,7 @@ export default function BugReportOverlay({
                                                                         className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
                                                                             isSelected
                                                                                 ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
-                                                                                : 'text-[var(--ink)] hover:bg-[var(--paper-contrast)]'
+                                                                                : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
                                                                         }`}
                                                                     >
                                                                         {model.modelName}
@@ -343,7 +343,7 @@ export default function BugReportOverlay({
                                 title={getSubmitTitle()}
                                 className={`rounded-lg p-2 transition-colors ${
                                     canSubmit
-                                        ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-strong)]'
+                                        ? 'bg-[var(--accent)] text-white hover:bg-[var(--accent-warm-hover)]'
                                         : 'bg-[var(--ink-muted)]/15 text-[var(--ink-muted)]/40'
                                 }`}
                             >
