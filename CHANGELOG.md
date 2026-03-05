@@ -7,13 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.36] - 2026-03-05
+## [0.1.36] - 2026-03-06
+
+### Added
+- **Session 智能标题自动生成**：首轮 QA 后 AI 自动生成语义化短标题（≤30 字），贯穿 Tab 栏、Chat 顶栏、历史记录、任务中心；支持 Chat 顶栏内联点击重命名，手动重命名后不再自动覆盖（`titleSource` 三态：default/auto/user）
+- **触控板双指水平滑动切换 Tab**：跟手动画 + 惯性检测 + 边界回弹，支持 macOS 触控板自然手势
+- **对话文件路径菜单「打开」选项**：右键文件路径可直接在系统中打开
+- **模型用量分布表格供应商筛选器**：使用统计页支持按供应商筛选模型用量
 
 ### Fixed
 - **飞书群聊管理未识别群组** (#11)：飞书 Bot 仅通过生命周期事件发现群组，新增与钉钉相同的消息级自动发现机制
 - **Gemini 工具调用 400 错误** (#10)：OpenAI 桥接层丢失 Gemini 思考模型的 `thought_signature` 字段，全链路增加透传
 - **代码块选中复制换行问题**：视觉换行被当成真实换行复制
 - **输入框工具栏窄屏换行**：工具栏按钮在窄宽度下自动隐藏文字标签，模型名称截断显示
+- **Rust 代理层缺少 PATCH 方法**：`proxy_http_request` 不支持 PATCH，导致 session 更新（重命名等）静默失败
+- **AI 分析内容误触发 Agent error 横幅**：非流式供应商正常响应被误显示为错误
+- **会话统计弹窗层级错误**：Modal 嵌套在 dropdown 内导致输入框浮于遮罩之上，改用 Portal 渲染到 document root
+- **会话统计弹窗样式**：卡片/表头背景与设置页使用统计面板风格统一（paper-elevated）
+- **飞书 Bot 权限缺失**：补充 `contact:contact.base:readonly` 权限
 
 ---
 
