@@ -11,6 +11,7 @@ import { useToast } from '@/components/Toast';
 import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
 import { useConfig } from '@/hooks/useConfig';
+import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Chat from '@/pages/Chat';
 import Launcher from '@/pages/Launcher';
 import Settings from '@/pages/Settings';
@@ -208,6 +209,9 @@ export default function App() {
     hasApiKey: boolean;
   } | null>(null);
   const [claudeEnvClearing, setClaudeEnvClearing] = useState(false);
+
+  // Content container ref for tab swipe gesture
+  const contentRef = useRef<HTMLDivElement>(null);
 
   // Per-tab launch guard — prevents concurrent launches overwriting each other's state
   const launchingTabRef = useRef<string | null>(null);
@@ -574,7 +578,7 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 
-  // Keyboard shortcuts: Cmd+T (new tab), Cmd+W (close tab)
+  // Keyboard shortcuts: Cmd+T (new tab), Cmd+W (close tab), Cmd+Shift+[/] (switch tab)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toLowerCase().includes('mac');
@@ -593,6 +597,18 @@ export default function App() {
       } else if (e.key === 'w' || e.key === 'W') {
         e.preventDefault();
         closeCurrentTab();
+      } else if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
+        // Cmd+Shift+[ = previous tab, Cmd+Shift+] = next tab
+        e.preventDefault();
+        const tabs = tabsRef.current;
+        const activeId = activeTabIdRef.current;
+        if (tabs.length <= 1 || !activeId) return;
+        const idx = tabs.findIndex((t) => t.id === activeId);
+        if (idx === -1) return;
+        const newIdx = e.code === 'BracketLeft' ? idx - 1 : idx + 1;
+        if (newIdx >= 0 && newIdx < tabs.length) {
+          setActiveTabId(tabs[newIdx].id);
+        }
       }
     };
 
@@ -1166,6 +1182,9 @@ export default function App() {
     setActiveTabId(tabId);
   }, []);
 
+  // Trackpad two-finger horizontal swipe to switch tabs (follow-along animation)
+  useTabSwipeGesture({ contentRef, tabsRef, activeTabIdRef, onSwitchTab: handleSelectTab });
+
   const handleCloseTab = useCallback((tabId: string) => {
     // Special case: If only one launcher tab, do nothing
     const currentTabs = tabsRef.current;
@@ -1405,7 +1424,7 @@ export default function App() {
       </CustomTitleBar>
 
       {/* Tab content - only Chat views need TabProvider for sidecar communication */}
-      <div className="relative flex-1 overflow-hidden">
+      <div ref={contentRef} className="relative flex-1 overflow-hidden">
         {tabs.map((tab) => (
           <MemoizedTabContent
             key={tab.id}
