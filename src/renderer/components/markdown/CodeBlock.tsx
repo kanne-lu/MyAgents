@@ -95,7 +95,7 @@ export default function CodeBlock({ children, language, className }: CodeBlockPr
                     color: '#4a4a4a',
                     userSelect: 'none',
                 }}
-                wrapLongLines
+                wrapLongLines={false}
             >
                 {children.trim()}
             </SyntaxHighlighter>

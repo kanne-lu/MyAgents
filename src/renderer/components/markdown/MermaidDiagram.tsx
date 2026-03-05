@@ -250,7 +250,7 @@ export default function MermaidDiagram({ children }: MermaidDiagramProps) {
                 color: '#4a4a4a',
                 userSelect: 'none',
             }}
-            wrapLongLines
+            wrapLongLines={false}
         >
             {children.trim()}
         </SyntaxHighlighter>
