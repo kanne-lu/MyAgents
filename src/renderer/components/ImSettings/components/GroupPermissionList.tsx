@@ -111,7 +111,7 @@ export default function GroupPermissionList({
             {/* Empty state */}
             {permissions.length === 0 && (
                 <p className="text-xs text-[var(--ink-muted)]">
-                    暂无群聊。将 Bot 添加到群聊后，群聊会出现在这里等待授权。
+                    暂无群聊。将 Bot 拉入群后，在群内发送任意一条消息即可被识别，届时群聊会出现在这里等待授权。
                 </p>
             )}
 
