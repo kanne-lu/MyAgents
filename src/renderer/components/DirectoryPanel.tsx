@@ -36,6 +36,7 @@ import ConfirmDialog from './ConfirmDialog';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 import RenameDialog from './RenameDialog';
 import AgentCapabilitiesPanel from './AgentCapabilitiesPanel';
+import WorkspaceIcon from './launcher/WorkspaceIcon';
 
 // Lazy load FilePreviewModal - it includes heavy SyntaxHighlighter
 const FilePreviewModal = lazy(() => import('./FilePreviewModal'));
@@ -51,6 +52,10 @@ export interface DirectoryPanelHandle {
 
 interface DirectoryPanelProps {
   agentDir: string;
+  /** Workspace icon ID (Phosphor) from project config */
+  projectIcon?: string;
+  /** Custom display name from project config */
+  projectDisplayName?: string;
   provider?: Provider | null;
   providers?: Provider[];
   onProviderChange?: (providerId: string) => void;
@@ -109,6 +114,8 @@ function getFolderName(path: string): string {
 
 const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(function DirectoryPanel({
   agentDir,
+  projectIcon,
+  projectDisplayName,
   provider: _provider,
   providers: _providers = [],
   onProviderChange: _onProviderChange,
@@ -1038,12 +1045,14 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
 
           {/* Folder header with name, path, stats - two row layout */}
           <div className="px-4 pb-2 pt-3">
-            {/* First row: folder icon, name, git branch, and stats */}
+            {/* First row: workspace icon, name, git branch, and stats */}
             <div className="flex items-center gap-2">
-              <FolderOpen className="h-4 w-4 flex-shrink-0 text-[var(--accent-warm)]" />
-              <span className="truncate text-sm font-semibold text-[var(--ink)]">{folderName}</span>
+              <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">
+                <WorkspaceIcon icon={projectIcon} size={16} />
+              </span>
+              <span className="truncate text-sm font-medium text-[var(--ink)]">{projectDisplayName || folderName}</span>
               {gitBranch && (
-                <span className="flex items-center gap-1 rounded bg-[var(--paper-elevated)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+                <span className="flex items-center gap-1 rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
                   <GitBranch className="h-3 w-3" />
                   {gitBranch}
                 </span>

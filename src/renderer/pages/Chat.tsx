@@ -1491,6 +1491,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           <DirectoryPanel
             ref={directoryPanelRef}
             agentDir={agentDir}
+            projectIcon={currentProject?.icon}
+            projectDisplayName={currentProject?.displayName}
             provider={currentProvider}
             providers={providers}
             onProviderChange={handleProviderChange}
