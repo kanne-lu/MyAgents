@@ -187,7 +187,7 @@ export const PRESET_TEMPLATES: WorkspaceTemplate[] = [
   {
     id: 'mino',
     name: 'Mino',
-    description: '内置技能、记忆与工作流的 AI Agent 工作区',
+    description: '能记忆、会进化的 AI Agent。从 minimal 开始，长成你想要的样子。',
     icon: 'lightning',
     isBuiltin: true,
   },
