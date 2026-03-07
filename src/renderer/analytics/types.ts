@@ -27,11 +27,15 @@ export type EventName =
   // 会话管理
   | 'session_new'
   | 'session_switch'
+  | 'session_rewind'
+  | 'session_title_edit'
   // 核心交互
   | 'message_send'
   | 'message_complete'
   | 'message_stop'
   | 'message_error'
+  | 'message_retry'
+  | 'message_copy'
   // 工具使用
   | 'tool_use'
   // 权限控制
@@ -42,13 +46,25 @@ export type EventName =
   | 'model_switch'
   | 'mcp_add'
   | 'mcp_remove'
+  // Agent & Skill
+  | 'agent_add'
+  | 'agent_remove'
+  | 'skill_use'
+  // IM Bot
+  | 'im_bot_create'
+  | 'im_bot_toggle'
+  | 'im_bot_remove'
   // 功能使用
   | 'tab_new'
   | 'tab_close'
   | 'settings_open'
   | 'workspace_open'
+  | 'workspace_create'
   | 'history_open'
   | 'file_drop'
+  | 'tts_play'
+  | 'task_center_open'
+  | 'bug_report_submit'
   // 系统事件
   | 'update_check'
   | 'update_install'

@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Copy, FolderOpen, FolderPlus, Loader2, Plus } from 'lucide-react';
+import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
@@ -406,8 +407,9 @@ export default function ImBotWizard({
             });
         }
         await refreshConfig();
+        track('im_bot_create', { platform });
         if (isMountedRef.current) onComplete(botId);
-    }, [botId, allowedUsers, onComplete, refreshConfig]);
+    }, [botId, allowedUsers, platform, onComplete, refreshConfig]);
 
     // Cancel wizard - stop bot, remove config, and clean up created workspace
     const handleCancel = useCallback(async () => {

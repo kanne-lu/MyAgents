@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, Plus } from 'lucide-react';
+import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
@@ -142,6 +143,7 @@ export default function ImBotList({
                         }
                         return next;
                     });
+                    track('im_bot_toggle', { platform: cfg.platform, enabled: false });
                     toastRef.current.success(`${cfg.name} 已停止`);
                     await invoke('cmd_update_im_bot_config', { botId, patch: { enabled: false } });
                 }
@@ -159,6 +161,7 @@ export default function ImBotList({
                 const newStatus = await invoke<ImBotStatus>('cmd_start_im_bot', params);
                 if (isMountedRef.current) {
                     setStatuses(prev => ({ ...prev, [botId]: newStatus }));
+                    track('im_bot_toggle', { platform: cfg.platform, enabled: true });
                     toastRef.current.success(`${cfg.name} 已启动`);
                     await invoke('cmd_update_im_bot_config', { botId, patch: { enabled: true } });
                 }

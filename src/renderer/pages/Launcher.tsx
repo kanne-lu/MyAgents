@@ -8,6 +8,7 @@ import { FolderPlus, LayoutTemplate, Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
+import { track } from '@/analytics';
 import { type ImageAttachment } from '@/components/SimpleChatInput';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
@@ -276,7 +277,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         handleLaunch(project, session.id);
     }, [handleLaunch]);
 
-    const handleOpenOverlay = useCallback(() => setShowOverlay(true), []);
+    const handleOpenOverlay = useCallback(() => { track('task_center_open', {}); setShowOverlay(true); }, []);
     const handleCloseOverlay = useCallback(() => setShowOverlay(false), []);
     const handleOpenCronDetail = useCallback((task: CronTask) => setSelectedCronTask(task), []);
     const handleCloseCronDetail = useCallback(() => setSelectedCronTask(null), []);
@@ -407,6 +408,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
     const handleCreateFromTemplate = useCallback(async (path: string, icon?: string, displayName?: string) => {
         const project = await addProject(path);
+        track('workspace_create', { source: icon ? 'template' : 'blank' });
         const updates: { icon?: string; displayName?: string } = {};
         if (icon) updates.icon = icon;
         if (displayName) updates.displayName = displayName;

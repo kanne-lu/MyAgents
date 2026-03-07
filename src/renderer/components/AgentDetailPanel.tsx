@@ -9,6 +9,7 @@ import { Loader2, ChevronDown, ChevronUp, Trash2, Edit2, X, Check, Plus } from '
 import { useCallback, useEffect, useState, useImperativeHandle, forwardRef, useRef, useMemo } from 'react';
 
 import { load as yamlLoad, dump as yamlDump } from 'js-yaml';
+import { track } from '@/analytics';
 import { apiGetJson as globalApiGet, apiPutJson as globalApiPut, apiDelete as globalApiDelete, apiPostJson as globalApiPost } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
@@ -442,6 +443,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                     `/api/agent/${encodeURIComponent(name)}?scope=${scope}${agentDirParam}`
                 );
                 if (response.success) {
+                    track('agent_remove', { scope });
                     toastRef.current.success('已删除');
                     onDeleted();
                 } else {

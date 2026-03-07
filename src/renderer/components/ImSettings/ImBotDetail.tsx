@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ChevronDown, FolderOpen, Loader2, Plus, Power, PowerOff, Trash2 } from 'lucide-react';
+import { track } from '@/analytics';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
@@ -248,6 +249,7 @@ export default function ImBotDetail({
             if (isRunning) {
                 await invoke('cmd_stop_im_bot', { botId });
                 if (isMountedRef.current) {
+                    track('im_bot_toggle', { platform: botConfigRef.current.platform, enabled: false });
                     toastRef.current.success('Bot 已停止');
                     setBotStatus(null);
                     await invokePatch({ enabled: false });
@@ -267,6 +269,7 @@ export default function ImBotDetail({
                 const params = await buildStartParams(botConfigRef.current);
                 await invoke('cmd_start_im_bot', params);
                 if (isMountedRef.current) {
+                    track('im_bot_toggle', { platform: botConfigRef.current.platform, enabled: true });
                     toastRef.current.success('Bot 已启动');
                     await invokePatch({ enabled: true });
                 }
@@ -289,6 +292,7 @@ export default function ImBotDetail({
                 // Rust cmd_remove_im_bot_config stops the bot, removes from config, emits event
                 await invoke('cmd_remove_im_bot_config', { botId });
             }
+            track('im_bot_remove', { platform: botConfigRef.current?.platform ?? 'unknown' });
             toastRef.current.success('Bot 已删除');
             onBack();
         } catch (err) {

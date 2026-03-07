@@ -5,6 +5,7 @@
 import { Plus, Bot, Loader2, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
 
+import { track } from '@/analytics';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import AgentDetailPanel from './AgentDetailPanel';
@@ -99,6 +100,7 @@ export default function GlobalAgentsPanel({ onDetailChange }: { onDetailChange?:
                 description: ''
             });
             if (response.success) {
+                track('agent_add', { scope: 'user' });
                 setViewState({ type: 'agent-detail', name: response.folderName || tempName, isNewAgent: true });
                 setRefreshKey(k => k + 1);
             } else {
@@ -164,6 +166,7 @@ export default function GlobalAgentsPanel({ onDetailChange }: { onDetailChange?:
                 description: newItemDescription.trim()
             });
             if (response.success) {
+                track('agent_add', { scope: 'user' });
                 setShowNewDialog(false);
                 setNewItemName('');
                 setNewItemDescription('');

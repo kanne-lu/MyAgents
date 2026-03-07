@@ -1,6 +1,7 @@
 import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Copy, Check, Undo2, RotateCcw } from 'lucide-react';
 
+import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
 import BlockGroup from '@/components/BlockGroup';
 import Markdown from '@/components/Markdown';
@@ -134,6 +135,7 @@ function AssistantActions({ message, onRetry, className = '' }: {
           aria-label="复制"
           onClick={() => {
             navigator.clipboard.writeText(text).catch(() => {});
+            track('message_copy', {});
             setCopied(true);
             if (timerRef.current) clearTimeout(timerRef.current);
             timerRef.current = setTimeout(() => setCopied(false), 1500);

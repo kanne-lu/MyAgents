@@ -5,6 +5,7 @@
 import { Plus, Bot, Loader2, Trash2, X as XIcon, Link2 } from 'lucide-react';
 import { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 
+import { track } from '@/analytics';
 import { apiGetJson as globalApiGet, apiPostJson as globalApiPost, apiPutJson as globalApiPut, apiDelete as globalApiDelete } from '@/api/apiFetch';
 import { useTabApiOptional } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
@@ -135,6 +136,7 @@ export default function WorkspaceAgentsList({
 
             const response = await api.post<{ success: boolean; error?: string; folderName?: string }>('/api/agent/create', payload);
             if (response.success && response.folderName) {
+                track('agent_add', { scope: 'project' });
                 onSelectAgent(response.folderName, 'project', true);
                 loadData();
             } else {

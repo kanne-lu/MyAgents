@@ -13,6 +13,7 @@
 import { Bot, ChevronDown, ChevronRight, RefreshCw, Sparkles, Terminal } from 'lucide-react';
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 
+import { track } from '@/analytics';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
@@ -162,6 +163,7 @@ export default memo(function AgentCapabilitiesPanel({
 
     // Click handlers
     const handleSkillClick = useCallback((name: string) => {
+        track('skill_use', { skill_name: name });
         onInsertSlashCommand?.(name);
     }, [onInsertSlashCommand]);
 

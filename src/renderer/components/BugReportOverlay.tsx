@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronUp, Send, ImagePlus } from 'lucide-react';
 
+import { track } from '@/analytics';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
 import type { ImageAttachment } from './SimpleChatInput';
@@ -122,6 +123,7 @@ export default function BugReportOverlay({
 
     const handleSubmit = useCallback(() => {
         if (!canSubmit) return;
+        track('bug_report_submit', { has_screenshot: images.length > 0 });
         window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
             detail: {
                 description: description.trim(),

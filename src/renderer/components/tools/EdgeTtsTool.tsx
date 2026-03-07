@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { track } from '@/analytics';
 import type { ToolUseSimple } from '@/types/chat';
 import { CollapsibleTool } from './CollapsibleTool';
 import { ToolHeader } from './utils';
@@ -72,6 +73,7 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
   const parsed = parseToolResult(tool.result);
   const resultKey = tool.result ?? '';
   const [audioState, setAudioState] = useState<{ error: boolean; key: string }>({ error: false, key: resultKey });
+  const ttsTrackedRef = useRef(false);
 
   const audioError = audioState.key === resultKey ? audioState.error : false;
 
@@ -146,6 +148,7 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
               controls
               src={getAudioUrl(parsed.filePath)}
               className="w-full max-w-[400px]"
+              onPlay={() => { if (!ttsTrackedRef.current) { track('tts_play', {}); ttsTrackedRef.current = true; } }}
               onError={() => setAudioState({ error: true, key: resultKey })}
             />
           )}

@@ -4,7 +4,7 @@
  */
 
 import { isTauriEnvironment } from '@/utils/browserMock';
-import { isAnalyticsEnabled } from './config';
+import { isAnalyticsEnabled, getApiKey, getEndpoint } from './config';
 import { getDeviceId, getPlatform, getAppVersionSync, preloadAppVersion, preloadPlatform, preloadDeviceId } from './device';
 import { enqueue, flush, flushSync } from './queue';
 import type { EventName, EventParams, TrackEvent } from './types';
@@ -23,6 +23,10 @@ export async function initAnalytics(): Promise<void> {
 
   // 并行预加载设备ID、版本号和平台信息
   await Promise.all([preloadDeviceId(), preloadAppVersion(), preloadPlatform()]);
+
+  // Write analytics config to disk for Sidecar server-side tracking
+  // Sidecar reads ~/.myagents/analytics_config.json to send events directly
+  await writeAnalyticsConfigForSidecar();
 
   // 注册页面卸载/隐藏事件
   if (typeof window !== 'undefined') {
@@ -118,4 +122,31 @@ export async function flushEvents(): Promise<void> {
  */
 export function isEnabled(): boolean {
   return isAnalyticsEnabled();
+}
+
+/**
+ * Write analytics config to ~/.myagents/analytics_config.json
+ * so that Bun Sidecar can send server-side events (e.g. ai_turn_complete)
+ */
+async function writeAnalyticsConfigForSidecar(): Promise<void> {
+  if (!isTauriEnvironment()) return;
+
+  try {
+    const { ensureConfigDir, getConfigDir, safeWriteJson } = await import('@/config/services/configStore');
+    const { join } = await import('@tauri-apps/api/path');
+    await ensureConfigDir();
+    const dir = await getConfigDir();
+    const filePath = await join(dir, 'analytics_config.json');
+
+    await safeWriteJson(filePath, {
+      enabled: isAnalyticsEnabled(),
+      apiKey: getApiKey(),
+      endpoint: getEndpoint(),
+      deviceId: getDeviceId(),
+      platform: getPlatform(),
+      appVersion: getAppVersionSync(),
+    });
+  } catch {
+    // Silent failure — analytics config write must not block app startup
+  }
 }

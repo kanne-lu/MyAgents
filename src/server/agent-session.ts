@@ -22,6 +22,7 @@ import { createSessionMetadata, type SessionMessage, type MessageAttachment, typ
 import { broadcast } from './sse';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { localTimestamp } from '../shared/logTime';
+import { trackServer } from './analytics';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -4695,6 +4696,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           tool_count: currentTurnToolCount,
           duration_ms: durationMs,
         });
+
+        // Server-side unified analytics: covers all sources (desktop/cron/im)
+        trackServer('ai_turn_complete', {
+          source: currentScenario.type,
+          platform: currentScenario.type === 'im' ? currentScenario.platform : null,
+          model: currentTurnUsage.model ?? null,
+          input_tokens: currentTurnUsage.inputTokens,
+          output_tokens: currentTurnUsage.outputTokens,
+          tool_count: currentTurnToolCount,
+          duration_ms: durationMs,
+        });
+
         handleMessageComplete();
         signalTurnComplete();  // 解锁 generator 进入下一轮
 

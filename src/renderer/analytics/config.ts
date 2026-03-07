@@ -4,19 +4,16 @@
  */
 
 /**
- * 默认上报地址
- */
-const DEFAULT_ENDPOINT = 'https://analytics.myagents.io/api/track';
-
-/**
  * 检查埋点是否启用
- * 必须同时满足：VITE_ANALYTICS_ENABLED=true 且 VITE_ANALYTICS_API_KEY 有值
+ * 必须同时满足：VITE_ANALYTICS_ENABLED=true 且 VITE_ANALYTICS_API_KEY 有值 且 VITE_ANALYTICS_ENDPOINT 有值
+ * 三个条件全部来自 .env（gitignored），fork 构建不包含任何值，analytics 完全不运作
  */
 export function isAnalyticsEnabled(): boolean {
   const enabled = import.meta.env.VITE_ANALYTICS_ENABLED;
   const apiKey = import.meta.env.VITE_ANALYTICS_API_KEY;
+  const endpoint = import.meta.env.VITE_ANALYTICS_ENDPOINT;
 
-  return enabled === 'true' && !!apiKey && apiKey.length > 0;
+  return enabled === 'true' && !!apiKey && apiKey.length > 0 && !!endpoint && endpoint.length > 0;
 }
 
 /**
@@ -30,7 +27,7 @@ export function getApiKey(): string {
  * 获取上报地址
  */
 export function getEndpoint(): string {
-  return import.meta.env.VITE_ANALYTICS_ENDPOINT || DEFAULT_ENDPOINT;
+  return import.meta.env.VITE_ANALYTICS_ENDPOINT || '';
 }
 
 /**
