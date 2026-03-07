@@ -10,7 +10,7 @@
  * - Right-click Agent: enable/disable, settings
  * - Right-click Skills/Commands: settings
  */
-import { Bot, ChevronDown, ChevronRight, RefreshCw, Sparkles, Terminal } from 'lucide-react';
+import { Bot, ChevronDown, ChevronRight, Globe, RefreshCw, Settings2, Sparkles, Terminal } from 'lucide-react';
 import { memo, useState, useCallback, useEffect, useMemo, useRef } from 'react';
 
 import { track } from '@/analytics';
@@ -194,6 +194,7 @@ export default memo(function AgentCapabilitiesPanel({
         const items: ContextMenuItem[] = [
             {
                 label: '设置',
+                icon: <Settings2 className="h-3.5 w-3.5" />,
                 onClick: () => openSettingsForScope(scope, 'agents'),
             },
             {
@@ -211,6 +212,7 @@ export default memo(function AgentCapabilitiesPanel({
         const items: ContextMenuItem[] = [
             {
                 label: '设置',
+                icon: <Settings2 className="h-3.5 w-3.5" />,
                 onClick: () => openSettingsForScope(scope, 'skills'),
             },
             {
@@ -223,6 +225,7 @@ export default memo(function AgentCapabilitiesPanel({
         if (scope === 'project' && folderName && !globalSkillFolderNamesRef.current?.has(folderName)) {
             items.push({
                 label: '同步至全局技能',
+                icon: <Globe className="h-3.5 w-3.5" />,
                 onClick: () => {
                     onSyncSkillToGlobalRef.current?.(folderName);
                     setCtxMenu(null);
