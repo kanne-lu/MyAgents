@@ -465,7 +465,7 @@ impl SidecarManager {
     }
 
     /// Get the next available port with max attempts to prevent infinite loop
-    fn allocate_port(&self) -> Result<u16, String> {
+    pub fn allocate_port(&self) -> Result<u16, String> {
         const MAX_ATTEMPTS: u32 = 200;
         
         for _ in 0..MAX_ATTEMPTS {
@@ -1080,6 +1080,11 @@ fn check_bun_in_dir(dir: &std::path::Path, label: &str) -> Option<PathBuf> {
 /// Returns a normalized path safe for `Command::new()` (no `\\?\` prefix on Windows).
 fn find_bun_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
     find_bun_executable_inner(app_handle).map(normalize_external_path)
+}
+
+/// Public wrapper for find_bun_executable (used by im::bridge module).
+pub fn find_bun_executable_pub<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
+    find_bun_executable(app_handle)
 }
 
 fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {

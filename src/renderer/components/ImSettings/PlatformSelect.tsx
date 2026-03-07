@@ -1,11 +1,11 @@
 import React from 'react';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Puzzle } from 'lucide-react';
 import type { ImPlatform } from '../../../shared/types/im';
 import telegramIcon from './assets/telegram.png';
 import feishuIcon from './assets/feishu.jpeg';
 import dingtalkIcon from './assets/dingtalk.svg';
 
-const platforms: { id: ImPlatform; name: string; description: string; icon: string }[] = [
+const platforms: { id: ImPlatform; name: string; description: string; icon?: string; iconElement?: React.ReactNode }[] = [
     {
         id: 'telegram',
         name: 'Telegram',
@@ -23,6 +23,12 @@ const platforms: { id: ImPlatform; name: string; description: string; icon: stri
         name: '钉钉',
         description: '通过钉钉自建应用 Bot 远程使用 AI Agent',
         icon: dingtalkIcon,
+    },
+    {
+        id: 'openclaw:plugin' as ImPlatform,
+        name: '社区插件',
+        description: '安装 OpenClaw 社区 Channel Plugin（QQ Bot、微信等）',
+        iconElement: <Puzzle className="h-12 w-12 text-[var(--ink-muted)]" />,
     },
 ];
 
@@ -59,7 +65,11 @@ export default function PlatformSelect({
                         onClick={() => onSelect(p.id)}
                         className="flex flex-col items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-6 transition-all hover:border-[var(--button-primary-bg)] hover:shadow-sm"
                     >
-                        <img src={p.icon} alt={p.name} className="h-12 w-12 rounded-xl" />
+                        {p.icon ? (
+                            <img src={p.icon} alt={p.name} className="h-12 w-12 rounded-xl" />
+                        ) : p.iconElement ? (
+                            p.iconElement
+                        ) : null}
                         <div className="text-center">
                             <p className="text-sm font-medium text-[var(--ink)]">{p.name}</p>
                             <p className="mt-1 text-xs text-[var(--ink-muted)]">{p.description}</p>

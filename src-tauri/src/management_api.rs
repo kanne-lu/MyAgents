@@ -63,7 +63,8 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/cron/runs", get(runs_cron_handler))
         .route("/api/cron/status", get(status_cron_handler))
         .route("/api/im/wake", post(wake_bot_handler))
-        .route("/api/im/send-media", post(send_media_handler));
+        .route("/api/im/send-media", post(send_media_handler))
+        .route("/api/im-bridge/message", post(handle_bridge_message));
 
     tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -532,5 +533,69 @@ async fn send_media_handler(
                 "error": format!("Unsupported file type: .{} — only images, documents, media, and archives can be sent", ext)
             }))
         }
+    }
+}
+
+// ===== Bridge Message handler (OpenClaw Channel Plugin → Rust) =====
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeMessagePayload {
+    bot_id: String,
+    plugin_id: String,
+    sender_id: String,
+    sender_name: Option<String>,
+    text: String,
+    chat_type: String,       // "direct" | "group"
+    chat_id: String,
+    message_id: Option<String>,
+    #[allow(dead_code)]
+    group_id: Option<String>,
+    is_mention: Option<bool>,
+}
+
+async fn handle_bridge_message(
+    Json(payload): Json<BridgeMessagePayload>,
+) -> Json<serde_json::Value> {
+    use crate::im::bridge;
+    use crate::im::types::{ImMessage, ImPlatform, ImSourceType};
+
+    let sender = match bridge::get_bridge_sender(&payload.bot_id).await {
+        Some(tx) => tx,
+        None => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("No bridge sender registered for bot_id={}", payload.bot_id)
+            }));
+        }
+    };
+
+    let source_type = if payload.chat_type == "group" {
+        ImSourceType::Group
+    } else {
+        ImSourceType::Private
+    };
+
+    let msg = ImMessage {
+        chat_id: payload.chat_id,
+        message_id: payload.message_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        text: payload.text,
+        sender_id: payload.sender_id,
+        sender_name: payload.sender_name,
+        source_type,
+        platform: ImPlatform::OpenClaw(payload.plugin_id),
+        timestamp: chrono::Utc::now(),
+        attachments: Vec::new(),
+        media_group_id: None,
+        is_mention: payload.is_mention.unwrap_or(true),
+        reply_to_bot: false,
+    };
+
+    match sender.send(msg).await {
+        Ok(_) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": format!("Failed to send message to processing loop: {}", e)
+        })),
     }
 }

@@ -2,6 +2,7 @@
 // Manages the Telegram Bot lifecycle, routing IM messages to AI Sidecars.
 
 pub mod adapter;
+pub mod bridge;
 pub mod buffer;
 pub mod dingtalk;
 pub mod feishu;
@@ -53,6 +54,7 @@ type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
 /// requests would conflict. Shared between processing loop and heartbeat runner.
 pub(crate) type PeerLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
 
+use bridge::BridgeAdapter;
 use buffer::MessageBuffer;
 use dingtalk::DingtalkAdapter;
 use feishu::FeishuAdapter;
@@ -69,6 +71,7 @@ pub(crate) enum AnyAdapter {
     Telegram(Arc<TelegramAdapter>),
     Feishu(Arc<FeishuAdapter>),
     Dingtalk(Arc<DingtalkAdapter>),
+    Bridge(Arc<BridgeAdapter>),
 }
 
 impl adapter::ImAdapter for AnyAdapter {
@@ -77,6 +80,7 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Telegram(a) => a.verify_connection().await,
             Self::Feishu(a) => a.verify_connection().await,
             Self::Dingtalk(a) => a.verify_connection().await,
+            Self::Bridge(a) => a.verify_connection().await,
         }
     }
     async fn register_commands(&self) -> adapter::AdapterResult<()> {
@@ -84,6 +88,7 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Telegram(a) => a.register_commands().await,
             Self::Feishu(a) => a.register_commands().await,
             Self::Dingtalk(a) => a.register_commands().await,
+            Self::Bridge(a) => a.register_commands().await,
         }
     }
     async fn listen_loop(&self, shutdown_rx: tokio::sync::watch::Receiver<bool>) {
@@ -91,6 +96,7 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Telegram(a) => a.listen_loop(shutdown_rx).await,
             Self::Feishu(a) => a.listen_loop(shutdown_rx).await,
             Self::Dingtalk(a) => a.listen_loop(shutdown_rx).await,
+            Self::Bridge(a) => a.listen_loop(shutdown_rx).await,
         }
     }
     async fn send_message(&self, chat_id: &str, text: &str) -> adapter::AdapterResult<()> {
@@ -98,6 +104,7 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Telegram(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
             Self::Feishu(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
             Self::Dingtalk(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
+            Self::Bridge(a) => adapter::ImAdapter::send_message(a.as_ref(), chat_id, text).await,
         }
     }
     async fn ack_received(&self, chat_id: &str, message_id: &str) {
@@ -105,6 +112,7 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Telegram(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
             Self::Feishu(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
             Self::Dingtalk(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
+            Self::Bridge(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
         }
     }
     async fn ack_processing(&self, chat_id: &str, message_id: &str) {
@@ -112,6 +120,7 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Telegram(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
             Self::Feishu(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
             Self::Dingtalk(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
+            Self::Bridge(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
         }
     }
     async fn ack_clear(&self, chat_id: &str, message_id: &str) {
@@ -119,6 +128,7 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Telegram(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
             Self::Feishu(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
             Self::Dingtalk(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
+            Self::Bridge(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
         }
     }
     async fn send_typing(&self, chat_id: &str) {
@@ -126,6 +136,7 @@ impl adapter::ImAdapter for AnyAdapter {
             Self::Telegram(a) => a.send_typing(chat_id).await,
             Self::Feishu(a) => a.send_typing(chat_id).await,
             Self::Dingtalk(a) => a.send_typing(chat_id).await,
+            Self::Bridge(a) => a.send_typing(chat_id).await,
         }
     }
 }
@@ -136,6 +147,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => a.send_message_returning_id(chat_id, text).await,
             Self::Feishu(a) => a.send_message_returning_id(chat_id, text).await,
             Self::Dingtalk(a) => a.send_message_returning_id(chat_id, text).await,
+            Self::Bridge(a) => a.send_message_returning_id(chat_id, text).await,
         }
     }
     async fn edit_message(&self, chat_id: &str, message_id: &str, text: &str) -> adapter::AdapterResult<()> {
@@ -143,6 +155,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
             Self::Feishu(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
             Self::Dingtalk(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
+            Self::Bridge(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
         }
     }
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> adapter::AdapterResult<()> {
@@ -150,6 +163,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
             Self::Feishu(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
             Self::Dingtalk(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
+            Self::Bridge(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
         }
     }
     fn max_message_length(&self) -> usize {
@@ -157,6 +171,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => a.max_message_length(),
             Self::Feishu(a) => a.max_message_length(),
             Self::Dingtalk(a) => a.max_message_length(),
+            Self::Bridge(a) => a.max_message_length(),
         }
     }
     async fn send_approval_card(
@@ -170,6 +185,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await.map_err(|e| e.to_string()),
             Self::Feishu(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await,
             Self::Dingtalk(a) => adapter::ImStreamAdapter::send_approval_card(a.as_ref(), chat_id, request_id, tool_name, tool_input).await,
+            Self::Bridge(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await,
         }
     }
     async fn update_approval_status(
@@ -182,6 +198,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => a.update_approval_status(chat_id, message_id, status).await.map_err(|e| e.to_string()),
             Self::Feishu(a) => a.update_approval_status(message_id, status).await,
             Self::Dingtalk(a) => adapter::ImStreamAdapter::update_approval_status(a.as_ref(), chat_id, message_id, status).await,
+            Self::Bridge(a) => adapter::ImStreamAdapter::update_approval_status(a.as_ref(), chat_id, message_id, status).await,
         }
     }
     async fn send_photo(
@@ -195,6 +212,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => a.send_photo(chat_id, data, filename, caption).await,
             Self::Feishu(a) => a.send_photo(chat_id, data, filename, caption).await,
             Self::Dingtalk(a) => a.send_photo(chat_id, data, filename, caption).await,
+            Self::Bridge(a) => a.send_photo(chat_id, data, filename, caption).await,
         }
     }
     async fn send_file(
@@ -209,6 +227,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
             Self::Feishu(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
             Self::Dingtalk(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
+            Self::Bridge(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
         }
     }
     fn use_draft_streaming(&self) -> bool {
@@ -216,6 +235,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => a.use_draft_streaming(),
             Self::Feishu(a) => a.use_draft_streaming(),
             Self::Dingtalk(a) => a.use_draft_streaming(),
+            Self::Bridge(a) => a.use_draft_streaming(),
         }
     }
     fn preferred_throttle_ms(&self) -> u64 {
@@ -223,6 +243,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Telegram(a) => a.preferred_throttle_ms(),
             Self::Feishu(a) => a.preferred_throttle_ms(),
             Self::Dingtalk(a) => a.preferred_throttle_ms(),
+            Self::Bridge(a) => a.preferred_throttle_ms(),
         }
     }
 }
@@ -262,6 +283,8 @@ pub struct ImBotInstance {
     heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
     /// Platform adapter (retained for graceful shutdown — e.g. dedup flush)
     pub(crate) adapter: Arc<AnyAdapter>,
+    /// Bridge process handle (OpenClaw plugins only)
+    bridge_process: Option<tokio::sync::Mutex<bridge::BridgeProcess>>,
     // ===== Hot-reloadable config =====
     pub(crate) current_model: Arc<tokio::sync::RwLock<Option<String>>>,
     pub(crate) current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
@@ -417,10 +440,11 @@ pub async fn start_im_bot<R: Runtime>(
     // Create platform adapter (implements ImAdapter + ImStreamAdapter traits)
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(256);
     let msg_tx_for_reinjection = msg_tx.clone(); // For media group merge re-injection
+    let mut bridge_process_handle: Option<bridge::BridgeProcess> = None;
     let adapter: Arc<AnyAdapter> = match config.platform {
         ImPlatform::Telegram => Arc::new(AnyAdapter::Telegram(Arc::new(TelegramAdapter::new(
             &config,
-            msg_tx,
+            msg_tx.clone(),
             Arc::clone(&allowed_users),
             approval_tx.clone(),
             group_event_tx.clone(),
@@ -429,7 +453,7 @@ pub async fn start_im_bot<R: Runtime>(
             let dedup_path = Some(health::bot_dedup_path(&bot_id));
             Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
                 &config,
-                msg_tx,
+                msg_tx.clone(),
                 Arc::clone(&allowed_users),
                 approval_tx.clone(),
                 dedup_path,
@@ -440,12 +464,49 @@ pub async fn start_im_bot<R: Runtime>(
             let dedup_path = Some(health::bot_dedup_path(&bot_id));
             Arc::new(AnyAdapter::Dingtalk(Arc::new(DingtalkAdapter::new(
                 &config,
-                msg_tx,
+                msg_tx.clone(),
                 Arc::clone(&allowed_users),
                 approval_tx.clone(),
                 dedup_path,
                 group_event_tx.clone(),
             ))))
+        }
+        ImPlatform::OpenClaw(ref channel_id) => {
+            // Allocate port for bridge process
+            let bridge_port = {
+                let manager = sidecar_manager.lock().unwrap();
+                manager.allocate_port()?
+            };
+
+            let rust_port = crate::management_api::get_management_port();
+            let plugin_id = config.openclaw_plugin_id.as_deref()
+                .unwrap_or(channel_id);
+
+            let plugin_dir = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".myagents")
+                .join("openclaw-plugins")
+                .join(plugin_id);
+
+            let bp = bridge::spawn_plugin_bridge(
+                app_handle,
+                &plugin_dir.to_string_lossy(),
+                bridge_port,
+                rust_port,
+                &bot_id,
+                config.openclaw_plugin_config.as_ref(),
+            )
+            .await?;
+
+            // Register bridge sender for inbound message routing
+            bridge::register_bridge_sender(&bot_id, msg_tx.clone()).await;
+
+            let adapter = Arc::new(AnyAdapter::Bridge(Arc::new(BridgeAdapter::new(
+                channel_id.clone(),
+                bp.port,
+            ))));
+            bridge_process_handle = Some(bp);
+            adapter
         }
     };
 
@@ -467,6 +528,11 @@ pub async fn start_im_bot<R: Runtime>(
         Err(e) => {
             let err_msg = format!("Bot connection verification failed: {}", e);
             ulog_error!("[im] {}", err_msg);
+            // Clean up bridge process if it was spawned (OpenClaw only)
+            if let Some(mut bp) = bridge_process_handle.take() {
+                bp.kill_sync();
+                bridge::unregister_bridge_sender(&bot_id).await;
+            }
             health.set_status(ImStatus::Error).await;
             health.set_error(Some(err_msg.clone())).await;
             let _ = health.persist().await;
@@ -1777,6 +1843,7 @@ pub async fn start_im_bot<R: Runtime>(
         }
         ImPlatform::Feishu => (None, Some(bind_code.clone())),
         ImPlatform::Dingtalk => (None, Some(bind_code.clone())),
+        ImPlatform::OpenClaw(_) => (None, Some(bind_code.clone())),
     };
 
     let status = ImBotStatus {
@@ -1858,6 +1925,8 @@ pub async fn start_im_bot<R: Runtime>(
         group_activation,
         group_tools_deny,
         group_history,
+        // OpenClaw Bridge process
+        bridge_process: bridge_process_handle.map(tokio::sync::Mutex::new),
     });
 
     Ok(status)
@@ -1911,6 +1980,13 @@ pub async fn stop_im_bot(
             feishu.flush_dedup_cache().await;
         }
 
+        // Kill bridge process and unregister sender (OpenClaw only)
+        if let Some(bp_mutex) = instance.bridge_process {
+            let mut bp = bp_mutex.lock().await;
+            bp.kill().await;
+            bridge::unregister_bridge_sender(bot_id).await;
+        }
+
         // Persist active sessions in health state before releasing Sidecars
         instance
             .health
@@ -1954,6 +2030,7 @@ pub async fn get_im_bot_status(im_state: &ManagedImBots, bot_id: &str) -> ImBotS
             }
             ImPlatform::Feishu => (None, Some(instance.bind_code.clone())),
             ImPlatform::Dingtalk => (None, Some(instance.bind_code.clone())),
+            ImPlatform::OpenClaw(_) => (None, Some(instance.bind_code.clone())),
         };
 
         ImBotStatus {
@@ -1992,6 +2069,7 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
             }
             ImPlatform::Feishu => (None, Some(instance.bind_code.clone())),
             ImPlatform::Dingtalk => (None, Some(instance.bind_code.clone())),
+            ImPlatform::OpenClaw(_) => (None, Some(instance.bind_code.clone())),
         };
 
         result.insert(bot_id.clone(), ImBotStatus {
@@ -2042,13 +2120,22 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     group_context: Option<&GroupStreamContext>,
 ) -> Result<Option<String>, RouteError> {
     // Build request body (same as original route_to_sidecar)
-    let source = match (&msg.platform, &msg.source_type) {
+    let source_owned;
+    let source: &str = match (&msg.platform, &msg.source_type) {
         (ImPlatform::Telegram, ImSourceType::Private) => "telegram_private",
         (ImPlatform::Telegram, ImSourceType::Group) => "telegram_group",
         (ImPlatform::Feishu, ImSourceType::Private) => "feishu_private",
         (ImPlatform::Feishu, ImSourceType::Group) => "feishu_group",
         (ImPlatform::Dingtalk, ImSourceType::Private) => "dingtalk_private",
         (ImPlatform::Dingtalk, ImSourceType::Group) => "dingtalk_group",
+        (ImPlatform::OpenClaw(ref id), ImSourceType::Private) => {
+            source_owned = format!("{}_private", id);
+            &source_owned
+        }
+        (ImPlatform::OpenClaw(ref id), ImSourceType::Group) => {
+            source_owned = format!("{}_group", id);
+            &source_owned
+        }
     };
     let mut body = json!({
         "message": msg.text,
@@ -2078,10 +2165,11 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     if let Some(gc) = group_context {
         body["sourceType"] = json!("group");
         body["groupName"] = json!(gc.group_name);
-        body["groupPlatform"] = json!(match gc.platform {
-            ImPlatform::Telegram => "Telegram",
-            ImPlatform::Feishu => "飞书",
-            ImPlatform::Dingtalk => "钉钉",
+        body["groupPlatform"] = json!(match &gc.platform {
+            ImPlatform::Telegram => "Telegram".to_string(),
+            ImPlatform::Feishu => "飞书".to_string(),
+            ImPlatform::Dingtalk => "钉钉".to_string(),
+            ImPlatform::OpenClaw(id) => id.clone(),
         });
         body["groupActivation"] = json!(match gc.activation {
             GroupActivation::Mention => "mention",
@@ -2495,6 +2583,9 @@ pub fn schedule_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                     config.dingtalk_client_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
                         && config.dingtalk_client_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
                 }
+                ImPlatform::OpenClaw(_) => {
+                    config.openclaw_plugin_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                }
             };
             if config.enabled && has_credentials {
                 ulog_info!("[im] Auto-starting bot: {}", bot_id);
@@ -2657,10 +2748,17 @@ pub async fn cmd_start_im_bot(
     telegramUseDraft: Option<bool>,
     heartbeatConfigJson: Option<String>,
     botName: Option<String>,
+    openclawPluginId: Option<String>,
+    openclawNpmSpec: Option<String>,
+    openclawPluginConfig: Option<serde_json::Value>,
 ) -> Result<ImBotStatus, String> {
     let im_platform = match platform.as_deref() {
         Some("feishu") => ImPlatform::Feishu,
         Some("dingtalk") => ImPlatform::Dingtalk,
+        Some(p) if p.starts_with("openclaw:") => {
+            let channel_id = p.strip_prefix("openclaw:").unwrap_or("").to_string();
+            ImPlatform::OpenClaw(channel_id)
+        }
         _ => ImPlatform::Telegram,
     };
     let heartbeat_config = heartbeatConfigJson
@@ -2694,6 +2792,9 @@ pub async fn cmd_start_im_bot(
         group_permissions: existing.map(|c| c.group_permissions.clone()).unwrap_or_default(),
         group_activation: existing.and_then(|c| c.group_activation.clone()),
         group_tools_deny: existing.map(|c| c.group_tools_deny.clone()).unwrap_or_default(),
+        openclaw_plugin_id: openclawPluginId,
+        openclaw_npm_spec: openclawNpmSpec,
+        openclaw_plugin_config: openclawPluginConfig,
     };
 
     start_im_bot(
@@ -2945,6 +3046,7 @@ async fn update_bot_config_internal<R: Runtime>(
         group_permissions: patch_group_perms.clone(),
         group_activation: patch_group_activation.clone(),
         group_tools_deny: patch_group_tools_deny.clone(),
+        openclaw_plugin_config: None, // Not hot-reloadable yet
     };
     let bid_for_disk = bid.clone();
     tokio::task::spawn_blocking(move || {
@@ -3335,4 +3437,15 @@ pub async fn cmd_remove_group(
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
     ulog_info!("[im] Group removed: {} for bot {}", groupId, botId);
     Ok(())
+}
+
+// ===== OpenClaw Channel Plugin Commands =====
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_install_openclaw_plugin(
+    app_handle: AppHandle,
+    npmSpec: String,
+) -> Result<serde_json::Value, String> {
+    bridge::install_openclaw_plugin(&app_handle, &npmSpec).await
 }

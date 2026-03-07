@@ -65,7 +65,9 @@ export default function ImBotDetail({
             ? !!(botConfig.feishuAppId && botConfig.feishuAppSecret)
             : botConfig.platform === 'dingtalk'
                 ? !!(botConfig.dingtalkClientId && botConfig.dingtalkClientSecret)
-                : !!botConfig.botToken
+                : botConfig.platform.startsWith('openclaw:')
+                    ? !!botConfig.openclawPluginId
+                    : !!botConfig.botToken
         : false;
     const hasUsers = (botConfig?.allowedUsers.length ?? 0) > 0;
 
@@ -230,6 +232,9 @@ export default function ImBotDetail({
             telegramUseDraft: cfg.telegramUseDraft ?? false,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
             botName: cfg.name || null,
+            openclawPluginId: cfg.openclawPluginId || null,
+            openclawNpmSpec: cfg.openclawNpmSpec || null,
+            openclawPluginConfig: cfg.openclawPluginConfig || null,
         };
     }, []);
 
@@ -260,7 +265,9 @@ export default function ImBotDetail({
                     ? (cfg.feishuAppId && cfg.feishuAppSecret)
                     : cfg.platform === 'dingtalk'
                         ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret)
-                        : cfg.botToken;
+                        : cfg.platform.startsWith('openclaw:')
+                            ? !!cfg.openclawPluginId
+                            : cfg.botToken;
                 if (!hasCredentials) {
                     toastRef.current.error(cfg.platform === 'telegram' ? '请先配置 Bot Token' : '请先配置应用凭证');
                     setToggling(false);
@@ -375,7 +382,7 @@ export default function ImBotDetail({
                 </div>
                 <button
                     onClick={toggleBot}
-                    disabled={toggling || (!(botConfig.platform === 'feishu' ? (botConfig.feishuAppId && botConfig.feishuAppSecret) : botConfig.platform === 'dingtalk' ? (botConfig.dingtalkClientId && botConfig.dingtalkClientSecret) : botConfig.botToken) && !isRunning)}
+                    disabled={toggling || (!(botConfig.platform === 'feishu' ? (botConfig.feishuAppId && botConfig.feishuAppSecret) : botConfig.platform === 'dingtalk' ? (botConfig.dingtalkClientId && botConfig.dingtalkClientSecret) : botConfig.platform.startsWith('openclaw:') ? botConfig.openclawPluginId : botConfig.botToken) && !isRunning)}
                     className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                         isRunning
                             ? 'bg-[var(--error-bg)] text-[var(--error)] hover:brightness-95'

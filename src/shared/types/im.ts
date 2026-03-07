@@ -3,12 +3,12 @@
 /**
  * IM platform type
  */
-export type ImPlatform = 'telegram' | 'feishu' | 'dingtalk';
+export type ImPlatform = 'telegram' | 'feishu' | 'dingtalk' | `openclaw:${string}`;
 
 /**
  * Message source identifier
  */
-export type MessageSource = 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group' | 'dingtalk_private' | 'dingtalk_group';
+export type MessageSource = 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group' | 'dingtalk_private' | 'dingtalk_group' | `${string}_private` | `${string}_group`;
 
 /**
  * Metadata attached to each message indicating its origin
@@ -102,6 +102,12 @@ export interface ImBotConfig {
   groupPermissions?: GroupPermission[];
   groupActivation?: GroupActivation;
   groupToolsDeny?: string[];
+
+  // ===== OpenClaw Channel Plugin =====
+  openclawPluginId?: string;
+  openclawNpmSpec?: string;
+  openclawPluginConfig?: Record<string, string>;
+  openclawManifest?: Record<string, string>;
 }
 
 /**
@@ -186,6 +192,21 @@ export interface ImConversation {
 }
 
 /**
+ * Check if a platform is an OpenClaw channel plugin
+ */
+export function isOpenClawPlatform(platform: ImPlatform): platform is `openclaw:${string}` {
+  return platform.startsWith('openclaw:');
+}
+
+/**
+ * Extract the channel ID from an OpenClaw platform string
+ */
+export function getOpenClawChannelId(platform: ImPlatform): string | null {
+  if (!isOpenClawPlatform(platform)) return null;
+  return platform.slice('openclaw:'.length);
+}
+
+/**
  * Default Telegram Bot configuration
  */
 export const DEFAULT_IM_BOT_CONFIG: ImBotConfig = {
@@ -242,9 +263,9 @@ export const DEFAULT_DINGTALK_BOT_CONFIG: ImBotConfig = {
 };
 
 /**
- * Source display labels
+ * Source display labels (built-in platforms)
  */
-export const SOURCE_LABELS: Record<MessageSource, string> = {
+const SOURCE_LABELS_MAP: Record<string, string> = {
   desktop: '桌面端',
   telegram_private: 'Telegram 私聊',
   telegram_group: 'Telegram 群聊',
@@ -255,9 +276,23 @@ export const SOURCE_LABELS: Record<MessageSource, string> = {
 };
 
 /**
- * Source display icons
+ * Get display label for a message source (supports dynamic OpenClaw sources)
  */
-export const SOURCE_ICONS: Record<MessageSource, string> = {
+export function getSourceLabel(source: MessageSource): string {
+  if (source in SOURCE_LABELS_MAP) return SOURCE_LABELS_MAP[source];
+  // Dynamic fallback for OpenClaw plugins: "qqbot_private" → "qqbot 私聊"
+  if (source.endsWith('_private')) return `${source.replace('_private', '')} 私聊`;
+  if (source.endsWith('_group')) return `${source.replace('_group', '')} 群聊`;
+  return source;
+}
+
+/** @deprecated Use getSourceLabel() for OpenClaw compatibility */
+export const SOURCE_LABELS = SOURCE_LABELS_MAP as Record<MessageSource, string>;
+
+/**
+ * Source display icons (built-in platforms)
+ */
+const SOURCE_ICONS_MAP: Record<string, string> = {
   desktop: '🖥',
   telegram_private: '📱',
   telegram_group: '👥',
@@ -266,3 +301,15 @@ export const SOURCE_ICONS: Record<MessageSource, string> = {
   dingtalk_private: '📱',
   dingtalk_group: '👥',
 };
+
+/**
+ * Get display icon for a message source (supports dynamic OpenClaw sources)
+ */
+export function getSourceIcon(source: MessageSource): string {
+  if (source in SOURCE_ICONS_MAP) return SOURCE_ICONS_MAP[source];
+  if (source.endsWith('_group')) return '👥';
+  return '📱';
+}
+
+/** @deprecated Use getSourceIcon() for OpenClaw compatibility */
+export const SOURCE_ICONS = SOURCE_ICONS_MAP as Record<MessageSource, string>;

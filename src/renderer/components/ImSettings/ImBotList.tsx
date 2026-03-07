@@ -116,6 +116,9 @@ export default function ImBotList({
             telegramUseDraft: cfg.telegramUseDraft ?? false,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
             botName: cfg.name || null,
+            openclawPluginId: cfg.openclawPluginId || null,
+            openclawNpmSpec: cfg.openclawNpmSpec || null,
+            openclawPluginConfig: cfg.openclawPluginConfig || null,
         };
     }, []);
 
@@ -152,7 +155,9 @@ export default function ImBotList({
                     ? (cfg.feishuAppId && cfg.feishuAppSecret)
                     : cfg.platform === 'dingtalk'
                         ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret)
-                        : cfg.botToken;
+                        : cfg.platform.startsWith('openclaw:')
+                            ? !!cfg.openclawPluginId
+                            : cfg.botToken;
                 if (!hasCredentials) {
                     toastRef.current.error(cfg.platform === 'telegram' ? '请先配置 Bot Token' : '请先配置应用凭证');
                     return;
@@ -277,7 +282,7 @@ export default function ImBotList({
                                             </span>
                                         )}
                                         {cfg.defaultWorkspacePath && <span>·</span>}
-                                        <span className="flex-shrink-0">{cfg.platform === 'feishu' ? '飞书' : cfg.platform === 'dingtalk' ? '钉钉' : 'Telegram'}</span>
+                                        <span className="flex-shrink-0">{cfg.platform === 'feishu' ? '飞书' : cfg.platform === 'dingtalk' ? '钉钉' : cfg.platform.startsWith('openclaw:') ? '社区插件' : 'Telegram'}</span>
                                     </div>
                                     {/* Capsule toggle button */}
                                     <button
@@ -285,7 +290,7 @@ export default function ImBotList({
                                             e.stopPropagation();
                                             toggleBot(cfg);
                                         }}
-                                        disabled={isToggling || (!(cfg.platform === 'feishu' ? (cfg.feishuAppId && cfg.feishuAppSecret) : cfg.platform === 'dingtalk' ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret) : cfg.botToken) && !isRunning)}
+                                        disabled={isToggling || (!(cfg.platform === 'feishu' ? (cfg.feishuAppId && cfg.feishuAppSecret) : cfg.platform === 'dingtalk' ? (cfg.dingtalkClientId && cfg.dingtalkClientSecret) : cfg.platform.startsWith('openclaw:') ? cfg.openclawPluginId : cfg.botToken) && !isRunning)}
                                         className={`flex-shrink-0 rounded-full px-3 py-1 text-xs font-medium transition-colors disabled:opacity-50 ${
                                             isRunning
                                                 ? 'border border-[var(--error)]/40 text-[var(--error)] hover:bg-[var(--error)]/10'

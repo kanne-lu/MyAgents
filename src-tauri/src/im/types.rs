@@ -37,15 +37,49 @@ pub struct BotConfigPatch {
     pub group_permissions: Option<Vec<GroupPermission>>,
     pub group_activation: Option<String>,
     pub group_tools_deny: Option<Vec<String>>,
+    // ===== OpenClaw Channel Plugin =====
+    pub openclaw_plugin_config: Option<serde_json::Value>,
 }
 
 /// IM platform type
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ImPlatform {
     Telegram,
     Feishu,
     Dingtalk,
+    /// OpenClaw channel plugin (String = channel ID, e.g. "qqbot")
+    OpenClaw(String),
+}
+
+impl Serialize for ImPlatform {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Telegram => serializer.serialize_str("telegram"),
+            Self::Feishu => serializer.serialize_str("feishu"),
+            Self::Dingtalk => serializer.serialize_str("dingtalk"),
+            Self::OpenClaw(id) => serializer.serialize_str(&format!("openclaw:{}", id)),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ImPlatform {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "telegram" => Ok(Self::Telegram),
+            "feishu" => Ok(Self::Feishu),
+            "dingtalk" => Ok(Self::Dingtalk),
+            other if other.starts_with("openclaw:") => {
+                let channel_id = other.strip_prefix("openclaw:").unwrap_or("").to_string();
+                if channel_id.is_empty() {
+                    Err(serde::de::Error::custom("openclaw: missing channel ID"))
+                } else {
+                    Ok(Self::OpenClaw(channel_id))
+                }
+            }
+            _ => Err(serde::de::Error::unknown_variant(&s, &["telegram", "feishu", "dingtalk", "openclaw:<id>"])),
+        }
+    }
 }
 
 impl std::fmt::Display for ImPlatform {
@@ -54,6 +88,7 @@ impl std::fmt::Display for ImPlatform {
             Self::Telegram => write!(f, "telegram"),
             Self::Feishu => write!(f, "feishu"),
             Self::Dingtalk => write!(f, "dingtalk"),
+            Self::OpenClaw(id) => write!(f, "openclaw:{}", id),
         }
     }
 }
@@ -257,6 +292,13 @@ pub struct ImConfig {
     pub group_activation: Option<String>,
     #[serde(default)]
     pub group_tools_deny: Vec<String>,
+    // ===== OpenClaw Channel Plugin =====
+    #[serde(default)]
+    pub openclaw_plugin_id: Option<String>,
+    #[serde(default)]
+    pub openclaw_npm_spec: Option<String>,
+    #[serde(default)]
+    pub openclaw_plugin_config: Option<serde_json::Value>,
 }
 
 fn default_platform() -> ImPlatform {
@@ -288,6 +330,9 @@ impl Default for ImConfig {
             group_permissions: Vec::new(),
             group_activation: None,
             group_tools_deny: Vec::new(),
+            openclaw_plugin_id: None,
+            openclaw_npm_spec: None,
+            openclaw_plugin_config: None,
         }
     }
 }

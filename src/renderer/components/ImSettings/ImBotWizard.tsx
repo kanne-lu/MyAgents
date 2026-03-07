@@ -215,6 +215,9 @@ export default function ImBotWizard({
             telegramUseDraft: cfg.telegramUseDraft ?? false,
             heartbeatConfigJson: cfg.heartbeat ? JSON.stringify(cfg.heartbeat) : null,
             botName: cfg.name || null,
+            openclawPluginId: cfg.openclawPluginId || null,
+            openclawNpmSpec: cfg.openclawNpmSpec || null,
+            openclawPluginConfig: cfg.openclawPluginConfig || null,
         };
     }, []);
 
