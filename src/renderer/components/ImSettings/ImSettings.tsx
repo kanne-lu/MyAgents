@@ -1,19 +1,20 @@
 import React, { useCallback, useState } from 'react';
 import { useConfig } from '@/hooks/useConfig';
-import { isOpenClawPlatform } from '../../../shared/types/im';
 import ImBotList from './ImBotList';
 import ImBotDetail from './ImBotDetail';
 import ImBotWizard from './ImBotWizard';
 import OpenClawWizard from './OpenClawWizard';
 import PlatformSelect from './PlatformSelect';
-import type { ImPlatform } from '../../../shared/types/im';
+import PluginInstall from './PluginInstall';
+import type { ImPlatform, InstalledPlugin } from '../../../shared/types/im';
 
 type View =
     | { type: 'list' }
     | { type: 'detail'; botId: string }
     | { type: 'platform-select' }
     | { type: 'wizard'; platform: ImPlatform }
-    | { type: 'openclaw-wizard' };
+    | { type: 'plugin-install' }
+    | { type: 'openclaw-wizard'; plugin: InstalledPlugin };
 
 export default function ImSettings() {
     const { config, isLoading, refreshConfig } = useConfig();
@@ -51,11 +52,13 @@ export default function ImSettings() {
             return (
                 <PlatformSelect
                     onSelect={(platform) => {
-                        if (isOpenClawPlatform(platform)) {
-                            setView({ type: 'openclaw-wizard' });
-                        } else {
-                            setView({ type: 'wizard', platform });
-                        }
+                        setView({ type: 'wizard', platform });
+                    }}
+                    onSelectPlugin={(plugin) => {
+                        setView({ type: 'openclaw-wizard', plugin });
+                    }}
+                    onInstallPlugin={() => {
+                        setView({ type: 'plugin-install' });
                     }}
                     onCancel={goToList}
                 />
@@ -68,9 +71,17 @@ export default function ImSettings() {
                     onCancel={() => setView({ type: 'platform-select' })}
                 />
             );
+        case 'plugin-install':
+            return (
+                <PluginInstall
+                    onComplete={() => setView({ type: 'platform-select' })}
+                    onCancel={() => setView({ type: 'platform-select' })}
+                />
+            );
         case 'openclaw-wizard':
             return (
                 <OpenClawWizard
+                    plugin={view.plugin}
                     onComplete={(id) => setView({ type: 'detail', botId: id })}
                     onCancel={() => setView({ type: 'platform-select' })}
                 />

@@ -70,29 +70,42 @@ impl BridgeAdapter {
 
 impl ImAdapter for BridgeAdapter {
     async fn verify_connection(&self) -> AdapterResult<String> {
-        let resp = self.client
-            .get(self.url("/status"))
-            .send()
-            .await
-            .map_err(|e| format!("Bridge status check failed: {}", e))?;
+        // Poll /status with retries — loadPlugin() may still be running
+        // (health check only verifies HTTP server is up, not that the plugin is loaded)
+        let max_attempts = 30; // 30 * 500ms = 15s max wait for plugin load + credential validation
+        for attempt in 0..max_attempts {
+            let resp = self.client
+                .get(self.url("/status"))
+                .send()
+                .await
+                .map_err(|e| format!("Bridge status check failed: {}", e))?;
 
-        if !resp.status().is_success() {
-            return Err(format!("Bridge returned status {}", resp.status()));
+            if !resp.status().is_success() {
+                return Err(format!("Bridge returned status {}", resp.status()));
+            }
+
+            let body: serde_json::Value = resp.json().await
+                .map_err(|e| format!("Bridge status parse error: {}", e))?;
+
+            // If there's a gateway error, fail immediately with the specific message
+            if let Some(err_msg) = body["error"].as_str() {
+                return Err(format!("Bridge plugin error: {}", err_msg));
+            }
+
+            if body["ready"].as_bool() == Some(true) {
+                let name = body["pluginName"].as_str()
+                    .unwrap_or(&self.plugin_id)
+                    .to_string();
+                return Ok(name);
+            }
+
+            // Plugin not ready yet — wait and retry
+            if attempt < max_attempts - 1 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
         }
 
-        let body: serde_json::Value = resp.json().await
-            .map_err(|e| format!("Bridge status parse error: {}", e))?;
-
-        // Check that the plugin has actually registered (ready: true)
-        if body["ready"].as_bool() != Some(true) {
-            return Err("Bridge plugin not ready (registration or gateway startup failed)".to_string());
-        }
-
-        let name = body["pluginName"].as_str()
-            .unwrap_or(&self.plugin_id)
-            .to_string();
-
-        Ok(name)
+        Err("Bridge plugin not ready after 15s (registration or credential validation may have failed)".to_string())
     }
 
     async fn register_commands(&self) -> AdapterResult<()> {
@@ -101,14 +114,45 @@ impl ImAdapter for BridgeAdapter {
     }
 
     async fn listen_loop(&self, mut shutdown_rx: tokio::sync::watch::Receiver<bool>) {
-        // Bridge pushes messages to Rust via management API, so we just wait for shutdown.
-        ulog_info!("[bridge:{}] Listen loop waiting for shutdown", self.plugin_id);
+        // Bridge pushes messages to Rust via management API.
+        // We periodically health-check the bridge process to detect crashes.
+        ulog_info!("[bridge:{}] Listen loop with health watchdog started", self.plugin_id);
+        let mut consecutive_failures: u32 = 0;
+        const MAX_FAILURES: u32 = 3;
+
         loop {
-            if shutdown_rx.changed().await.is_err() || *shutdown_rx.borrow() {
-                break;
+            tokio::select! {
+                result = shutdown_rx.changed() => {
+                    if result.is_err() || *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_secs(30)) => {
+                    // Periodic health check
+                    match self.client.get(self.url("/health")).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            if consecutive_failures > 0 {
+                                ulog_info!("[bridge:{}] Health check recovered after {} failures", self.plugin_id, consecutive_failures);
+                                consecutive_failures = 0;
+                            }
+                        }
+                        Ok(resp) => {
+                            consecutive_failures += 1;
+                            ulog_error!("[bridge:{}] Health check returned {}, failure {}/{}", self.plugin_id, resp.status(), consecutive_failures, MAX_FAILURES);
+                        }
+                        Err(e) => {
+                            consecutive_failures += 1;
+                            ulog_error!("[bridge:{}] Health check failed: {}, failure {}/{}", self.plugin_id, e, consecutive_failures, MAX_FAILURES);
+                        }
+                    }
+                    if consecutive_failures >= MAX_FAILURES {
+                        ulog_error!("[bridge:{}] Bridge process appears dead ({} consecutive health check failures), exiting listen loop", self.plugin_id, MAX_FAILURES);
+                        break;
+                    }
+                }
             }
         }
-        // Signal bridge to stop
+        // Signal bridge to stop (best effort — may already be dead)
         ulog_info!("[bridge:{}] Sending stop to bridge", self.plugin_id);
         let _ = self.client.post(self.url("/stop")).send().await;
     }
@@ -431,10 +475,33 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         // Prevent system proxy (Clash/V2Ray) from intercepting localhost traffic
         .env("NO_PROXY", "127.0.0.1,localhost")
         .env("no_proxy", "127.0.0.1,localhost")
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn bridge process: {}", e))?;
+
+    // Pipe stdout/stderr to unified log (same pattern as sidecar.rs)
+    {
+        use std::io::{BufRead, BufReader};
+        if let Some(stdout) = child.stdout.take() {
+            let bot_id_clone = bot_id.to_string();
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines().flatten() {
+                    log::info!("[bridge-out][{}] {}", bot_id_clone, line);
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let bot_id_clone = bot_id.to_string();
+            std::thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().flatten() {
+                    log::error!("[bridge-err][{}] {}", bot_id_clone, line);
+                }
+            });
+        }
+    }
 
     // Wait for health check
     let client = crate::local_http::json_client(Duration::from_secs(5));
@@ -692,4 +759,132 @@ async fn read_plugin_manifest(
     }
 
     json!({ "name": pkg_name })
+}
+
+/// List all installed OpenClaw plugins
+pub async fn list_openclaw_plugins() -> Result<Vec<serde_json::Value>, String> {
+    let plugins_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".myagents")
+        .join("openclaw-plugins");
+
+    if !plugins_dir.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut plugins = Vec::new();
+    let mut entries = tokio::fs::read_dir(&plugins_dir)
+        .await
+        .map_err(|e| format!("Failed to read plugins dir: {}", e))?;
+
+    while let Some(entry) = entries.next_entry().await.map_err(|e| format!("{}", e))? {
+        if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+
+        let plugin_id = entry.file_name().to_string_lossy().to_string();
+        let plugin_dir = entry.path();
+
+        // Read project package.json to find the installed npm dependency
+        let pkg_json_path = plugin_dir.join("package.json");
+        let mut npm_spec = String::new();
+
+        if let Ok(content) = tokio::fs::read_to_string(&pkg_json_path).await {
+            if let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(deps) = pkg["dependencies"].as_object() {
+                    if let Some((name, _)) = deps.iter().next() {
+                        npm_spec = name.clone();
+                    }
+                }
+            }
+        }
+
+        if npm_spec.is_empty() {
+            continue;
+        }
+
+        // Read the actual npm package's info
+        let dep_pkg_path = plugin_dir
+            .join("node_modules")
+            .join(&npm_spec)
+            .join("package.json");
+        let pkg_info = if let Ok(content) = tokio::fs::read_to_string(&dep_pkg_path).await {
+            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_default()
+        } else {
+            serde_json::Value::Null
+        };
+
+        // Read openclaw.plugin.json manifest
+        let manifest_path = plugin_dir
+            .join("node_modules")
+            .join(&npm_spec)
+            .join("openclaw.plugin.json");
+        let manifest = if let Ok(content) = tokio::fs::read_to_string(&manifest_path).await {
+            serde_json::from_str::<serde_json::Value>(&content).unwrap_or_default()
+        } else {
+            serde_json::Value::Null
+        };
+
+        // Extract required config fields from channel source (isConfigured pattern)
+        let pkg_dir = plugin_dir.join("node_modules").join(&npm_spec);
+        let required_fields = extract_required_fields(&pkg_dir).await;
+
+        plugins.push(json!({
+            "pluginId": plugin_id,
+            "installDir": plugin_dir.to_string_lossy(),
+            "npmSpec": npm_spec,
+            "manifest": manifest,
+            "packageVersion": pkg_info.get("version"),
+            "homepage": pkg_info.get("homepage"),
+            "requiredFields": required_fields,
+        }));
+    }
+
+    Ok(plugins)
+}
+
+/// Extract required config field names from the channel plugin source.
+/// Looks for `isConfigured: (account) => Boolean(account?.fieldA && account?.fieldB)`
+/// and extracts ["fieldA", "fieldB"].
+async fn extract_required_fields(pkg_dir: &std::path::Path) -> Vec<String> {
+    let candidates = [
+        pkg_dir.join("src").join("channel.ts"),
+        pkg_dir.join("dist").join("channel.js"),
+        pkg_dir.join("channel.ts"),
+        pkg_dir.join("channel.js"),
+    ];
+
+    for path in &candidates {
+        if let Ok(content) = tokio::fs::read_to_string(path).await {
+            if let Some(pos) = content.find("isConfigured") {
+                // Only look at the single expression line — stop at first newline or `,\n`
+                let rest = &content[pos..std::cmp::min(pos + 300, content.len())];
+                let line_end = rest.find('\n').unwrap_or(rest.len());
+                let snippet = &rest[..line_end];
+
+                // Extract unique field names from "account?.fieldName" patterns
+                let mut seen = std::collections::HashSet::new();
+                let mut fields = Vec::new();
+                let needle = "account?.";
+                let mut search_from = 0;
+                while let Some(idx) = snippet[search_from..].find(needle) {
+                    let start = search_from + idx + needle.len();
+                    let end = snippet[start..]
+                        .find(|c: char| !c.is_alphanumeric() && c != '_')
+                        .map(|i| start + i)
+                        .unwrap_or(snippet.len());
+                    let field = &snippet[start..end];
+                    if !field.is_empty() && seen.insert(field.to_string()) {
+                        fields.push(field.to_string());
+                    }
+                    search_from = end;
+                }
+                if !fields.is_empty() {
+                    return fields;
+                }
+            }
+        }
+    }
+
+    vec![]
 }

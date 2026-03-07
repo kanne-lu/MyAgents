@@ -1,51 +1,159 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ArrowLeft, ArrowRight, Check, FolderOpen, Loader2, Package } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Check, ExternalLink, FolderOpen, FolderPlus, Loader2, Plus, Puzzle, Trash2 } from 'lucide-react';
 import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
-import { addProject } from '@/config/configService';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import CustomSelect from '@/components/CustomSelect';
-import type { ImBotConfig, ImBotStatus, ImPlatform } from '../../../shared/types/im';
+import type { ImBotConfig, ImBotStatus, ImPlatform, InstalledPlugin } from '../../../shared/types/im';
+
+// ===== Config Field Editor =====
+
+interface ConfigField {
+    key: string;
+    value: string;
+}
+
+function ConfigFieldEditor({
+    fields,
+    onChange,
+}: {
+    fields: ConfigField[];
+    onChange: (fields: ConfigField[]) => void;
+}) {
+    const updateField = (index: number, part: 'key' | 'value', val: string) => {
+        const next = [...fields];
+        next[index] = { ...next[index], [part]: val };
+        onChange(next);
+    };
+
+    const removeField = (index: number) => {
+        onChange(fields.filter((_, i) => i !== index));
+    };
+
+    const addField = () => {
+        onChange([...fields, { key: '', value: '' }]);
+    };
+
+    return (
+        <div className="space-y-2">
+            {fields.map((field, i) => (
+                <div key={i} className="flex items-center gap-2">
+                    <input
+                        type="text"
+                        value={field.key}
+                        onChange={(e) => updateField(i, 'key', e.target.value)}
+                        placeholder="配置名"
+                        className="w-[140px] shrink-0 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors"
+                    />
+                    <input
+                        type="text"
+                        value={field.value}
+                        onChange={(e) => updateField(i, 'value', e.target.value)}
+                        placeholder="值"
+                        className="min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors"
+                    />
+                    <button
+                        onClick={() => removeField(i)}
+                        className="shrink-0 rounded-lg p-1.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--error)]"
+                    >
+                        <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                </div>
+            ))}
+            <button
+                onClick={addField}
+                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            >
+                <Plus className="h-3.5 w-3.5" />
+                添加配置项
+            </button>
+        </div>
+    );
+}
+
+// ===== Schema-driven Config Inputs =====
+
+function SchemaConfigInputs({
+    schema,
+    values,
+    onChange,
+}: {
+    schema: Record<string, { type?: string; description?: string }>;
+    values: Record<string, string>;
+    onChange: (values: Record<string, string>) => void;
+}) {
+    const keys = Object.keys(schema);
+    return (
+        <div className="space-y-3">
+            {keys.map((key) => {
+                const field = schema[key];
+                return (
+                    <div key={key}>
+                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                            {key}
+                        </label>
+                        {field.description && (
+                            <p className="mb-1 text-xs text-[var(--ink-muted)]">{field.description}</p>
+                        )}
+                        <input
+                            type="text"
+                            value={values[key] || ''}
+                            onChange={(e) => onChange({ ...values, [key]: e.target.value })}
+                            placeholder={`输入 ${key}`}
+                            className="w-full rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors"
+                        />
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
+// ===== Main Wizard =====
 
 export default function OpenClawWizard({
+    plugin,
     onComplete,
     onCancel,
 }: {
+    plugin: InstalledPlugin;
     onComplete: (botId: string) => void;
     onCancel: () => void;
 }) {
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
-    const { projects, refreshConfig } = useConfig();
+    const { projects, addProject, refreshConfig } = useConfig();
     const isMountedRef = useRef(true);
 
-    // Step 1: Install plugin
-    // Step 2: Configure plugin (simple key-value)
-    // Step 3: Select workspace
-    // Step 4: Start bot
+    // Step 1: Configure plugin
+    // Step 2: Select workspace
+    // Step 3: Start bot
     const [step, setStep] = useState(1);
 
-    // Step 1 state
-    const [npmSpec, setNpmSpec] = useState('');
-    const [installing, setInstalling] = useState(false);
-    const [pluginInfo, setPluginInfo] = useState<{
-        pluginId: string;
-        installDir: string;
-        manifest: { name?: string; description?: string; version?: string };
-    } | null>(null);
+    // Derive config approach from manifest
+    const schemaProperties = plugin.manifest?.configSchema?.properties;
+    const hasSchema = schemaProperties && Object.keys(schemaProperties).length > 0;
 
-    // Step 2 state
-    const [pluginConfig, setPluginConfig] = useState<Record<string, string>>({});
+    // Config state — pre-populate from requiredFields extracted from plugin source
+    const [schemaValues, setSchemaValues] = useState<Record<string, string>>({});
+    const [customFields, setCustomFields] = useState<ConfigField[]>(() => {
+        const required = plugin.requiredFields;
+        if (required && required.length > 0) {
+            return required.map((key) => ({ key, value: '' }));
+        }
+        return [{ key: '', value: '' }];
+    });
 
-    // Step 3 state
-    const [workspaceChoice, setWorkspaceChoice] = useState<'existing' | 'new'>('existing');
+    // Workspace state — default to 'new' like Feishu wizard
+    const [workspaceChoice, setWorkspaceChoice] = useState<'new' | 'existing'>('new');
     const [selectedExistingPath, setSelectedExistingPath] = useState('');
     const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+    const createdWorkspacePathRef = useRef<string | undefined>(undefined);
 
-    // Step 4 state
+    // Start state
     const [starting, setStarting] = useState(false);
 
     const botId = useRef(crypto.randomUUID()).current;
@@ -62,73 +170,64 @@ export default function OpenClawWizard({
         }
     }, [projects, selectedExistingPath]);
 
-    const handleInstall = useCallback(async () => {
-        if (!npmSpec.trim()) {
-            toastRef.current.error('请输入 npm 包名');
-            return;
+    // Build merged config from schema values + custom fields
+    const buildConfig = useCallback((): Record<string, string> => {
+        const cfg: Record<string, string> = { ...schemaValues };
+        for (const f of customFields) {
+            if (f.key.trim()) {
+                cfg[f.key.trim()] = f.value.trim();
+            }
         }
+        return cfg;
+    }, [schemaValues, customFields]);
 
-        setInstalling(true);
+    const workspaceName = plugin.manifest?.name || plugin.pluginId;
+
+    const handleWorkspaceNext = useCallback(async () => {
+        setCreatingWorkspace(true);
         try {
-            if (isTauriEnvironment()) {
-                const { invoke } = await import('@tauri-apps/api/core');
-                const result = await invoke<{ pluginId: string; installDir: string; manifest: { name?: string; description?: string; version?: string } }>('cmd_install_openclaw_plugin', {
-                    npmSpec: npmSpec.trim(),
-                });
-                if (isMountedRef.current) {
-                    setPluginInfo(result);
-                    track('openclaw_plugin_installed', { npmSpec: npmSpec.trim() });
-                    setStep(2);
+            if (workspaceChoice === 'new') {
+                if (createdWorkspacePathRef.current) {
+                    // Reuse previously created workspace if user navigated back
+                    setSelectedExistingPath(createdWorkspacePathRef.current);
+                } else if (isTauriEnvironment()) {
+                    const { invoke } = await import('@tauri-apps/api/core');
+                    const result = await invoke<{ path: string; is_new: boolean }>('cmd_create_bot_workspace', {
+                        workspaceName,
+                    });
+                    createdWorkspacePathRef.current = result.path;
+                    setSelectedExistingPath(result.path);
+                    await addProject(result.path);
+                    await refreshConfig();
+                }
+            } else {
+                if (!selectedExistingPath) {
+                    toastRef.current.error('请选择一个工作区');
+                    setCreatingWorkspace(false);
+                    return;
                 }
             }
+            if (isMountedRef.current) setStep(3);
         } catch (err) {
-            if (isMountedRef.current) {
-                toastRef.current.error(`安装失败: ${err}`);
-            }
+            if (isMountedRef.current) toastRef.current.error(`创建工作区失败: ${err}`);
         } finally {
-            if (isMountedRef.current) {
-                setInstalling(false);
-            }
+            if (isMountedRef.current) setCreatingWorkspace(false);
         }
-    }, [npmSpec]);
-
-    const handleSelectWorkspace = useCallback(async () => {
-        if (workspaceChoice === 'new') {
-            if (!isTauriEnvironment()) return;
-            setCreatingWorkspace(true);
-            try {
-                const { open } = await import('@tauri-apps/plugin-dialog');
-                const selected = await open({ directory: true, multiple: false });
-                if (selected && typeof selected === 'string') {
-                    // Add to projects
-                    await addProject(selected);
-                    if (isMountedRef.current) {
-                        setSelectedExistingPath(selected);
-                        setWorkspaceChoice('existing');
-                    }
-                }
-            } finally {
-                if (isMountedRef.current) setCreatingWorkspace(false);
-            }
-            return;
-        }
-
-        setStep(4);
-    }, [workspaceChoice]);
+    }, [workspaceChoice, workspaceName, selectedExistingPath, refreshConfig]);
 
     const handleStart = useCallback(async () => {
-        if (!pluginInfo || !isTauriEnvironment()) return;
+        if (!isTauriEnvironment()) return;
 
         setStarting(true);
         try {
             const { invoke } = await import('@tauri-apps/api/core');
-            const pluginId = pluginInfo.pluginId;
+            const pluginId = plugin.pluginId;
             const platform: ImPlatform = `openclaw:${pluginId}`;
+            const pluginConfig = buildConfig();
 
-            // Build bot config
             const newConfig: ImBotConfig = {
                 id: botId,
-                name: pluginInfo.manifest?.name || pluginId,
+                name: plugin.manifest?.name || pluginId,
                 platform,
                 botToken: '',
                 allowedUsers: [],
@@ -137,15 +236,13 @@ export default function OpenClawWizard({
                 setupCompleted: true,
                 defaultWorkspacePath: selectedExistingPath,
                 openclawPluginId: pluginId,
-                openclawNpmSpec: npmSpec.trim(),
+                openclawNpmSpec: plugin.npmSpec,
                 openclawPluginConfig: Object.keys(pluginConfig).length > 0 ? pluginConfig : undefined,
             };
 
-            // Save config to disk
             await invoke('cmd_add_im_bot_config', { botConfig: newConfig });
             await refreshConfig();
 
-            // Build start params
             const params = {
                 botId,
                 botToken: '',
@@ -166,7 +263,7 @@ export default function OpenClawWizard({
                 heartbeatConfigJson: null,
                 botName: newConfig.name,
                 openclawPluginId: pluginId,
-                openclawNpmSpec: npmSpec.trim(),
+                openclawNpmSpec: plugin.npmSpec,
                 openclawPluginConfig: Object.keys(pluginConfig).length > 0 ? pluginConfig : null,
             };
 
@@ -183,229 +280,354 @@ export default function OpenClawWizard({
                 setStarting(false);
             }
         }
-    }, [pluginInfo, botId, npmSpec, pluginConfig, selectedExistingPath, refreshConfig, onComplete]);
+    }, [plugin, botId, buildConfig, selectedExistingPath, refreshConfig, onComplete]);
 
     const existingOptions = projects.map(p => ({
         value: p.path,
         label: shortenPathForDisplay(p.path),
+        icon: <FolderOpen className="h-3.5 w-3.5" />,
     }));
+
+    const pluginName = plugin.manifest?.name || plugin.pluginId;
+    const pluginDesc = plugin.manifest?.description || '';
+    const pluginConfig = buildConfig();
+    const configCount = Object.keys(pluginConfig).length;
+
+    // Step 1 validation: any row with a key must also have a value
+    const hasIncompleteFields = customFields.some(f => f.key.trim() && !f.value.trim());
+    const hasIncompleteSchema = hasSchema && Object.entries(schemaValues).some(([, v]) => !v.trim())
+        || (hasSchema && Object.keys(schemaProperties!).some(k => !schemaValues[k]?.trim()));
+
+    const totalSteps = 3;
+    const stepLabel = step === 1 ? '配置插件' : step === 2 ? '设置工作区' : '启动 Bot';
+    const platformColor = '#8B5CF6'; // Purple for community plugins
 
     return (
         <div className="space-y-6">
             {/* Header */}
             <div className="flex items-center gap-3">
                 <button
-                    onClick={onCancel}
+                    onClick={step === 1 ? onCancel : () => setStep(step - 1)}
                     className="rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                 >
                     <ArrowLeft className="h-4 w-4" />
                 </button>
                 <div>
-                    <h2 className="text-lg font-semibold text-[var(--ink)]">安装社区插件</h2>
+                    <div className="flex items-center gap-2">
+                        <h2 className="text-lg font-semibold text-[var(--ink)]">
+                            添加 {pluginName} Bot
+                        </h2>
+                        <span
+                            className="rounded-full px-2 py-0.5 text-xs font-medium"
+                            style={{ backgroundColor: `${platformColor}15`, color: platformColor }}
+                        >
+                            {pluginName}
+                        </span>
+                    </div>
                     <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
-                        步骤 {step} / 4 — {
-                            step === 1 ? '安装插件' :
-                            step === 2 ? '配置插件' :
-                            step === 3 ? '选择工作区' :
-                            '启动 Bot'
-                        }
+                        步骤 {step}/{totalSteps}: {stepLabel}
                     </p>
+                    <div className="mt-1.5 flex gap-1">
+                        {Array.from({ length: totalSteps }, (_, i) => (
+                            <div
+                                key={i}
+                                className={`h-1 w-16 rounded-full ${step >= i + 1 ? 'bg-[var(--button-primary-bg)]' : 'bg-[var(--line)]'}`}
+                            />
+                        ))}
+                    </div>
                 </div>
             </div>
 
-            {/* Step 1: Install */}
+            {/* Step 1: Plugin Info + Config */}
             {step === 1 && (
-                <div className="space-y-4">
-                    <div>
-                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                            npm 包名
-                        </label>
-                        <input
-                            type="text"
-                            value={npmSpec}
-                            onChange={(e) => setNpmSpec(e.target.value)}
-                            placeholder="例如: @openclaw/channel-qqbot"
-                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-placeholder)] focus:border-[var(--button-primary-bg)] focus:outline-none"
-                            onKeyDown={(e) => e.key === 'Enter' && handleInstall()}
-                            disabled={installing}
-                        />
-                        <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                            输入 OpenClaw 兼容的 Channel Plugin 的 npm 包名
-                        </p>
+                <div className="space-y-6">
+                    {/* Plugin info card */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <div className="flex items-start gap-4">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-[var(--accent-warm-subtle)]">
+                                <Puzzle className="h-5 w-5 text-[var(--accent-warm)]" />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                    <p className="text-sm font-semibold text-[var(--ink)]">{pluginName}</p>
+                                    {plugin.packageVersion && (
+                                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+                                            v{plugin.packageVersion}
+                                        </span>
+                                    )}
+                                </div>
+                                {pluginDesc && (
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">{pluginDesc}</p>
+                                )}
+                                {plugin.homepage && (
+                                    <button
+                                        className="mt-1.5 inline-flex items-center gap-1 text-xs text-[var(--accent-warm)] hover:underline"
+                                        onClick={() => {
+                                            if (isTauriEnvironment()) {
+                                                import('@tauri-apps/plugin-shell').then(({ open }) => open(plugin.homepage!));
+                                            }
+                                        }}
+                                    >
+                                        <ExternalLink className="h-3 w-3" />
+                                        项目主页
+                                    </button>
+                                )}
+                            </div>
+                        </div>
                     </div>
-                    <button
-                        onClick={handleInstall}
-                        disabled={installing || !npmSpec.trim()}
-                        className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:opacity-90 disabled:opacity-50"
-                    >
-                        {installing ? (
-                            <>
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                安装中…
-                            </>
-                        ) : (
-                            <>
-                                <Package className="h-4 w-4" />
-                                安装插件
-                            </>
-                        )}
-                    </button>
-                </div>
-            )}
 
-            {/* Step 2: Configure */}
-            {step === 2 && (
-                <div className="space-y-4">
-                    {pluginInfo && (
-                        <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] p-4">
-                            <p className="text-sm font-medium text-[var(--ink)]">
-                                {pluginInfo.manifest?.name || pluginInfo.pluginId}
-                            </p>
-                            {pluginInfo.manifest?.description && (
-                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                    {pluginInfo.manifest.description}
-                                </p>
+                    {/* Config section */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">插件配置</h3>
+                        <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                            输入插件需要的配置参数（如 appId、clientSecret 等）
+                        </p>
+
+                        <div className="mt-4">
+                            {hasSchema ? (
+                                /* Schema-driven inputs */
+                                <div className="space-y-4">
+                                    <SchemaConfigInputs
+                                        schema={schemaProperties!}
+                                        values={schemaValues}
+                                        onChange={setSchemaValues}
+                                    />
+                                    {/* Extra custom fields */}
+                                    <div className="border-t border-[var(--line-subtle)] pt-3">
+                                        <p className="mb-2 text-xs text-[var(--ink-muted)]">自定义配置</p>
+                                        <ConfigFieldEditor
+                                            fields={customFields}
+                                            onChange={setCustomFields}
+                                        />
+                                    </div>
+                                </div>
+                            ) : (
+                                /* Key-value pair editor */
+                                <ConfigFieldEditor
+                                    fields={customFields}
+                                    onChange={setCustomFields}
+                                />
                             )}
                         </div>
-                    )}
-
-                    <div>
-                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                            插件配置（可选）
-                        </label>
-                        <p className="mb-2 text-xs text-[var(--ink-muted)]">
-                            输入插件需要的配置项（key=value 格式，每行一项）
-                        </p>
-                        <textarea
-                            value={Object.entries(pluginConfig).map(([k, v]) => `${k}=${v}`).join('\n')}
-                            onChange={(e) => {
-                                const cfg: Record<string, string> = {};
-                                e.target.value.split('\n').forEach(line => {
-                                    const idx = line.indexOf('=');
-                                    if (idx > 0) {
-                                        cfg[line.slice(0, idx).trim()] = line.slice(idx + 1).trim();
-                                    }
-                                });
-                                setPluginConfig(cfg);
-                            }}
-                            placeholder="appId=xxx&#10;appSecret=yyy"
-                            rows={4}
-                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 font-mono text-sm text-[var(--ink)] placeholder:text-[var(--ink-placeholder)] focus:border-[var(--button-primary-bg)] focus:outline-none"
-                        />
                     </div>
 
-                    <button
-                        onClick={() => setStep(3)}
-                        className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:opacity-90"
-                    >
-                        下一步
-                        <ArrowRight className="h-4 w-4" />
-                    </button>
+                    {/* Actions */}
+                    <div className="flex justify-between">
+                        <button
+                            onClick={onCancel}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+                        >
+                            取消
+                        </button>
+                        <button
+                            onClick={() => setStep(2)}
+                            disabled={hasIncompleteFields || hasIncompleteSchema}
+                            className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+                        >
+                            下一步
+                            <ArrowRight className="h-4 w-4" />
+                        </button>
+                    </div>
                 </div>
             )}
 
-            {/* Step 3: Workspace */}
-            {step === 3 && (
-                <div className="space-y-4">
-                    <div>
-                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                            工作区目录
-                        </label>
-                        <p className="mb-3 text-xs text-[var(--ink-muted)]">
-                            AI Agent 将在此目录下工作
+            {/* Step 2: Workspace */}
+            {step === 2 && (
+                <div className="space-y-6">
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">选择 Bot 工作区</h3>
+                        <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                            工作区是 Bot 的独立运行环境，包含记忆、配置和巡检清单等文件。建议每个 Bot 使用独立工作区。
                         </p>
-                    </div>
 
-                    {existingOptions.length > 0 && (
-                        <div className="space-y-2">
-                            <label className="flex items-center gap-2">
+                        <div className="mt-5 space-y-3">
+                            {/* Option 1: Create new workspace */}
+                            <label
+                                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-4 transition-colors ${
+                                    workspaceChoice === 'new'
+                                        ? 'border-[var(--button-primary-bg)] bg-[var(--button-primary-bg)]/5'
+                                        : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
+                                }`}
+                            >
                                 <input
                                     type="radio"
+                                    name="workspace-choice"
+                                    checked={workspaceChoice === 'new'}
+                                    onChange={() => setWorkspaceChoice('new')}
+                                    className="mt-0.5 accent-[var(--button-primary-bg)]"
+                                />
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <FolderPlus className="h-4 w-4 text-[var(--button-primary-bg)]" />
+                                        <span className="text-sm font-medium text-[var(--ink)]">
+                                            新建工作区 — {workspaceName}
+                                        </span>
+                                        <span className="rounded-full bg-[var(--button-primary-bg)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--button-primary-bg)]">
+                                            推荐
+                                        </span>
+                                    </div>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                        为此 Bot 创建专属工作区，拥有独立的记忆和配置
+                                    </p>
+                                    <p className="mt-1 font-mono text-[10px] text-[var(--ink-muted)]">
+                                        ~/.myagents/projects/{workspaceName}/
+                                    </p>
+                                </div>
+                            </label>
+
+                            {/* Option 2: Select existing workspace */}
+                            <label
+                                className={`flex cursor-pointer items-start gap-3 rounded-lg border p-4 transition-colors ${
+                                    workspaceChoice === 'existing'
+                                        ? 'border-[var(--button-primary-bg)] bg-[var(--button-primary-bg)]/5'
+                                        : 'border-[var(--line)] hover:border-[var(--ink-muted)]'
+                                }`}
+                            >
+                                <input
+                                    type="radio"
+                                    name="workspace-choice"
                                     checked={workspaceChoice === 'existing'}
                                     onChange={() => setWorkspaceChoice('existing')}
-                                    className="accent-[var(--button-primary-bg)]"
+                                    className="mt-0.5 accent-[var(--button-primary-bg)]"
                                 />
-                                <span className="text-sm text-[var(--ink)]">使用已有工作区</span>
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <FolderOpen className="h-4 w-4 text-[var(--ink-muted)]" />
+                                        <span className="text-sm font-medium text-[var(--ink)]">
+                                            选择已有工作区
+                                        </span>
+                                    </div>
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                        与其他 Bot 或客户端共享现有工作区
+                                    </p>
+
+                                    {workspaceChoice === 'existing' && (
+                                        <div className="mt-3">
+                                            <CustomSelect
+                                                value={selectedExistingPath}
+                                                options={existingOptions}
+                                                onChange={setSelectedExistingPath}
+                                                placeholder="选择工作区"
+                                                triggerIcon={<FolderOpen className="h-3.5 w-3.5" />}
+                                                className="w-full"
+                                                footerAction={{
+                                                    label: '选择文件夹...',
+                                                    icon: <Plus className="h-3.5 w-3.5" />,
+                                                    onClick: async () => {
+                                                        if (!isTauriEnvironment()) return;
+                                                        const { open } = await import('@tauri-apps/plugin-dialog');
+                                                        const selected = await open({ directory: true, multiple: false, title: '选择 Bot 工作区' });
+                                                        if (selected && typeof selected === 'string') {
+                                                            if (!projects.find(p => p.path === selected)) {
+                                                                await addProject(selected);
+                                                                await refreshConfig();
+                                                            }
+                                                            setSelectedExistingPath(selected);
+                                                        }
+                                                    },
+                                                }}
+                                            />
+                                        </div>
+                                    )}
+                                </div>
                             </label>
-                            {workspaceChoice === 'existing' && (
-                                <CustomSelect
-                                    value={selectedExistingPath}
-                                    options={existingOptions}
-                                    onChange={setSelectedExistingPath}
-                                />
-                            )}
                         </div>
-                    )}
+                    </div>
 
-                    <label className="flex items-center gap-2">
-                        <input
-                            type="radio"
-                            checked={workspaceChoice === 'new'}
-                            onChange={() => setWorkspaceChoice('new')}
-                            className="accent-[var(--button-primary-bg)]"
-                        />
-                        <span className="text-sm text-[var(--ink)]">选择新目录</span>
-                    </label>
-
-                    <button
-                        onClick={handleSelectWorkspace}
-                        disabled={creatingWorkspace || (workspaceChoice === 'existing' && !selectedExistingPath)}
-                        className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:opacity-90 disabled:opacity-50"
-                    >
-                        {creatingWorkspace ? (
-                            <>
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                选择中…
-                            </>
-                        ) : workspaceChoice === 'new' ? (
-                            <>
-                                <FolderOpen className="h-4 w-4" />
-                                选择目录
-                            </>
-                        ) : (
-                            <>
-                                下一步
-                                <ArrowRight className="h-4 w-4" />
-                            </>
-                        )}
-                    </button>
+                    {/* Actions */}
+                    <div className="flex justify-between">
+                        <button
+                            onClick={() => setStep(1)}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+                        >
+                            上一步
+                        </button>
+                        <button
+                            onClick={handleWorkspaceNext}
+                            disabled={creatingWorkspace || (workspaceChoice === 'existing' && !selectedExistingPath)}
+                            className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+                        >
+                            {creatingWorkspace ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    创建中…
+                                </>
+                            ) : (
+                                <>
+                                    下一步
+                                    <ArrowRight className="h-4 w-4" />
+                                </>
+                            )}
+                        </button>
+                    </div>
                 </div>
             )}
 
-            {/* Step 4: Start */}
-            {step === 4 && (
-                <div className="space-y-4">
-                    <div className="rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] p-4 space-y-2">
-                        <p className="text-sm text-[var(--ink)]">
-                            <span className="font-medium">插件：</span>{pluginInfo?.manifest?.name || pluginInfo?.pluginId}
+            {/* Step 3: Summary + Start */}
+            {step === 3 && (
+                <div className="space-y-6">
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <h3 className="text-sm font-medium text-[var(--ink)]">确认配置</h3>
+                        <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                            确认以下信息无误后启动 Bot
                         </p>
-                        <p className="text-sm text-[var(--ink)]">
-                            <span className="font-medium">工作区：</span>{shortenPathForDisplay(selectedExistingPath)}
-                        </p>
-                        {Object.keys(pluginConfig).length > 0 && (
-                            <p className="text-sm text-[var(--ink)]">
-                                <span className="font-medium">配置项：</span>{Object.keys(pluginConfig).length} 个
-                            </p>
-                        )}
+
+                        <div className="mt-4 space-y-3">
+                            <div className="flex items-center gap-3 rounded-lg border border-[var(--line)] p-3">
+                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)]">
+                                    <Puzzle className="h-4 w-4 text-[var(--accent-warm)]" />
+                                </div>
+                                <div>
+                                    <p className="text-sm font-medium text-[var(--ink)]">{pluginName}</p>
+                                    {plugin.packageVersion && (
+                                        <p className="text-xs text-[var(--ink-muted)]">v{plugin.packageVersion}</p>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="space-y-2 rounded-lg border border-[var(--line)] p-3">
+                                <div className="flex items-center justify-between">
+                                    <span className="text-xs text-[var(--ink-muted)]">工作区</span>
+                                    <span className="text-sm text-[var(--ink)]">
+                                        {shortenPathForDisplay(selectedExistingPath)}
+                                    </span>
+                                </div>
+                                {configCount > 0 && (
+                                    <div className="flex items-center justify-between border-t border-[var(--line-subtle)] pt-2">
+                                        <span className="text-xs text-[var(--ink-muted)]">配置项</span>
+                                        <span className="text-sm text-[var(--ink)]">{configCount} 个</span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
                     </div>
 
-                    <button
-                        onClick={handleStart}
-                        disabled={starting}
-                        className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:opacity-90 disabled:opacity-50"
-                    >
-                        {starting ? (
-                            <>
-                                <Loader2 className="h-4 w-4 animate-spin" />
-                                启动中…
-                            </>
-                        ) : (
-                            <>
-                                <Check className="h-4 w-4" />
-                                启动 Bot
-                            </>
-                        )}
-                    </button>
+                    {/* Actions */}
+                    <div className="flex justify-between">
+                        <button
+                            onClick={() => setStep(2)}
+                            className="rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+                        >
+                            上一步
+                        </button>
+                        <button
+                            onClick={handleStart}
+                            disabled={starting}
+                            className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+                        >
+                            {starting ? (
+                                <>
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                    启动中…
+                                </>
+                            ) : (
+                                <>
+                                    启动 Bot
+                                    <Check className="h-4 w-4" />
+                                </>
+                            )}
+                        </button>
+                    </div>
                 </div>
             )}
         </div>

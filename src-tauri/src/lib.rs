@@ -186,6 +186,7 @@ pub fn run() {
             im::cmd_remove_group,
             // OpenClaw Channel Plugin commands
             im::cmd_install_openclaw_plugin,
+            im::cmd_list_openclaw_plugins,
         ])
         .setup(|app| {
             // Initialize logging for all builds

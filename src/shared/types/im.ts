@@ -111,6 +111,26 @@ export interface ImBotConfig {
 }
 
 /**
+ * Installed OpenClaw channel plugin (from ~/.myagents/openclaw-plugins/)
+ */
+export interface InstalledPlugin {
+  pluginId: string;
+  installDir: string;
+  npmSpec: string;
+  manifest: {
+    id?: string;
+    name?: string;
+    description?: string;
+    channels?: string[];
+    configSchema?: { type: string; properties: Record<string, { type?: string; description?: string }> };
+  } | null;
+  packageVersion?: string;
+  homepage?: string;
+  /** Required config field names extracted from the plugin's isConfigured check */
+  requiredFields?: string[];
+}
+
+/**
  * Heartbeat configuration for periodic autonomous checks.
  * The actual checklist content lives in HEARTBEAT.md in the workspace root,
  * not in this config — the config only controls timing and behavior.

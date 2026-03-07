@@ -3449,3 +3449,8 @@ pub async fn cmd_install_openclaw_plugin(
 ) -> Result<serde_json::Value, String> {
     bridge::install_openclaw_plugin(&app_handle, &npmSpec).await
 }
+
+#[tauri::command]
+pub async fn cmd_list_openclaw_plugins() -> Result<Vec<serde_json::Value>, String> {
+    bridge::list_openclaw_plugins().await
+}

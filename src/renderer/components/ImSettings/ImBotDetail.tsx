@@ -23,6 +23,56 @@ import HeartbeatConfigCard from './components/HeartbeatConfigCard';
 import DingtalkCardConfig from './components/DingtalkCardConfig';
 import GroupPermissionList from './components/GroupPermissionList';
 import type { ImBotConfig, ImBotStatus, GroupActivation } from '../../../shared/types/im';
+import { isOpenClawPlatform } from '../../../shared/types/im';
+
+// ===== OpenClaw Plugin Config Editor =====
+
+function OpenClawConfigEditor({
+    pluginConfig,
+    pluginId,
+    npmSpec,
+    onChange,
+}: {
+    pluginConfig: Record<string, unknown>;
+    pluginId: string;
+    npmSpec: string;
+    onChange: (config: Record<string, unknown>) => void;
+}) {
+    const entries = Object.entries(pluginConfig);
+
+    return (
+        <div className="space-y-4">
+            <div className="flex items-center gap-2 text-xs text-[var(--ink-muted)]">
+                <span>插件: {npmSpec || pluginId}</span>
+            </div>
+            {entries.length === 0 ? (
+                <p className="text-sm text-[var(--ink-muted)]">此插件无需额外配置</p>
+            ) : (
+                <div className="space-y-3">
+                    {entries.map(([key, value]) => (
+                        <div key={key}>
+                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                {key}
+                            </label>
+                            <input
+                                type={key.toLowerCase().includes('secret') || key.toLowerCase().includes('token') ? 'password' : 'text'}
+                                value={String(value ?? '')}
+                                onChange={(e) => {
+                                    onChange({ ...pluginConfig, [key]: e.target.value });
+                                }}
+                                placeholder={`输入 ${key}`}
+                                className="w-full rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors"
+                            />
+                        </div>
+                    ))}
+                </div>
+            )}
+            <p className="text-xs text-[var(--ink-muted)]">
+                修改配置后需重启 Bot 才能生效
+            </p>
+        </div>
+    );
+}
 
 export default function ImBotDetail({
     botId,
@@ -366,6 +416,7 @@ export default function ImBotDetail({
     }
 
     const isRunning = botStatus?.status === 'online' || botStatus?.status === 'connecting';
+    const isOpenClaw = isOpenClawPlatform(botConfig.platform);
 
     return (
         <div className="space-y-6">
@@ -403,7 +454,7 @@ export default function ImBotDetail({
             {/* Bot Status */}
             <BotStatusPanel status={botStatus} />
 
-            {/* Platform credentials */}
+            {/* Platform credentials / Plugin config */}
             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]">
                 <button
                     type="button"
@@ -412,11 +463,11 @@ export default function ImBotDetail({
                 >
                     <div className="flex items-center gap-2">
                         <h3 className="text-sm font-semibold text-[var(--ink)]">
-                            {botConfig.platform === 'feishu' ? '飞书应用凭证' : botConfig.platform === 'dingtalk' ? '钉钉应用凭证' : 'Telegram Bot'}
+                            {isOpenClaw ? '插件配置' : botConfig.platform === 'feishu' ? '飞书应用凭证' : botConfig.platform === 'dingtalk' ? '钉钉应用凭证' : 'Telegram Bot'}
                         </h3>
                         {!isCredentialsExpanded && hasCredentials && (
                             <span className="text-xs text-[var(--success)]">
-                                {botUsername ? `已验证: ${botUsername}` : '已配置'}
+                                {isOpenClaw ? '已配置' : botUsername ? `已验证: ${botUsername}` : '已配置'}
                             </span>
                         )}
                     </div>
@@ -424,7 +475,16 @@ export default function ImBotDetail({
                 </button>
                 {isCredentialsExpanded && (
                     <div className="px-5 pb-5">
-                        {botConfig.platform === 'dingtalk' ? (
+                        {isOpenClaw ? (
+                            <OpenClawConfigEditor
+                                pluginConfig={botConfig.openclawPluginConfig ?? {}}
+                                pluginId={botConfig.openclawPluginId ?? ''}
+                                npmSpec={botConfig.openclawNpmSpec ?? ''}
+                                onChange={async (newConfig) => {
+                                    await invokePatch({ openclawPluginConfig: newConfig });
+                                }}
+                            />
+                        ) : botConfig.platform === 'dingtalk' ? (
                             <DingtalkCredentialInput
                                 clientId={botConfig.dingtalkClientId ?? ''}
                                 clientSecret={botConfig.dingtalkClientSecret ?? ''}
@@ -475,7 +535,8 @@ export default function ImBotDetail({
                 )}
             </div>
 
-            {/* User binding */}
+            {/* User binding — not applicable for OpenClaw plugins (they manage users via plugin gateway) */}
+            {!isOpenClaw && (
             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]">
                 <button
                     type="button"
@@ -517,6 +578,7 @@ export default function ImBotDetail({
                     </div>
                 )}
             </div>
+            )}
 
             {/* Group Permissions (v0.1.28) */}
             {(() => {

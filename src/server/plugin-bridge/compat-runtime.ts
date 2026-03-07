@@ -13,8 +13,23 @@
 export function createCompatRuntime(rustPort: number, botId: string, pluginId: string) {
   const rustBaseUrl = `http://127.0.0.1:${rustPort}`;
 
+  // Mutable — updated after plugin registration when actual ID is known
+  let currentPluginId = pluginId;
+
   const runtime = {
+    /** Update the plugin ID after registration */
+    setPluginId(id: string) { currentPluginId = id; },
     channel: {
+      /**
+       * Activity tracking — no-op in MyAgents.
+       * The QQ Bot plugin calls activity.record() on every inbound/outbound message.
+       */
+      activity: {
+        record(_event: Record<string, unknown>) {
+          // No-op — MyAgents doesn't need OpenClaw activity tracking
+        },
+      },
+
       routing: {
         /**
          * Resolve which agent should handle this message.
@@ -94,7 +109,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
                 botId,
-                pluginId,
+                pluginId: currentPluginId,
                 senderId,
                 senderName: senderName || undefined,
                 text,

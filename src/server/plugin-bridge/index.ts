@@ -43,10 +43,14 @@ console.log(`[plugin-bridge] Starting: plugin-dir=${pluginDir} port=${port} rust
 
 let capturedPlugin: CapturedPlugin | null = null;
 let pluginName = 'unknown';
+let gatewayError: string | null = null;
 
 async function loadPlugin() {
-  // Create compat API for plugin registration
+  // Create compat API and runtime for plugin registration
   const compatApi = createCompatApi(pluginConfig);
+  // Runtime must be created early — plugins call setRuntime(api.runtime) during register()
+  const runtime = createCompatRuntime(rustPort, botId, 'unknown');
+  compatApi.runtime = runtime;
 
   // Find the plugin entry point
   const pkgJsonPath = `${pluginDir}/package.json`;
@@ -79,12 +83,17 @@ async function loadPlugin() {
   // Import the plugin module
   const pluginModule = await import(`${pluginDir}/node_modules/${entryModule}`);
 
-  // The plugin's default export should be a function that takes the API
-  const registerFn = pluginModule.default || pluginModule;
-  if (typeof registerFn === 'function') {
-    await registerFn(compatApi);
-  } else if (typeof registerFn === 'object' && registerFn.default) {
-    await registerFn.default(compatApi);
+  // Plugins can export their registration in several patterns:
+  //   1. default export = { register(api) { ... } }  (OpenClaw standard)
+  //   2. default export = function(api) { ... }       (simple)
+  //   3. module.default.default                       (double-wrapped ESM)
+  const exported = pluginModule.default || pluginModule;
+  if (typeof exported === 'object' && typeof exported.register === 'function') {
+    await exported.register(compatApi);
+  } else if (typeof exported === 'function') {
+    await exported(compatApi);
+  } else if (typeof exported === 'object' && typeof exported.default?.register === 'function') {
+    await exported.default.register(compatApi);
   }
 
   capturedPlugin = compatApi.getCapturedPlugin();
@@ -95,18 +104,127 @@ async function loadPlugin() {
 
   console.log(`[plugin-bridge] Plugin registered: ${capturedPlugin.id} (${capturedPlugin.name})`);
 
-  // Create compat runtime and start the plugin's gateway
-  const runtime = createCompatRuntime(rustPort, botId, capturedPlugin.id);
+  // Update runtime with actual plugin ID (was 'unknown' at creation time)
+  if (runtime && typeof (runtime as Record<string, unknown>).setPluginId === 'function') {
+    (runtime as Record<string, unknown> & { setPluginId: (id: string) => void }).setPluginId(capturedPlugin.id);
+  }
 
+  // Build OpenClaw-format config from our flat pluginConfig
+  // QQBot expects: cfg.channels.qqbot.appId, cfg.channels.qqbot.clientSecret, etc.
+  const openclawCfg: Record<string, unknown> = {
+    channels: {
+      [capturedPlugin.id]: {
+        enabled: true,
+        ...pluginConfig,
+      },
+    },
+  };
+
+  // Resolve account using the plugin's own config.resolveAccount if available
+  const configAccessor = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
+  let account: Record<string, unknown>;
+  if (typeof configAccessor?.resolveAccount === 'function') {
+    try {
+      account = (configAccessor.resolveAccount as (cfg: unknown, id?: string) => Record<string, unknown>)(openclawCfg);
+    } catch (err) {
+      console.warn(`[plugin-bridge] resolveAccount failed, using flat config:`, err);
+      account = { accountId: 'default', enabled: true, ...pluginConfig };
+    }
+  } else {
+    account = { accountId: 'default', enabled: true, ...pluginConfig };
+  }
+
+  console.log(`[plugin-bridge] Resolved account:`, JSON.stringify(account));
+
+  // Wrap outbound.sendText/sendMedia if top-level handlers are missing
+  // OpenClaw plugins put send functions under plugin.outbound with signature:
+  //   outbound.sendText({ to, text, accountId, replyToId, cfg })
+  // We need to wrap them to match our CapturedPlugin interface:
+  //   sendText(chatId, text) → outbound.sendText({ to: chatId, text, cfg })
+  const outbound = capturedPlugin.raw?.outbound as Record<string, unknown> | undefined;
+  if (!capturedPlugin.sendText && typeof outbound?.sendText === 'function') {
+    const outboundSendText = outbound.sendText as (params: Record<string, unknown>) => Promise<{ messageId?: string; error?: Error }>;
+    capturedPlugin.sendText = async (chatId: string, text: string) => {
+      const result = await outboundSendText({ to: chatId, text, accountId: account.accountId || 'default', cfg: openclawCfg });
+      if (result?.error) throw result.error;
+      return { messageId: result?.messageId };
+    };
+    console.log('[plugin-bridge] Wrapped outbound.sendText as sendText handler');
+  }
+  if (!capturedPlugin.sendMedia && typeof outbound?.sendMedia === 'function') {
+    const outboundSendMedia = outbound.sendMedia as (params: Record<string, unknown>) => Promise<{ messageId?: string; error?: Error }>;
+    capturedPlugin.sendMedia = async (params: Record<string, unknown>) => {
+      const result = await outboundSendMedia({ ...params, accountId: account.accountId || 'default', cfg: openclawCfg });
+      if (result?.error) throw result.error;
+      return { messageId: result?.messageId };
+    };
+    console.log('[plugin-bridge] Wrapped outbound.sendMedia as sendMedia handler');
+  }
+
+  // Validate credentials before starting gateway
+  // Check if the plugin's isConfigured function reports the account as configured
+  const isConfigured = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
+  if (typeof isConfigured?.isConfigured === 'function') {
+    const configured = (isConfigured.isConfigured as (a: unknown) => boolean)(account);
+    if (!configured) {
+      const errMsg = 'Plugin reports account is not configured (missing required credentials)';
+      console.error(`[plugin-bridge] ${errMsg}`);
+      gatewayError = errMsg;
+      return; // Don't start gateway — credentials are missing
+    }
+  }
+
+  // For QQ Bot specifically, try to get an access token to validate credentials early
+  const appId = String(account.appId || '');
+  const clientSecret = String(account.clientSecret || '');
+  if (appId && clientSecret) {
+    try {
+      console.log(`[plugin-bridge] Validating credentials (appId=${appId})...`);
+      const resp = await fetch('https://bots.qq.com/app/getAppAccessToken', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId, clientSecret }),
+      });
+      const data = await resp.json() as { access_token?: string; message?: string };
+      if (!resp.ok || !data.access_token) {
+        const errMsg = `Credential validation failed: ${data.message || `HTTP ${resp.status}`}`;
+        console.error(`[plugin-bridge] ${errMsg}`);
+        gatewayError = errMsg;
+        return; // Don't start gateway with bad credentials
+      }
+      console.log(`[plugin-bridge] Credentials validated successfully`);
+    } catch (err) {
+      console.warn(`[plugin-bridge] Credential validation network error (will try gateway anyway):`, err);
+      // Don't block gateway start on network errors — gateway has its own retry logic
+    }
+  }
+
+  // Start the plugin's gateway
   const startAccount = capturedPlugin.gateway?.startAccount;
   if (typeof startAccount === 'function') {
+    const abortController = new AbortController();
+    let status: Record<string, unknown> = { running: false, connected: false };
+
     const ctx = {
-      config: pluginConfig,
-      runtime,
-      logger: console,
+      account,
+      abortSignal: abortController.signal,
+      log: console,
+      cfg: openclawCfg,
+      getStatus: () => status,
+      setStatus: (s: Record<string, unknown>) => { status = s; },
     };
-    await (startAccount as (ctx: Record<string, unknown>) => Promise<void>)(ctx);
-    console.log(`[plugin-bridge] Plugin gateway started`);
+
+    // Don't await — let the gateway run in background (it may be long-lived)
+    (startAccount as (ctx: Record<string, unknown>) => Promise<void>)(ctx)
+      .then(() => console.log(`[plugin-bridge] Plugin gateway started`))
+      .catch((err: unknown) => {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[plugin-bridge] Gateway error:`, errMsg);
+        gatewayError = errMsg;
+      });
+
+    // Store abort controller for graceful shutdown
+    (globalThis as Record<string, unknown>).__bridgeAbort = abortController;
   }
 }
 
@@ -123,10 +241,11 @@ const server = Bun.serve({
 
     if (path === '/status') {
       return Response.json({
-        ok: true,
+        ok: !gatewayError,
         pluginName,
         pluginId: capturedPlugin?.id || 'unknown',
-        ready: !!capturedPlugin,
+        ready: !!capturedPlugin && !gatewayError,
+        error: gatewayError || undefined,
       });
     }
 
@@ -193,8 +312,42 @@ const server = Bun.serve({
       }
     }
 
+    if (path === '/validate-credentials' && req.method === 'POST') {
+      const body = await req.json() as Record<string, unknown>;
+      const appId = String(body.appId || '');
+      const clientSecret = String(body.clientSecret || '');
+
+      if (!appId || !clientSecret) {
+        return Response.json({ ok: false, error: 'Missing appId or clientSecret' }, { status: 400 });
+      }
+
+      try {
+        // Try to get an access token from QQ Bot API to validate credentials
+        const resp = await fetch('https://bots.qq.com/app/getAppAccessToken', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ appId, clientSecret }),
+        });
+
+        const data = await resp.json() as { access_token?: string; expires_in?: number; code?: number; message?: string };
+
+        if (resp.ok && data.access_token) {
+          return Response.json({ ok: true, message: 'Credentials valid' });
+        } else {
+          const errMsg = data.message || `HTTP ${resp.status}`;
+          return Response.json({ ok: false, error: `QQ Bot API: ${errMsg}` });
+        }
+      } catch (err) {
+        return Response.json({ ok: false, error: `Network error: ${err instanceof Error ? err.message : String(err)}` }, { status: 500 });
+      }
+    }
+
     if (path === '/stop' && req.method === 'POST') {
       console.log('[plugin-bridge] Received stop signal');
+      // Abort the gateway via AbortController
+      const abortCtrl = (globalThis as Record<string, unknown>).__bridgeAbort as AbortController | undefined;
+      if (abortCtrl) abortCtrl.abort();
+      // Also try calling stopAccount if available
       const stopAccount = capturedPlugin?.gateway?.stopAccount;
       if (typeof stopAccount === 'function') {
         try {

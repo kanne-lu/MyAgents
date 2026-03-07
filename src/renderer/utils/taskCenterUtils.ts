@@ -42,8 +42,9 @@ export function formatTime(isoString: string): string {
  * Check if session source indicates IM bot origin
  */
 export function isImSource(source: SessionMetadata['source']): boolean {
-    return source === 'telegram_private' || source === 'telegram_group'
-        || source === 'feishu_private' || source === 'feishu_group';
+    if (!source) return false;
+    // Built-in IM platforms + OpenClaw channels all use "<platform>_private" / "<platform>_group"
+    return (source.endsWith('_private') || source.endsWith('_group')) && source !== 'desktop';
 }
 
 /**
