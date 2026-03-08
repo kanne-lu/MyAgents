@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.38] - 2026-03-09
+
+### Added
+- **OpenClaw Channel Plugin 兼容**：Plugin Bridge 架构，支持社区 Channel 插件（如 QQ Bot）以独立 Bun 进程加载运行，Promoted Plugin 获得一等 UI 待遇（自定义图标、品牌色、安装引导）
+- **Mid-turn message injection**：去除 turn 级阻塞，支持 AI 处理中注入新消息，无需等待当前回复完成
+- **标题栏反馈按钮**：快速反馈入口
+
+### Fixed
+- **聊天页自动滚动全面优化**：content-aware 双目标滚动公式（用户消息置顶 → 跟随 AI 内容）、动态 spacer 按需扩缩（避免过大空白）、wasClamped 启发式防止布局钳制误禁用自动滚动、平滑动画替代瞬间跳跃
+- **后台任务运行时 chat 中断卡死**：SDK Task 生命周期消息处理修复
+- **引用全局 Agent 时 Task 工具无法识别自定义 sub-agent** (#13)
+- **自动更新请求未走用户代理配置**：更新检查现通过用户配置的代理发送
+- **Plugin Bridge 进程崩溃后残留**：添加 sidecar 标记确保清理
+- **Bridge 进程因 --myagents-sidecar 参数崩溃**
+- **插件安装后配置字段未预填 + 安装 toast 提示**
+- **QQ Bot npm 包名修正**：更正为 @sliverp/qqbot
+- **路径遍历、pluginId 不匹配、Popover 交互**：cross-review 修复
+
+### Changed
+- **依赖升级**：@tauri-apps/api ~2.10、plugin-updater ~2.10
+
+---
+
 ## [0.1.37] - 2026-03-07
 
 ### Added
