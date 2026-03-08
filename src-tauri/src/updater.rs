@@ -104,6 +104,28 @@ pub struct UpdateReadyInfo {
     pub version: String,
 }
 
+/// Build an updater with user's proxy configuration applied.
+/// Reads proxy settings from ~/.myagents/config.json:
+/// - Proxy enabled → `.proxy(url)`
+/// - No proxy configured → `.no_proxy()` (bypass system proxy env vars)
+fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let target = get_update_target();
+    let mut builder = app.updater_builder().target(target.to_string());
+
+    if let Some(proxy_settings) = proxy_config::read_proxy_settings() {
+        let proxy_url = proxy_config::get_proxy_url(&proxy_settings)?;
+        log::info!("[Updater] Using proxy for update requests: {}", proxy_url);
+        let url = reqwest::Url::parse(&proxy_url)
+            .map_err(|e| format!("Invalid proxy URL '{}': {}", proxy_url, e))?;
+        builder = builder.proxy(url);
+    } else {
+        log::info!("[Updater] No proxy configured, using direct connection for updates");
+        builder = builder.no_proxy();
+    }
+
+    builder.build().map_err(|e| format!("Failed to build updater: {}", e))
+}
+
 /// Check for updates on startup and silently download if available
 /// This is the main entry point called from setup hook
 pub async fn check_update_on_startup(app: AppHandle) {
@@ -159,13 +181,8 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
     let target = get_update_target();
     let current_version = app.package_info().version.to_string();
 
-    // Build updater with explicit target to override {{target}} template variable
-    // Without this, tauri-plugin-updater only uses OS name (e.g., "darwin" instead of "darwin-aarch64")
-    let updater = app
-        .updater_builder()
-        .target(target.to_string())
-        .build()
-        .map_err(|e| format!("Failed to build updater: {}", e))?;
+    // Build updater with user's proxy configuration
+    let updater = build_updater_with_proxy(app)?;
     logger::info(
         app,
         format!(
@@ -365,12 +382,7 @@ pub async fn install_pending_update(app: AppHandle) -> Result<(), String> {
 
         // Step 2: Build updater and check for latest version to get Update object
         // Note: This requires network. If offline, the user will need to connect first.
-        let target = get_update_target();
-        let updater = app
-            .updater_builder()
-            .target(target.to_string())
-            .build()
-            .map_err(|e| format!("Failed to build updater: {}", e))?;
+        let updater = build_updater_with_proxy(&app)?;
 
         let update = match updater.check().await {
             Ok(Some(update)) => update,
