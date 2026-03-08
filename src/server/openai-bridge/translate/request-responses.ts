@@ -3,7 +3,7 @@
 import type { AnthropicRequest, AnthropicMessage, AnthropicToolResultBlock, AnthropicSystemBlock } from '../types/anthropic';
 import type { ResponsesRequest, ResponsesInputItem, ResponsesInputContentPart, ResponsesInputFunctionCall, ResponsesToolChoice } from '../types/openai-responses';
 import type { BridgeConfig } from '../types/bridge';
-import { budgetToReasoningEffort } from './usage';
+
 
 export interface TranslateRequestResponsesOptions {
   modelMapping?: BridgeConfig['modelMapping'];
@@ -76,10 +76,9 @@ export function translateRequestToResponses(
     responsesReq.stream = true;
   }
 
-  // 9. Thinking → reasoning
-  if (req.thinking?.type === 'enabled') {
-    responsesReq.reasoning = { effort: budgetToReasoningEffort(req.thinking.budget_tokens) };
-  }
+  // 9. Thinking → reasoning: intentionally omitted.
+  // Many OpenAI-compatible providers don't support reasoning/reasoning_effort,
+  // and custom providers would return 400 "Unrecognized request argument".
 
   return responsesReq;
 }

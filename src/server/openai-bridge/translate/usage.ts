@@ -43,13 +43,6 @@ export function toAnthropicUsage(snap: UsageSnapshot): AnthropicUsage {
   };
 }
 
-/** Map thinking.budget_tokens → reasoning_effort level */
-export function budgetToReasoningEffort(budgetTokens: number): 'low' | 'medium' | 'high' {
-  if (budgetTokens <= 2048) return 'low';
-  if (budgetTokens <= 8192) return 'medium';
-  return 'high';
-}
-
 /** Merge a partial OpenAI usage update into an existing snapshot (for streaming accumulation) */
 export function mergeUsage(existing: UsageSnapshot, usage: OpenAIUsage | null | undefined): UsageSnapshot {
   if (!usage) return existing;

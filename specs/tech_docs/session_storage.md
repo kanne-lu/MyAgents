@@ -195,7 +195,6 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     // 2. 重置状态
     shouldAbortSession = false;
     messageResolver = null;
-    resolveTurnComplete = null;
     messages.length = 0;
 
     // 3. 加载历史消息到内存（支持增量保存）

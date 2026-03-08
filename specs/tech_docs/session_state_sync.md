@@ -48,7 +48,6 @@ export async function resetSession(): Promise<void> {
     clearMessageState();
     shouldAbortSession = false;
     messageResolver = null;
-    resolveTurnComplete = null;
 
     // 3. 生成新 sessionId
     sessionId = randomUUID();

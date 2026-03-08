@@ -2979,8 +2979,10 @@ export async function resetSession(): Promise<void> {
   messageResolver = null;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
 
-  // 4b. Clear sub-agent definitions (will be re-set by frontend if needed)
-  currentAgentDefinitions = null;
+  // 4b. Keep currentAgentDefinitions — agents are workspace-level config, not session state.
+  // Clearing them here causes a race: pre-warm fires before frontend re-syncs agents,
+  // so referenced global agents (only available via programmatic injection) are lost.
+  // See: https://github.com/hAcKlyc/MyAgents/issues/13
 
   // 5. Clear SDK ready signal state (same as switchToSession)
   _sdkReadyResolve = null;
@@ -3851,7 +3853,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Build common query options (shared between normal start and "already in use" fallback)
     const commonQueryOptions = {
       enableFileCheckpointing: true,
-      maxThinkingTokens: 32_000,
+      thinking: { type: 'adaptive' as const },
+      effort: 'high' as const,
       // Load settings from project scope only (.claude/)
       // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
       // CLAUDE_CONFIG_DIR is NOT set — preserves Anthropic subscription Keychain lookup

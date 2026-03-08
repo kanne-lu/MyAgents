@@ -5,7 +5,7 @@ import type { OpenAIRequest } from '../types/openai';
 import type { BridgeConfig } from '../types/bridge';
 import { translateMessages } from './messages';
 import { translateToolDefinitions, translateToolChoice } from './tools';
-import { budgetToReasoningEffort } from './usage';
+
 
 export interface TranslateRequestOptions {
   modelMapping?: BridgeConfig['modelMapping'];
@@ -77,10 +77,9 @@ export function translateRequest(
     openaiReq.stream_options = { include_usage: true };
   }
 
-  // 7. Thinking → reasoning_effort
-  if (req.thinking?.type === 'enabled') {
-    openaiReq.reasoning_effort = budgetToReasoningEffort(req.thinking.budget_tokens);
-  }
+  // 7. Thinking → reasoning_effort: intentionally omitted.
+  // Many OpenAI-compatible providers don't support reasoning_effort,
+  // and custom providers would return 400 "Unrecognized request argument".
 
   return openaiReq;
 }
