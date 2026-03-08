@@ -329,7 +329,7 @@ export default function OpenClawWizard({
                 <div>
                     <div className="flex items-center gap-2">
                         <h2 className="text-lg font-semibold text-[var(--ink)]">
-                            添加 {pluginName} Bot
+                            添加 {pluginName}
                         </h2>
                         <span
                             className="rounded-full px-2 py-0.5 text-xs font-medium"
@@ -400,7 +400,29 @@ export default function OpenClawWizard({
                             {promoted?.setupGuide?.credentialTitle || '插件配置'}
                         </h3>
                         <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                            {promoted?.setupGuide?.credentialHint || '输入插件需要的配置参数（如 appId、clientSecret 等）'}
+                            {promoted?.setupGuide?.credentialHintLink ? (
+                                <>
+                                    前往{' '}
+                                    <a
+                                        href={promoted.setupGuide.credentialHintLink}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
+                                        onClick={(e) => {
+                                            if (isTauriEnvironment()) {
+                                                e.preventDefault();
+                                                import('@tauri-apps/plugin-shell').then(({ open }) => open(promoted!.setupGuide!.credentialHintLink!));
+                                            }
+                                        }}
+                                    >
+                                        QQ 开放平台
+                                        <ExternalLink className="inline h-3 w-3" />
+                                    </a>
+                                    {' '}创建应用，获取 AppID 和 AppSecret
+                                </>
+                            ) : (
+                                promoted?.setupGuide?.credentialHint || '输入插件需要的配置参数（如 appId、clientSecret 等）'
+                            )}
                         </p>
 
                         <div className="mt-4">
@@ -431,6 +453,50 @@ export default function OpenClawWizard({
                             )}
                         </div>
                     </div>
+
+                    {/* Step-by-step image guide (promoted plugins only) */}
+                    {promoted?.setupGuide?.steps && promoted.setupGuide.steps.length > 0 && (
+                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                            <p className="text-sm font-medium text-[var(--ink)]">配置指引</p>
+                            {promoted.setupGuide.steps.map((guideStep, i) => {
+                                const linkText = guideStep.captionLinkText;
+                                const linkUrl = guideStep.captionLinkUrl;
+                                const splitIdx = linkText ? guideStep.caption.indexOf(linkText) : -1;
+                                return (
+                                <div key={i} className={i > 0 ? 'mt-5' : 'mt-3'}>
+                                    <p className="text-xs text-[var(--ink-muted)]">
+                                        {splitIdx >= 0 && linkUrl ? (
+                                            <>
+                                                {guideStep.caption.slice(0, splitIdx)}
+                                                <a
+                                                    href={linkUrl}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
+                                                    onClick={(e) => {
+                                                        if (isTauriEnvironment()) {
+                                                            e.preventDefault();
+                                                            import('@tauri-apps/plugin-shell').then(({ open }) => open(linkUrl));
+                                                        }
+                                                    }}
+                                                >
+                                                    {linkText}
+                                                    <ExternalLink className="inline h-3 w-3" />
+                                                </a>
+                                                {guideStep.caption.slice(splitIdx + linkText!.length)}
+                                            </>
+                                        ) : guideStep.caption}
+                                    </p>
+                                    <img
+                                        src={guideStep.image}
+                                        alt={guideStep.alt}
+                                        className="mt-2 w-full rounded-lg border border-[var(--line)]"
+                                    />
+                                </div>
+                                );
+                            })}
+                        </div>
+                    )}
 
                     {/* Actions */}
                     <div className="flex justify-between">
