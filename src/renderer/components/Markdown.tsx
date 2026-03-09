@@ -399,6 +399,13 @@ function preprocessContent(content: string): string {
     return `\x00CODE${protected_.length - 1}\x00`;
   });
 
+  // Protect GFM table blocks (2+ consecutive lines starting with |)
+  // Without this, regexes below (e.g. heading fix) corrupt table cells containing #
+  processed = processed.replace(/(?:^[ \t]*\|[^\n]*(?:\n|$)){2,}/gm, (match) => {
+    protected_.push(match);
+    return `\x00CODE${protected_.length - 1}\x00`;
+  });
+
   // Step 2: Apply format fixes to unprotected content
 
   // 2a. Ensure headers have a blank line before them (except at the start)
