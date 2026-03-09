@@ -251,15 +251,13 @@ const MessageList = memo(function MessageList({
         {showStatus && <StatusTimer message={statusMessage} />}
       </div>
       {/* Dynamic bottom spacer — provides scroll room for content-aware targeting.
-          React always sets minHeight to IDLE_SPACER_HEIGHT (80px) as a stable base.
-          During loading, useAutoScroll's animation loop INCREASES it via direct DOM
-          manipulation to provide just enough scroll room (no excessive empty space).
-          When loading ends, the animation stops and the CSS transition smoothly
-          collapses the spacer from the JS-set value back to 80px. */}
+          React sets minHeight to IDLE_SPACER_HEIGHT (80px) as the declarative baseline.
+          During loading, useAutoScroll's RAF loop INCREASES it via direct DOM manipulation.
+          When loading ends, a JS collapse animation smoothly shrinks it back to 80px,
+          pinning scroll to bottom or preserving position based on per-frame scroll check. */}
       {(historyMessages.length > 0 || streamingMessage) && (
         <div
           ref={spacerRef}
-          className={isLoading ? '' : 'transition-[min-height] duration-500 ease-out'}
           style={{
             minHeight: IDLE_SPACER_HEIGHT,
             overflowAnchor: 'none',

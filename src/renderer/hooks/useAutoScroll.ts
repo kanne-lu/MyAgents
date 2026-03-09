@@ -16,7 +16,9 @@ const CONTENT_BOTTOM_GAP = 80;   // px between content end and viewport bottom d
 // Idle spacer height — MUST match MessageList's idle spacer minHeight
 export const IDLE_SPACER_HEIGHT = 80;
 
-// Collapse guard duration — slightly longer than spacer CSS transition (500ms)
+// Spacer collapse animation duration (ms)
+const COLLAPSE_DURATION_MS = 400;
+// Collapse guard duration — MUST be > COLLAPSE_DURATION_MS to prevent animation restart
 const COLLAPSE_GUARD_MS = 600;
 
 const LOG = '[autoScroll]';
@@ -60,6 +62,9 @@ export function useAutoScroll(
   const lastFrameTimeRef = useRef<number>(0);
   const isAnimatingRef = useRef(false);
 
+  // Collapse animation state (separate from content-following animation)
+  const collapseAnimFrameRef = useRef<number | null>(null);
+
   // Keep isLoading in a ref so animation loop can access it
   const isLoadingRef = useRef(isLoading);
   useEffect(() => {
@@ -85,10 +90,10 @@ export function useAutoScroll(
   // Cached offsetTop of the last user message for animation loop (avoids DOM query per frame)
   const lastUserMsgTopRef = useRef(0);
 
-  // Collapse guard — prevents animation restart during spacer CSS transition.
-  // When loading ends, the spacer collapses from ~100vh to 80px over 500ms.
+  // Collapse guard — prevents content-following animation restart during spacer collapse.
+  // When loading ends, the spacer collapses from its dynamic height to 80px.
   // Without this guard, ResizeObserver / messagesLength effects would restart
-  // the animation in normal mode, chasing the collapsing spacer → visible jump.
+  // the content-following animation, chasing the shrinking spacer.
   const isCollapsingRef = useRef(false);
   const collapseTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Track previous isLoading to only fire collapse guard on true→false transition
@@ -110,9 +115,21 @@ export function useAutoScroll(
     isAnimatingRef.current = false;
   }, []);
 
-  // When loading finishes (true→false): stop animation and enter collapse guard.
-  // The spacer collapses via CSS transition — browser naturally clamps scrollTop each frame,
-  // producing a smooth settling animation. No pre-clamp needed.
+  const cancelCollapseAnimation = useCallback(() => {
+    if (collapseAnimFrameRef.current !== null && typeof window !== 'undefined') {
+      window.cancelAnimationFrame(collapseAnimFrameRef.current);
+      collapseAnimFrameRef.current = null;
+    }
+  }, []);
+
+  // When loading finishes (true→false): collapse the spacer back to idle height.
+  // Uses a single JS RAF animation that decides per-frame how to handle scroll:
+  //   - If user is near bottom → pin scrollTop to maxScrollTop (smooth follow)
+  //   - If user is scrolled up → preserve scrollTop (invisible collapse)
+  // This per-frame check is more robust than a one-time flag check because:
+  //   1. `isAutoScrollEnabledRef` can be false even when the user is at bottom
+  //      (they scrolled up then back down manually — auto-scroll stays disabled)
+  //   2. The user might scroll during the 400ms animation, changing their position
   // Only fires on true→false transition — not on initial mount when isLoading starts as false.
   useEffect(() => {
     const wasLoading = prevIsLoadingRef.current;
@@ -121,13 +138,63 @@ export function useAutoScroll(
     if (!isLoading && wasLoading) {
       isContentAwareRef.current = false;
       cancelAnimation();
+      cancelCollapseAnimation();
 
-      // No pre-clamp needed: the spacer collapses via CSS transition (500ms ease-out).
-      // As scrollHeight decreases each frame, the browser naturally clamps scrollTop,
-      // producing a smooth "settling" animation instead of an instant jump.
+      const container = containerRef.current;
+      const spacer = spacerRef.current;
 
-      // Enter collapse guard — prevents ResizeObserver from restarting animation
-      // during the spacer's CSS collapse transition.
+      if (container && spacer) {
+        // Read current JS-set height (React's style prop is always IDLE_SPACER_HEIGHT,
+        // but the animation loop overrides it via direct DOM manipulation during loading)
+        const currentHeight = parseFloat(spacer.style.minHeight) || IDLE_SPACER_HEIGHT;
+
+        if (currentHeight <= IDLE_SPACER_HEIGHT) {
+          // Already at idle height — ensure exact value (no floating-point drift)
+          spacer.style.minHeight = `${IDLE_SPACER_HEIGHT}px`;
+        } else {
+          // Animate collapse. Each frame checks actual scroll position to decide behavior.
+          const fromHeight = currentHeight;
+          const startTime = performance.now();
+
+          const tick = () => {
+            // Check if user is near bottom BEFORE layout change
+            const oldMaxST = container.scrollHeight - container.clientHeight;
+            const wasAtBottom = container.scrollTop >= oldMaxST - 2;
+
+            // Calculate new spacer height
+            const elapsed = performance.now() - startTime;
+            const progress = Math.min(elapsed / COLLAPSE_DURATION_MS, 1);
+            // ease-out quadratic: decelerates smoothly
+            const eased = 1 - (1 - progress) * (1 - progress);
+            // Use exact IDLE_SPACER_HEIGHT on final frame to avoid rounding drift
+            const newHeight = progress < 1
+              ? Math.round(fromHeight + (IDLE_SPACER_HEIGHT - fromHeight) * eased)
+              : IDLE_SPACER_HEIGHT;
+
+            const savedScrollTop = container.scrollTop;
+            spacer.style.minHeight = `${newHeight}px`;
+
+            if (wasAtBottom) {
+              // User at bottom → pin to new bottom (smooth follow)
+              container.scrollTop = container.scrollHeight - container.clientHeight;
+            } else {
+              // User scrolled up → preserve viewport position (invisible collapse)
+              container.scrollTop = savedScrollTop;
+            }
+
+            if (progress < 1) {
+              collapseAnimFrameRef.current = requestAnimationFrame(tick);
+            } else {
+              collapseAnimFrameRef.current = null;
+            }
+          };
+
+          collapseAnimFrameRef.current = requestAnimationFrame(tick);
+        }
+      }
+
+      // Enter collapse guard — prevents ResizeObserver from restarting
+      // the content-following animation during the spacer collapse.
       isCollapsingRef.current = true;
       if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current);
       collapseTimerRef.current = setTimeout(() => {
@@ -135,10 +202,17 @@ export function useAutoScroll(
         collapseTimerRef.current = null;
       }, COLLAPSE_GUARD_MS);
     } else if (isLoading && !wasLoading) {
-      // Loading started — clear any leftover collapse guard
+      // Loading started — clear any leftover collapse guard / animation.
+      // Also normalize spacer height in case a previous collapse was interrupted mid-way.
       clearCollapseGuard();
+      cancelCollapseAnimation();
+      const spacer = spacerRef.current;
+      if (spacer) {
+        const h = parseFloat(spacer.style.minHeight) || IDLE_SPACER_HEIGHT;
+        if (h !== IDLE_SPACER_HEIGHT) spacer.style.minHeight = `${IDLE_SPACER_HEIGHT}px`;
+      }
     }
-  }, [isLoading, cancelAnimation, clearCollapseGuard]);
+  }, [isLoading, cancelAnimation, cancelCollapseAnimation, clearCollapseGuard]);
 
   /** Update cached position of the last user message in DOM */
   const updateLastUserMsgTop = useCallback(() => {
@@ -316,8 +390,9 @@ export function useAutoScroll(
       return;
     }
 
-    // Cancel any ongoing smooth scroll animation
+    // Cancel any ongoing animations (content-following + collapse)
     cancelAnimation();
+    cancelCollapseAnimation();
     clearCollapseGuard();
 
     // Re-enable auto-scroll, use absolute bottom (not content-aware)
@@ -325,13 +400,17 @@ export function useAutoScroll(
     isPausedRef.current = false;
     isContentAwareRef.current = false;
 
+    // Reset spacer to idle height (may have been mid-collapse)
+    const spacer = spacerRef.current;
+    if (spacer) spacer.style.minHeight = `${IDLE_SPACER_HEIGHT}px`;
+
     // Instant scroll without animation
     element.scrollTop = element.scrollHeight;
 
     if (isDebugMode()) {
       console.log(LOG, 'scrollToBottomInstant →', element.scrollTop);
     }
-  }, [cancelAnimation, clearCollapseGuard]);
+  }, [cancelAnimation, cancelCollapseAnimation, clearCollapseGuard]);
 
   /**
    * Smooth scroll to position user message near viewport top.
@@ -350,11 +429,10 @@ export function useAutoScroll(
     // Cancel any pending session-init scroll — user sending a message takes priority
     pendingScrollRef.current = false;
 
-    // Clear collapse guard — user action takes priority over spacer transition
+    // Clear collapse guard and animations — user action takes priority
     clearCollapseGuard();
-
-    // Cancel any stuck animation
     cancelAnimation();
+    cancelCollapseAnimation();
 
     // Enable content-aware targeting.
     // The actual scroll happens in the messagesLength effect when the new user message
@@ -366,16 +444,17 @@ export function useAutoScroll(
     if (isDebugMode()) {
       console.log(LOG, 'scrollToBottom: set content-aware, waiting for new msg in DOM');
     }
-  }, [cancelAnimation, clearCollapseGuard]);
+  }, [cancelAnimation, cancelCollapseAnimation, clearCollapseGuard]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       cancelAnimation();
+      cancelCollapseAnimation();
       if (pauseTimerRef.current) clearTimeout(pauseTimerRef.current);
       if (collapseTimerRef.current) clearTimeout(collapseTimerRef.current);
     };
-  }, [cancelAnimation]);
+  }, [cancelAnimation, cancelCollapseAnimation]);
 
   // Handle session switch - use sessionId for reliable detection
   useEffect(() => {
