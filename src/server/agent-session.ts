@@ -4106,10 +4106,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const API_WATCHDOG_TIMEOUT_MS = 5 * 60 * 1000;
+    let watchdogFired = false;
     apiWatchdogId = setInterval(() => {
       // Only check during active turns (not pre-warm, not idle between turns)
       if (!isStreamingMessage || isPreWarming) return;
-      if (pendingTools === 0 && Date.now() - lastSdkEventAt > API_WATCHDOG_TIMEOUT_MS) {
+      if (!watchdogFired && pendingTools === 0 && Date.now() - lastSdkEventAt > API_WATCHDOG_TIMEOUT_MS) {
+        watchdogFired = true;
         console.error(`[agent] API watchdog: no SDK event for ${API_WATCHDOG_TIMEOUT_MS / 1000}s with no pending tools — aborting`);
         broadcast('chat:agent-error', {
           message: 'API 响应超时（5 分钟无活动），已自动终止。请重试。'

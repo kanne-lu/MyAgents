@@ -56,6 +56,7 @@ const ProcessRow = memo(function ProcessRow({
                 clearInterval(thinkingTimerRef.current);
                 thinkingTimerRef.current = undefined;
             }
+            setThinkingElapsed(0);
             return;
         }
 
