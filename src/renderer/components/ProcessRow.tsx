@@ -174,7 +174,7 @@ const ProcessRow = memo(function ProcessRow({
             mainLabel = durationSec > 0 ? `思考中断 (${durationSec}s)` : '思考中断';
             icon = <StopCircle className="size-4 text-[var(--warning)]" />;
         } else {
-            mainLabel = durationSec > 0 ? `思考了 ${durationSec}s` : '思考完成';
+            mainLabel = `思考了 ${Math.max(durationSec, 1)}s`;
             icon = <Brain className="size-4" />;
         }
     } else if (isTool && block.tool) {
