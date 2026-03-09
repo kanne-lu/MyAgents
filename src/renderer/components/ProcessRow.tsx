@@ -56,8 +56,9 @@ const ProcessRow = memo(function ProcessRow({
                 clearInterval(thinkingTimerRef.current);
                 thinkingTimerRef.current = undefined;
             }
-            setThinkingElapsed(0);
-            return;
+            // Use rAF to avoid synchronous setState in effect body (react-hooks/set-state-in-effect)
+            const resetId = requestAnimationFrame(() => setThinkingElapsed(0));
+            return () => cancelAnimationFrame(resetId);
         }
 
         const startTime = block.thinkingStartedAt;

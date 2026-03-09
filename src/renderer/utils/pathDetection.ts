@@ -25,6 +25,8 @@ const PATH_EXTENSIONS = new Set([
   'lock', 'sum', 'mod',
   // Images (still paths even though they're binary)
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp',
+  // Audio
+  'mp3', 'wav', 'ogg', 'opus', 'webm', 'aac', 'm4a',
 ]);
 
 /** Well-known dotfiles that are valid paths but lack a "normal" extension */

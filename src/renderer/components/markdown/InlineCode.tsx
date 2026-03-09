@@ -3,9 +3,13 @@
  *
  * When rendered inside a Chat (FileActionContext available), automatically
  * detects file/folder paths and makes them interactive (dashed underline + click menu).
+ * Audio file paths get an inline play/stop button.
  */
 import { useFileAction } from '@/context/FileActionContext';
+import { isAudioPath } from '@/utils/audioPlayer';
+import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { looksLikeFilePath } from '@/utils/pathDetection';
+import { Play, Square } from 'lucide-react';
 
 interface InlineCodeProps {
     children: React.ReactNode;
@@ -25,6 +29,25 @@ function extractText(node: React.ReactNode): string {
     return '';
 }
 
+/** Inline play/stop button for audio file paths */
+function AudioPlayButton({ filePath }: { filePath: string }) {
+    const { isActive, toggle } = useAudioPlayer(filePath);
+
+    return (
+        <button
+            type="button"
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggle(); }}
+            className="ml-1 inline-flex size-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-hover)] align-middle"
+            title={isActive ? '停止播放' : '播放音频'}
+        >
+            {isActive
+                ? <Square className="size-2 fill-current" />
+                : <Play className="size-2.5 fill-current ml-px" />
+            }
+        </button>
+    );
+}
+
 export default function InlineCode({ children }: InlineCodeProps) {
     const fileAction = useFileAction(); // null outside Chat
     const text = extractText(children);
@@ -33,6 +56,9 @@ export default function InlineCode({ children }: InlineCodeProps) {
     if (!fileAction || !looksLikeFilePath(text)) {
         return <code className={BASE_CLASS}>{children}</code>;
     }
+
+    // Check if this is an audio file path
+    const isAudio = isAudioPath(text);
 
     // Ask context for cached result (may trigger a batched backend request)
     const pathInfo = fileAction.checkPath(text);
@@ -57,13 +83,16 @@ export default function InlineCode({ children }: InlineCodeProps) {
     };
 
     return (
-        <code
-            className={INTERACTIVE_CLASS}
-            onClick={handleClick}
-            onContextMenu={handleContextMenu}
-            title={pathInfo.type === 'dir' ? `文件夹: ${text}` : `文件: ${text}`}
-        >
-            {children}
-        </code>
+        <span className="inline-flex items-center">
+            <code
+                className={INTERACTIVE_CLASS}
+                onClick={handleClick}
+                onContextMenu={handleContextMenu}
+                title={pathInfo.type === 'dir' ? `文件夹: ${text}` : `文件: ${text}`}
+            >
+                {children}
+            </code>
+            {isAudio && <AudioPlayButton filePath={text} />}
+        </span>
     );
 }

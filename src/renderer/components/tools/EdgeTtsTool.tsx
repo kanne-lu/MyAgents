@@ -1,9 +1,11 @@
-import { useRef, useState } from 'react';
+import { useRef, useState, useEffect, useCallback } from 'react';
+import { Play, Square } from 'lucide-react';
 import { track } from '@/analytics';
 import type { ToolUseSimple } from '@/types/chat';
 import { CollapsibleTool } from './CollapsibleTool';
 import { ToolHeader } from './utils';
-import { isTauriEnvironment } from '@/utils/browserMock';
+import { getAudioUrl } from '@/utils/audioPlayer';
+import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 
 interface EdgeTtsToolProps {
   tool: ToolUseSimple;
@@ -60,22 +62,77 @@ function parseToolResult(result: string | undefined): {
   };
 }
 
-/** Convert a file path to a playable audio URL */
-function getAudioUrl(filePath: string): string {
-  if (isTauriEnvironment()) {
-    const encoded = filePath.split('/').map(segment => encodeURIComponent(segment)).join('/');
-    return `asset://localhost/${encoded}`;
+/** Compact audio player bar with progress */
+function AudioPlayerBar({ filePath }: { filePath: string }) {
+  const { isActive, toggle, progress, duration } = useAudioPlayer(filePath);
+  const [audioError, setAudioError] = useState(false);
+  const trackedRef = useRef(false);
+
+  // Track first play
+  const handleToggle = useCallback(() => {
+    if (!isActive && !trackedRef.current) {
+      track('tts_play', {});
+      trackedRef.current = true;
+    }
+    toggle();
+  }, [isActive, toggle]);
+
+  // Test audio reachability on mount
+  useEffect(() => {
+    const url = getAudioUrl(filePath);
+    fetch(url, { method: 'HEAD' }).then(r => {
+      if (!r.ok) setAudioError(true);
+    }).catch(() => setAudioError(true));
+  }, [filePath]);
+
+  if (audioError) {
+    return (
+      <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs text-[var(--error)]">
+        音频加载失败
+      </div>
+    );
   }
-  return `/api/audio?path=${encodeURIComponent(filePath)}`;
+
+  const displayProgress = isActive && duration > 0 ? progress / duration : 0;
+  const formatTime = (sec: number) => {
+    if (!sec || !isFinite(sec)) return '0:00';
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, '0')}`;
+  };
+
+  return (
+    <div className="flex items-center gap-2.5 rounded-lg bg-[var(--paper-inset)] px-3 py-2 max-w-[400px]">
+      {/* Play/Stop button */}
+      <button
+        type="button"
+        onClick={handleToggle}
+        className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-hover)]"
+      >
+        {isActive
+          ? <Square className="size-2.5 fill-current" />
+          : <Play className="size-3 fill-current ml-0.5" />
+        }
+      </button>
+
+      {/* Progress bar */}
+      <div className="flex flex-1 items-center gap-2">
+        <div className="relative h-1 flex-1 rounded-full bg-[var(--line)]">
+          <div
+            className="absolute inset-y-0 left-0 rounded-full bg-[var(--accent)] transition-[width] duration-200"
+            style={{ width: `${displayProgress * 100}%` }}
+          />
+        </div>
+        <span className="text-[10px] tabular-nums text-[var(--ink-muted)] shrink-0">
+          {isActive ? formatTime(progress) : '0:00'} / {isActive && duration > 0 ? formatTime(duration) : '--:--'}
+        </span>
+      </div>
+    </div>
+  );
 }
 
 export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
   const parsed = parseToolResult(tool.result);
-  const resultKey = tool.result ?? '';
-  const [audioState, setAudioState] = useState<{ error: boolean; key: string }>({ error: false, key: resultKey });
-  const ttsTrackedRef = useRef(false);
-
-  const audioError = audioState.key === resultKey ? audioState.error : false;
 
   const isListVoices = tool.name.includes('list_voices');
   const toolLabel = isListVoices ? '查询语音' : '语音合成';
@@ -139,19 +196,7 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
       {/* Audio player */}
       {parsed.filePath && !parsed.error && (
         <div className="mt-2">
-          {audioError ? (
-            <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs text-[var(--error)]">
-              音频加载失败
-            </div>
-          ) : (
-            <audio
-              controls
-              src={getAudioUrl(parsed.filePath)}
-              className="w-full max-w-[400px]"
-              onPlay={() => { if (!ttsTrackedRef.current) { track('tts_play', {}); ttsTrackedRef.current = true; } }}
-              onError={() => setAudioState({ error: true, key: resultKey })}
-            />
-          )}
+          <AudioPlayerBar filePath={parsed.filePath} />
         </div>
       )}
 
