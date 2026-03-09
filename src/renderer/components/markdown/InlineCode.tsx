@@ -82,17 +82,26 @@ export default function InlineCode({ children }: InlineCodeProps) {
         fileAction.openFileMenu(e.clientX, e.clientY, text, pathInfo.type);
     };
 
-    return (
-        <span className="inline-flex items-center">
-            <code
-                className={INTERACTIVE_CLASS}
-                onClick={handleClick}
-                onContextMenu={handleContextMenu}
-                title={pathInfo.type === 'dir' ? `文件夹: ${text}` : `文件: ${text}`}
-            >
-                {children}
-            </code>
-            {isAudio && <AudioPlayButton filePath={text} />}
-        </span>
+    const codeEl = (
+        <code
+            className={INTERACTIVE_CLASS}
+            onClick={handleClick}
+            onContextMenu={handleContextMenu}
+            title={pathInfo.type === 'dir' ? `文件夹: ${text}` : `文件: ${text}`}
+        >
+            {children}
+        </code>
     );
+
+    // Only wrap in span when audio button is needed, preserving DOM structure for non-audio paths
+    if (isAudio) {
+        return (
+            <span className="inline-flex items-center">
+                {codeEl}
+                <AudioPlayButton filePath={text} />
+            </span>
+        );
+    }
+
+    return codeEl;
 }

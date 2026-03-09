@@ -24,14 +24,26 @@ export function isAudioPath(filePath: string): boolean {
   return ext ? AUDIO_EXTENSIONS.has(ext) : false;
 }
 
-type StateListener = (state: { playing: boolean; currentPath: string | null; progress: number; duration: number }) => void;
+interface AudioState {
+  playing: boolean;
+  currentPath: string | null;
+  progress: number;
+  duration: number;
+}
+
+type StateListener = (state: AudioState) => void;
 
 let audio: HTMLAudioElement | null = null;
 let currentPath: string | null = null;
 const listeners = new Set<StateListener>();
 
+// Throttle timeupdate notifications to ~4 updates/sec max
+// This prevents excessive React re-renders from the ~4Hz timeupdate events
+let lastProgressNotifyAt = 0;
+const PROGRESS_THROTTLE_MS = 250;
+
 function notify() {
-  const state = {
+  const state: AudioState = {
     playing: audio ? !audio.paused && !audio.ended : false,
     currentPath,
     progress: audio?.currentTime ?? 0,
@@ -40,11 +52,30 @@ function notify() {
   for (const fn of listeners) fn(state);
 }
 
+function notifyProgress() {
+  const now = Date.now();
+  if (now - lastProgressNotifyAt < PROGRESS_THROTTLE_MS) return;
+  lastProgressNotifyAt = now;
+  notify();
+}
+
 /** Subscribe to audio state changes. Returns unsubscribe function. */
 export function subscribeAudio(fn: StateListener): () => void {
   listeners.add(fn);
   return () => { listeners.delete(fn); };
 }
+
+/** Remove all event listeners from the current audio element */
+function detachListeners(el: HTMLAudioElement) {
+  el.removeEventListener('play', notify);
+  el.removeEventListener('pause', notify);
+  el.removeEventListener('ended', onEnded);
+  el.removeEventListener('timeupdate', notifyProgress);
+  el.removeEventListener('error', onError);
+}
+
+function onEnded() { currentPath = null; notify(); }
+function onError() { currentPath = null; notify(); }
 
 /** Play an audio file. Stops any currently playing audio first. */
 export function playAudio(filePath: string): void {
@@ -53,15 +84,17 @@ export function playAudio(filePath: string): void {
   audio = new Audio(getAudioUrl(filePath));
   audio.addEventListener('play', notify);
   audio.addEventListener('pause', notify);
-  audio.addEventListener('ended', () => { currentPath = null; notify(); });
-  audio.addEventListener('timeupdate', notify);
-  audio.addEventListener('error', () => { currentPath = null; notify(); });
+  audio.addEventListener('ended', onEnded);
+  audio.addEventListener('timeupdate', notifyProgress);
+  audio.addEventListener('error', onError);
   audio.play().catch(() => { currentPath = null; notify(); });
 }
 
 /** Stop currently playing audio. */
 export function stopAudio(): void {
   if (audio) {
+    // Detach listeners BEFORE cleanup to prevent spurious error/state events
+    detachListeners(audio);
     audio.pause();
     audio.removeAttribute('src');
     audio.load(); // release resources

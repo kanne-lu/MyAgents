@@ -1,10 +1,9 @@
-import { useRef, useState, useEffect, useCallback } from 'react';
+import { useRef, useCallback } from 'react';
 import { Play, Square } from 'lucide-react';
 import { track } from '@/analytics';
 import type { ToolUseSimple } from '@/types/chat';
 import { CollapsibleTool } from './CollapsibleTool';
 import { ToolHeader } from './utils';
-import { getAudioUrl } from '@/utils/audioPlayer';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 
 interface EdgeTtsToolProps {
@@ -65,7 +64,6 @@ function parseToolResult(result: string | undefined): {
 /** Compact audio player bar with progress */
 function AudioPlayerBar({ filePath }: { filePath: string }) {
   const { isActive, toggle, progress, duration } = useAudioPlayer(filePath);
-  const [audioError, setAudioError] = useState(false);
   const trackedRef = useRef(false);
 
   // Track first play
@@ -76,22 +74,6 @@ function AudioPlayerBar({ filePath }: { filePath: string }) {
     }
     toggle();
   }, [isActive, toggle]);
-
-  // Test audio reachability on mount
-  useEffect(() => {
-    const url = getAudioUrl(filePath);
-    fetch(url, { method: 'HEAD' }).then(r => {
-      if (!r.ok) setAudioError(true);
-    }).catch(() => setAudioError(true));
-  }, [filePath]);
-
-  if (audioError) {
-    return (
-      <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 text-xs text-[var(--error)]">
-        音频加载失败
-      </div>
-    );
-  }
 
   const displayProgress = isActive && duration > 0 ? progress / duration : 0;
   const formatTime = (sec: number) => {
