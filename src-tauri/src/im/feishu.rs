@@ -81,9 +81,11 @@ const WS_INITIAL_BACKOFF_SECS: u64 = 1;
 const WS_MAX_BACKOFF_SECS: u64 = 60;
 /// WebSocket read timeout: if no data (including server pings) is received
 /// within this period, the connection is assumed dead and will be reconnected.
-/// Feishu server pings every ~120s, so 300s (2.5x) allows for one missed
-/// ping plus network jitter, with near-zero false positives.
-const WS_READ_TIMEOUT_SECS: u64 = 300;
+/// With client-side pings every 30s, 120s means ~4 missed pings → truly dead.
+const WS_READ_TIMEOUT_SECS: u64 = 120;
+/// Client-side WebSocket ping interval. Keeps NAT/firewall mappings alive
+/// and enables faster dead-connection detection.
+const WS_PING_INTERVAL_SECS: u64 = 30;
 
 /// Persist dedup cache to disk (atomic: write tmp → rename).
 /// Free function so it can be used from `spawn_blocking` ('static closure).
@@ -1465,15 +1467,21 @@ impl FeishuAdapter {
             let (mut ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
 
             // Track last received data to detect dead connections.
-            // Feishu server sends protobuf pings every ~120s; if we receive nothing
-            // for WS_READ_TIMEOUT_SECS (300s ≈ 2.5x ping interval), the connection
-            // is assumed dead and we break out to reconnect.
             let mut last_activity = tokio::time::Instant::now();
+
+            // Client-side ping to keep NAT/firewall mappings alive.
+            // Without this, idle TCP connections get silently dropped by middleboxes,
+            // and the server's protobuf pings never reach us.
+            let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(WS_PING_INTERVAL_SECS));
+            ping_interval.tick().await; // skip immediate tick
 
             // Read messages — Feishu uses ONLY binary protobuf frames
             loop {
                 let timeout_at = last_activity + std::time::Duration::from_secs(WS_READ_TIMEOUT_SECS);
+                // biased: prioritize read over timeout to avoid false "dead connection"
+                // when data arrives at the same instant the timeout fires.
                 tokio::select! {
+                    biased;
                     msg = futures::StreamExt::next(&mut ws_read) => {
                         match msg {
                             Some(Ok(WsMessage::Binary(data))) => {
@@ -1577,6 +1585,12 @@ impl FeishuAdapter {
                             ws_write.send(WsMessage::Close(None)),
                         ).await;
                         break;
+                    }
+                    _ = ping_interval.tick() => {
+                        if let Err(e) = ws_write.send(WsMessage::Ping(vec![])).await {
+                            ulog_warn!("[feishu] WS ping send failed: {}", e);
+                            break;
+                        }
                     }
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
