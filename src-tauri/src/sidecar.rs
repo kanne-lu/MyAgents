@@ -1751,6 +1751,130 @@ pub fn start_global_sidecar<R: Runtime>(
     start_tab_sidecar(app_handle, manager, GLOBAL_SIDECAR_ID, None)
 }
 
+/// Check Global Sidecar status.
+/// Returns:
+/// - None: sidecar was never started (no instance in manager) → skip
+/// - Some((port, true)):  process alive → do HTTP health check
+/// - Some((port, false)): process dead → needs restart immediately
+fn check_global_sidecar_status(manager: &ManagedSidecarManager) -> Option<(u16, bool)> {
+    let mut guard = manager.lock().ok()?;
+    let instance = guard.get_instance_mut(GLOBAL_SIDECAR_ID)?;
+    Some((instance.port, instance.is_running()))
+}
+
+/// Background health monitor for the Global Sidecar.
+/// Periodically checks if the Global Sidecar is alive and auto-restarts it when it dies.
+/// Emits `global-sidecar:restarted` Tauri event with the new URL on successful restart.
+pub async fn monitor_global_sidecar(
+    app_handle: AppHandle,
+    manager: ManagedSidecarManager,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    use crate::logger;
+
+    const CHECK_INTERVAL_SECS: u64 = 15;
+    const MAX_RESTART_FAILURES: u32 = 5;
+    const MAX_BACKOFF_SECS: u64 = 300; // 5 minutes
+
+    let mut consecutive_restart_failures: u32 = 0;
+    let mut is_first_check = true;
+
+    logger::info(&app_handle, "[sidecar] Global sidecar health monitor started".to_string());
+
+    loop {
+        // First iteration: short delay (let Global Sidecar start up)
+        // Subsequent iterations: normal interval or backoff on restart failures
+        if is_first_check {
+            is_first_check = false;
+            tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+        } else if consecutive_restart_failures > 0 {
+            // Exponential backoff: 30s, 60s, 120s, 240s, 300s, 300s, ...
+            let backoff = std::cmp::min(
+                CHECK_INTERVAL_SECS.saturating_mul(2u64.saturating_pow(consecutive_restart_failures)),
+                MAX_BACKOFF_SECS,
+            );
+            tokio::time::sleep(Duration::from_secs(backoff)).await;
+        } else {
+            tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
+        }
+
+        if shutdown.load(Relaxed) {
+            logger::info(&app_handle, "[sidecar] Global sidecar monitor stopping (app shutdown)".to_string());
+            break;
+        }
+
+        // Check process status (cheap, no HTTP)
+        let (port, process_alive) = match check_global_sidecar_status(&manager) {
+            Some(status) => status,
+            None => continue, // Not started yet — skip
+        };
+
+        let needs_restart = if process_alive {
+            // Process alive → verify with HTTP health check (blocking)
+            let is_healthy = tokio::task::spawn_blocking(move || {
+                check_sidecar_http_health(port)
+            })
+            .await
+            .unwrap_or(false);
+            !is_healthy
+        } else {
+            // Process already dead → definitely needs restart
+            true
+        };
+
+        if !needs_restart || shutdown.load(Relaxed) {
+            // Healthy — reset failure counter
+            consecutive_restart_failures = 0;
+            continue;
+        }
+
+        log::warn!("[sidecar] Global sidecar on port {} is unhealthy, auto-restarting...", port);
+
+        // Mark the existing instance as unhealthy so start_global_sidecar() won't
+        // short-circuit with "already running". Without this, a hung process (alive
+        // but not responding to HTTP) would never be replaced — is_running() checks
+        // the healthy flag first, and start_tab_sidecar returns the old port.
+        {
+            if let Ok(mut guard) = manager.lock() {
+                if let Some(instance) = guard.get_instance_mut(GLOBAL_SIDECAR_ID) {
+                    instance.healthy = false;
+                }
+            }
+        }
+
+        let app_clone = app_handle.clone();
+        let mgr_clone = manager.clone();
+        match tokio::task::spawn_blocking(move || {
+            start_global_sidecar(&app_clone, &mgr_clone)
+        })
+        .await
+        {
+            Ok(Ok(new_port)) => {
+                consecutive_restart_failures = 0;
+                let new_url = format!("http://127.0.0.1:{}", new_port);
+                logger::info(
+                    &app_handle,
+                    format!("[sidecar] Global sidecar auto-restarted on port {} ({})", new_port, new_url),
+                );
+                let _ = app_handle.emit("global-sidecar:restarted", &new_url);
+            }
+            Ok(Err(e)) => {
+                consecutive_restart_failures += 1;
+                if consecutive_restart_failures >= MAX_RESTART_FAILURES {
+                    log::error!("[sidecar] Failed to auto-restart global sidecar ({} consecutive failures, backing off): {}", consecutive_restart_failures, e);
+                } else {
+                    log::error!("[sidecar] Failed to auto-restart global sidecar (attempt {}): {}", consecutive_restart_failures, e);
+                }
+            }
+            Err(e) => {
+                consecutive_restart_failures += 1;
+                log::error!("[sidecar] spawn_blocking failed during global sidecar restart: {}", e);
+            }
+        }
+    }
+}
+
 // ============= Session-Centric Sidecar API (v0.1.11) =============
 
 /// Result returned from ensure_session_sidecar

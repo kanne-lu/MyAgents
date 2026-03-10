@@ -128,6 +128,16 @@ pub trait ImStreamAdapter: ImAdapter {
         caption: Option<&str>,
     ) -> impl std::future::Future<Output = AdapterResult<Option<String>>> + Send;
 
+    /// Finalize a streamed message block. Override for format-switching
+    /// (e.g., Feishu Card Kit: detect table/code → delete Post + send Card).
+    /// Default: edit in place.
+    fn finalize_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send;
+
     /// Whether this adapter uses draft streaming (affects finalize behavior).
     /// When true, finalize_block will delete draft + send_message instead of edit_message.
     fn use_draft_streaming(&self) -> bool { false }

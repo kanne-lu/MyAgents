@@ -1867,6 +1867,11 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   const isWindows = process.platform === 'win32';
   const bundledBunDir = getBundledBunDir();
 
+  // Windows directory env vars — hoisted for reuse across essentialPaths + git-bash detection
+  const winProgramFiles = isWindows ? (process.env.PROGRAMFILES || 'C:\\Program Files') : '';
+  const winProgramFilesX86 = isWindows ? (process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)') : '';
+  const winLocalAppData = isWindows ? (process.env.LOCALAPPDATA || '') : '';
+
   if (isDebug) {
     console.log('[env] Script directory:', getScriptDir());
     console.log(`[env] Checking bundled bun: ${bundledBunDir || 'NOT FOUND'} -> ${bundledBunDir ? 'EXISTS' : 'NOT FOUND'}`);
@@ -1895,6 +1900,15 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     // Windows paths
     if (home) {
       essentialPaths.push(resolve(home, '.bun', 'bin'));
+    }
+    // Git for Windows — SDK requires git-bash, and PATH may not include Git yet
+    // (e.g. NSIS just installed Git but current process tree has stale PATH)
+    for (const gp of [
+      resolve(winProgramFiles, 'Git', 'cmd'),
+      resolve(winProgramFilesX86, 'Git', 'cmd'),
+      ...(winLocalAppData ? [resolve(winLocalAppData, 'Programs', 'Git', 'cmd')] : []),
+    ]) {
+      essentialPaths.push(gp);
     }
   } else {
     // macOS/Linux paths
@@ -1935,17 +1949,19 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   }
 
   // Build base environment
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    [PATH_KEY]: finalPath,
-    // Disable SDK nonessential traffic (Statsig telemetry, Sentry error reporting, surveys).
-    // MyAgents manages its own telemetry; these external connections add startup latency
-    // and can timeout in restricted network environments (e.g. China).
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    // DO NOT set CLAUDE_CONFIG_DIR here — it would change the Keychain service name
-    // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
-    // into project .claude/skills/ by syncProjectUserConfig() instead.
-  };
+  // Spread then explicitly set PATH to avoid duplicate PATH/Path keys on Windows
+  // (spreading process.env into a plain object loses case-insensitivity)
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.PATH;
+  delete env.Path;
+  env[PATH_KEY] = finalPath;
+  // Disable SDK nonessential traffic (Statsig telemetry, Sentry error reporting, surveys).
+  // MyAgents manages its own telemetry; these external connections add startup latency
+  // and can timeout in restricted network environments (e.g. China).
+  env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1';
+  // DO NOT set CLAUDE_CONFIG_DIR here — it would change the Keychain service name
+  // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
+  // into project .claude/skills/ by syncProjectUserConfig() instead.
 
   // agent-browser: config is at ~/.agent-browser/config.json (default path, no env var needed)
 
@@ -1956,6 +1972,22 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     if (abCliPath) {
       // cliPath = .../agent-browser/bin/agent-browser.js → HOME = .../agent-browser/
       env.AGENT_BROWSER_HOME = resolve(abCliPath, '..', '..');
+    }
+  }
+
+  // Windows: Set CLAUDE_CODE_GIT_BASH_PATH so SDK finds git-bash directly
+  // without relying on which("git") in PATH (which may be stale after NSIS install)
+  if (isWindows && !process.env.CLAUDE_CODE_GIT_BASH_PATH) {
+    const gitBashCandidates = [
+      resolve(winProgramFiles, 'Git', 'bin', 'bash.exe'),
+      resolve(winProgramFilesX86, 'Git', 'bin', 'bash.exe'),
+      ...(winLocalAppData ? [resolve(winLocalAppData, 'Programs', 'Git', 'bin', 'bash.exe')] : []),
+    ];
+    for (const candidate of gitBashCandidates) {
+      if (existsSync(candidate)) {
+        env.CLAUDE_CODE_GIT_BASH_PATH = candidate;
+        break;
+      }
     }
   }
 
@@ -3634,8 +3666,11 @@ export async function interruptCurrentResponse(): Promise<boolean> {
     let shouldForceAbort = false;
     // 使用 Promise.race 添加 5 秒超时
     const interruptPromise = querySession.interrupt();
+    // 15s timeout: SDK interrupt may be slow when the subprocess is mid-tool-execution,
+    // waiting for API response, or processing large MCP output. The previous 5s timeout
+    // caused cascading failures (force-abort → rewind error → MIME loss → subprocess crash).
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error('Interrupt timeout')), 5000);
+      setTimeout(() => reject(new Error('Interrupt timeout')), 15000);
     });
 
     try {
@@ -3745,9 +3780,16 @@ export async function rewindSession(userMessageId: string): Promise<{
     }
 
     // 3. 在活跃 session 上直接执行 rewindFiles（subprocess 存活，即时调用！）
-    if (querySession && lastAssistantUuid) {
+    //    跳过已被 force-abort 的 session：subprocess 正在死亡，发 IPC 会阻塞到超时（~100s）。
+    if (querySession && lastAssistantUuid && !shouldAbortSession) {
       try {
-        const result = await querySession.rewindFiles(lastAssistantUuid);
+        const REWIND_FILES_TIMEOUT_MS = 5_000;
+        const result = await Promise.race([
+          querySession.rewindFiles(lastAssistantUuid),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('rewindFiles timeout')), REWIND_FILES_TIMEOUT_MS)
+          ),
+        ]);
         console.log('[agent] rewindFiles result:', JSON.stringify(result));
         if (!result.canRewind) {
           console.warn('[agent] rewindFiles cannot rewind:', result.error);
@@ -4116,11 +4158,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // Only active when isStreamingMessage is true (an active turn is in progress).
     // pendingTools > 0 means a local tool or subagent is executing (no API
     // call in flight), so we skip. pendingTools === 0 means we're waiting
-    // for the API — if no SDK event arrives for 5 minutes, abort.
+    // for the API — if no SDK event arrives for 15 minutes, abort.
     let pendingTools = 0;
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
-    const API_WATCHDOG_TIMEOUT_MS = 5 * 60 * 1000;
+    const API_WATCHDOG_TIMEOUT_MS = 15 * 60 * 1000;
     let watchdogFired = false;
     apiWatchdogId = setInterval(() => {
       // Only check during active turns (not pre-warm, not idle between turns)
@@ -4135,7 +4177,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         watchdogFired = true;
         console.error(`[agent] API watchdog: no SDK event for ${API_WATCHDOG_TIMEOUT_MS / 1000}s with no pending tools — aborting`);
         broadcast('chat:agent-error', {
-          message: 'API 响应超时（5 分钟无活动），已自动终止。请重试。'
+          message: 'API 响应超时（15 分钟无活动），已自动终止。请重试。'
         });
         broadcast('chat:message-error', 'API 响应超时');
         abortPersistentSession();

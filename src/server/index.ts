@@ -1280,7 +1280,9 @@ async function main() {
           console.log('[chat] stop');
           const stopped = await interruptCurrentResponse();
           if (!stopped) {
-            return jsonResponse({ success: false, error: 'No active response to stop.' }, 400);
+            // Not an error — common when user double-clicks stop or response finishes
+            // between button click and request arrival. Return 200 to avoid frontend error toast.
+            return jsonResponse({ success: true, alreadyStopped: true });
           }
           return jsonResponse({ success: true });
         } catch (error) {
@@ -6539,9 +6541,9 @@ async function main() {
   console.log(`[server] Version: MCP-Install-Fix-v2`);
 
   // Verify PATH detection
-  import('./utils/shell').then(({ getShellEnv }) => {
-    const env = getShellEnv();
-    console.log('[server] Startup PATH:', env.PATH);
+  import('./utils/shell').then(({ getShellEnv, getShellPath }) => {
+    getShellEnv(); // Ensure PATH is initialized
+    console.log('[server] Startup PATH:', getShellPath());
   });
 }
 

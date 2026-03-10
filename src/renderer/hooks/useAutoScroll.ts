@@ -152,15 +152,15 @@ export function useAutoScroll(
           // Already at idle height — ensure exact value (no floating-point drift)
           spacer.style.minHeight = `${IDLE_SPACER_HEIGHT}px`;
         } else {
-          // Animate collapse. Each frame checks actual scroll position to decide behavior.
+          // Animate collapse.
+          // Use auto-scroll enabled state (set by user behavior) as the pin-to-bottom flag.
+          // This is robust against DOM changes from React re-renders (AssistantActions appearing,
+          // thinking blocks collapsing) which shift scrollHeight and break per-frame maxScrollTop checks.
+          const shouldPinToBottom = isAutoScrollEnabledRef.current;
           const fromHeight = currentHeight;
           const startTime = performance.now();
 
           const tick = () => {
-            // Check if user is near bottom BEFORE layout change
-            const oldMaxST = container.scrollHeight - container.clientHeight;
-            const wasAtBottom = container.scrollTop >= oldMaxST - 2;
-
             // Calculate new spacer height
             const elapsed = performance.now() - startTime;
             const progress = Math.min(elapsed / COLLAPSE_DURATION_MS, 1);
@@ -174,11 +174,11 @@ export function useAutoScroll(
             const savedScrollTop = container.scrollTop;
             spacer.style.minHeight = `${newHeight}px`;
 
-            if (wasAtBottom) {
-              // User at bottom → pin to new bottom (smooth follow)
+            if (shouldPinToBottom) {
+              // Auto-scroll was active → pin to new bottom (smooth follow)
               container.scrollTop = container.scrollHeight - container.clientHeight;
             } else {
-              // User scrolled up → preserve viewport position (invisible collapse)
+              // User had scrolled up → preserve viewport position (invisible collapse)
               container.scrollTop = savedScrollTop;
             }
 

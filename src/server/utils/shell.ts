@@ -4,6 +4,7 @@ import { readdirSync, existsSync } from 'fs';
 
 const isWindows = process.platform === 'win32';
 const PATH_SEPARATOR = isWindows ? ';' : ':';
+const PATH_KEY = isWindows ? 'Path' : 'PATH';
 
 /**
  * Common binary paths for the current platform
@@ -19,6 +20,10 @@ function getFallbackPaths(): string[] {
             localAppData ? join(localAppData, 'bun', 'bin') : '',
             programFiles ? join(programFiles, 'nodejs') : '',
             userProfile ? join(userProfile, 'AppData', 'Roaming', 'npm') : '',
+            // Git for Windows — SDK requires git; PATH may be stale after NSIS install
+            programFiles ? join(programFiles, 'Git', 'cmd') : '',
+            join(process.env['PROGRAMFILES(X86)'] || '', 'Git', 'cmd'),
+            localAppData ? join(localAppData, 'Programs', 'Git', 'cmd') : '',
         ].filter(Boolean);
     }
 
@@ -67,7 +72,7 @@ export function getShellPath(): string {
 
     // On Windows, just use existing PATH with fallback paths prepended
     if (isWindows) {
-        const existing = process.env.PATH || '';
+        const existing = process.env[PATH_KEY] || process.env.PATH || '';
         cachedPath = existing ? `${fallback}${PATH_SEPARATOR}${existing}` : fallback;
         console.log('[shell] Windows PATH configured');
         return cachedPath;
@@ -94,7 +99,7 @@ export function getShellPath(): string {
 
     // Fallback
     console.log('[shell] Using fallback PATH construction ONLY');
-    const existing = process.env.PATH || '';
+    const existing = process.env[PATH_KEY] || process.env.PATH || '';
     cachedPath = existing ? `${fallback}${PATH_SEPARATOR}${existing}` : fallback;
     console.log('[shell] Fallback PATH:', cachedPath);
     return cachedPath!;
@@ -105,8 +110,12 @@ export function getShellPath(): string {
  */
 export function getShellEnv(): Record<string, string> {
     const path = getShellPath();
-    return {
-        ...process.env,
-        PATH: path
-    };
+    const env = { ...process.env } as Record<string, string>;
+    // Ensure single PATH key — Windows env may have Path or PATH;
+    // spreading process.env into a plain object loses case-insensitivity,
+    // so both casings can coexist and confuse child_process.spawn().
+    delete env.PATH;
+    delete env.Path;
+    env[PATH_KEY] = path;
+    return env;
 }

@@ -43,7 +43,12 @@ const WS_INITIAL_BACKOFF_SECS: u64 = 1;
 const WS_MAX_BACKOFF_SECS: u64 = 60;
 /// WebSocket read timeout: if no data (including pings) is received
 /// within this period, the connection is assumed dead.
-const WS_READ_TIMEOUT_SECS: u64 = 300;
+/// With client-side pings every 30s, 120s means ~4 missed pings → truly dead.
+const WS_READ_TIMEOUT_SECS: u64 = 120;
+/// Client-side WebSocket ping interval. Keeps NAT/firewall mappings alive
+/// and enables faster dead-connection detection (without this, silent TCP
+/// drops go unnoticed until the read timeout fires).
+const WS_PING_INTERVAL_SECS: u64 = 30;
 
 /// Dedup cache TTL (72 hours)
 const DEDUP_TTL_SECS: u64 = 72 * 60 * 60;
@@ -773,13 +778,25 @@ impl DingtalkAdapter {
 
         let (mut ws_write, mut ws_read) = ws_stream.split();
 
-        let read_timeout = Duration::from_secs(WS_READ_TIMEOUT_SECS);
+        // Track last received data to detect dead connections.
+        let mut last_activity = tokio::time::Instant::now();
+
+        // Client-side ping to keep NAT/firewall mappings alive.
+        // Without this, idle TCP connections get silently dropped by middleboxes,
+        // and the server's SYSTEM pings never reach us.
+        let mut ping_interval = tokio::time::interval(Duration::from_secs(WS_PING_INTERVAL_SECS));
+        ping_interval.tick().await; // skip immediate tick
 
         loop {
+            let timeout_at = last_activity + Duration::from_secs(WS_READ_TIMEOUT_SECS);
+            // biased: prioritize read over timeout to avoid false "dead connection"
+            // when data arrives at the same instant the timeout fires.
             tokio::select! {
-                msg = tokio::time::timeout(read_timeout, ws_read.next()) => {
+                biased;
+                msg = ws_read.next() => {
                     match msg {
-                        Ok(Some(Ok(ws_msg))) => {
+                        Some(Ok(ws_msg)) => {
+                            last_activity = tokio::time::Instant::now();
                             match ws_msg {
                                 WsMessage::Text(text) => {
                                     self.handle_ws_text_frame(&text, &mut ws_write).await;
@@ -796,15 +813,23 @@ impl DingtalkAdapter {
                                 }
                             }
                         }
-                        Ok(Some(Err(e))) => {
+                        Some(Err(e)) => {
                             return Err(format!("WS read error: {}", e));
                         }
-                        Ok(None) => {
+                        None => {
                             return Ok(()); // Stream ended
                         }
-                        Err(_) => {
-                            return Err("WS read timeout (dead connection)".to_string());
-                        }
+                    }
+                }
+                _ = tokio::time::sleep_until(timeout_at) => {
+                    return Err(format!(
+                        "WS read timeout (no data for {}s, dead connection)",
+                        WS_READ_TIMEOUT_SECS
+                    ));
+                }
+                _ = ping_interval.tick() => {
+                    if let Err(e) = ws_write.send(WsMessage::Ping(vec![])).await {
+                        return Err(format!("WS ping send failed: {}", e));
                     }
                 }
                 _ = shutdown_rx.changed() => {
@@ -1264,6 +1289,15 @@ impl super::adapter::ImStreamAdapter for DingtalkAdapter {
 
     fn max_message_length(&self) -> usize {
         MAX_MESSAGE_LENGTH
+    }
+
+    async fn finalize_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        self.edit_message(chat_id, message_id, text).await
     }
 
     async fn send_approval_card(

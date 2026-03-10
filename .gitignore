@@ -47,6 +47,7 @@ npm-debug.log*
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/resources/server-dist.js
+src-tauri/resources/plugin-bridge-dist.js
 src-tauri/resources/claude-agent-sdk
 src-tauri/resources/agent-browser-cli
 src-tauri/resources/vcruntime140.dll

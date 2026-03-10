@@ -398,6 +398,15 @@ impl ImStreamAdapter for BridgeAdapter {
         Ok(resp_body["messageId"].as_str().map(|s| s.to_string()))
     }
 
+    async fn finalize_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        self.edit_message(chat_id, message_id, text).await
+    }
+
     fn use_draft_streaming(&self) -> bool {
         false
     }

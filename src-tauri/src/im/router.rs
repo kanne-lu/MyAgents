@@ -101,7 +101,7 @@ impl SessionRouter {
     /// Ensure a Sidecar is running for the given session key.
     /// Returns `(port, is_new_sidecar)` — `is_new_sidecar` is true when a new Sidecar was created
     /// (caller should sync AI config like model/MCP after creation).
-    /// Called while holding the router lock (brief: health check ~500ms + spawn ~2s worst case).
+    /// Called while holding the router lock (brief: health check ~4.5s worst case + spawn ~2s).
     pub async fn ensure_sidecar<R: Runtime>(
         &mut self,
         session_key: &str,
@@ -234,19 +234,27 @@ impl SessionRouter {
         }
     }
 
-    /// Check if Sidecar is healthy via HTTP
+    /// Check if Sidecar is healthy via HTTP.
+    /// Uses retry with increasing timeout to avoid false positives when Bun is
+    /// temporarily busy (MCP tool execution, heavy computation, GC pause).
     async fn check_sidecar_health(&self, port: u16) -> bool {
         let url = format!("http://127.0.0.1:{}/health", port);
-        match self
-            .http_client
-            .get(&url)
-            .timeout(Duration::from_millis(500))
-            .send()
-            .await
-        {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => false,
+        // Retry once with longer timeout before declaring unhealthy.
+        // First attempt: 1.5s (handles normal load).
+        // Retry: 3s (handles heavy MCP processing / GC pauses).
+        for timeout_ms in [1500u64, 3000] {
+            match self
+                .http_client
+                .get(&url)
+                .timeout(Duration::from_millis(timeout_ms))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => return true,
+                _ => {}
+            }
         }
+        false
     }
 
     /// Handle /new command — reset session for a peer.

@@ -544,7 +544,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     vendor: 'ZenMux',
     cloudProvider: '云服务商',
     type: 'api',
-    primaryModel: 'zenmux/auto',
+    primaryModel: 'anthropic/claude-sonnet-4.6',
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://zenmux.ai',
@@ -553,7 +553,6 @@ export const PRESET_PROVIDERS: Provider[] = [
       disableNonessential: true,
     },
     models: [
-      { model: 'zenmux/auto', modelName: 'ZenMux Auto', modelSeries: 'zenmux' },
       { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google' },
       { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
       { model: 'anthropic/claude-opus-4.6', modelName: 'Claude Opus 4.6', modelSeries: 'claude' },

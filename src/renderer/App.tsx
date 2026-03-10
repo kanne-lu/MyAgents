@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
@@ -322,6 +322,7 @@ export default function App() {
     let unlistenRecoverySummary: (() => void) | null = null;
     let unlistenTaskRecovered: (() => void) | null = null;
     let unlistenBgComplete: (() => void) | null = null;
+    let unlistenSidecarRestarted: (() => void) | null = null;
 
     const setupCronRecoveryListeners = async () => {
       if (!isTauriEnvironment()) return;
@@ -380,6 +381,16 @@ export default function App() {
             console.log('[App] Cron manager ready (Rust recovery complete)');
           }
         });
+
+        // Listen for Global Sidecar auto-restart by Rust health monitor
+        unlistenSidecarRestarted = await listen<string>('global-sidecar:restarted', (event) => {
+          if (mountedRef.current) {
+            const newUrl = event.payload;
+            console.log('[App] Global sidecar auto-restarted by health monitor:', newUrl);
+            updateGlobalServerUrl(newUrl);
+            setLogServerUrl(newUrl);
+          }
+        });
       } catch (error) {
         console.error('[App] Failed to setup cron recovery listeners:', error);
       }
@@ -406,6 +417,9 @@ export default function App() {
       }
       if (unlistenBgComplete) {
         unlistenBgComplete();
+      }
+      if (unlistenSidecarRestarted) {
+        unlistenSidecarRestarted();
       }
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();

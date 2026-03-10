@@ -48,6 +48,7 @@ pub fn run() {
     let sidecar_state_for_window = sidecar_state.clone();
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_tray_exit = sidecar_state.clone();
+    let sidecar_state_for_monitor = sidecar_state.clone();
 
     let im_state_for_management = im_bot_state.clone();
     let im_state_for_window = im_bot_state.clone();
@@ -63,6 +64,7 @@ pub fn run() {
     let cleanup_done_for_window = cleanup_done.clone();
     let cleanup_done_for_exit = cleanup_done.clone();
     let cleanup_done_for_tray_exit = cleanup_done.clone();
+    let cleanup_done_for_monitor = cleanup_done.clone();
 
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
@@ -272,6 +274,20 @@ pub fn run() {
             // Auto-start IM Bot if previously enabled (3s delay)
             im::schedule_auto_start(app.handle().clone());
             log::info!("[App] IM Bot auto-start scheduled");
+
+            // Start Global Sidecar health monitor
+            // Periodically checks if the Global Sidecar is alive and auto-restarts it
+            // This prevents the "all network broken" state on Windows when the window
+            // is minimized to tray and the OS kills child processes
+            let app_handle_for_monitor = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                sidecar::monitor_global_sidecar(
+                    app_handle_for_monitor,
+                    sidecar_state_for_monitor,
+                    cleanup_done_for_monitor,
+                ).await;
+            });
+            log::info!("[App] Global sidecar health monitor spawned");
 
             // Start background update check (5 second delay to let app initialize)
             log::info!("[App] Setup complete, spawning background update check task...");

@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.40] - 2026-03-10
+
+### Added
+- **飞书 Card Kit v2.0 原生渲染**：含表格或代码块的消息自动使用 Interactive Card 发送，飞书客户端原生渲染 markdown 表格和代码高亮
+- **Global Sidecar 健康监控**：后台进程死亡自动重启，前端日志熔断器防止刷屏
+
+### Fixed
+- **钉钉/飞书 WS 连接因 NAT 静默断开频繁重连**：新增客户端 ping（30s 间隔）保持 NAT 映射存活
+- **IM Bot 会话中断**：健康检查误判 + interrupt 超时级联故障修复
+- **AI 回复结束后页面跳动**：spacer 收缩动画优化 + AssistantActions 延迟渲染
+- **Windows 首次安装后 SDK 找不到 bun/git**：bun.exe 别名 + Git PATH 发现 + 重复 PATH 去重
+- **Markdown 表格内 inline code 占位符未还原**（显示 ◆CODE{n}◆）
+- **rewind 阻塞 103 秒**：5s 超时 + 图片 MIME type 丢失修复
+- **飞书 Card 表格内加粗标记未渲染**：发送前 strip 表格行内 `**` 标记
+- **Sidecar 指数退避溢出**：连续失败 61 次后 panic，改用 saturating 算术
+- **Windows portable 构建 bun.exe 过期**：始终覆盖确保版本一致
+- **API watchdog 误杀复杂任务**：超时从 5 分钟放宽至 15 分钟
+
+### Changed
+- **流式首发攒句优化**：累积到标点或 20 字后才首发，避免单字闪烁
+- **移除 ZenMux 预设 zenmux/auto 模型**
+
+---
+
 ## [0.1.39] - 2026-03-10
 
 ### Added

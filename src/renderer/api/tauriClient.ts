@@ -672,6 +672,14 @@ export function resetTabServerUrlCache(tabId: string): void {
     tabServerUrls.delete(tabId);
 }
 
+/**
+ * Update Global Sidecar server URL cache
+ * Called when the Rust health monitor auto-restarts the Global Sidecar on a new port
+ */
+export function updateGlobalServerUrl(url: string): void {
+    tabServerUrls.set('__global__', url);
+}
+
 // ============= Session Activation API =============
 // These functions support Session singleton constraint
 

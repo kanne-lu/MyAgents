@@ -230,6 +230,14 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Bridge(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
         }
     }
+    async fn finalize_message(&self, chat_id: &str, message_id: &str, text: &str) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => a.finalize_message(chat_id, message_id, text).await,
+            Self::Feishu(a) => a.finalize_message(chat_id, message_id, text).await,
+            Self::Dingtalk(a) => a.finalize_message(chat_id, message_id, text).await,
+            Self::Bridge(a) => a.finalize_message(chat_id, message_id, text).await,
+        }
+    }
     fn use_draft_streaming(&self) -> bool {
         match self {
             Self::Telegram(a) => a.use_draft_streaming(),
@@ -2279,7 +2287,8 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
 
                         // First meaningful text in this block → create or adopt draft
                         // Skip whitespace-only blocks (API spacer blocks before thinking)
-                        if draft_id.is_none() && !block_text.trim().is_empty() {
+                        // Accumulate until sentence boundary or min length for meaningful first send
+                        if draft_id.is_none() && !block_text.trim().is_empty() && has_sentence_boundary(&block_text) {
                             if let Some(pid) = placeholder_id.take() {
                                 // Adopt the placeholder as draft → edit with real content
                                 draft_id = Some(pid);
@@ -2492,7 +2501,7 @@ async fn finalize_block<A: adapter::ImStreamAdapter>(
         let max_len = adapter.max_message_length();
         if let Some(ref did) = draft_id {
             if text.chars().count() <= max_len {
-                if let Err(e) = adapter.edit_message(chat_id, did, text).await {
+                if let Err(e) = adapter.finalize_message(chat_id, did, text).await {
                     ulog_warn!("[im] Finalize edit failed: {}, sending as new message", e);
                     let _ = adapter.send_message(chat_id, text).await;
                 }
@@ -2523,6 +2532,30 @@ fn format_draft_text(text: &str, max_len: usize) -> String {
     } else {
         text.to_string()
     }
+}
+
+/// Check if text has accumulated enough for a meaningful first send.
+/// Triggers on sentence-ending punctuation or minimum length threshold.
+/// Only affects first-send timing; subsequent edits use `preferred_throttle_ms`.
+fn has_sentence_boundary(text: &str) -> bool {
+    const MIN_FIRST_SEND_LEN: usize = 20;
+    if text.chars().count() >= MIN_FIRST_SEND_LEN {
+        return true;
+    }
+    let trimmed = text.trim_end();
+    trimmed.ends_with('\n')
+        || trimmed.ends_with('。')
+        || trimmed.ends_with('，')
+        || trimmed.ends_with('！')
+        || trimmed.ends_with('？')
+        || trimmed.ends_with('；')
+        || trimmed.ends_with('：')
+        || trimmed.ends_with(',')
+        || trimmed.ends_with('.')
+        || trimmed.ends_with('!')
+        || trimmed.ends_with('?')
+        || trimmed.ends_with(';')
+        || trimmed.ends_with(':')
 }
 
 /// Extract `data:` payload from SSE event string.

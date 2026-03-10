@@ -1608,6 +1608,15 @@ impl super::adapter::ImStreamAdapter for TelegramAdapter {
             .map_err(|e| e.to_string())
     }
 
+    async fn finalize_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        <Self as super::adapter::ImStreamAdapter>::edit_message(self, chat_id, message_id, text).await
+    }
+
     fn use_draft_streaming(&self) -> bool {
         self.use_message_draft && !self.draft_fallback.load(std::sync::atomic::Ordering::Relaxed)
     }

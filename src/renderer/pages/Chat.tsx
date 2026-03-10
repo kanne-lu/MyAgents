@@ -1155,7 +1155,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (imageAttachments?.length) {
       const restoredImages: ImageAttachment[] = imageAttachments.map(a => ({
         id: a.id,
-        file: new File([], a.name),
+        file: new File([], a.name, { type: a.mimeType }),
         preview: a.previewUrl || '',
       }));
       chatInputRef.current?.setImages(restoredImages);
@@ -1224,7 +1224,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           a.isImage || a.mimeType?.startsWith('image/')
         ).map(a => ({
           id: a.id,
-          file: new File([], a.name),
+          file: new File([], a.name, { type: a.mimeType }),
           preview: a.previewUrl || '',
         }));
         handleSendMessageRef.current(content, imageAttachments?.length ? imageAttachments : undefined);

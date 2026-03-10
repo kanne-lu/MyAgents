@@ -1606,8 +1606,13 @@ export default function TabProvider({
         setSessionState('stopping');
 
         try {
-            const response = await postJson<{ success: boolean; error?: string }>('/chat/stop');
+            const response = await postJson<{ success: boolean; alreadyStopped?: boolean; error?: string }>('/chat/stop');
             if (response.success) {
+                // Nothing was active — restore UI immediately, no need to wait for SSE
+                if (response.alreadyStopped) {
+                    setSessionState(prev => prev === 'stopping' ? 'idle' : prev);
+                    return true;
+                }
                 // 设置 5 秒超时，如果没有收到 SSE 事件确认则强制恢复 UI
                 stopTimeoutRef.current = setTimeout(() => {
                     if (isStreamingRef.current) {

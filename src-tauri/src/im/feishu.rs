@@ -81,9 +81,11 @@ const WS_INITIAL_BACKOFF_SECS: u64 = 1;
 const WS_MAX_BACKOFF_SECS: u64 = 60;
 /// WebSocket read timeout: if no data (including server pings) is received
 /// within this period, the connection is assumed dead and will be reconnected.
-/// Feishu server pings every ~120s, so 300s (2.5x) allows for one missed
-/// ping plus network jitter, with near-zero false positives.
-const WS_READ_TIMEOUT_SECS: u64 = 300;
+/// With client-side pings every 30s, 120s means ~4 missed pings → truly dead.
+const WS_READ_TIMEOUT_SECS: u64 = 120;
+/// Client-side WebSocket ping interval. Keeps NAT/firewall mappings alive
+/// and enables faster dead-connection detection.
+const WS_PING_INTERVAL_SECS: u64 = 30;
 
 /// Persist dedup cache to disk (atomic: write tmp → rename).
 /// Free function so it can be used from `spawn_blocking` ('static closure).
@@ -120,6 +122,72 @@ struct TokenCache {
 enum ListKind {
     Unordered,
     Ordered(u64), // current item number
+}
+
+// ── Card Kit v2.0 helpers ──────────────────────────────────────
+
+/// Check if text contains markdown tables or fenced code blocks that benefit
+/// from Card Kit v2.0 native rendering (instead of Post rich-text).
+fn should_use_card(text: &str) -> bool {
+    // 1. Fenced code block
+    if text.contains("```") {
+        return true;
+    }
+    // 2. Markdown table (header row + separator row)
+    has_markdown_table(text)
+}
+
+/// Detect markdown table: a `|---|` separator row preceded by a `|...|` header row.
+fn has_markdown_table(text: &str) -> bool {
+    let mut prev_is_pipe_row = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if is_table_separator(trimmed) && prev_is_pipe_row {
+            return true;
+        }
+        prev_is_pipe_row = trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() > 1;
+    }
+    false
+}
+
+/// Check if a line is a markdown table separator like `|---|---|` or `|:---:|---:|`.
+fn is_table_separator(line: &str) -> bool {
+    if !line.starts_with('|') || !line.ends_with('|') || line.len() < 5 {
+        return false;
+    }
+    let inner = &line[1..line.len() - 1];
+    inner.chars().all(|c| matches!(c, '-' | ':' | '|' | ' ')) && inner.contains('-')
+}
+
+/// Strip `**bold**` markers from markdown table rows.
+/// Feishu Card Kit renders tables natively but doesn't parse inline formatting in cells.
+fn strip_bold_in_table_rows(text: &str) -> String {
+    let mut result = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let is_table_row = trimmed.starts_with('|') && trimmed.ends_with('|') && trimmed.len() > 1;
+        if is_table_row && trimmed.contains("**") {
+            result.push(line.replace("**", ""));
+        } else {
+            result.push(line.to_string());
+        }
+    }
+    result.join("\n")
+}
+
+/// Build a Card Kit v2.0 JSON structure with a single markdown element.
+fn build_markdown_card(text: &str) -> Value {
+    let content = strip_bold_in_table_rows(text);
+    json!({
+        "schema": "2.0",
+        "config": { "wide_screen_mode": true },
+        "body": {
+            "elements": [{
+                "tag": "markdown",
+                "content": content,
+            }]
+        }
+    })
 }
 
 /// Convert Markdown text to Feishu Post rich-text format.
@@ -870,7 +938,8 @@ impl FeishuAdapter {
 
     /// Send a rich-text (post) message and return the message_id.
     /// Automatically converts Markdown to Feishu Post format.
-    pub async fn send_text_message(&self, chat_id: &str, text: &str) -> Result<Option<String>, String> {
+    /// Always uses Post format — for streaming drafts and explicit Post-only paths.
+    pub async fn send_post_message(&self, chat_id: &str, text: &str) -> Result<Option<String>, String> {
         let url = format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_API_BASE);
         let post_content = markdown_to_feishu_post(text);
         let content = serde_json::to_string(&post_content).unwrap_or_default();
@@ -883,6 +952,43 @@ impl FeishuAdapter {
         let resp = self.api_call("POST", &url, Some(&body)).await?;
         let msg_id = resp["data"]["message_id"].as_str().map(String::from);
         Ok(msg_id)
+    }
+
+    /// Auto-detecting send: Card Kit v2.0 for table/code content, Post for plain text.
+    pub async fn send_text_message(&self, chat_id: &str, text: &str) -> Result<Option<String>, String> {
+        if should_use_card(text) {
+            self.send_card_message(chat_id, text).await
+        } else {
+            self.send_post_message(chat_id, text).await
+        }
+    }
+
+    /// Send a Card Kit v2.0 interactive message with markdown content.
+    async fn send_card_message(&self, chat_id: &str, text: &str) -> Result<Option<String>, String> {
+        let url = format!("{}/im/v1/messages?receive_id_type=chat_id", FEISHU_API_BASE);
+        let card = build_markdown_card(text);
+        let content = serde_json::to_string(&card).unwrap_or_default();
+        let body = json!({
+            "receive_id": chat_id,
+            "msg_type": "interactive",
+            "content": content,
+        });
+
+        let resp = self.api_call("POST", &url, Some(&body)).await?;
+        let msg_id = resp["data"]["message_id"].as_str().map(String::from);
+        Ok(msg_id)
+    }
+
+    /// Edit an existing Card message (PATCH, not PUT).
+    #[allow(dead_code)]
+    async fn edit_card_message(&self, message_id: &str, text: &str) -> Result<(), String> {
+        let url = format!("{}/im/v1/messages/{}", FEISHU_API_BASE, message_id);
+        let card = build_markdown_card(text);
+        let card_str = serde_json::to_string(&card).unwrap_or_default();
+        let body = json!({ "content": card_str });
+
+        self.api_call("PATCH", &url, Some(&body)).await?;
+        Ok(())
     }
 
     /// Upload an image to Feishu and return the image_key.
@@ -1465,15 +1571,21 @@ impl FeishuAdapter {
             let (mut ws_write, mut ws_read) = futures::StreamExt::split(ws_stream);
 
             // Track last received data to detect dead connections.
-            // Feishu server sends protobuf pings every ~120s; if we receive nothing
-            // for WS_READ_TIMEOUT_SECS (300s ≈ 2.5x ping interval), the connection
-            // is assumed dead and we break out to reconnect.
             let mut last_activity = tokio::time::Instant::now();
+
+            // Client-side ping to keep NAT/firewall mappings alive.
+            // Without this, idle TCP connections get silently dropped by middleboxes,
+            // and the server's protobuf pings never reach us.
+            let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(WS_PING_INTERVAL_SECS));
+            ping_interval.tick().await; // skip immediate tick
 
             // Read messages — Feishu uses ONLY binary protobuf frames
             loop {
                 let timeout_at = last_activity + std::time::Duration::from_secs(WS_READ_TIMEOUT_SECS);
+                // biased: prioritize read over timeout to avoid false "dead connection"
+                // when data arrives at the same instant the timeout fires.
                 tokio::select! {
+                    biased;
                     msg = futures::StreamExt::next(&mut ws_read) => {
                         match msg {
                             Some(Ok(WsMessage::Binary(data))) => {
@@ -1577,6 +1689,12 @@ impl FeishuAdapter {
                             ws_write.send(WsMessage::Close(None)),
                         ).await;
                         break;
+                    }
+                    _ = ping_interval.tick() => {
+                        if let Err(e) = ws_write.send(WsMessage::Ping(vec![])).await {
+                            ulog_warn!("[feishu] WS ping send failed: {}", e);
+                            break;
+                        }
                     }
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
@@ -2046,7 +2164,8 @@ impl super::adapter::ImStreamAdapter for FeishuAdapter {
         chat_id: &str,
         text: &str,
     ) -> super::adapter::AdapterResult<Option<String>> {
-        self.send_text_message(chat_id, text).await
+        // Streaming first-send: always Post (first chunk rarely contains tables)
+        self.send_post_message(chat_id, text).await
     }
 
     async fn edit_message(
@@ -2068,6 +2187,32 @@ impl super::adapter::ImStreamAdapter for FeishuAdapter {
 
     fn max_message_length(&self) -> usize {
         30000
+    }
+
+    async fn finalize_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> super::adapter::AdapterResult<()> {
+        if should_use_card(text) {
+            // Send-before-delete: new Card first, then delete old Post.
+            // If Card fails, fall back to editing the Post in place.
+            match self.send_card_message(chat_id, text).await {
+                Ok(_) => {
+                    if let Err(e) = self.delete_text_message(message_id).await {
+                        ulog_warn!("[feishu] Card sent but failed to delete old Post: {}", e);
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    ulog_warn!("[feishu] Card send failed, falling back to Post edit: {}", e);
+                    self.edit_text_message(message_id, text).await
+                }
+            }
+        } else {
+            self.edit_text_message(message_id, text).await
+        }
     }
 
     async fn send_approval_card(

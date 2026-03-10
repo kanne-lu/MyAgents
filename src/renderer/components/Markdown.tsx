@@ -426,10 +426,15 @@ function preprocessContent(content: string): string {
   processed = processed.replace(/^(\d+\.)([^\s\n])/gm, '$1 $2');
 
   // Step 3: Restore protected code blocks and inline code
+  // Multiple passes needed: table blocks may contain inline code placeholders,
+  // so restoring the table in one pass leaves inner placeholders unresolved.
   // eslint-disable-next-line no-control-regex -- Intentional use of NUL as placeholder
-  processed = processed.replace(/\x00CODE(\d+)\x00/g, (_, index) => {
-    return protected_[parseInt(index, 10)];
-  });
+  while (/\x00CODE\d+\x00/.test(processed)) {
+    // eslint-disable-next-line no-control-regex
+    processed = processed.replace(/\x00CODE(\d+)\x00/g, (_, index) => {
+      return protected_[parseInt(index, 10)];
+    });
+  }
 
   return processed;
 }
