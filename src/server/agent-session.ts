@@ -3745,9 +3745,16 @@ export async function rewindSession(userMessageId: string): Promise<{
     }
 
     // 3. 在活跃 session 上直接执行 rewindFiles（subprocess 存活，即时调用！）
-    if (querySession && lastAssistantUuid) {
+    //    跳过已被 force-abort 的 session：subprocess 正在死亡，发 IPC 会阻塞到超时（~100s）。
+    if (querySession && lastAssistantUuid && !shouldAbortSession) {
       try {
-        const result = await querySession.rewindFiles(lastAssistantUuid);
+        const REWIND_FILES_TIMEOUT_MS = 5_000;
+        const result = await Promise.race([
+          querySession.rewindFiles(lastAssistantUuid),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('rewindFiles timeout')), REWIND_FILES_TIMEOUT_MS)
+          ),
+        ]);
         console.log('[agent] rewindFiles result:', JSON.stringify(result));
         if (!result.canRewind) {
           console.warn('[agent] rewindFiles cannot rewind:', result.error);
