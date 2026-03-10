@@ -3452,8 +3452,13 @@ export async function enqueueUserMessage(
 
   console.log(`[agent] enqueue user message len=${trimmed.length} images=${images?.length ?? 0} mode=${currentPermissionMode}`);
 
-  // Transition from pre-warm to active session
-  if (isPreWarming) {
+  // Transition from pre-warm to active session.
+  // CRITICAL: Only transition when the session is NOT being aborted. If shouldAbortSession
+  // is true, the session is dying — mutating isPreWarming here would "steal" the flag from
+  // the startStreamingSession finally block, causing wasPreWarming to be false and both
+  // recovery branches to miss. The message will be queued (isSessionBusy path below) and
+  // processed by the next session after the finally block's schedulePreWarm fires.
+  if (isPreWarming && !shouldAbortSession) {
     isPreWarming = false;
     // Pre-warm 已收到 system_init → SDK 已注册此 session，后续必须用 resume
     if (systemInitInfo) {
@@ -3465,8 +3470,11 @@ export async function enqueueUserMessage(
       broadcast('chat:system-init', { info: systemInitInfo, sessionId });
     }
   }
-  // Cancel any pending pre-warm timer (user is sending a message now)
-  if (preWarmTimer) {
+  // Cancel any pending pre-warm timer (user is sending a message now).
+  // BUT: when shouldAbortSession is true, the timer is the ONLY recovery mechanism
+  // for restarting the session — don't cancel it. Messages will queue via isSessionBusy
+  // path and be processed when the timer fires a new session.
+  if (preWarmTimer && !shouldAbortSession) {
     clearTimeout(preWarmTimer);
     preWarmTimer = null;
   }
@@ -5090,6 +5098,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Error 已通过 catch block 广播给前端（line 4702），用户已知出错。
       console.log('[agent] Unexpected session exit, scheduling recovery pre-warm');
       preWarmFailCount = 0; // 新的故障上下文，重置重试计数
+      schedulePreWarm();
+    }
+
+    // Safety net: detect orphaned messages left in queue with no session or timer to process them.
+    // Race condition: enqueueUserMessage arrives between abortPersistentSession() and this finally
+    // block — it cancels the pre-warm timer and steals isPreWarming flag, causing BOTH branches
+    // above to miss. Without this, messages sit in queue indefinitely until a window refocus
+    // or other external event triggers a re-sync.
+    if (messageQueue.length > 0 && !preWarmTimer && !isProcessing && querySession === null) {
+      console.warn(`[agent] Safety net: ${messageQueue.length} orphaned message(s) in queue, scheduling recovery`);
+      preWarmFailCount = 0;
       schedulePreWarm();
     }
   }
