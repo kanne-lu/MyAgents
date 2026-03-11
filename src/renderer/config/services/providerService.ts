@@ -50,7 +50,24 @@ export async function loadCustomProviders(): Promise<Provider[]> {
                         console.warn('[configService] Invalid provider file, skipping:', entry.name);
                         continue;
                     }
-                    providers.push(parsed as Provider);
+                    const p = parsed as Provider;
+                    // 若 primaryModel 不在 models 中（如删除模型后未正确保存），自动修正并持久化
+                    if (p.models.length > 0) {
+                        const modelIds = p.models.map((m: { model: string }) => m.model);
+                        if (!modelIds.includes(p.primaryModel)) {
+                            p.primaryModel = p.models[0].model;
+                            if (isDebugMode()) {
+                                console.log('[configService] Fixed invalid primaryModel for provider:', p.id, '->', p.primaryModel);
+                            }
+                            try {
+                                const providerPath = await join(providersDir, entry.name);
+                                await safeWriteJson(providerPath, p);
+                            } catch (e) {
+                                console.warn('[configService] Failed to persist primaryModel fix:', e);
+                            }
+                        }
+                    }
+                    providers.push(p);
                 } catch (parseError) {
                     console.error('[configService] Failed to parse provider file:', entry.name, parseError);
                 }

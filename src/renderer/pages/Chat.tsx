@@ -151,7 +151,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Local provider state: snapshot project's providerId at creation, independent thereafter.
   // Prevents cross-tab pollution when another tab patches the shared project.
   const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(
-    currentProject?.providerId ?? undefined
+    currentProject?.providerId ?? config.defaultProviderId ?? undefined
   );
   const currentProvider = selectedProviderId
     ? providers.find((p) => p.id === selectedProviderId)
@@ -766,6 +766,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
   }, [currentProject?.id]);
+
+  // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
+  useEffect(() => {
+    if (!currentProject || !currentProvider || joinedExistingSidecarRef.current) return;
+    if (currentProvider.type === 'subscription' || !Array.isArray(currentProvider.models) || currentProvider.models.length === 0) return;
+    if (!selectedModel) return;
+    const modelIds = currentProvider.models.map((m) => m.model);
+    if (modelIds.includes(selectedModel)) return;
+    const fallback = currentProvider.primaryModel;
+    if (fallback) {
+      setSelectedModel(fallback);
+      void patchProject(currentProject.id, { model: fallback });
+    }
+  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject]);
 
   // Sync selectedModel to backend so pre-warm uses the correct model.
   // Without this, backend currentModel stays undefined until the first message,

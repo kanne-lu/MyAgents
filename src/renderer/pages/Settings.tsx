@@ -1527,6 +1527,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             }
             // Persist provider to disk and refresh providers list
             await addCustomProvider(newProvider);
+            // Switch default to the newly added provider so Chat/Launcher use it immediately
+            await updateConfig({ defaultProviderId: newProvider.id });
             // Trigger verification directly (no debounce — unlike handleSaveApiKey which
             // debounces for keystroke input, creation is a one-shot operation)
             if (customForm.apiKey) {
@@ -1684,11 +1686,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 toast.error('供应商至少需要保留一个模型');
                 return;
             }
+            const finalModels = [
+                ...remainingModels,
+                ...customModels.map((m) => ({
+                    model: m,
+                    modelName: m,
+                    modelSeries: 'custom' as const,
+                })),
+            ];
+            // 若 primaryModel 已被删除，改用第一个可用模型
+            const validPrimary = finalModels.some(m => m.model === provider.primaryModel)
+                ? provider.primaryModel
+                : finalModels[0].model;
             // For custom providers, update the provider and persist to disk
             const updatedProvider: Provider = {
                 ...provider,
                 name: editName.trim(),
                 cloudProvider: editCloudProvider?.trim() || '自定义',
+                primaryModel: validPrimary,
                 authType: editAuthType ?? provider.authType ?? 'auth_token',
                 apiProtocol: editApiProtocol === 'openai' ? 'openai' : undefined,
                 maxOutputTokens: editApiProtocol === 'openai' && editingProvider?.editMaxOutputTokens ? parsePositiveInt(editingProvider.editMaxOutputTokens) : undefined,
@@ -1697,14 +1712,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     ...provider.config,
                     baseUrl: editBaseUrl.trim(),
                 },
-                models: [
-                    ...remainingModels,
-                    ...customModels.map((m) => ({
-                        model: m,
-                        modelName: m,
-                        modelSeries: 'custom',
-                    })),
-                ],
+                models: finalModels,
             };
             try {
                 await updateCustomProvider(updatedProvider);
@@ -4024,22 +4032,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Custom Provider Modal */}
             {showCustomForm && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-                    <div className="mx-4 w-full max-w-md rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
-                        <div className="mb-5 flex items-center justify-between">
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">添加自定义供应商</h3>
-                            <button
-                                onClick={() => {
-                                    setShowCustomForm(false);
-                                    setCustomForm(EMPTY_CUSTOM_FORM);
-                                }}
-                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
-                            >
-                                <X className="h-5 w-5" />
-                            </button>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm overflow-y-auto py-8">
+                    <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                        <div className="flex-shrink-0 px-6 pt-6 pb-4">
+                            <div className="flex items-center justify-between">
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">添加自定义供应商</h3>
+                                <button
+                                    onClick={() => {
+                                        setShowCustomForm(false);
+                                        setCustomForm(EMPTY_CUSTOM_FORM);
+                                    }}
+                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+                                >
+                                    <X className="h-5 w-5" />
+                                </button>
+                            </div>
                         </div>
 
-                        <div className="space-y-4">
+                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6">
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
                                     供应商名称 <span className="text-[var(--error)]">*</span>
@@ -4267,23 +4277,25 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </div>
                         </div>
 
-                        <div className="mt-6 flex gap-3">
-                            <button
-                                onClick={() => {
-                                    setShowCustomForm(false);
-                                    setCustomForm(EMPTY_CUSTOM_FORM);
-                                }}
-                                className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
-                            >
-                                取消
-                            </button>
-                            <button
-                                onClick={handleAddCustomProvider}
-                                disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
-                                className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
-                            >
-                                添加
-                            </button>
+                        <div className="flex-shrink-0 border-t border-[var(--line)] px-6 py-4">
+                            <div className="flex gap-3">
+                                <button
+                                    onClick={() => {
+                                        setShowCustomForm(false);
+                                        setCustomForm(EMPTY_CUSTOM_FORM);
+                                    }}
+                                    className="flex-1 rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                                >
+                                    取消
+                                </button>
+                                <button
+                                    onClick={handleAddCustomProvider}
+                                    disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
+                                    className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+                                >
+                                    添加
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -4291,21 +4303,23 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Provider Management Modal */}
             {editingProvider && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
-                    <div className="mx-4 w-full max-w-md rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl">
-                        <div className="mb-5 flex items-center justify-between">
-                            <h3 className="text-lg font-semibold text-[var(--ink)]">
-                                {editingProvider.provider.isBuiltin ? '管理供应商' : '编辑供应商'}
-                            </h3>
-                            <button
-                                onClick={() => setEditingProvider(null)}
-                                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
-                            >
-                                <X className="h-5 w-5" />
-                            </button>
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm overflow-y-auto py-8">
+                    <div className="mx-4 w-full max-w-md flex max-h-[90vh] flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
+                        <div className="flex-shrink-0 px-6 pt-6 pb-4">
+                            <div className="flex items-center justify-between">
+                                <h3 className="text-lg font-semibold text-[var(--ink)]">
+                                    {editingProvider.provider.isBuiltin ? '管理供应商' : '编辑供应商'}
+                                </h3>
+                                <button
+                                    onClick={() => setEditingProvider(null)}
+                                    className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+                                >
+                                    <X className="h-5 w-5" />
+                                </button>
+                            </div>
                         </div>
 
-                        <div className="space-y-4">
+                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-6">
                             {/* Provider info - editable for custom, read-only for preset */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">供应商名称</label>
@@ -4518,33 +4532,34 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </div>
                         </div>
 
-                        <div className="mt-6 flex items-center justify-between">
-                            {/* Delete button (only for custom providers) */}
-                            {!editingProvider.provider.isBuiltin ? (
-                                <button
-                                    onClick={() => setDeleteConfirmProvider(editingProvider.provider)}
-                                    className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
-                                >
-                                    <Trash2 className="h-4 w-4" />
-                                    删除
-                                </button>
-                            ) : (
-                                <div />
-                            )}
+                        <div className="flex-shrink-0 border-t border-[var(--line)] px-6 pt-6 pb-4">
+                            <div className="flex items-center justify-between">
+                                {!editingProvider.provider.isBuiltin ? (
+                                    <button
+                                        onClick={() => setDeleteConfirmProvider(editingProvider.provider)}
+                                        className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                    >
+                                        <Trash2 className="h-4 w-4" />
+                                        删除
+                                    </button>
+                                ) : (
+                                    <div />
+                                )}
 
-                            <div className="flex gap-3">
-                                <button
-                                    onClick={() => setEditingProvider(null)}
-                                    className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
-                                >
-                                    取消
-                                </button>
-                                <button
-                                    onClick={saveProviderEdits}
-                                    className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
-                                >
-                                    保存
-                                </button>
+                                <div className="flex gap-3">
+                                    <button
+                                        onClick={() => setEditingProvider(null)}
+                                        className="rounded-lg border border-[var(--line)] px-4 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]"
+                                    >
+                                        取消
+                                    </button>
+                                    <button
+                                        onClick={saveProviderEdits}
+                                        className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                                    >
+                                        保存
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>
