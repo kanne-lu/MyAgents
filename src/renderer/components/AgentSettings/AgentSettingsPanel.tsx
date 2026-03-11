@@ -1,7 +1,7 @@
 // Agent settings panel — flat layout with section dividers
 // NOTE: This panel is still used by the Settings page Agent card list.
 // The new WorkspaceGeneralTab replaces it inside WorkspaceConfigPanel.
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useConfig } from '@/hooks/useConfig';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { getAgentById } from '@/config/services/agentConfigService';
@@ -22,12 +22,6 @@ export default function AgentSettingsPanel({ agentId }: AgentSettingsPanelProps)
   const { config, projects, refreshConfig } = useConfig();
   const { statuses, refresh: refreshStatuses } = useAgentStatuses();
   const [agent, setAgent] = useState<AgentConfig | undefined>(() => getAgentById(config, agentId));
-  const isMountedRef = useRef(true);
-
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
 
   useEffect(() => {
     setAgent(getAgentById(config, agentId));

@@ -4,7 +4,6 @@ import {
   ChevronUp,
   Eye,
   FilePlus,
-  FileText,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -25,6 +24,7 @@ import { useTabApi } from '@/context/TabContext';
 import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import type { DirectoryTreeNode, DirectoryTree, ExpandDirectoryResult } from '../../shared/dir-types';
 import { isImageFile, isPreviewable } from '../../shared/fileTypes';
+import { getFileIcon } from '@/utils/fileIcons';
 
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useToast } from '@/components/Toast';
@@ -715,6 +715,15 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
     }
   };
 
+  const handleMove = async (sourcePaths: string[], targetDir: string) => {
+    try {
+      await apiPost('/agent/move', { sourcePaths, targetDir });
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Move failed');
+    }
+  };
+
   const handleDelete = async (path: string) => {
     try {
       await apiPost('/agent/delete', { path });
@@ -1111,8 +1120,6 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                 <Tree
                   data={treeData}
                   openByDefault={false}
-                  disableDrag
-                  disableDrop
                   disableMultiSelection
                   disableEdit
                   rowHeight={26}
@@ -1120,8 +1127,15 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                   height={treeHeight}
                   width="100%"
                   className="overscroll-none"
+                  onMove={async ({ dragNodes, parentNode }) => {
+                    const sourcePaths = dragNodes.map(n => (n.data as DirectoryTreeNode).path);
+                    const targetDir = parentNode
+                      ? (parentNode.data as DirectoryTreeNode).path ?? ''
+                      : '';
+                    await handleMove(sourcePaths, targetDir);
+                  }}
                 >
-                {({ node, style }) => {
+                {({ node, style, dragHandle }) => {
                   const data = node.data as DirectoryTreeNode;
                   const isDir = data.type === 'dir';
                   // Check if this is the myagents_files folder (special folder for imported files)
@@ -1131,7 +1145,7 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                       node.isOpen ?
                         FolderOpen
                         : Folder
-                      : FileText;
+                      : getFileIcon(data.name);
 
                   const isLoadingDir = isDir && loadingDirs.has(data.path);
                   const isDropTarget = isDir && dropTargetPath === data.path && isExternalDrop;
@@ -1220,16 +1234,22 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                     }
                   };
 
+                  const isInternalDropTarget = node.willReceiveDrop;
+                  const isDragging = node.isDragging;
+
                   return (
                     <div
+                      ref={dragHandle}
                       style={style}
                       data-tree-row
                       className={`flex h-full cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${
-                        isDropTarget
+                        isDropTarget || isInternalDropTarget
                           ? 'ring-2 ring-inset ring-[var(--accent)]/50 bg-[var(--accent)]/10'
-                          : isSelected
-                            ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
-                            : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+                          : isDragging
+                            ? 'opacity-40'
+                            : isSelected
+                              ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+                              : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                         }`}
                       onClick={handleRowClick}
                       onContextMenu={(e) => handleContextMenu(e, data)}

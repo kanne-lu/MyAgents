@@ -218,10 +218,11 @@ const MessageList = memo(function MessageList({
       wasSessionLoadingRef.current = false;
       // Content stays hidden (opacity:0) until this RAF fires,
       // which atomically sets fadeIn=true + contentHidden=false in the same render batch.
-      requestAnimationFrame(() => {
+      const rafId = requestAnimationFrame(() => {
         setFadeIn(true);
         setContentHidden(false);
       });
+      return () => cancelAnimationFrame(rafId);
     }
   }, [isSessionLoading]);
 

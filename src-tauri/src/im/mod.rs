@@ -4182,7 +4182,8 @@ pub async fn cmd_start_agent_channel(
             if agent.channels.contains_key(&channelId) {
                 ulog_warn!("[agent] Channel {} already running in agent {}, skipping start", channelId, agentId);
                 // Return current status instead of double-starting
-                let ch = agent.channels.get(&channelId).unwrap();
+                let ch = agent.channels.get(&channelId)
+                    .ok_or_else(|| format!("[agent] Channel {} disappeared from agent {}", channelId, agentId))?;
                 let health_state = ch.bot_instance.health.get_state().await;
                 let active_sessions = ch.bot_instance.router.lock().await.active_sessions();
                 return Ok(ChannelStatus {
@@ -4583,7 +4584,6 @@ pub async fn cmd_update_agent_config(
     if let Some(agent) = agents_guard.get(&agentId) {
         if let Some(ref model) = patch.model {
             *agent.current_model.write().await = Some(model.clone());
-            // Sync model to all channel sidecars
             for (_ch_id, ch_inst) in &agent.channels {
                 *ch_inst.bot_instance.current_model.write().await = Some(model.clone());
             }
@@ -4616,6 +4616,29 @@ pub async fn cmd_update_agent_config(
             if let Ok(hb_config) = serde_json::from_str::<types::HeartbeatConfig>(hb_json) {
                 if let Some(ref hb_arc) = agent.heartbeat_config {
                     *hb_arc.write().await = hb_config;
+                }
+            }
+        }
+
+        // Push config changes to all active Sidecar ports (same as legacy update_bot_config_internal)
+        for (_ch_id, ch_inst) in &agent.channels {
+            let router = ch_inst.bot_instance.router.lock().await;
+            let ports = router.active_sidecar_ports();
+            if !ports.is_empty() {
+                if patch.model.is_some() {
+                    for port in &ports {
+                        router.sync_ai_config(*port, patch.model.as_deref(), None).await;
+                    }
+                }
+                if patch.mcp_servers_json.is_some() {
+                    for port in &ports {
+                        router.sync_ai_config(*port, None, patch.mcp_servers_json.as_deref()).await;
+                    }
+                }
+                if let Some(ref pm) = patch.permission_mode {
+                    for port in &ports {
+                        router.sync_permission_mode(*port, pm).await;
+                    }
                 }
             }
         }

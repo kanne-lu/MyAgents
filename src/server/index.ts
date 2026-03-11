@@ -2600,6 +2600,77 @@ async function main() {
         }
       }
 
+      // Move files/folders to a target directory
+      if (pathname === '/agent/move' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { sourcePaths?: string[]; targetDir?: string };
+          const sourcePaths = payload?.sourcePaths;
+          const targetDir = payload?.targetDir?.trim() ?? '';
+
+          if (!sourcePaths || !Array.isArray(sourcePaths) || sourcePaths.length === 0) {
+            return jsonResponse({ success: false, error: 'sourcePaths is required.' }, 400);
+          }
+
+          // Resolve target directory (empty string = workspace root)
+          const resolvedTargetDir = targetDir
+            ? resolveAgentPath(currentAgentDir, targetDir)
+            : currentAgentDir;
+          if (!resolvedTargetDir) {
+            return jsonResponse({ success: false, error: 'Invalid target directory.' }, 400);
+          }
+          if (!existsSync(resolvedTargetDir) || !statSync(resolvedTargetDir).isDirectory()) {
+            return jsonResponse({ success: false, error: 'Target must be an existing directory.' }, 400);
+          }
+
+          const movedFiles: Array<{ oldPath: string; newPath: string }> = [];
+          const errors: string[] = [];
+
+          for (const src of sourcePaths) {
+            const resolvedSrc = resolveAgentPath(currentAgentDir, src.trim());
+            if (!resolvedSrc || !existsSync(resolvedSrc)) {
+              errors.push(`Not found: ${src}`);
+              continue;
+            }
+
+            // Prevent moving a directory into itself or its descendant
+            if (resolvedTargetDir === resolvedSrc || resolvedTargetDir.startsWith(resolvedSrc + sep)) {
+              errors.push(`Cannot move folder into itself: ${src}`);
+              continue;
+            }
+
+            // Skip if already in the target directory
+            if (dirname(resolvedSrc) === resolvedTargetDir) continue;
+
+            const itemName = basename(resolvedSrc);
+            let destination = join(resolvedTargetDir, itemName);
+
+            // Auto-rename on conflict
+            if (existsSync(destination)) {
+              const ext = extname(itemName);
+              const base = ext ? itemName.slice(0, -ext.length) : itemName;
+              let counter = 1;
+              do {
+                destination = join(resolvedTargetDir, `${base} (${counter})${ext}`);
+                counter++;
+              } while (existsSync(destination));
+            }
+
+            await rename(resolvedSrc, destination);
+            movedFiles.push({
+              oldPath: relative(currentAgentDir, resolvedSrc),
+              newPath: relative(currentAgentDir, destination),
+            });
+          }
+
+          return jsonResponse({ success: true, movedFiles, errors: errors.length > 0 ? errors : undefined });
+        } catch (error) {
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Move failed' },
+            500
+          );
+        }
+      }
+
       // Delete file or folder
       if (pathname === '/agent/delete' && request.method === 'POST') {
         try {
