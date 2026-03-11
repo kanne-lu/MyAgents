@@ -106,6 +106,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     historyMessages,
     streamingMessage,
     isLoading,
+    isSessionLoading,
     sessionState,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
@@ -811,7 +812,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
   }, [joinedExistingSidecar]);
 
-  const { containerRef: messagesContainerRef, spacerRef, scrollToBottom } = useAutoScroll(isLoading, messages.length, sessionId);
+  const { containerRef: messagesContainerRef, spacerRef, scrollToBottom, pauseAutoScroll } = useAutoScroll(isLoading, messages.length, sessionId);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
@@ -1144,6 +1145,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const { messageId, content, attachments } = rewindTarget;
 
     // 1. 立即关闭对话框 + 乐观更新 UI
+    // Pause auto-scroll to prevent animated scrolling during rewind's DOM changes.
+    // Without this, the smooth scroll animation fights with the browser's natural
+    // scroll clamping (messages removed → scrollHeight shrinks → scrollTop adjusts).
+    pauseAutoScroll(500);
     setRewindTarget(null);
     setMessages(prev => {
       const idx = prev.findIndex(m => m.id === messageId);
@@ -1183,7 +1188,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         setRewindStatus(null);
         setIsLoading(false);
       });
-  }, [rewindTarget, apiPost, setMessages, setIsLoading]);
+  }, [rewindTarget, apiPost, setMessages, setIsLoading, pauseAutoScroll]);
 
   // Retry = rewind to before user message + auto-resend
   // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
@@ -1204,6 +1209,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const userMessageId = userMsg.id;
 
     // 1. Optimistic UI: truncate to before user message
+    pauseAutoScroll(500);
     setMessages(prev => {
       const idx = prev.findIndex(m => m.id === userMessageId);
       return idx >= 0 ? prev.slice(0, idx) : prev;
@@ -1243,7 +1249,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           setIsLoading(false);
         }
       });
-  }, [apiPost, setMessages, setIsLoading]); // all stable — refs handle the rest
+  }, [apiPost, setMessages, setIsLoading, pauseAutoScroll]); // all stable — refs handle the rest
 
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string) => {
@@ -1437,6 +1443,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               historyMessages={historyMessages}
               streamingMessage={streamingMessage}
               isLoading={isLoading}
+              isSessionLoading={isSessionLoading}
               containerRef={messagesContainerRef}
               spacerRef={spacerRef}
               bottomPadding={140}

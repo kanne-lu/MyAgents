@@ -24,7 +24,6 @@ function Tip({ label, children }: { label: string; children: React.ReactNode }) 
 interface MessageProps {
   message: MessageType;
   isLoading?: boolean;
-  isStreaming?: boolean;       // AI 回复中时隐藏时间回溯按钮
   onRewind?: (messageId: string) => void;
   onRetry?: (assistantMessageId: string) => void;
   /** Slot rendered after the BlockGroup containing ExitPlanMode tool */
@@ -46,7 +45,10 @@ function formatTimestamp(date: Date): string {
 function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
   // Different loading state -> must re-render
   if (prev.isLoading !== next.isLoading) return false;
-  if (prev.isStreaming !== next.isStreaming) return false;
+  // NOTE: isStreaming was removed from props — rewind button visibility is now
+  // controlled via CSS ([data-streaming] selector on the scroll container).
+  // This eliminates mass re-renders of ALL N history messages when streaming
+  // state changes (~30px × N ≈ 1500+px layout-recalc in long sessions).
   // exitPlanModeSlot — useMemo in MessageList keeps reference stable during streaming
   if (prev.exitPlanModeSlot !== next.exitPlanModeSlot) return false;
   // onRewind/onRetry 不比较 — 通过 Chat.tsx useCallback([]) + ref 保证稳定
@@ -162,23 +164,25 @@ function AssistantActions({ message, onRetry, className = '' }: {
  * Message component with memo optimization.
  * History messages won't re-render when streaming message updates.
  */
-const Message = memo(function Message({ message, isLoading = false, isStreaming, onRewind, onRetry, exitPlanModeSlot }: MessageProps) {
+const Message = memo(function Message({ message, isLoading = false, onRewind, onRetry, exitPlanModeSlot }: MessageProps) {
   const { openPreview } = useImagePreview();
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [userHovered, setUserHovered] = useState(false);
 
-  // Delay AssistantActions rendering until after the spacer collapse animation (400ms).
-  // Prevents layout shift (~30px from action buttons) during collapse, which causes
-  // the per-frame scroll position tracking to oscillate and produce a visible "jump".
-  const [actionsReady, setActionsReady] = useState(!isStreaming);
+  // Delay AssistantActions rendering on the STREAMING message only.
+  // Uses isLoading (not isStreaming) so that HISTORY messages (isLoading=false always)
+  // keep their actions visible at all times. This prevents a massive layout shift
+  // when streaming ends: previously all N history messages toggled actions simultaneously
+  // (~30px × N ≈ 1500+px in long sessions), overwhelming scroll anchoring.
+  const [actionsReady, setActionsReady] = useState(!isLoading);
   useEffect(() => {
-    if (!isStreaming) {
+    if (!isLoading) {
       const timer = setTimeout(() => setActionsReady(true), 350);
       return () => clearTimeout(timer);
     }
     setActionsReady(false);
-  }, [isStreaming]);
+  }, [isLoading]);
 
   useEffect(() => {
     return () => {
@@ -258,15 +262,17 @@ const Message = memo(function Message({ message, isLoading = false, isStreaming,
           {/* 操作栏：时间 + 图标按钮，hover 淡入 */}
           <div className={`mr-2 mt-1 flex items-center gap-2 transition-opacity ${userHovered ? 'opacity-100' : 'opacity-0'}`}>
             <span className="text-[11px] text-[var(--ink-muted)] mr-1">{formatTimestamp(message.timestamp)}</span>
-            {!isStreaming && onRewind && (
-              <Tip label="时间回溯">
-                <button type="button"
-                  aria-label="时间回溯"
-                  onClick={() => onRewind(message.id)}
-                  className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                  <Undo2 className="size-3.5" />
-                </button>
-              </Tip>
+            {onRewind && (
+              <span data-rewind-btn>
+                <Tip label="时间回溯">
+                  <button type="button"
+                    aria-label="时间回溯"
+                    onClick={() => onRewind(message.id)}
+                    className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                    <Undo2 className="size-3.5" />
+                  </button>
+                </Tip>
+              </span>
             )}
             <Tip label={copied ? '已复制' : '复制'}>
               <button type="button"

@@ -38,6 +38,7 @@ export interface TabState {
     historyMessages: Message[];    // Immutable during streaming — zero re-render for history
     streamingMessage: Message | null;  // Only this updates during streaming
     isLoading: boolean;
+    isSessionLoading: boolean;  // true while loadSession REST API is in-flight
     sessionState: SessionState;
 
     // Agent info
@@ -135,6 +136,7 @@ const defaultContextValue: TabContextValue = {
     historyMessages: [],
     streamingMessage: null,
     isLoading: false,
+    isSessionLoading: false,
     sessionState: 'idle',
     logs: [],
     unifiedLogs: [],
