@@ -130,8 +130,8 @@ export default function WorkspaceBasicsSection({ project, agent }: WorkspaceBasi
 
   return (
     <div className="space-y-3">
-      {/* Name */}
-      <div className="flex items-center gap-3">
+      {/* Name + Icon — single row */}
+      <div className="relative flex items-center gap-3">
         <label className="w-16 shrink-0 text-xs text-[var(--ink-muted)]">名称</label>
         <input
           className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--accent)] focus:outline-none"
@@ -141,18 +141,14 @@ export default function WorkspaceBasicsSection({ project, agent }: WorkspaceBasi
           onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
           placeholder="工作区名称"
         />
-      </div>
-
-      {/* Icon */}
-      <div className="relative flex items-center gap-3">
-        <label className="w-16 shrink-0 text-xs text-[var(--ink-muted)]">图标</label>
         <button
-          className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-colors ${
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors ${
             openPopup === 'icon'
               ? 'border-[var(--accent)] bg-[var(--accent-warm-muted)]'
               : 'border-[var(--line)] hover:border-[var(--line-strong)]'
           }`}
           onClick={() => setOpenPopup(openPopup === 'icon' ? null : 'icon')}
+          title="选择图标"
         >
           <WorkspaceIcon icon={project.icon || DEFAULT_WORKSPACE_ICON} size={22} />
         </button>
@@ -160,7 +156,7 @@ export default function WorkspaceBasicsSection({ project, agent }: WorkspaceBasi
         {openPopup === 'icon' && (
           <>
             <div className="fixed inset-0 z-40" onClick={() => setOpenPopup(null)} />
-            <div className="absolute left-20 top-0 z-50 max-h-[260px] w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
+            <div className="absolute right-0 top-10 z-50 max-h-[260px] w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
               <div className="flex flex-wrap gap-1.5">
                 <button
                   type="button"

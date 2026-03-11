@@ -3,9 +3,10 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useConfig } from '@/hooks/useConfig';
+import { useToast } from '@/components/Toast';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { isTauriEnvironment } from '@/utils/browserMock';
-import { getAgentById, addAgentConfig, patchAgentConfig } from '@/config/services/agentConfigService';
+import { getAgentById, addAgentConfig, patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
 import type { AgentConfig } from '../../../shared/types/agent';
 import WorkspaceBasicsSection from './WorkspaceBasicsSection';
 import AgentChannelsSection from './sections/AgentChannelsSection';
@@ -25,6 +26,9 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
   const agent = project?.agentId ? getAgentById(config, project.agentId) : undefined;
   const isProactive = !!(project?.isAgent && agent?.enabled);
   const { statuses, refresh: refreshStatuses } = useAgentStatuses(isProactive);
+  const toast = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
   const isMountedRef = useRef(true);
   const [toggling, setToggling] = useState(false);
 
@@ -59,25 +63,62 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
         };
         await addAgentConfig(newAgent);
         await patchProject(project.id, { isAgent: true, agentId: newAgent.id });
+        toastRef.current.success('主动 Agent 模式已开启');
       } else if (agent.enabled) {
         // Disable — stop all running channels first
+        let stoppedCount = 0;
         if (isTauriEnvironment()) {
           const { invoke } = await import('@tauri-apps/api/core');
           for (const ch of agent.channels) {
             try {
               await invoke('cmd_stop_agent_channel', { agentId: agent.id, channelId: ch.id });
+              stoppedCount++;
             } catch { /* channel may not be running */ }
           }
         }
         await patchAgentConfig(agent.id, { enabled: false });
+        toastRef.current.success(
+          stoppedCount > 0
+            ? `主动 Agent 模式已关闭，${stoppedCount} 个渠道已停止`
+            : '主动 Agent 模式已关闭',
+        );
       } else {
-        // Re-enable
+        // Re-enable — auto-restart channels that have credentials (setupCompleted)
         await patchAgentConfig(agent.id, { enabled: true });
+        await refreshConfig(); // Refresh first so invokeStartAgentChannel reads latest config
+        // Re-read the latest agent config after refresh
+        const latestAgent = getAgentById(await (async () => {
+          const { loadAppConfig } = await import('@/config/services/appConfigService');
+          return loadAppConfig();
+        })(), agent.id);
+        if (latestAgent && isTauriEnvironment()) {
+          const startable = latestAgent.channels.filter(ch => ch.enabled && ch.setupCompleted);
+          let startedCount = 0;
+          for (const ch of startable) {
+            try {
+              await invokeStartAgentChannel(latestAgent, ch);
+              startedCount++;
+            } catch (e) {
+              console.warn(`[WorkspaceGeneralTab] Auto-start channel ${ch.id} failed:`, e);
+            }
+          }
+          toastRef.current.success(
+            startedCount > 0
+              ? `主动 Agent 模式已开启，${startedCount} 个渠道已启动`
+              : '主动 Agent 模式已开启',
+          );
+        } else {
+          toastRef.current.success('主动 Agent 模式已开启');
+        }
+        if (isMountedRef.current) await refreshStatuses();
+        if (isMountedRef.current) setToggling(false);
+        return; // refreshConfig already called above
       }
       await refreshConfig();
       if (isMountedRef.current) await refreshStatuses();
     } catch (e) {
       console.error('[WorkspaceGeneralTab] Toggle proactive failed:', e);
+      toastRef.current.error('操作失败');
     } finally {
       if (isMountedRef.current) setToggling(false);
     }
@@ -115,7 +156,7 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
         </div>
 
         {/* Section 2: Proactive Agent Toggle (L1) */}
-        <div className={`pt-6 ${isProactive && agent ? '' : 'border-b border-[var(--line)] pb-6'}`}>
+        <div className="pt-6">
           <div className="flex items-center justify-between">
             <div>
               <h3 className="text-lg font-semibold text-[var(--ink)]">主动 Agent 模式</h3>
