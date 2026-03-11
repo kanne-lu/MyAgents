@@ -99,6 +99,42 @@ pub const GLOBAL_SIDECAR_ID: &str = "__global__";
 // This marker is added to all sidecar commands for reliable process identification
 const SIDECAR_MARKER: &str = "--myagents-sidecar";
 
+// ===== Crashed Bun Tracking =====
+// When a bundled bun crashes with STATUS_ACCESS_VIOLATION (0xC0000005, typically AVX2
+// incompatibility in VMs), mark it as crashed so subsequent attempts fall through to system bun.
+static CRASHED_BUN_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[allow(dead_code)] // Only called from #[cfg(windows)] blocks; harmless on other platforms
+fn mark_bun_as_crashed(path: &std::path::Path) {
+    let normalized = normalize_external_path(path.to_path_buf());
+    // unwrap_or_else recovers from Mutex poisoning — the body is trivial (Vec::push),
+    // so the data is still consistent even if a previous holder panicked.
+    let mut paths = CRASHED_BUN_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    if !paths.iter().any(|p| p == &normalized) {
+        paths.push(normalized.clone());
+        log::warn!(
+            "[sidecar] Marked bun as crashed (will try system fallback on next attempt): {:?}",
+            normalized
+        );
+    }
+}
+
+fn is_bun_crashed(path: &std::path::Path) -> bool {
+    let normalized = normalize_external_path(path.to_path_buf());
+    let paths = CRASHED_BUN_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    paths.iter().any(|x| x == &normalized)
+}
+
+/// On Windows, check if the process exited with STATUS_ACCESS_VIOLATION (0xC0000005)
+/// and mark the bun binary as crashed for fallback to system bun.
+#[cfg(target_os = "windows")]
+fn maybe_mark_crashed_bun(status: &std::process::ExitStatus, bun_path: &std::path::Path) {
+    let code = status.code().unwrap_or(0) as u32;
+    if code == 0xc0000005 {
+        mark_bun_as_crashed(bun_path);
+    }
+}
+
 // ===== Proxy Configuration =====
 // Default values (must match TypeScript PROXY_DEFAULTS in types.ts)
 // Proxy configuration is now managed by the shared proxy_config module
@@ -1023,6 +1059,13 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::pa
                  Please install Visual C++ Redistributable: \
                  https://aka.ms/vs/17/release/vc_redist.x64.exe"
             }
+            0xc0000005 => {
+                "STATUS_ACCESS_VIOLATION — bundled bun.exe may require AVX2 instructions \
+                 (unsupported in many virtual machines and older CPUs). \
+                 Install bun globally via: powershell -c \"irm bun.sh/install.ps1 | iex\" \
+                 (or: npm install -g bun). Both auto-select a compatible baseline build. \
+                 The app will fall back to the system-installed bun on the next attempt."
+            }
             0xc0000022 => {
                 "Access denied — antivirus may be blocking bun.exe. \
                  Check Windows Security > Protection History, or add the install directory to exclusions."
@@ -1064,11 +1107,21 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::pa
 #[cfg(target_os = "windows")]
 fn check_bun_in_dir(dir: &std::path::Path, label: &str) -> Option<PathBuf> {
     let win_bun = dir.join("bun-x86_64-pc-windows-msvc.exe");
+    let win_bun_simple = dir.join("bun.exe");
+
+    // If ANY bun in this directory is marked as crashed, skip ALL candidates.
+    // Both filenames likely point to the same binary, so trying the sibling would just crash again.
+    let any_crashed = (win_bun.exists() && is_bun_crashed(&win_bun))
+        || (win_bun_simple.exists() && is_bun_crashed(&win_bun_simple));
+    if any_crashed {
+        log::warn!("[sidecar] Skipping all bun candidates from {} (crashed): {:?}", label, dir);
+        return None;
+    }
+
     if win_bun.exists() {
         log::info!("[sidecar] Using bundled bun from {} (platform): {:?}", label, win_bun);
         return Some(win_bun);
     }
-    let win_bun_simple = dir.join("bun.exe");
     if win_bun_simple.exists() {
         log::info!("[sidecar] Using bundled bun from {} (simple): {:?}", label, win_bun_simple);
         return Some(win_bun_simple);
@@ -1139,8 +1192,12 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
             let bundled_bun = resource_dir.join("binaries").join("bun");
 
             if bundled_bun.exists() {
-                log::info!("Using bundled bun: {:?}", bundled_bun);
-                return Some(bundled_bun);
+                if is_bun_crashed(&bundled_bun) {
+                    log::warn!("Skipping crashed bundled bun: {:?}", bundled_bun);
+                } else {
+                    log::info!("Using bundled bun: {:?}", bundled_bun);
+                    return Some(bundled_bun);
+                }
             }
 
             #[cfg(target_os = "macos")]
@@ -1160,8 +1217,12 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
             {
                 let platform_bun = resource_dir.join("binaries").join("bun-x86_64-pc-windows-msvc.exe");
                 if platform_bun.exists() {
-                    log::info!("Using bundled platform bun: {:?}", platform_bun);
-                    return Some(platform_bun);
+                    if is_bun_crashed(&platform_bun) {
+                        log::warn!("Skipping crashed bundled platform bun: {:?}", platform_bun);
+                    } else {
+                        log::info!("Using bundled platform bun: {:?}", platform_bun);
+                        return Some(platform_bun);
+                    }
                 }
             }
         }
@@ -1324,15 +1385,33 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
     None
 }
 
-/// Wait for a new sidecar to become healthy using TCP-level check
+/// Wait for a new sidecar to become healthy using TCP-level check.
 /// For initial startup, TCP check is sufficient and more reliable because:
 /// - Bun starts listening on TCP port before HTTP handler is fully ready
 /// - TCP check has been proven stable in production
 /// Note: For REUSING an existing sidecar, use check_sidecar_http_health() instead
-fn wait_for_health(port: u16) -> Result<(), String> {
+///
+/// `alive_check`: optional closure that returns `true` if the sidecar process is still alive.
+/// Checked every 20 iterations (~10s) to detect early crashes (e.g., AVX2 0xC0000005 on Windows
+/// VMs where Windows Defender delays the crash by 20-30s, bypassing the 50ms early exit check).
+fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Result<(), String> {
     let delay = Duration::from_millis(HEALTH_CHECK_DELAY_MS);
 
     for attempt in 1..=HEALTH_CHECK_MAX_ATTEMPTS {
+        // Every 20 attempts (~10s), check if process is still alive.
+        // This catches crashes that happen after the 50ms early exit check
+        // (e.g., Windows Defender scans bun.exe for 20-30s before it executes and crashes).
+        if attempt % 20 == 0 {
+            if let Some(ref check) = alive_check {
+                if !check() {
+                    return Err(format!(
+                        "Sidecar process exited during health check on port {} (detected at attempt {})",
+                        port, attempt
+                    ));
+                }
+            }
+        }
+
         match std::net::TcpStream::connect_timeout(
             &format!("127.0.0.1:{}", port).parse().unwrap(),
             Duration::from_millis(HEALTH_CHECK_TIMEOUT_MS),
@@ -1578,6 +1657,8 @@ pub fn start_tab_sidecar<R: Runtime>(
         // Process exited immediately, wait a bit for stderr thread to capture output
         thread::sleep(Duration::from_millis(100));
         log::error!("[sidecar] Process exited immediately with status: {:?}", status);
+        #[cfg(target_os = "windows")]
+        maybe_mark_crashed_bun(&status, &bun_path);
         let diag = diagnose_immediate_exit(&status, &bun_path);
         return Err(diag);
     }
@@ -1596,8 +1677,25 @@ pub fn start_tab_sidecar<R: Runtime>(
     // Drop lock before waiting for health
     drop(manager_guard);
 
+    // Build liveness check closure — detects process death during health check.
+    // Critical for Windows VMs where Defender delays bun.exe execution by 20-30s,
+    // causing the crash to happen well after the 50ms early exit check above.
+    let liveness_manager = manager.clone();
+    let liveness_tab_id = tab_id.to_string();
+    let alive_check: Box<dyn Fn() -> bool> = Box::new(move || {
+        if let Ok(mut guard) = liveness_manager.lock() {
+            if let Some(instance) = guard.get_instance_mut(&liveness_tab_id) {
+                matches!(instance.process.try_wait(), Ok(None))
+            } else {
+                false
+            }
+        } else {
+            true // can't acquire lock, assume alive
+        }
+    });
+
     // Wait for health
-    match wait_for_health(port) {
+    match wait_for_health(port, Some(alive_check)) {
         Ok(()) => {
             // Mark as healthy
             let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
@@ -1615,6 +1713,8 @@ pub fn start_tab_sidecar<R: Runtime>(
             if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
                 match instance.process.try_wait() {
                     Ok(Some(status)) => {
+                        #[cfg(target_os = "windows")]
+                        maybe_mark_crashed_bun(&status, &bun_path);
                         let detail = format!(" | process exited: {:?}", status);
                         ulog_error!("[sidecar]{}", detail);
                         diag.push_str(&detail);
@@ -2139,6 +2239,8 @@ fn create_new_session_sidecar<R: Runtime>(
     if let Ok(Some(status)) = child.try_wait() {
         thread::sleep(Duration::from_millis(100));
         log::error!("[sidecar] SessionSidecar exited immediately with status: {:?}", status);
+        #[cfg(target_os = "windows")]
+        maybe_mark_crashed_bun(&status, &bun_path);
         let diag = diagnose_immediate_exit(&status, &bun_path);
         return Err(diag);
     }
@@ -2161,8 +2263,23 @@ fn create_new_session_sidecar<R: Runtime>(
     // Drop lock before waiting for health
     drop(manager_guard);
 
+    // Build liveness check closure for session sidecar
+    let liveness_manager = manager.clone();
+    let liveness_session_id = session_id.to_string();
+    let alive_check: Box<dyn Fn() -> bool> = Box::new(move || {
+        if let Ok(mut guard) = liveness_manager.lock() {
+            if let Some(sidecar) = guard.sidecars.get_mut(&liveness_session_id) {
+                matches!(sidecar.process.try_wait(), Ok(None))
+            } else {
+                false
+            }
+        } else {
+            true // can't acquire lock, assume alive
+        }
+    });
+
     // Wait for health
-    match wait_for_health(port) {
+    match wait_for_health(port, Some(alive_check)) {
         Ok(()) => {
             // Mark as healthy
             let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
@@ -2180,8 +2297,15 @@ fn create_new_session_sidecar<R: Runtime>(
         }
         Err(e) => {
             log::error!("[sidecar] SessionSidecar health check failed: {}", e);
-            // Remove the failed sidecar
             let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
+            // Check exit status and mark crashed bun for fallback
+            #[cfg(target_os = "windows")]
+            if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+                if let Ok(Some(status)) = sidecar.process.try_wait() {
+                    maybe_mark_crashed_bun(&status, &bun_path);
+                }
+            }
+            // Remove the failed sidecar
             manager_guard.sidecars.remove(session_id);
             Err(e)
         }

@@ -41,19 +41,27 @@ try {
         Write-Host "下载 Bun 运行时 (v$BunVersion)..." -ForegroundColor Blue
 
         $WinFile = Join-Path $BinariesDir "bun-x86_64-pc-windows-msvc.exe"
+        # Always re-download: the output filename doesn't encode build variant (baseline vs AVX2),
+        # so we can't tell if an existing file is the correct baseline build.
+        if (Test-Path $WinFile) {
+            Remove-Item -Force $WinFile
+        }
         if (-not (Test-Path $WinFile)) {
-            Write-Host "  下载 Windows x64 版本..." -ForegroundColor Cyan
+            Write-Host "  下载 Windows x64 版本 (baseline)..." -ForegroundColor Cyan
             $TempZip = Join-Path $env:TEMP "bun-windows.zip"
             $TempDir = Join-Path $env:TEMP "bun-windows-extract"
 
             try {
-                $DownloadUrl = "https://github.com/oven-sh/bun/releases/download/bun-v$BunVersion/bun-windows-x64.zip"
+                # Use baseline build (SSE2-only) for maximum compatibility with VMs and older CPUs.
+                # The standard bun-windows-x64.zip requires AVX2 which many VMs don't support,
+                # causing STATUS_ACCESS_VIOLATION (0xC0000005) crashes.
+                $DownloadUrl = "https://github.com/oven-sh/bun/releases/download/bun-v$BunVersion/bun-windows-x64-baseline.zip"
                 Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempZip -UseBasicParsing
 
                 if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
                 Expand-Archive -Path $TempZip -DestinationPath $TempDir -Force
 
-                $ExtractedBun = Join-Path $TempDir "bun-windows-x64\bun.exe"
+                $ExtractedBun = Join-Path $TempDir "bun-windows-x64-baseline\bun.exe"
                 if (Test-Path $ExtractedBun) {
                     Copy-Item -Path $ExtractedBun -Destination $WinFile -Force
                     Write-Host "  OK - Windows x64" -ForegroundColor Green
