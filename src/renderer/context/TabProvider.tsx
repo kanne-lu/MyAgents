@@ -1394,6 +1394,12 @@ export default function TabProvider({
 
         const sse = createSseConnection(tabId, currentSessionIdRef);
         sse.setEventHandler(handleSseEvent);
+        sse.setStatusHandler((status) => {
+            if (status === 'disconnected' || status === 'failed') {
+                setIsConnected(false);
+                setIsLoading(false);
+            }
+        });
         sseRef.current = sse;
 
         try {
@@ -1567,12 +1573,7 @@ export default function TabProvider({
                 if (localQueueId) {
                     setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
                 }
-                setMessages(prev => [...prev, {
-                    id: `error-${crypto.randomUUID()}`,
-                    role: 'assistant' as const,
-                    content: `发送失败: ${response.error ?? '未知错误'}`,
-                    timestamp: new Date(),
-                }]);
+                setAgentError(response.error ?? '发送失败');
                 pendingAttachmentsRef.current = null;
             }
         }).catch((error) => {
@@ -1580,12 +1581,9 @@ export default function TabProvider({
             if (localQueueId) {
                 setQueuedMessages(prev => prev.filter(q => q.queueId !== localQueueId));
             }
-            setMessages(prev => [...prev, {
-                id: `error-${crypto.randomUUID()}`,
-                role: 'assistant' as const,
-                content: `发送失败: ${error instanceof Error ? error.message : '网络错误'}`,
-                timestamp: new Date(),
-            }]);
+            const msg = error instanceof Error ? error.message : '网络错误';
+            if (msg !== 'Failed to fetch') setAgentError(msg);
+            else setIsLoading(false);
             pendingAttachmentsRef.current = null;
         });
 
