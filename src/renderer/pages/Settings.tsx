@@ -292,14 +292,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
     const [showWorkspaceSelect, setShowWorkspaceSelect] = useState(false);
 
-    const handleSelectAgent = useCallback((_agentId: string, _workspacePath: string) => {
-        setOverlayAgent({ agentId: _agentId, workspacePath: _workspacePath });
-    }, []);
-
-    // Open workspace's config panel with Agent tab (for upgrade or settings)
-    const handleUpgradeWorkspace = useCallback(() => {
-        setShowWorkspaceSelect(true);
-    }, []);
 
     const handleWorkspaceSelected = useCallback((project: import('@/config/types').Project) => {
         setShowWorkspaceSelect(false);

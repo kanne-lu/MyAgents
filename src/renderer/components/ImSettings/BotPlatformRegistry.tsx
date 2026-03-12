@@ -61,6 +61,8 @@ export default function BotPlatformRegistry() {
   const toast = useToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const isMountedRef = useRef(true);
+  useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -70,8 +72,9 @@ export default function BotPlatformRegistry() {
         const { invoke } = await import('@tauri-apps/api/core');
         const plugins = await invoke<InstalledPlugin[]>('cmd_list_openclaw_plugins');
         if (!cancelled) setInstalledPlugins(plugins);
-      } catch { /* ignore */ }
-      finally { if (!cancelled) setLoading(false); }
+      } catch (err) {
+        console.warn('[BotPlatformRegistry] Failed to load plugins:', err);
+      } finally { if (!cancelled) setLoading(false); }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -81,12 +84,14 @@ export default function BotPlatformRegistry() {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('cmd_uninstall_openclaw_plugin', { pluginId: pendingUninstall.pluginId });
+      if (!isMountedRef.current) return;
       setInstalledPlugins(prev => prev.filter(p => p.pluginId !== pendingUninstall.pluginId));
       toastRef.current.success(`已卸载 ${pendingUninstall.manifest?.name || pendingUninstall.pluginId}`);
     } catch (err) {
+      if (!isMountedRef.current) return;
       toastRef.current.error(String(err));
     } finally {
-      setPendingUninstall(null);
+      if (isMountedRef.current) setPendingUninstall(null);
     }
   }, [pendingUninstall]);
 
@@ -102,12 +107,14 @@ export default function BotPlatformRegistry() {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const result = await invoke<InstalledPlugin>('cmd_install_openclaw_plugin', { npmSpec: promoted.npmSpec });
+      if (!isMountedRef.current) return;
       setInstalledPlugins(prev => [...prev, result]);
       toastRef.current.success(`${promoted.name} 安装成功`);
     } catch (err) {
+      if (!isMountedRef.current) return;
       toastRef.current.error(`安装失败: ${err}`);
     } finally {
-      setAutoInstalling(null);
+      if (isMountedRef.current) setAutoInstalling(null);
     }
   }, [installedPlugins]);
 
@@ -117,14 +124,16 @@ export default function BotPlatformRegistry() {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const result = await invoke<InstalledPlugin>('cmd_install_openclaw_plugin', { npmSpec: installNpmSpec.trim() });
+      if (!isMountedRef.current) return;
       setInstalledPlugins(prev => [...prev, result]);
       toastRef.current.success(`已安装 ${result.manifest?.name || result.pluginId}`);
       setShowInstallInput(false);
       setInstallNpmSpec('');
     } catch (err) {
+      if (!isMountedRef.current) return;
       toastRef.current.error(`安装失败: ${err}`);
     } finally {
-      setInstalling(false);
+      if (isMountedRef.current) setInstalling(false);
     }
   }, [installNpmSpec]);
 
@@ -134,17 +143,18 @@ export default function BotPlatformRegistry() {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const result = await invoke<InstalledPlugin>('cmd_install_openclaw_plugin', { npmSpec });
+      if (!isMountedRef.current) return;
       setInstalledPlugins(prev => prev.map(p => p.pluginId === pluginId ? result : p));
       toastRef.current.success(`已更新至 ${result.packageVersion || '最新版'}`);
     } catch (err) {
+      if (!isMountedRef.current) return;
       toastRef.current.error(`更新失败: ${err}`);
     } finally {
-      setUpdating(null);
+      if (isMountedRef.current) setUpdating(null);
     }
   }, []);
 
   const promotedIds = new Set(PROMOTED_PLUGINS.map(p => p.pluginId));
-  const installedIds = new Set(installedPlugins.map(p => p.pluginId));
 
   // Community plugins (exclude promoted)
   const pluginPlatforms: PlatformEntry[] = installedPlugins
