@@ -18,7 +18,19 @@ import {
   ExternalLink
 } from 'lucide-react';
 import { forwardRef, lazy, memo, Suspense, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Tree } from 'react-arborist';
+import { Tree, type TreeApi } from 'react-arborist';
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  useDraggable,
+  useDroppable,
+  type DragStartEvent,
+  type DragOverEvent,
+  type DragEndEvent,
+} from '@dnd-kit/core';
 
 import { useTabApi } from '@/context/TabContext';
 import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
@@ -114,6 +126,92 @@ function getFolderName(path: string): string {
   return parts[parts.length - 1] || 'Workspace';
 }
 
+/** Tree row component — uses @dnd-kit hooks for drag (useDraggable) + drop (useDroppable) */
+interface TreeNodeRowProps {
+  data: DirectoryTreeNode;
+  style: React.CSSProperties;
+  isDir: boolean;
+  isLoadingDir: boolean;
+  isDropTarget: boolean;
+  isInternalDropTarget: boolean;
+  isDragging: boolean;
+  isSelected: boolean;
+  isOpen: boolean;
+  isInternal: boolean;
+  Icon: React.ElementType;
+  onClick: (e: React.MouseEvent) => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+  onDragEnter: (e: React.DragEvent) => void;
+  onDragLeave: (e: React.DragEvent) => void;
+}
+
+const TreeNodeRow = memo(function TreeNodeRow({
+  data, style, isDir, isLoadingDir, isDropTarget, isInternalDropTarget,
+  isDragging, isSelected, isOpen, isInternal, Icon,
+  onClick, onContextMenu, onDragEnter, onDragLeave,
+}: TreeNodeRowProps) {
+  // Every row is draggable
+  const { attributes, listeners, setNodeRef: setDragRef } = useDraggable({
+    id: `drag:${data.path}`,
+    data,
+  });
+
+  // Only directories are droppable
+  const { setNodeRef: setDropRef, isOver } = useDroppable({
+    id: `drop:${data.path}`,
+    disabled: !isDir,
+  });
+
+  // Merge refs: both drag source and drop target on same element
+  const mergedRef = useCallback((el: HTMLDivElement | null) => {
+    setDragRef(el);
+    setDropRef(el);
+  }, [setDragRef, setDropRef]);
+
+  const highlight = isDropTarget || isInternalDropTarget || (isOver && isDir);
+
+  return (
+    <div
+      ref={mergedRef}
+      style={style}
+      data-tree-row
+      {...attributes}
+      {...listeners}
+      className={`flex h-full cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${
+        highlight
+          ? 'ring-1 ring-inset ring-[var(--accent)]/40 bg-[var(--accent)]/8'
+          : isDragging
+            ? 'opacity-40'
+            : isSelected
+              ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
+              : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+      }`}
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      onDragEnter={onDragEnter}
+      onDragLeave={onDragLeave}
+    >
+      <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center text-[var(--ink-muted)]">
+        {isLoadingDir ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : isInternal ? (
+          <ChevronRight
+            className={`h-3 w-3 transition-transform ${isOpen ? 'rotate-90' : ''}`}
+          />
+        ) : null}
+      </span>
+      <Icon
+        className={`h-3.5 w-3.5 flex-shrink-0 ${
+          isDir
+            ? 'text-[var(--accent-warm)]/70'
+            : 'text-[var(--accent-warm)]'
+        }`}
+      />
+      <span className="min-w-0 flex-1 truncate font-medium select-none">{data.name}</span>
+    </div>
+  );
+});
+
 const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps>(function DirectoryPanel({
   agentDir,
   projectIcon,
@@ -157,6 +255,13 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
   const [isExternalDrop, setIsExternalDrop] = useState(false);
   const [dropTargetPath, setDropTargetPath] = useState<string | null>(null);
   const dragCounterRef = useRef(0);
+
+  // Internal drag-drop state (@dnd-kit pointer-events based)
+  const [activeDragItem, setActiveDragItem] = useState<{ paths: string[]; name: string; icon: React.ElementType } | null>(null);
+  const [internalDropTarget, setInternalDropTarget] = useState<string | null>(null);
+  const internalDropTargetRef = useRef<string | null>(null);
+  const autoExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const treeApiRef = useRef<TreeApi<DirectoryTreeNode> | undefined>(undefined);
 
   // Git branch state
   const [gitBranch, setGitBranch] = useState<string | null>(null);
@@ -630,6 +735,104 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
     // Don't clear dropTargetPath here - let tree level handler or drop handler do it
   }, []);
 
+  // Move handler (used by both internal DnD and context menu)
+  const handleMove = useCallback(async (sourcePaths: string[], targetDir: string) => {
+    try {
+      await apiPost('/agent/move', { sourcePaths, targetDir });
+      refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Move failed');
+    }
+  }, [apiPost, refresh]);
+
+  // --- Internal DnD via @dnd-kit (pointer-events based, reliable in Tauri WebView) ---
+  const updateDropTarget = useCallback((val: string | null) => {
+    internalDropTargetRef.current = val;
+    setInternalDropTarget(val);
+  }, []);
+
+  const clearAutoExpandTimer = useCallback(() => {
+    if (autoExpandTimerRef.current !== null) {
+      clearTimeout(autoExpandTimerRef.current);
+      autoExpandTimerRef.current = null;
+    }
+  }, []);
+
+  // Lookup map for hit-testing during drag
+  const nodeByPath = useMemo(() => {
+    const map = new Map<string, DirectoryTreeNode>();
+    flattenedNodes.forEach(n => map.set(n.path, n));
+    return map;
+  }, [flattenedNodes]);
+
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } })
+  );
+
+  const handleDndDragStart = useCallback((event: DragStartEvent) => {
+    const data = event.active.data.current as DirectoryTreeNode | undefined;
+    if (!data) return;
+    // Multi-select: if dragged item is selected and there are multiple selections, drag all
+    const paths = selectedNodes.some(n => n.path === data.path) && selectedNodes.length > 1
+      ? selectedNodes.map(n => n.path)
+      : [data.path];
+    const icon = data.type === 'dir' ? Folder : getFileIcon(data.name);
+    setActiveDragItem({ paths, name: data.name, icon });
+  }, [selectedNodes]);
+
+  const handleDndDragOver = useCallback((event: DragOverEvent) => {
+    const overId = event.over?.id as string | undefined;
+    if (!overId) {
+      // Over empty space — target root
+      if (internalDropTargetRef.current !== '') {
+        updateDropTarget('');
+        clearAutoExpandTimer();
+      }
+      return;
+    }
+    // Drop targets have id = "drop:{path}"
+    const targetPath = overId.startsWith('drop:') ? overId.slice(5) : null;
+    if (targetPath === null) return;
+
+    if (internalDropTargetRef.current !== targetPath) {
+      updateDropTarget(targetPath);
+      clearAutoExpandTimer();
+      // Auto-expand closed folder after 600ms hover
+      const nodeData = nodeByPath.get(targetPath);
+      autoExpandTimerRef.current = setTimeout(() => {
+        if (nodeData?.loaded === false) {
+          void expandDir(targetPath);
+        }
+        treeApiRef.current?.open(targetPath);
+      }, 600);
+    }
+  }, [updateDropTarget, clearAutoExpandTimer, nodeByPath, expandDir]);
+
+  const handleDndDragEnd = useCallback((_event: DragEndEvent) => {
+    const dragItem = activeDragItem;
+    const targetPath = internalDropTargetRef.current;
+    // Clean up state first
+    setActiveDragItem(null);
+    updateDropTarget(null);
+    clearAutoExpandTimer();
+
+    if (!dragItem || targetPath === null) return;
+    const sourcePaths = dragItem.paths;
+    // Don't drop on itself or into descendant
+    if (sourcePaths.includes(targetPath)) return;
+    if (targetPath && sourcePaths.some(p => targetPath.startsWith(p + '/'))) return;
+    void handleMove(sourcePaths, targetPath);
+  }, [activeDragItem, handleMove, updateDropTarget, clearAutoExpandTimer]);
+
+  const handleDndDragCancel = useCallback(() => {
+    setActiveDragItem(null);
+    updateDropTarget(null);
+    clearAutoExpandTimer();
+  }, [updateDropTarget, clearAutoExpandTimer]);
+
+  // Clean up auto-expand timer on unmount
+  useEffect(() => clearAutoExpandTimer, [clearAutoExpandTimer]);
+
   // Keyboard paste handler (Cmd/Ctrl+V)
   useEffect(() => {
     const handlePaste = async (e: ClipboardEvent) => {
@@ -712,15 +915,6 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
       refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Rename failed');
-    }
-  };
-
-  const handleMove = async (sourcePaths: string[], targetDir: string) => {
-    try {
-      await apiPost('/agent/move', { sourcePaths, targetDir });
-      refresh();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Move failed');
     }
   };
 
@@ -1117,25 +1311,28 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                 <div className="px-4 py-3 text-xs text-[var(--ink-muted)]">Loading...</div>
               )}
               {directoryInfo && (
+                <DndContext
+                  sensors={dndSensors}
+                  onDragStart={handleDndDragStart}
+                  onDragOver={handleDndDragOver}
+                  onDragEnd={handleDndDragEnd}
+                  onDragCancel={handleDndDragCancel}
+                >
                 <Tree
+                  ref={treeApiRef}
                   data={treeData}
                   openByDefault={false}
                   disableMultiSelection
                   disableEdit
+                  disableDrag
+                  disableDrop
                   rowHeight={26}
                   indent={16}
                   height={treeHeight}
                   width="100%"
                   className="overscroll-none"
-                  onMove={async ({ dragNodes, parentNode }) => {
-                    const sourcePaths = dragNodes.map(n => (n.data as DirectoryTreeNode).path);
-                    const targetDir = parentNode
-                      ? (parentNode.data as DirectoryTreeNode).path ?? ''
-                      : '';
-                    await handleMove(sourcePaths, targetDir);
-                  }}
                 >
-                {({ node, style, dragHandle }) => {
+                {({ node, style }) => {
                   const data = node.data as DirectoryTreeNode;
                   const isDir = data.type === 'dir';
                   // Check if this is the myagents_files folder (special folder for imported files)
@@ -1234,49 +1431,45 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                     }
                   };
 
-                  const isInternalDropTarget = node.willReceiveDrop;
-                  const isDragging = node.isDragging;
+                  // @dnd-kit: check if this node is a drop target or being dragged
+                  const isInternalDropTarget = isDir && internalDropTarget === data.path;
+                  const isDragging = !!activeDragItem?.paths.includes(data.path);
 
                   return (
-                    <div
-                      ref={dragHandle}
+                    <TreeNodeRow
+                      key={data.id}
+                      data={data}
                       style={style}
-                      data-tree-row
-                      className={`flex h-full cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${
-                        isDropTarget || isInternalDropTarget
-                          ? 'ring-2 ring-inset ring-[var(--accent)]/50 bg-[var(--accent)]/10'
-                          : isDragging
-                            ? 'opacity-40'
-                            : isSelected
-                              ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
-                              : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
-                        }`}
+                      isDir={isDir}
+                      isLoadingDir={isLoadingDir}
+                      isDropTarget={isDropTarget}
+                      isInternalDropTarget={isInternalDropTarget}
+                      isDragging={isDragging}
+                      isSelected={isSelected}
+                      isOpen={node.isOpen}
+                      isInternal={node.isInternal}
+                      Icon={Icon}
                       onClick={handleRowClick}
                       onContextMenu={(e) => handleContextMenu(e, data)}
                       onDragEnter={(e) => handleRowDragEnter(e, data.path, isDir)}
                       onDragLeave={handleRowDragLeave}
-                    >
-                      <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center text-[var(--ink-muted)]">
-                        {isLoadingDir ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : node.isInternal ? (
-                          <ChevronRight
-                            className={`h-3 w-3 transition-transform ${node.isOpen ? 'rotate-90' : ''}`}
-                          />
-                        ) : null}
-                      </span>
-                      <Icon
-                        className={`h-3.5 w-3.5 flex-shrink-0 ${
-                          isDir
-                            ? 'text-[var(--accent-warm)]/70'
-                            : 'text-[var(--accent-warm)]'
-                          }`}
-                      />
-                      <span className="min-w-0 flex-1 truncate font-medium select-none">{data.name}</span>
-                    </div>
+                    />
                   );
                 }}
                 </Tree>
+                {/* Drag overlay — floating preview that follows cursor */}
+                <DragOverlay dropAnimation={null}>
+                  {activeDragItem && (
+                    <div className="flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-[13px] shadow-lg">
+                      <activeDragItem.icon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent-warm)]" />
+                      <span className="font-medium text-[var(--ink)]">{activeDragItem.name}</span>
+                      {activeDragItem.paths.length > 1 && (
+                        <span className="text-xs text-[var(--ink-muted)]">+{activeDragItem.paths.length - 1}</span>
+                      )}
+                    </div>
+                  )}
+                </DragOverlay>
+                </DndContext>
               )}
             </div>
 
