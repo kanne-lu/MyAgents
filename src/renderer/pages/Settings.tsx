@@ -4266,16 +4266,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 )}
                             </div>
 
-                            <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">API Key</label>
-                                <input
-                                    type="password"
-                                    value={customForm.apiKey}
-                                    onChange={(e) => setCustomForm((p) => ({ ...p, apiKey: e.target.value }))}
-                                    placeholder="可选，稍后设置"
-                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--ink)] focus:outline-none"
-                                />
-                            </div>
+                            {/* API Key moved to provider list page for consistency with edit flow */}
                         </div>
 
                         <div className="flex-shrink-0 border-t border-[var(--line)] px-6 py-4">
