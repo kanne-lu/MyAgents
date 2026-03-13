@@ -9,7 +9,6 @@ import { getWorkspaceCronTasks, getBackgroundSessions } from '@/api/cronTaskClie
 import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
 import { isTauriEnvironment } from '@/utils/browserMock';
-import type { ImBotStatus } from '../../shared/types/im';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
 import type { SessionTag } from '@/hooks/useTaskCenterData';
@@ -51,8 +50,7 @@ export default function SessionHistoryDropdown({
     const onCloseRef = useRef(onClose);
     const statsSessionRef = useRef(statsSession);
 
-    // IM bot statuses for active session tagging
-    const [imBotStatuses, setImBotStatuses] = useState<Record<string, ImBotStatus>>({});
+    // Agent statuses for active session tagging
     const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
     const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>([]);
 
@@ -61,14 +59,8 @@ export default function SessionHistoryDropdown({
         const map = new Map<string, SessionTag[]>();
         if (!sessions) return map;
 
-        // Build IM session map from legacy + agent statuses
+        // Build IM session map from agent channel statuses
         const imSessionPlatformMap = new Map<string, string>();
-        for (const status of Object.values(imBotStatuses)) {
-            if (status.status !== 'online' && status.status !== 'connecting') continue;
-            for (const activeSession of status.activeSessions) {
-                imSessionPlatformMap.set(activeSession.sessionId, extractPlatformDisplay(activeSession.sessionKey));
-            }
-        }
         for (const agentStatus of Object.values(agentStatuses)) {
             for (const channel of agentStatus.channels) {
                 if (channel.status !== 'online' && channel.status !== 'connecting') continue;
@@ -97,7 +89,7 @@ export default function SessionHistoryDropdown({
         }
 
         return map;
-    }, [sessions, cronTasks, backgroundSessionIds, imBotStatuses, agentStatuses]);
+    }, [sessions, cronTasks, backgroundSessionIds, agentStatuses]);
 
     // Sorted sessions: tagged first, then by lastActiveAt descending within each group
     const sortedSessions = useMemo(() => {
@@ -123,23 +115,16 @@ export default function SessionHistoryDropdown({
         let cancelled = false;
 
         (async () => {
-            // Load sessions, cron tasks, IM bot statuses, agent statuses, and background sessions in parallel
-            const imStatusPromise = isTauriEnvironment()
-                ? import('@tauri-apps/api/core')
-                    .then(({ invoke }) => invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status'))
-                    .catch(() => ({} as Record<string, ImBotStatus>))
-                : Promise.resolve({} as Record<string, ImBotStatus>);
-
+            // Load sessions, cron tasks, agent statuses, and background sessions in parallel
             const agentStatusPromise = isTauriEnvironment()
                 ? import('@tauri-apps/api/core')
                     .then(({ invoke }) => invoke<AgentStatusMap>('cmd_all_agents_status'))
                     .catch(() => ({} as AgentStatusMap))
                 : Promise.resolve({} as AgentStatusMap);
 
-            const [sessionsResult, cronTasksResult, imStatuses, agentStatusResult, bgSessionsResult] = await Promise.allSettled([
+            const [sessionsResult, cronTasksResult, agentStatusResult, bgSessionsResult] = await Promise.allSettled([
                 getSessions(agentDir),
                 getWorkspaceCronTasks(agentDir),
-                imStatusPromise,
                 agentStatusPromise,
                 getBackgroundSessions().catch(() => [] as string[]),
             ]);
@@ -162,12 +147,7 @@ export default function SessionHistoryDropdown({
                 setCronTasks([]); // Fall back to no cron task indicators
             }
 
-            // IM bot statuses are optional enhancement
-            if (imStatuses.status === 'fulfilled') {
-                setImBotStatuses(imStatuses.value);
-            }
-
-            // Agent statuses (new Agent channel system)
+            // Agent statuses
             if (agentStatusResult.status === 'fulfilled') {
                 setAgentStatuses(agentStatusResult.value);
             }
@@ -183,7 +163,6 @@ export default function SessionHistoryDropdown({
             // Reset state when closing or agentDir changes
             setSessions(null);
             setCronTasks(null);
-            setImBotStatuses({});
             setAgentStatuses({});
             setBackgroundSessionIds([]);
             setStatsSession(null);
@@ -221,18 +200,15 @@ export default function SessionHistoryDropdown({
             const u2 = await listen('cron:task-stopped', refreshCron);
             unlisteners.push(u1, u2);
 
-            // IM/Agent status changes → refresh statuses
+            // Agent status changes → refresh statuses
             const refreshStatuses = () => {
                 import('@tauri-apps/api/core').then(({ invoke }) => {
-                    invoke<Record<string, ImBotStatus>>('cmd_im_all_bots_status')
-                        .then(s => { if (mounted) setImBotStatuses(s); }).catch(() => {});
                     invoke<AgentStatusMap>('cmd_all_agents_status')
                         .then(s => { if (mounted) setAgentStatuses(s); }).catch(() => {});
                 }).catch(() => {});
             };
-            const u3 = await listen('im:status-changed', refreshStatuses);
-            const u4 = await listen('agent:status-changed', refreshStatuses);
-            unlisteners.push(u3, u4);
+            const u3 = await listen('agent:status-changed', refreshStatuses);
+            unlisteners.push(u3);
 
             // Background completion → refresh background sessions
             const u5 = await listen('session:background-complete', () => {

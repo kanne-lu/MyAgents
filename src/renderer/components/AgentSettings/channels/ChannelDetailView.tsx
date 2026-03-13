@@ -26,7 +26,8 @@ import AiConfigCard from '../../ImSettings/components/AiConfigCard';
 import DingtalkCardConfig from '../../ImSettings/components/DingtalkCardConfig';
 import GroupPermissionList from '../../ImSettings/components/GroupPermissionList';
 import type { AgentConfig, ChannelConfig, ChannelOverrides } from '../../../../shared/types/agent';
-import type { ImBotStatus, GroupActivation } from '../../../../shared/types/im';
+import type { GroupActivation } from '../../../../shared/types/im';
+import type { ChannelStatusData } from '@/hooks/useAgentStatuses';
 import { isOpenClawPlatform } from '../../../../shared/types/im';
 import type { InstalledPlugin } from '../../../../shared/types/im';
 import { findPromotedByPlatform } from '../../ImSettings/promotedPlugins';
@@ -106,7 +107,7 @@ export default function ChannelDetailView({
     );
 
     // Bot runtime status (uses channelId as botId)
-    const [botStatus, setBotStatus] = useState<ImBotStatus | null>(null);
+    const [botStatus, setBotStatus] = useState<ChannelStatusData | null>(null);
     const [verifyStatus, setVerifyStatus] = useState<'idle' | 'verifying' | 'valid' | 'invalid'>('idle');
     const [botUsername, setBotUsername] = useState<string | undefined>();
     const [toggling, setToggling] = useState(false);
@@ -195,10 +196,10 @@ export default function ChannelDetailView({
             if (togglingRef.current) return;
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
-                const status = await invoke<ImBotStatus>('cmd_im_bot_status', { botId: channelId });
+                const status = await invoke<ChannelStatusData | null>('cmd_agent_channel_status', { agentId: agent.id, channelId });
                 if (isMountedRef.current && !togglingRef.current) {
                     setBotStatus(status);
-                    if (status.botUsername) {
+                    if (status?.botUsername) {
                         setBotUsername(status.botUsername);
                         setVerifyStatus('valid');
                         // Auto-sync channel name from platform username (once)

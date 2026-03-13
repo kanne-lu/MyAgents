@@ -202,6 +202,133 @@ pub fn bot_dedup_path(bot_id: &str) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
+// Agent channel path helpers (v0.1.41 — TD-3)
+// ---------------------------------------------------------------------------
+
+/// ~/.myagents/agents/{agentId}/channels/{channelId}/
+pub fn agent_channel_data_dir(agent_id: &str, channel_id: &str) -> PathBuf {
+    debug_assert!(
+        !agent_id.is_empty()
+            && !agent_id.contains('/')
+            && !agent_id.contains('\\')
+            && !agent_id.contains(".."),
+        "[im-health] Invalid agent_id for path construction: {:?}",
+        agent_id
+    );
+    debug_assert!(
+        !channel_id.is_empty()
+            && !channel_id.contains('/')
+            && !channel_id.contains('\\')
+            && !channel_id.contains(".."),
+        "[im-health] Invalid channel_id for path construction: {:?}",
+        channel_id
+    );
+    myagents_dir()
+        .join("agents")
+        .join(agent_id)
+        .join("channels")
+        .join(channel_id)
+}
+
+pub fn agent_channel_health_path(agent_id: &str, channel_id: &str) -> PathBuf {
+    agent_channel_data_dir(agent_id, channel_id).join("state.json")
+}
+
+pub fn agent_channel_buffer_path(agent_id: &str, channel_id: &str) -> PathBuf {
+    agent_channel_data_dir(agent_id, channel_id).join("buffer.json")
+}
+
+pub fn agent_channel_dedup_path(agent_id: &str, channel_id: &str) -> PathBuf {
+    agent_channel_data_dir(agent_id, channel_id).join("dedup.json")
+}
+
+/// Migrate bot data from legacy im_bots/{channelId}/ to agents/{agentId}/channels/{channelId}/.
+/// Copies files to new path first; only deletes old path on success. Idempotent (skips if new exists).
+pub fn migrate_bot_data_to_agent(channel_id: &str, agent_id: &str) {
+    let old_dir = bot_data_dir(channel_id);
+    let new_dir = agent_channel_data_dir(agent_id, channel_id);
+
+    // Nothing to migrate if old dir doesn't exist
+    if !old_dir.exists() {
+        // Ensure new dir exists for fresh starts
+        let _ = std::fs::create_dir_all(&new_dir);
+        return;
+    }
+
+    // Skip if new dir already has data (idempotent)
+    if new_dir.join("state.json").exists() {
+        ulog_info!(
+            "[im-health] Agent channel data already exists at {:?}, skipping migration",
+            new_dir
+        );
+        return;
+    }
+
+    // Create new dir
+    if let Err(e) = std::fs::create_dir_all(&new_dir) {
+        ulog_warn!(
+            "[im-health] Failed to create agent channel dir {:?}: {}, skipping migration",
+            new_dir, e
+        );
+        return;
+    }
+
+    // Copy each file
+    let files = ["state.json", "buffer.json", "dedup.json"];
+    let mut all_copied = true;
+    for file in &files {
+        let old_path = old_dir.join(file);
+        let new_path = new_dir.join(file);
+        if old_path.exists() {
+            match std::fs::copy(&old_path, &new_path) {
+                Ok(_) => ulog_info!(
+                    "[im-health] Migrated {} from im_bots/{} to agents/{}/channels/{}",
+                    file, channel_id, agent_id, channel_id
+                ),
+                Err(e) => {
+                    ulog_warn!(
+                        "[im-health] Failed to copy {} during migration: {}",
+                        file, e
+                    );
+                    all_copied = false;
+                }
+            }
+        }
+    }
+
+    // Only delete old dir if all files copied successfully
+    if all_copied {
+        match std::fs::remove_dir_all(&old_dir) {
+            Ok(_) => ulog_info!(
+                "[im-health] Removed old bot data dir: im_bots/{}",
+                channel_id
+            ),
+            Err(e) => ulog_warn!(
+                "[im-health] Failed to remove old bot dir {:?}: {}",
+                old_dir, e
+            ),
+        }
+    }
+}
+
+/// Clean up agent channel data (called when channel config is removed).
+pub fn cleanup_agent_channel_data(agent_id: &str, channel_id: &str) {
+    let dir = agent_channel_data_dir(agent_id, channel_id);
+    if dir.exists() {
+        match std::fs::remove_dir_all(&dir) {
+            Ok(_) => ulog_info!(
+                "[im-health] Cleaned agent channel data: agents/{}/channels/{}",
+                agent_id, channel_id
+            ),
+            Err(e) => ulog_warn!(
+                "[im-health] Failed to remove agent channel dir {:?}: {}",
+                dir, e
+            ),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Legacy path helpers (private, migration only)
 // ---------------------------------------------------------------------------
 
@@ -361,16 +488,38 @@ fn cleanup_orphaned_flat_files() {
 }
 
 /// Read active bot IDs from config.json. Returns None on any read/parse error.
+/// Includes both legacy imBotConfigs IDs and agent channel IDs to prevent orphan cleanup
+/// from accidentally deleting data for either path.
 fn read_active_bot_ids(myagents: &Path) -> Option<HashSet<String>> {
     let config_path = myagents.join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let bots = config.get("imBotConfigs")?.as_array()?;
-    Some(
-        bots.iter()
-            .filter_map(|b| b.get("id")?.as_str().map(|s| s.to_string()))
-            .collect(),
-    )
+
+    let mut ids = HashSet::new();
+
+    // Legacy imBotConfigs
+    if let Some(bots) = config.get("imBotConfigs").and_then(|v| v.as_array()) {
+        for b in bots {
+            if let Some(id) = b.get("id").and_then(|v| v.as_str()) {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+
+    // Agent channel IDs (v0.1.41)
+    if let Some(agents) = config.get("agents").and_then(|v| v.as_array()) {
+        for agent in agents {
+            if let Some(channels) = agent.get("channels").and_then(|v| v.as_array()) {
+                for ch in channels {
+                    if let Some(id) = ch.get("id").and_then(|v| v.as_str()) {
+                        ids.insert(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Some(ids)
 }
 
 /// Extract bot_id from flat filename like "im_{botId}_state.json".

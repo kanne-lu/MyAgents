@@ -376,23 +376,14 @@ struct WakeRequest {
     text: Option<String>,
 }
 
-/// Look up a bot instance by ID — checks ManagedImBots first, then falls back to agent channels.
+/// Look up a bot instance by ID — checks ManagedAgents first (primary path), then
+/// falls back to ManagedImBots (legacy compatibility, usually empty after migration).
 /// Returns (router Arc, heartbeat wake_tx) with locks already dropped.
 async fn find_bot_refs(bot_id: &str) -> Option<(
     std::sync::Arc<tokio::sync::Mutex<im::router::SessionRouter>>,
     Option<tokio::sync::mpsc::Sender<im::types::WakeReason>>,
 )> {
-    // Try legacy IM bots first
-    if let Some(bots) = get_im_bots() {
-        let bots_guard = bots.lock().await;
-        if let Some(instance) = bots_guard.get(bot_id) {
-            return Some((
-                std::sync::Arc::clone(&instance.router),
-                instance.heartbeat_wake_tx.clone(),
-            ));
-        }
-    }
-    // Fall back to agent channels
+    // Check agent channels first (primary path after v0.1.41 migration)
     if let Some(agents) = get_agents() {
         let agents_guard = agents.lock().await;
         for agent in agents_guard.values() {
@@ -404,23 +395,35 @@ async fn find_bot_refs(bot_id: &str) -> Option<(
             }
         }
     }
-    None
-}
-
-/// Look up a bot's adapter by ID — checks ManagedImBots first, then agent channels.
-async fn find_bot_adapter(bot_id: &str) -> Option<std::sync::Arc<im::AnyAdapter>> {
+    // Legacy fallback: ManagedImBots (for backward compatibility — usually empty)
     if let Some(bots) = get_im_bots() {
         let bots_guard = bots.lock().await;
         if let Some(instance) = bots_guard.get(bot_id) {
-            return Some(std::sync::Arc::clone(&instance.adapter));
+            return Some((
+                std::sync::Arc::clone(&instance.router),
+                instance.heartbeat_wake_tx.clone(),
+            ));
         }
     }
+    None
+}
+
+/// Look up a bot's adapter by ID — checks ManagedAgents first, then legacy ManagedImBots.
+async fn find_bot_adapter(bot_id: &str) -> Option<std::sync::Arc<im::AnyAdapter>> {
+    // Check agent channels first (primary path)
     if let Some(agents) = get_agents() {
         let agents_guard = agents.lock().await;
         for agent in agents_guard.values() {
             if let Some(ch_inst) = agent.channels.get(bot_id) {
                 return Some(std::sync::Arc::clone(&ch_inst.bot_instance.adapter));
             }
+        }
+    }
+    // Legacy fallback
+    if let Some(bots) = get_im_bots() {
+        let bots_guard = bots.lock().await;
+        if let Some(instance) = bots_guard.get(bot_id) {
+            return Some(std::sync::Arc::clone(&instance.adapter));
         }
     }
     None

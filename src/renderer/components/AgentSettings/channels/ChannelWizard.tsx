@@ -14,7 +14,8 @@ import BindQrPanel from '../../ImSettings/components/BindQrPanel';
 import BindCodePanel from '../../ImSettings/components/BindCodePanel';
 import WhitelistManager from '../../ImSettings/components/WhitelistManager';
 import type { AgentConfig, ChannelConfig, ChannelType } from '../../../../shared/types/agent';
-import type { ImBotStatus, InstalledPlugin } from '../../../../shared/types/im';
+import type { InstalledPlugin } from '../../../../shared/types/im';
+import type { ChannelStatusData } from '@/hooks/useAgentStatuses';
 import telegramBotAddImg from '../../ImSettings/assets/telegram_bot_add.png';
 import feishuStep1Img from '../../ImSettings/assets/feishu_step1.png';
 import feishuStep2PermImg from '../../ImSettings/assets/feishu_step2_permissions.png';
@@ -118,7 +119,7 @@ export default function ChannelWizard({
     const [starting, setStarting] = useState(false);
     const [channelId] = useState(() => crypto.randomUUID());
     const [allowedUsers, setAllowedUsers] = useState<string[]>([]);
-    const [botStatus, setBotStatus] = useState<ImBotStatus | null>(null);
+    const [botStatus, setBotStatus] = useState<ChannelStatusData | null>(null);
     const [permJsonCopied, setPermJsonCopied] = useState(false);
     const copyTimeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -174,14 +175,14 @@ export default function ChannelWizard({
     const openclawHasIncompleteSchema = hasOpenclawSchema
         && Array.from(openclawSchemaRequired).some(k => !openclawSchemaValues[k]?.trim());
 
-    // Poll status when in binding step (use cmd_im_bot_status with channelId as botId)
+    // Poll status when in binding step
     useEffect(() => {
         if (step !== bindingStep || !isTauriEnvironment()) return;
 
         const poll = async () => {
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
-                const status = await invoke<ImBotStatus>('cmd_im_bot_status', { botId: channelId });
+                const status = await invoke<ChannelStatusData | null>('cmd_agent_channel_status', { agentId: agent.id, channelId });
                 if (isMountedRef.current) {
                     setBotStatus(status);
                 }
@@ -193,7 +194,7 @@ export default function ChannelWizard({
         poll();
         const interval = setInterval(poll, 3000);
         return () => clearInterval(interval);
-    }, [step, bindingStep, channelId]);
+    }, [step, bindingStep, channelId, agent.id]);
 
     // Listen for user-bound events
     useEffect(() => {
@@ -272,7 +273,7 @@ export default function ChannelWizard({
         await invokeStartAgentChannel(agent, channelCfg);
         // Poll initial status after start
         const { invoke } = await import('@tauri-apps/api/core');
-        return invoke<ImBotStatus>('cmd_im_bot_status', { botId: channelCfg.id });
+        return invoke<ChannelStatusData | null>('cmd_agent_channel_status', { agentId: agent.id, channelId: channelCfg.id });
     }, [agent]);
 
     // OpenClaw: step 2 = start + complete

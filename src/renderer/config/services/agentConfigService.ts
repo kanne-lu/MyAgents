@@ -140,60 +140,15 @@ export function migrateImBotConfigsToAgents(config: AppConfig, projects: Project
   return config;
 }
 
-/**
- * Build backward-compatible imBotConfigs[] shim from agents[].
- * Lets Rust layer continue reading the old format until Phase 2 is complete.
- */
-export function buildImBotConfigsShim(agents: AgentConfig[]): ImBotConfig[] {
-  const shim: ImBotConfig[] = [];
-  for (const agent of agents) {
-    for (const ch of agent.channels) {
-      shim.push({
-        id: ch.id,
-        name: ch.name || agent.name,
-        platform: ch.type,
-        botToken: ch.botToken || '',
-        allowedUsers: ch.allowedUsers || [],
-        feishuAppId: ch.feishuAppId,
-        feishuAppSecret: ch.feishuAppSecret,
-        dingtalkClientId: ch.dingtalkClientId,
-        dingtalkClientSecret: ch.dingtalkClientSecret,
-        dingtalkUseAiCard: ch.dingtalkUseAiCard,
-        dingtalkCardTemplateId: ch.dingtalkCardTemplateId,
-        telegramUseDraft: ch.telegramUseDraft,
-        openclawPluginId: ch.openclawPluginId,
-        openclawNpmSpec: ch.openclawNpmSpec,
-        openclawPluginConfig: ch.openclawPluginConfig,
-        openclawManifest: ch.openclawManifest,
-        providerId: ch.overrides?.providerId ?? agent.providerId,
-        model: ch.overrides?.model ?? agent.model,
-        providerEnvJson: ch.overrides?.providerEnvJson ?? agent.providerEnvJson,
-        permissionMode: ch.overrides?.permissionMode ?? agent.permissionMode,
-        mcpEnabledServers: agent.mcpEnabledServers,
-        defaultWorkspacePath: agent.workspacePath,
-        enabled: ch.enabled && agent.enabled,
-        setupCompleted: ch.setupCompleted,
-        heartbeat: agent.heartbeat,
-        groupPermissions: ch.groupPermissions,
-        groupActivation: ch.groupActivation,
-        groupToolsDeny: ch.overrides?.toolsDeny,
-      });
-    }
-  }
-  return shim;
-}
-
 // ============= Persistence Helpers =============
 
 /**
  * Save agents to disk (atomic read-modify-write).
- * Also writes the imBotConfigs shim for Rust backward compatibility.
  */
 export async function persistAgents(agents: AgentConfig[]): Promise<void> {
   await atomicModifyConfig(config => ({
     ...config,
     agents,
-    imBotConfigs: buildImBotConfigsShim(agents),
   }));
 }
 
@@ -242,7 +197,6 @@ export async function patchAgentConfig(
     return {
       ...config,
       agents,
-      imBotConfigs: buildImBotConfigsShim(agents),
     };
   });
 
@@ -314,7 +268,6 @@ export async function addAgentConfig(agent: AgentConfig): Promise<void> {
     return {
       ...config,
       agents,
-      imBotConfigs: buildImBotConfigsShim(agents),
     };
   });
 }
@@ -328,7 +281,6 @@ export async function removeAgentConfig(agentId: string): Promise<void> {
     return {
       ...config,
       agents,
-      imBotConfigs: buildImBotConfigsShim(agents),
     };
   });
 }

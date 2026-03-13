@@ -409,40 +409,89 @@ pub fn signal_all_bots_shutdown(im_state: &ManagedImBots) {
     }
 }
 
-/// Start the IM Bot
-pub async fn start_im_bot<R: Runtime>(
+/// Shutdown a single bot instance (extracted from stop_im_bot for reuse by agent commands).
+/// Does NOT lock any global state — caller is responsible for removing the instance first.
+async fn shutdown_bot_instance(
+    instance: ImBotInstance,
+    sidecar_manager: &ManagedSidecarManager,
+    bot_id: &str,
+) -> Result<(), String> {
+    ulog_info!("[im] Stopping bot instance {}...", bot_id);
+
+    // Signal shutdown to all loops
+    let _ = instance.shutdown_tx.send(true);
+
+    // Abort poll_handle to cancel in-flight long-poll HTTP request immediately
+    instance.poll_handle.abort();
+
+    // Wait for in-flight messages to finish (graceful: up to 10s)
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        instance.process_handle,
+    )
+    .await
+    {
+        Ok(_) => ulog_info!("[im] Processing loop exited gracefully"),
+        Err(_) => ulog_warn!("[im] Processing loop did not exit within 10s, proceeding with shutdown"),
+    }
+
+    // Wait for auxiliary tasks
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
+    if let Some(hb) = instance.heartbeat_handle {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), hb).await;
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.health_handle).await;
+
+    // Persist remaining buffered messages to disk
+    if let Err(e) = instance.buffer.lock().await.save_to_disk() {
+        ulog_warn!("[im] Failed to persist buffer on shutdown: {}", e);
+    }
+
+    // Flush dedup cache to disk (Feishu only)
+    if let AnyAdapter::Feishu(ref feishu) = *instance.adapter {
+        feishu.flush_dedup_cache().await;
+    }
+
+    // Kill bridge process and unregister sender (OpenClaw only)
+    if let Some(bp_mutex) = instance.bridge_process {
+        let mut bp = bp_mutex.lock().await;
+        bp.kill().await;
+        bridge::unregister_bridge_sender(bot_id).await;
+    }
+
+    // Persist active sessions in health state before releasing Sidecars
+    instance
+        .health
+        .set_active_sessions(instance.router.lock().await.active_sessions())
+        .await;
+
+    // Release all Sidecar sessions
+    instance
+        .router
+        .lock()
+        .await
+        .release_all(sidecar_manager);
+
+    // Final health state: mark as Stopped and persist
+    instance.health.set_status(ImStatus::Stopped).await;
+    let _ = instance.health.persist().await;
+
+    ulog_info!("[im] Bot instance {} stopped", bot_id);
+    Ok(())
+}
+
+/// Create a bot instance without locking or inserting into any global container.
+/// Core logic extracted from start_im_bot for reuse by agent channel commands.
+/// `agent_id` controls:
+///   - Router session key format (TD-2: `agent:` prefix vs legacy `im:`)
+///   - Health file path (TD-3: `agents/{id}/channels/` vs `im_bots/`)
+async fn create_bot_instance<R: Runtime>(
     app_handle: &AppHandle<R>,
-    im_state: &ManagedImBots,
     sidecar_manager: &ManagedSidecarManager,
     bot_id: String,
     config: ImConfig,
-) -> Result<ImBotStatus, String> {
-    let mut im_guard = im_state.lock().await;
-
-    // Gracefully stop existing instance for this bot_id if running
-    if let Some(instance) = im_guard.remove(&bot_id) {
-        ulog_info!("[im] Stopping existing IM Bot {} before restart", bot_id);
-        let _ = instance.shutdown_tx.send(true);
-        instance.poll_handle.abort(); // Cancel in-flight long-poll immediately
-        // Wait briefly for in-flight messages (shorter timeout for restart)
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            instance.process_handle,
-        )
-        .await;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
-        if let Some(hb) = instance.heartbeat_handle {
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(3), hb).await;
-        }
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.health_handle).await;
-        instance
-            .router
-            .lock()
-            .await
-            .release_all(sidecar_manager);
-        instance.health.reset().await;
-    }
-
+    agent_id: Option<String>,
+) -> Result<(ImBotInstance, ImBotStatus), String> {
     ulog_info!(
         "[im] Starting IM Bot {} (configured workspace: {:?})",
         bot_id,
@@ -451,6 +500,11 @@ pub async fn start_im_bot<R: Runtime>(
 
     // Migrate legacy files to per-bot paths on first start
     health::migrate_legacy_files(&bot_id);
+
+    // TD-3: Migrate bot data to agent path if this is an agent channel
+    if let Some(ref aid) = agent_id {
+        health::migrate_bot_data_to_agent(&bot_id, aid);
+    }
 
     // Determine default workspace (filter empty strings from frontend)
     // Fallback chain: configured path → bundled mino → home dir
@@ -471,16 +525,26 @@ pub async fn start_im_bot<R: Runtime>(
 
     ulog_info!("[im] Resolved workspace: {}", default_workspace.display());
 
-    // Initialize components (per-bot paths)
-    let health_path = health::bot_health_path(&bot_id);
+    // Initialize components (TD-3: agent channels use agent-scoped paths)
+    let health_path = match &agent_id {
+        Some(aid) => health::agent_channel_health_path(aid, &bot_id),
+        None => health::bot_health_path(&bot_id),
+    };
     let health = Arc::new(HealthManager::new(health_path));
     health.set_status(ImStatus::Connecting).await;
 
-    let buffer_path = health::bot_buffer_path(&bot_id);
+    let buffer_path = match &agent_id {
+        Some(aid) => health::agent_channel_buffer_path(aid, &bot_id),
+        None => health::bot_buffer_path(&bot_id),
+    };
     let buffer = Arc::new(Mutex::new(MessageBuffer::load_from_disk(&buffer_path)));
 
+    // TD-2: Agent channels use new_for_agent() for agent-scoped session keys
     let router = {
-        let mut r = SessionRouter::new(default_workspace);
+        let mut r = match &agent_id {
+            Some(aid) => SessionRouter::new_for_agent(default_workspace, aid.clone()),
+            None => SessionRouter::new(default_workspace),
+        };
         // Restore peer→session mapping from previous run's im_state.json
         let prev_sessions = health.get_state().await.active_sessions;
         r.restore_sessions(&prev_sessions);
@@ -536,7 +600,10 @@ pub async fn start_im_bot<R: Runtime>(
             group_event_tx.clone(),
         )))),
         ImPlatform::Feishu => {
-            let dedup_path = Some(health::bot_dedup_path(&bot_id));
+            let dedup_path = Some(match &agent_id {
+                Some(aid) => health::agent_channel_dedup_path(aid, &bot_id),
+                None => health::bot_dedup_path(&bot_id),
+            });
             Arc::new(AnyAdapter::Feishu(Arc::new(FeishuAdapter::new(
                 &config,
                 msg_tx.clone(),
@@ -547,7 +614,10 @@ pub async fn start_im_bot<R: Runtime>(
             ))))
         }
         ImPlatform::Dingtalk => {
-            let dedup_path = Some(health::bot_dedup_path(&bot_id));
+            let dedup_path = Some(match &agent_id {
+                Some(aid) => health::agent_channel_dedup_path(aid, &bot_id),
+                None => health::bot_dedup_path(&bot_id),
+            });
             Arc::new(AnyAdapter::Dingtalk(Arc::new(DingtalkAdapter::new(
                 &config,
                 msg_tx.clone(),
@@ -611,7 +681,12 @@ pub async fn start_im_bot<R: Runtime>(
             health.set_bot_username(Some(username)).await;
             health.set_status(ImStatus::Online).await;
             health.set_error(None).await;
-            let _ = app_handle.emit("im:status-changed", json!({ "event": "online" }));
+            // Emit appropriate event based on whether this is an agent channel or legacy bot
+            if agent_id.is_some() {
+                let _ = app_handle.emit("agent:status-changed", json!({ "event": "online" }));
+            } else {
+                let _ = app_handle.emit("im:status-changed", json!({ "event": "online" }));
+            }
         }
         Err(e) => {
             let err_msg = format!("Bot connection verification failed: {}", e);
@@ -1715,7 +1790,15 @@ pub async fn start_im_bot<R: Runtime>(
                                 task_router.lock().await.active_sessions(),
                             )
                             .await;
-                        let _ = task_app.emit("im:status-changed", json!({ "event": "sessions_updated" }));
+                        // Emit appropriate event based on agent_link
+                        {
+                            let link_guard = task_agent_link.read().await;
+                            if link_guard.is_some() {
+                                let _ = task_app.emit("agent:status-changed", json!({ "event": "sessions_updated" }));
+                            } else {
+                                let _ = task_app.emit("im:status-changed", json!({ "event": "sessions_updated" }));
+                            }
+                        }
 
                         // 7b. Update agent lastActiveChannel (if this bot belongs to an agent)
                         {
@@ -1957,6 +2040,7 @@ pub async fn start_im_bot<R: Runtime>(
     let manager_for_idle = Arc::clone(sidecar_manager);
     let app_for_idle = app_handle.clone();
     let mut idle_shutdown_rx = shutdown_rx.clone();
+    let agent_id_for_idle = agent_id.clone();
 
     let _idle_handle = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -1965,8 +2049,12 @@ pub async fn start_im_bot<R: Runtime>(
                 _ = interval.tick() => {
                     let collected = router_for_idle.lock().await.collect_idle_sessions(&manager_for_idle);
                     if collected > 0 {
-                        // Notify UI so it can update session status display
-                        let _ = app_for_idle.emit("im:status-changed", json!({ "event": "sessions_collected" }));
+                        // Notify UI — agent channels emit agent event, legacy emit im event
+                        if agent_id_for_idle.is_some() {
+                            let _ = app_for_idle.emit("agent:status-changed", json!({ "event": "sessions_collected" }));
+                        } else {
+                            let _ = app_for_idle.emit("im:status-changed", json!({ "event": "sessions_collected" }));
+                        }
                     }
                 }
                 _ = idle_shutdown_rx.changed() => {
@@ -2042,9 +2130,9 @@ pub async fn start_im_bot<R: Runtime>(
         (Some(handle), Some(wake_tx), Some(config_arc))
     };
 
-    // Store instance
+    // Build instance (caller is responsible for inserting into the appropriate container)
     let instance_platform = config.platform.clone();
-    im_guard.insert(bot_id.clone(), ImBotInstance {
+    let instance = ImBotInstance {
         bot_id,
         platform: instance_platform,
         shutdown_tx,
@@ -2077,89 +2165,54 @@ pub async fn start_im_bot<R: Runtime>(
         bridge_process: bridge_process_handle.map(tokio::sync::Mutex::new),
         // Agent link (set after moving into AgentInstance)
         agent_link,
-    });
+    };
+
+    Ok((instance, status))
+}
+
+/// Start the IM Bot (thin wrapper over create_bot_instance for legacy callers).
+pub async fn start_im_bot<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    im_state: &ManagedImBots,
+    sidecar_manager: &ManagedSidecarManager,
+    bot_id: String,
+    config: ImConfig,
+) -> Result<ImBotStatus, String> {
+    // Gracefully stop existing instance for this bot_id if running
+    let existing = {
+        let mut im_guard = im_state.lock().await;
+        im_guard.remove(&bot_id)
+    };
+    if let Some(instance) = existing {
+        ulog_info!("[im] Stopping existing IM Bot {} before restart", bot_id);
+        let _ = shutdown_bot_instance(instance, sidecar_manager, &bot_id).await;
+    }
+
+    let (instance, status) = create_bot_instance(app_handle, sidecar_manager, bot_id.clone(), config, None).await?;
+
+    let mut im_guard = im_state.lock().await;
+    im_guard.insert(bot_id, instance);
 
     Ok(status)
 }
 
-/// Stop the IM Bot
+/// Stop the IM Bot (thin wrapper over shutdown_bot_instance).
 pub async fn stop_im_bot(
     im_state: &ManagedImBots,
     sidecar_manager: &ManagedSidecarManager,
     bot_id: &str,
 ) -> Result<(), String> {
-    let mut im_guard = im_state.lock().await;
+    let instance = {
+        let mut im_guard = im_state.lock().await;
+        im_guard.remove(bot_id)
+    };
 
-    if let Some(instance) = im_guard.remove(bot_id) {
-        ulog_info!("[im] Stopping IM Bot {}...", bot_id);
-
-        // Signal shutdown to all loops
-        let _ = instance.shutdown_tx.send(true);
-
-        // Abort poll_handle to cancel in-flight long-poll HTTP request immediately.
-        // Without this, the old getUpdates request hangs for up to 30s on Telegram servers,
-        // causing 409 Conflict errors if the bot is restarted quickly.
-        instance.poll_handle.abort();
-
-        // Wait for in-flight messages to finish (graceful: up to 10s)
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            instance.process_handle,
-        )
-        .await
-        {
-            Ok(_) => ulog_info!("[im] Processing loop exited gracefully"),
-            Err(_) => ulog_warn!("[im] Processing loop did not exit within 10s, proceeding with shutdown"),
-        }
-
-        // Wait for auxiliary tasks to finish (short timeout — already signaled via shutdown_tx)
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
-        if let Some(hb) = instance.heartbeat_handle {
-            // Heartbeat runner may be mid-HTTP-call; wait before releasing Sidecars
-            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), hb).await;
-        }
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.health_handle).await;
-
-        // Persist remaining buffered messages to disk
-        if let Err(e) = instance.buffer.lock().await.save_to_disk() {
-            ulog_warn!("[im] Failed to persist buffer on shutdown: {}", e);
-        }
-
-        // Flush dedup cache to disk (Feishu only — ensures last entries survive restart)
-        if let AnyAdapter::Feishu(ref feishu) = *instance.adapter {
-            feishu.flush_dedup_cache().await;
-        }
-
-        // Kill bridge process and unregister sender (OpenClaw only)
-        if let Some(bp_mutex) = instance.bridge_process {
-            let mut bp = bp_mutex.lock().await;
-            bp.kill().await;
-            bridge::unregister_bridge_sender(bot_id).await;
-        }
-
-        // Persist active sessions in health state before releasing Sidecars
-        instance
-            .health
-            .set_active_sessions(instance.router.lock().await.active_sessions())
-            .await;
-
-        // Release all Sidecar sessions
-        instance
-            .router
-            .lock()
-            .await
-            .release_all(sidecar_manager);
-
-        // Final health state: mark as Stopped and persist
-        instance.health.set_status(ImStatus::Stopped).await;
-        let _ = instance.health.persist().await;
-
-        ulog_info!("[im] IM Bot stopped");
+    if let Some(instance) = instance {
+        shutdown_bot_instance(instance, sidecar_manager, bot_id).await
     } else {
-        ulog_debug!("[im] IM Bot was not running");
+        ulog_debug!("[im] IM Bot {} was not running", bot_id);
+        Ok(())
     }
-
-    Ok(())
 }
 
 /// Get current IM Bot status for a specific bot
@@ -3089,7 +3142,6 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
 
         use tauri::Manager;
         let agent_state = app_handle.state::<ManagedAgents>();
-        let im_state = app_handle.state::<ManagedImBots>();
         let sidecar_manager = app_handle.state::<ManagedSidecarManager>();
 
         for agent_config in agents {
@@ -3109,7 +3161,6 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                 }
                 let mut im_config = channel.to_im_config(&agent_config);
                 // Suppress per-channel heartbeat interval — agent-level heartbeat controls timing.
-                // The runner still exists (to receive delegated wake signals from agent heartbeat).
                 im_config.heartbeat_config = Some(types::HeartbeatConfig {
                     enabled: false,
                     ..types::HeartbeatConfig::default()
@@ -3130,7 +3181,6 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                     }
                 };
                 if has_credentials {
-                    // Use channel.id as the bot_id for the underlying ImBotInstance
                     let bot_id = channel.id.clone();
                     // Dedup: skip if channel already running in agent state
                     {
@@ -3143,10 +3193,11 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                         }
                     }
                     ulog_info!("[agent] Auto-starting channel {} of agent {}", bot_id, agent_config.id);
-                    match start_im_bot(&app_handle, &im_state, &sidecar_manager, bot_id.clone(), im_config).await {
-                        Ok(_bot_status) => {
+                    // Create bot instance directly (no transit through ManagedImBots)
+                    match create_bot_instance(&app_handle, &sidecar_manager, bot_id.clone(), im_config, Some(agent_config.id.clone())).await {
+                        Ok((bot_instance, _bot_status)) => {
                             ulog_info!("[agent] Auto-start succeeded for channel {}", bot_id);
-                            // Register channel in agent state
+                            // Register channel directly in agent state
                             let mut agents_guard = agent_state.lock().await;
                             let agent_instance = agents_guard.entry(agent_config.id.clone()).or_insert_with(|| {
                                 AgentInstance {
@@ -3163,24 +3214,19 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                     mcp_servers_json: Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
                                 }
                             });
-                            // Move the bot instance from im_state to agent channel
-                            let mut im_guard = im_state.lock().await;
-                            if let Some(bot_instance) = im_guard.remove(&bot_id) {
-                                // Set agent_link so the processing loop can update lastActiveChannel
-                                let link = AgentChannelLink {
-                                    channel_id: channel.id.clone(),
-                                    agent_id: agent_config.id.clone(),
-                                    last_active_channel: Arc::clone(&shared_lac),
-                                };
-                                *bot_instance.agent_link.write().await = Some(link);
+                            // Set agent_link so the processing loop can update lastActiveChannel
+                            let link = AgentChannelLink {
+                                channel_id: channel.id.clone(),
+                                agent_id: agent_config.id.clone(),
+                                last_active_channel: Arc::clone(&shared_lac),
+                            };
+                            *bot_instance.agent_link.write().await = Some(link);
 
-                                agent_instance.channels.insert(channel.id.clone(), ChannelInstance {
-                                    channel_id: channel.id.clone(),
-                                    bot_instance,
-                                });
-                                started_channel_ids.push(channel.id.clone());
-                            }
-                            drop(im_guard);
+                            agent_instance.channels.insert(channel.id.clone(), ChannelInstance {
+                                channel_id: channel.id.clone(),
+                                bot_instance,
+                            });
+                            started_channel_ids.push(channel.id.clone());
                             drop(agents_guard);
                         }
                         Err(e) => ulog_warn!("[agent] Auto-start failed for channel {}: {}", bot_id, e),
@@ -3378,8 +3424,9 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
 
 // ===== Tauri Commands =====
 
+#[deprecated(note = "Use cmd_start_agent_channel instead")]
 #[tauri::command]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, deprecated)]
 pub async fn cmd_start_im_bot(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -3406,6 +3453,7 @@ pub async fn cmd_start_im_bot(
     openclawNpmSpec: Option<String>,
     openclawPluginConfig: Option<serde_json::Value>,
 ) -> Result<ImBotStatus, String> {
+    ulog_warn!("[im] Deprecated cmd_start_im_bot called for bot={}", botId);
     let im_platform = match platform.as_deref() {
         Some("feishu") => ImPlatform::Feishu,
         Some("dingtalk") => ImPlatform::Dingtalk,
@@ -3461,21 +3509,24 @@ pub async fn cmd_start_im_bot(
     .await
 }
 
+#[deprecated(note = "Use cmd_stop_agent_channel instead")]
 #[tauri::command]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, deprecated)]
 pub async fn cmd_stop_im_bot(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
     sidecarManager: tauri::State<'_, ManagedSidecarManager>,
     botId: String,
 ) -> Result<(), String> {
+    ulog_warn!("[im] Deprecated cmd_stop_im_bot called for bot={}", botId);
     stop_im_bot(&imState, &sidecarManager, &botId).await?;
     let _ = app_handle.emit("im:status-changed", json!({ "event": "stopped" }));
     Ok(())
 }
 
+#[deprecated(note = "Use cmd_agent_channel_status instead")]
 #[tauri::command]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, deprecated)]
 pub async fn cmd_im_bot_status(
     imState: tauri::State<'_, ManagedImBots>,
     agentState: tauri::State<'_, ManagedAgents>,
@@ -3523,11 +3574,13 @@ pub async fn cmd_im_bot_status(
     Ok(status)
 }
 
+#[deprecated(note = "Use cmd_all_agents_status instead")]
 #[tauri::command]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, deprecated)]
 pub async fn cmd_im_all_bots_status(
     imState: tauri::State<'_, ManagedImBots>,
 ) -> Result<HashMap<String, ImBotStatus>, String> {
+    ulog_warn!("[im] Deprecated cmd_im_all_bots_status called");
     Ok(get_all_bots_status(&imState).await)
 }
 
@@ -3935,8 +3988,9 @@ fn read_available_providers_from_disk() -> Option<String> {
 }
 
 /// Unified config update command: replaces all 6 old hot-update commands.
+#[deprecated(note = "Use cmd_update_agent_config instead")]
 #[tauri::command]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, deprecated)]
 pub async fn cmd_update_im_bot_config(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -3948,8 +4002,9 @@ pub async fn cmd_update_im_bot_config(
 
 /// Read runtime config snapshot from a running bot's Arc fields.
 /// Returns the hot-reloadable config as a JSON object; returns null fields if bot is not running.
+#[deprecated(note = "Use cmd_agent_channel_status or cmd_agent_status instead")]
 #[tauri::command]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, deprecated)]
 pub async fn cmd_get_im_bot_runtime_config(
     imState: tauri::State<'_, ManagedImBots>,
     botId: String,
@@ -3975,8 +4030,9 @@ pub async fn cmd_get_im_bot_runtime_config(
 }
 
 /// Add a new bot config to disk.
+#[deprecated(note = "Use addAgentConfig on the frontend instead")]
 #[tauri::command]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, deprecated)]
 pub async fn cmd_add_im_bot_config(
     app_handle: AppHandle,
     botConfig: serde_json::Value,
@@ -3992,8 +4048,9 @@ pub async fn cmd_add_im_bot_config(
 }
 
 /// Remove a bot config from disk (stops the bot first if running).
+#[deprecated(note = "Use removeAgentConfig on the frontend instead")]
 #[tauri::command]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, deprecated)]
 pub async fn cmd_remove_im_bot_config(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -4173,13 +4230,12 @@ pub async fn cmd_uninstall_openclaw_plugin(pluginId: String) -> Result<(), Strin
 // ===== Agent Tauri Commands (v0.1.41) =====
 
 /// Start a single channel within an agent.
-/// Under the hood, creates an ImBotInstance via start_im_bot and wraps it in ChannelInstance.
+/// Creates an ImBotInstance directly via create_bot_instance and inserts into ManagedAgents.
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_start_agent_channel(
     app_handle: AppHandle,
     agentState: tauri::State<'_, ManagedAgents>,
-    imState: tauri::State<'_, ManagedImBots>,
     sidecarManager: tauri::State<'_, ManagedSidecarManager>,
     agentId: String,
     channelId: String,
@@ -4192,7 +4248,6 @@ pub async fn cmd_start_agent_channel(
         if let Some(agent) = agents_guard.get(&agentId) {
             if agent.channels.contains_key(&channelId) {
                 ulog_warn!("[agent] Channel {} already running in agent {}, skipping start", channelId, agentId);
-                // Return current status instead of double-starting
                 let ch = agent.channels.get(&channelId)
                     .ok_or_else(|| format!("[agent] Channel {} disappeared from agent {}", channelId, agentId))?;
                 let health_state = ch.bot_instance.health.get_state().await;
@@ -4223,17 +4278,17 @@ pub async fn cmd_start_agent_channel(
         ..types::HeartbeatConfig::default()
     });
 
-    // Start underlying bot via existing infrastructure
-    let bot_status = start_im_bot(
+    // Create bot instance directly (no transit through ManagedImBots)
+    let (bot_instance, bot_status) = create_bot_instance(
         &app_handle,
-        &imState,
         &sidecarManager,
         channelId.clone(),
         im_config,
+        Some(agentId.clone()),
     )
     .await?;
 
-    // Move bot instance from im_state into agent state
+    // Insert directly into agent state
     let mut agents_guard = agentState.lock().await;
     let agent_instance = agents_guard.entry(agentId.clone()).or_insert_with(|| {
         AgentInstance {
@@ -4251,22 +4306,18 @@ pub async fn cmd_start_agent_channel(
         }
     });
 
-    let mut im_guard = imState.lock().await;
-    if let Some(bot_instance) = im_guard.remove(&channelId) {
-        // Set agent_link so the processing loop can update lastActiveChannel
-        let link = AgentChannelLink {
-            channel_id: channelId.clone(),
-            agent_id: agentId.clone(),
-            last_active_channel: Arc::clone(&agent_instance.last_active_channel),
-        };
-        *bot_instance.agent_link.write().await = Some(link);
+    // Set agent_link so the processing loop can update lastActiveChannel
+    let link = AgentChannelLink {
+        channel_id: channelId.clone(),
+        agent_id: agentId.clone(),
+        last_active_channel: Arc::clone(&agent_instance.last_active_channel),
+    };
+    *bot_instance.agent_link.write().await = Some(link);
 
-        agent_instance.channels.insert(channelId.clone(), ChannelInstance {
-            channel_id: channelId.clone(),
-            bot_instance,
-        });
-    }
-    drop(im_guard);
+    agent_instance.channels.insert(channelId.clone(), ChannelInstance {
+        channel_id: channelId.clone(),
+        bot_instance,
+    });
 
     // Start agent-level heartbeat if not already running
     let needs_heartbeat = agent_instance.heartbeat_handle.is_none() && !agent_instance.channels.is_empty();
@@ -4438,37 +4489,37 @@ pub async fn cmd_start_agent_channel(
     };
 
     let _ = app_handle.emit("agent:status-changed", json!({ "agentId": agentId, "event": "channel_started" }));
-    // Backward compat event
-    let _ = app_handle.emit("im:status-changed", json!({ "event": "started" }));
 
     Ok(channel_status)
 }
 
 /// Stop a single channel within an agent.
+/// Directly removes from ManagedAgents and shuts down — no transit through ManagedImBots.
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_stop_agent_channel(
     app_handle: AppHandle,
     agentState: tauri::State<'_, ManagedAgents>,
-    imState: tauri::State<'_, ManagedImBots>,
     sidecarManager: tauri::State<'_, ManagedSidecarManager>,
     agentId: String,
     channelId: String,
 ) -> Result<(), String> {
-    let mut agents_guard = agentState.lock().await;
-    if let Some(agent) = agents_guard.get_mut(&agentId) {
-        if let Some(channel_instance) = agent.channels.remove(&channelId) {
-            // Move back to im_state for stop_im_bot to find
-            let mut im_guard = imState.lock().await;
-            im_guard.insert(channelId.clone(), channel_instance.bot_instance);
-            drop(im_guard);
+    let bot_instance = {
+        let mut agents_guard = agentState.lock().await;
+        if let Some(agent) = agents_guard.get_mut(&agentId) {
+            agent.channels.remove(&channelId).map(|ch| ch.bot_instance)
+        } else {
+            None
         }
-    }
-    drop(agents_guard);
+    };
 
-    stop_im_bot(&imState, &sidecarManager, &channelId).await?;
+    if let Some(instance) = bot_instance {
+        shutdown_bot_instance(instance, &sidecarManager, &channelId).await?;
+    } else {
+        ulog_debug!("[agent] Channel {} not found in agent {}", channelId, agentId);
+    }
+
     let _ = app_handle.emit("agent:status-changed", json!({ "agentId": agentId, "event": "channel_stopped" }));
-    let _ = app_handle.emit("im:status-changed", json!({ "event": "stopped" }));
     Ok(())
 }
 
@@ -4506,6 +4557,39 @@ async fn collect_channel_statuses(refs: Vec<ChannelStatusRef>) -> Vec<ChannelSta
         });
     }
     out
+}
+
+/// Get status for a single agent channel.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_agent_channel_status(
+    agentState: tauri::State<'_, ManagedAgents>,
+    agentId: String,
+    channelId: String,
+) -> Result<Option<ChannelStatus>, String> {
+    let snapshot = {
+        let agents_guard = agentState.lock().await;
+        agents_guard.get(&agentId).and_then(|agent| {
+            agent.channels.get(&channelId).map(|ch_inst| {
+                ChannelStatusRef {
+                    channel_id: channelId.clone(),
+                    channel_type: ch_inst.bot_instance.config.platform.clone(),
+                    name: ch_inst.bot_instance.config.name.clone(),
+                    health: Arc::clone(&ch_inst.bot_instance.health),
+                    router: Arc::clone(&ch_inst.bot_instance.router),
+                    started_at: ch_inst.bot_instance.started_at,
+                    bind_code: ch_inst.bot_instance.bind_code.clone(),
+                }
+            })
+        })
+    }; // agents_guard dropped
+
+    if let Some(r) = snapshot {
+        let statuses = collect_channel_statuses(vec![r]).await;
+        Ok(statuses.into_iter().next())
+    } else {
+        Ok(None)
+    }
 }
 
 /// Get status for a single agent (all channels).
@@ -4713,26 +4797,21 @@ pub async fn cmd_create_agent(
 pub async fn cmd_delete_agent(
     app_handle: AppHandle,
     agentState: tauri::State<'_, ManagedAgents>,
-    imState: tauri::State<'_, ManagedImBots>,
     sidecarManager: tauri::State<'_, ManagedSidecarManager>,
     agentId: String,
 ) -> Result<(), String> {
-    // Stop all running channels
-    let mut agents_guard = agentState.lock().await;
-    if let Some(agent) = agents_guard.remove(&agentId) {
-        let channel_ids: Vec<String> = agent.channels.keys().cloned().collect();
-        let mut im_guard = imState.lock().await;
-        for (ch_id, ch_inst) in agent.channels {
-            im_guard.insert(ch_id, ch_inst.bot_instance);
+    // Stop all running channels directly via shutdown_bot_instance
+    let channels = {
+        let mut agents_guard = agentState.lock().await;
+        if let Some(agent) = agents_guard.remove(&agentId) {
+            agent.channels
+        } else {
+            HashMap::new()
         }
-        drop(im_guard);
-        drop(agents_guard);
+    }; // agents_guard dropped
 
-        for ch_id in channel_ids {
-            let _ = stop_im_bot(&imState, &sidecarManager, &ch_id).await;
-        }
-    } else {
-        drop(agents_guard);
+    for (ch_id, ch_inst) in channels {
+        let _ = shutdown_bot_instance(ch_inst.bot_instance, &sidecarManager, &ch_id).await;
     }
 
     // Remove from disk

@@ -96,9 +96,7 @@ impl SessionRouter {
         }
     }
 
-    /// Create a router for an Agent channel (uses new session key format).
-    /// Not yet activated — agent channels currently use `new()` with legacy key format.
-    #[allow(dead_code)]
+    /// Create a router for an Agent channel (uses `agent:` session key format).
     pub fn new_for_agent(default_workspace: PathBuf, agent_id: String) -> Self {
         Self {
             peer_sessions: HashMap::new(),
@@ -488,11 +486,29 @@ impl SessionRouter {
     /// NOT the persisted value. This ensures workspace changes take effect on restart.
     pub fn restore_sessions(&mut self, sessions: &[super::types::ImActiveSession]) {
         for s in sessions {
-            let (source_type, source_id) = parse_session_key(&s.session_key);
+            // TD-2: Migrate session key format if router has agent_id but key uses legacy "im:" prefix.
+            // Old keys: im:{platform}:{type}:{id} → new: agent:{agentId}:{platform}:{type}:{id}
+            let session_key = if let Some(ref agent_id) = self.agent_id {
+                if s.session_key.starts_with("im:") {
+                    // Translate: im:{platform}:{type}:{id} → agent:{agentId}:{platform}:{type}:{id}
+                    let rest = s.session_key.strip_prefix("im:").unwrap_or(&s.session_key);
+                    let migrated = format!("agent:{}:{}", agent_id, rest);
+                    ulog_info!(
+                        "[im-router] Migrated session key: {} → {}",
+                        s.session_key, migrated
+                    );
+                    migrated
+                } else {
+                    s.session_key.clone()
+                }
+            } else {
+                s.session_key.clone()
+            };
+            let (source_type, source_id) = parse_session_key(&session_key);
             self.peer_sessions.insert(
-                s.session_key.clone(),
+                session_key.clone(),
                 PeerSession {
-                    session_key: s.session_key.clone(),
+                    session_key: session_key.clone(),
                     session_id: s.session_id.clone(), // Restore original session_id for resume
                     sidecar_port: 0, // Sidecar not running yet; ensure_sidecar will start it
                     workspace_path: self.default_workspace.clone(),
