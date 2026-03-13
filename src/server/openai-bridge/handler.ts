@@ -41,8 +41,15 @@ export function getProxyForUrl(url: string): string | undefined {
   return proxy;
 }
 
+export interface BridgeHandler {
+  /** Handle an incoming Anthropic-format request */
+  (request: Request): Promise<Response>;
+  /** Seed the thought_signature cache (e.g., from persisted session history) */
+  seedThoughtSignatures(entries: Array<{ id: string; thought_signature: string }>): void;
+}
+
 /** Create a bridge handler that translates Anthropic → OpenAI → Anthropic */
-export function createBridgeHandler(config: BridgeConfig): (request: Request) => Promise<Response> {
+export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
   const log = config.logger === null ? () => {} : (config.logger ?? console.log);
   const timeout = config.upstreamTimeout ?? DEFAULT_TIMEOUT;
   const translateReasoning = config.translateReasoning ?? true;
@@ -54,7 +61,7 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
   // Capped at THOUGHT_SIG_CACHE_MAX to prevent unbounded growth in long-lived sessions.
   const thoughtSignatureCache = new Map<string, string>();
 
-  return async (request: Request): Promise<Response> => {
+  const handler = async (request: Request): Promise<Response> => {
     // 1. Extract API key from request headers
     const apiKey = request.headers.get('x-api-key') || request.headers.get('authorization')?.replace('Bearer ', '') || '';
 
@@ -194,6 +201,18 @@ export function createBridgeHandler(config: BridgeConfig): (request: Request) =>
         : handleNonStreamResponse(upstreamResp, anthropicReq.model, translateReasoning, log, thoughtSignatureCache);
     }
   };
+
+  // Expose cache seeding for session resume (thought_signatures from persisted history)
+  // Uses cacheThoughtSignatures() to enforce THOUGHT_SIG_CACHE_MAX consistently.
+  handler.seedThoughtSignatures = (entries: Array<{ id: string; thought_signature: string }>) => {
+    cacheThoughtSignatures(entries, thoughtSignatureCache, THOUGHT_SIG_CACHE_MAX);
+    if (entries.length > 0) {
+      log(`[bridge] Seeded ${entries.length} thought_signature(s) from session history`);
+    }
+  };
+
+  // Safe: function object with an attached method property matches BridgeHandler's callable + method shape
+  return handler as BridgeHandler;
 }
 
 async function handleNonStreamResponse(

@@ -137,6 +137,7 @@ import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
 import { broadcast, createSseClient, getClients } from './sse';
 import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
 import { createBridgeHandler } from './openai-bridge';
+import { registerBridgeSeedFn } from './bridge-cache';
 import { generateTitle } from './title-generator';
 
 type ImagePayload = {
@@ -1116,6 +1117,7 @@ async function main() {
     },
     logger: (msg) => console.log(msg),
   });
+  registerBridgeSeedFn((entries) => bridgeHandler.seedThoughtSignatures(entries));
 
   console.log(`[startup] Bun.serve() binding to 127.0.0.1:${port}...`);
 

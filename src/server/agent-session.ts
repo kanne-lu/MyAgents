@@ -20,6 +20,7 @@ import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage } from './types/session';
 import { broadcast } from './sse';
+import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
@@ -254,6 +255,8 @@ type ToolUseState = {
   isLoading?: boolean;
   isError?: boolean;
   subagentCalls?: SubagentToolCall[];
+  /** Gemini thinking models: opaque signature that must be round-tripped on tool calls */
+  thought_signature?: string;
 };
 
 type SubagentToolCall = {
@@ -266,6 +269,8 @@ type SubagentToolCall = {
   result?: string;
   isLoading?: boolean;
   isError?: boolean;
+  /** Gemini thinking models: opaque signature that must be round-tripped on tool calls */
+  thought_signature?: string;
 };
 
 type ContentBlock = {
@@ -2299,6 +2304,7 @@ function handleToolUseStart(tool: {
   name: string;
   input: Record<string, unknown>;
   streamIndex: number;
+  thought_signature?: string;
 }): void {
   flushPendingMidTurnQueue();
   const message = ensureAssistantMessage();
@@ -2347,6 +2353,7 @@ function handleSubagentToolUseStart(
     name: string;
     input: Record<string, unknown>;
     streamIndex?: number;
+    thought_signature?: string;
   }
 ): void {
   const parentTool = findToolBlockById(parentToolUseId);
@@ -2983,6 +2990,22 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
     if (!isNaN(parsedId)) {
       messageSequence = parsedId + 1;
     }
+  }
+
+  // Seed Bridge thought_signature cache from persisted tool_use blocks
+  // (Gemini thinking models require round-tripping this field; the cache is lost on sidecar restart)
+  const thoughtSigEntries: Array<{ id: string; thought_signature: string }> = [];
+  for (const msg of messages) {
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (block.type === 'tool_use' && block.tool?.thought_signature) {
+          thoughtSigEntries.push({ id: block.tool.id, thought_signature: block.tool.thought_signature });
+        }
+      }
+    }
+  }
+  if (thoughtSigEntries.length > 0) {
+    seedBridgeThoughtSignatures(thoughtSigEntries);
   }
 }
 
@@ -4390,11 +4413,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             broadcast('chat:thinking-start', { index: streamEvent.index });
           } else if (streamEvent.content_block.type === 'tool_use') {
             streamIndexToToolId.set(streamEvent.index, streamEvent.content_block.id);
+            // Extract thought_signature from content block (Gemini thinking models)
+            const contentBlock = streamEvent.content_block as { id: string; name: string; input?: Record<string, unknown>; thought_signature?: string };
             const toolPayload = {
-              id: streamEvent.content_block.id,
-              name: streamEvent.content_block.name,
-              input: streamEvent.content_block.input || {},
-              streamIndex: streamEvent.index
+              id: contentBlock.id,
+              name: contentBlock.name,
+              input: contentBlock.input || {},
+              streamIndex: streamEvent.index,
+              ...(contentBlock.thought_signature ? { thought_signature: contentBlock.thought_signature } : {}),
             };
             if (sdkMessage.parent_tool_use_id) {
               handleSubagentToolUseStart(sdkMessage.parent_tool_use_id, toolPayload);
