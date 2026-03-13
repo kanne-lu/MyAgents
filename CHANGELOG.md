@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.41] - 2026-03-14
+
+### Added
+- **Agent 中心架构升级**：IM Bot 中心架构全面升级为 Agent 中心架构，数据模型迁移、Rust 层重构、UI 改造三阶段完成。旧版 ImBotConfig 自动迁移为 AgentConfig，按工作区聚合、保留 bot ID 作为 channel ID
+- **供应商子 Agent 模型别名映射**：解决 SDK 内置子 Agent 硬编码模型问题，支持自定义供应商模型别名
+- **文件预览器增强**：空文档占位提示与编辑入口、二进制黑名单判断替代文本白名单、createPortal 修复滚动穿透
+- **文件树图标 + 拖拽移动**：基于 @dnd-kit 重构，替换 HTML5 DnD
+- **Launcher 主动 Agent UX 改进**：卡片展示 channel 状态标签、心跳图标、Agent 设置快捷入口
+
+### Fixed
+- **Windows 标题生成 404** (#23)：双层修复 — (1) generateSessionTitle 改用 Tab-scoped API 替代 Global Sidecar；(2) pre-warm 竞态导致 system_init 永不 replay，前端 sessionId 停留在 pending 占位符
+- **fullAgency 模式下工具仍请求权限**：permissionMode/model 跟踪变量在 session abort 期间丢失，收窄更新范围至 abort 场景
+- **Gemini thinking 模型 400 错误** (#22)：thought_signature 持久化 + 双位置归一化 + direct/extra_content.google 同步
+- **定时任务系统休眠后延迟数小时触发**：改用 wall-clock 轮询替代 setInterval
+- **后台 Agent 子任务完成后 UI 状态不更新**
+- **AI 小助理面板**：模型下拉被遮挡（移除 overflow-hidden）、底部圆角溢出、右键选中文本
+- **session 加载时消息跳动 + 空白屏优化**
+- **OpenClaw 插件更新后版本号消失 + 自动重启相关 Bot**
+- **Tray 退出改为 app.exit(0)**：不再绕行前端 WebView
+- **Windows VM bun 崩溃**：切换 baseline 构建 + 系统 fallback
+- **v0.1.41 技术债清理 (TD-1 ~ TD-6 主体)**：消除 IM Bot 兼容层，start_channel 提取、agent: session key 激活、健康文件路径迁移、shim 删除、ImSettings 移除
+
+### Changed
+- **关于页面排版优化**：产品描述改为「开发者来信」风格
+- **「心跳循环」更名为「循环」**：图标换为 Timer
+- **「项目设置」统一更名为「Agent 设置」**
+- **Tauri crate 升级**：2.9.5 → 2.9.6
+
+---
+
 ## [0.1.40] - 2026-03-10
 
 ### Added
