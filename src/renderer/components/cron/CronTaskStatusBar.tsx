@@ -1,5 +1,5 @@
 // Cron Task Status Bar - Shows above input when heartbeat loop mode is enabled
-import { HeartPulse, Settings2, X } from 'lucide-react';
+import { Timer, Settings2, X } from 'lucide-react';
 import { formatCronInterval } from '@/types/cronTask';
 
 interface CronTaskStatusBarProps {
@@ -19,9 +19,9 @@ export default function CronTaskStatusBar({
       style={{ backgroundColor: 'color-mix(in srgb, var(--paper) 92%, var(--heartbeat))' }}
     >
       <div className="flex items-center gap-2">
-        <HeartPulse className="h-4 w-4 text-[var(--heartbeat)]" />
+        <Timer className="h-4 w-4 text-[var(--heartbeat)]" />
         <span className="text-sm font-medium text-[var(--heartbeat)]">
-          心跳循环模式
+          循环模式
         </span>
         <span className="text-sm text-[var(--ink-muted)]">
           每 {formatCronInterval(intervalMinutes)} 执行一次
@@ -40,7 +40,7 @@ export default function CronTaskStatusBar({
           type="button"
           onClick={onCancel}
           className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--heartbeat-bg)] hover:text-[var(--heartbeat)]"
-          title="取消心跳循环"
+          title="取消循环"
         >
           <X className="h-4 w-4" />
         </button>

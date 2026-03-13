@@ -418,7 +418,7 @@ export default function SessionHistoryDropdown({
                                                     <button
                                                         className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 group-hover:opacity-40"
                                                         disabled
-                                                        title="请先停止心跳循环后再删除"
+                                                        title="请先停止循环任务后再删除"
                                                     >
                                                         <Trash2 className="h-3.5 w-3.5" />
                                                     </button>

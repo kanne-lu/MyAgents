@@ -1536,7 +1536,7 @@ export default function App() {
       {exitConfirmState && (
         <ConfirmDialog
           title="退出应用"
-          message={`有 ${exitConfirmState.runningTaskCount} 个心跳循环正在运行中。退出后任务将被停止。确定要退出吗？`}
+          message={`有 ${exitConfirmState.runningTaskCount} 个循环任务正在运行中。退出后任务将被停止。确定要退出吗？`}
           confirmText="退出"
           cancelText="取消"
           confirmVariant="danger"

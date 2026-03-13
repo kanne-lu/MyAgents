@@ -1,5 +1,5 @@
 // Cron Task Settings Modal - Configure scheduled task parameters
-import { X, HeartPulse, Calendar, AlertCircle, Bell } from 'lucide-react';
+import { X, Timer, Calendar, AlertCircle, Bell } from 'lucide-react';
 import { useState, useCallback, useMemo, useRef } from 'react';
 import type { CronEndConditions, CronRunMode, CronTaskConfig } from '@/types/cronTask';
 import { CRON_INTERVAL_PRESETS, MIN_CRON_INTERVAL, formatCronInterval } from '@/types/cronTask';
@@ -272,8 +272,8 @@ function CronTaskSettingsForm({
         {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <HeartPulse className="h-5 w-5 text-[var(--heartbeat)]" />
-            <h2 className="text-lg font-semibold text-[var(--ink)]">心跳循环</h2>
+            <Timer className="h-5 w-5 text-[var(--heartbeat)]" />
+            <h2 className="text-lg font-semibold text-[var(--ink)]">循环</h2>
           </div>
           <button
             onClick={onClose}
@@ -287,7 +287,7 @@ function CronTaskSettingsForm({
           {/* Feature Introduction */}
           <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] p-4">
             <p className="text-sm leading-relaxed text-[var(--ink-secondary)]">
-              心跳循环将赋予 AI 按照时间间隔，循环执行任务的能力。
+              循环将赋予 AI 按照时间间隔，循环执行任务的能力。
             </p>
             <p className="mt-2 text-sm leading-relaxed text-[var(--ink-secondary)]">
               一旦您在面板内设置开启循环，发送信息后，这段信息就会被按照间隔，不断发送给 AI。
@@ -297,7 +297,7 @@ function CronTaskSettingsForm({
           {/* Interval Selection */}
           <div>
             <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-[var(--ink)]">
-              <HeartPulse className="h-4 w-4" />
+              <Timer className="h-4 w-4" />
               循环间隔
             </label>
             <div className="flex flex-wrap gap-2">

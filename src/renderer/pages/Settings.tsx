@@ -2774,9 +2774,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">
                                                 <div>
-                                                    <h3 className="text-sm font-medium text-[var(--ink)]">心跳循环</h3>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">循环任务</h3>
                                                     <p className="mt-1 text-xs text-[var(--ink-muted)]">
-                                                        查看和管理运行中的心跳循环任务（开发调试用）
+                                                        查看和管理运行中的循环任务（开发调试用）
                                                     </p>
                                                 </div>
                                                 <button

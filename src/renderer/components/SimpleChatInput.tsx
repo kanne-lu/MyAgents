@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, HeartPulse, Settings2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2 } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import { useToast } from '@/components/Toast';
@@ -1533,10 +1533,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       ? 'bg-[var(--heartbeat-bg)] text-[var(--heartbeat)] hover:bg-[var(--heartbeat)]/20'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
-                  title={cronModeEnabled ? '心跳循环已启用' : '开启心跳循环'}
+                  title={cronModeEnabled ? '循环已启用' : '开启循环'}
                 >
-                  <HeartPulse className="h-3.5 w-3.5" />
-                  <span className="toolbar-label">心跳</span>
+                  <Timer className="h-3.5 w-3.5" />
+                  <span className="toolbar-label">循环</span>
                 </button>
               )}
             </div>
