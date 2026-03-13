@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::RwLock;
-use tokio::time::{interval, Duration};
+use tokio::time::Duration;
 use uuid::Uuid;
 
 use crate::{ulog_info, ulog_warn};
@@ -39,11 +39,10 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
-/// Parse a cron expression and compute the Duration until next fire time.
+/// Parse a cron expression and compute the next fire time as a wall-clock UTC timestamp.
 /// Accepts standard 5-field cron expressions (min hour dom month dow) and
 /// converts to the 7-field format required by the `cron` crate (sec min hour dom month dow year).
-/// Returns None if the expression is invalid or has no upcoming fire time.
-fn next_cron_fire_duration(expr: &str, tz: Option<&str>) -> Result<Duration, String> {
+fn next_cron_fire_time(expr: &str, tz: Option<&str>) -> Result<DateTime<Utc>, String> {
     // Normalize: 5-field → 7-field by prepending "0 " (seconds) and appending " *" (year)
     let expr7 = {
         let fields: Vec<&str> = expr.trim().split_whitespace().collect();
@@ -71,9 +70,38 @@ fn next_cron_fire_duration(expr: &str, tz: Option<&str>) -> Result<Duration, Str
     let next = schedule.after(&now).next()
         .ok_or_else(|| format!("No upcoming fire time for cron expression '{}'", expr))?;
 
-    let next_utc = next.with_timezone(&Utc);
-    let duration_secs = (next_utc - Utc::now()).num_seconds().max(1) as u64;
-    Ok(Duration::from_secs(duration_secs))
+    Ok(next.with_timezone(&Utc))
+}
+
+/// Wall-clock aware sleep that survives system suspend/hibernate.
+///
+/// Unlike `tokio::time::sleep(duration)` which uses monotonic time (pauses during
+/// system sleep on macOS), this function polls `Utc::now()` (wall clock) every
+/// POLL_INTERVAL seconds, correctly detecting that the scheduled time has passed
+/// even after the system wakes from sleep.
+///
+/// Returns `true` if target time was reached, `false` if shutdown was requested.
+async fn sleep_until_wallclock(
+    target: DateTime<Utc>,
+    shutdown: &RwLock<bool>,
+    task_id: &str,
+) -> bool {
+    const POLL_SECS: u64 = 30;
+    loop {
+        let now = Utc::now();
+        if now >= target {
+            return true;
+        }
+        // Check shutdown flag
+        if *shutdown.read().await {
+            log::info!("[CronTask] Task {} wallclock sleep interrupted by shutdown", task_id);
+            return false;
+        }
+        // Sleep for min(remaining, POLL_SECS) — short sleeps survive system suspend
+        let remaining_secs = (target - now).num_seconds().max(0) as u64;
+        let sleep_secs = remaining_secs.min(POLL_SECS).max(1);
+        tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+    }
 }
 
 /// Atomic file save helper - writes to temp file first, then renames
@@ -470,12 +498,8 @@ fn compute_next_execution(task: &CronTask) -> Option<String> {
             Some(next.to_rfc3339())
         }
         Some(CronSchedule::Cron { expr, tz }) => {
-            // Use existing next_cron_fire_duration to compute
-            match next_cron_fire_duration(expr, tz.as_deref()) {
-                Ok(duration) => {
-                    let next = Utc::now() + chrono::Duration::seconds(duration.as_secs() as i64);
-                    Some(next.to_rfc3339())
-                }
+            match next_cron_fire_time(expr, tz.as_deref()) {
+                Ok(next) => Some(next.to_rfc3339()),
                 Err(_) => None,
             }
         }
@@ -662,38 +686,40 @@ impl CronTaskManager {
                 Some(CronSchedule::Cron { expr, tz }) => Some((expr.clone(), tz.clone())),
                 _ => None,
             };
-            let interval_duration = Duration::from_secs(interval_mins.max(5) as u64 * 60);
-            let initial_wait = if let Some(CronSchedule::At { ref at }) = schedule {
-                // One-shot: calculate delay until target time
+            let interval_secs = interval_mins.max(5) as i64 * 60;
+            // Compute initial target as a wall-clock time (not a Duration).
+            // This is critical: we use sleep_until_wallclock() which polls Utc::now()
+            // instead of tokio::time::sleep() which uses monotonic time that pauses
+            // during system sleep/suspend.
+            let initial_target: Option<DateTime<Utc>> = if let Some(CronSchedule::At { ref at }) = schedule {
+                // One-shot: target is the specified time
                 match DateTime::parse_from_rfc3339(at).or_else(|_| DateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S")) {
                     Ok(target) => {
                         let target_utc = target.with_timezone(&Utc);
                         let now = Utc::now();
                         if target_utc > now {
-                            let wait_secs = (target_utc - now).num_seconds().max(1) as u64;
-                            log::info!("[CronTask] Task {} scheduled at {}, waiting {} seconds", task_id_owned, at, wait_secs);
-                            Duration::from_secs(wait_secs)
+                            log::info!("[CronTask] Task {} scheduled at {}, waiting {} seconds", task_id_owned, at, (target_utc - now).num_seconds());
+                            Some(target_utc)
                         } else {
                             log::info!("[CronTask] Task {} target time {} already passed, executing immediately", task_id_owned, at);
-                            Duration::from_secs(2)
+                            Some(now + chrono::Duration::seconds(2))
                         }
                     }
                     Err(e) => {
                         log::warn!("[CronTask] Task {} invalid 'at' time '{}': {}, executing in 2s", task_id_owned, at, e);
-                        Duration::from_secs(2)
+                        Some(Utc::now() + chrono::Duration::seconds(2))
                     }
                 }
             } else if let Some(CronSchedule::Cron { ref expr, ref tz }) = schedule {
-                // Cron expression: compute next fire time
-                match next_cron_fire_duration(expr, tz.as_deref()) {
-                    Ok(d) => {
-                        log::info!("[CronTask] Task {} cron expr '{}' (tz={:?}), next fire in {} seconds",
-                            task_id_owned, expr, tz, d.as_secs());
-                        d
+                // Cron expression: compute next fire time from wall clock
+                match next_cron_fire_time(expr, tz.as_deref()) {
+                    Ok(target) => {
+                        log::info!("[CronTask] Task {} cron expr '{}' (tz={:?}), next fire at {} (in {} seconds)",
+                            task_id_owned, expr, tz, target, (target - Utc::now()).num_seconds());
+                        Some(target)
                     }
                     Err(e) => {
                         log::error!("[CronTask] Task {} invalid cron config: {}, stopping scheduler", task_id_owned, e);
-                        // Clean up and exit — invalid cron expression is unrecoverable
                         {
                             let mut active = active_schedulers.write().await;
                             active.remove(&task_id_owned);
@@ -702,39 +728,33 @@ impl CronTaskManager {
                     }
                 }
             } else if execution_count == 0 {
-                // First execution - execute immediately with small delay for UI to be ready
                 log::info!("[CronTask] Task {} first execution, starting in 2 seconds", task_id_owned);
-                Duration::from_secs(2)
+                Some(Utc::now() + chrono::Duration::seconds(2))
             } else if let Some(last_exec) = last_executed {
+                let next_exec = last_exec + chrono::Duration::seconds(interval_secs);
                 let now = Utc::now();
-                let next_exec = last_exec + chrono::Duration::minutes(interval_mins as i64);
                 if next_exec > now {
-                    // Wait until next scheduled time
-                    let wait_secs = (next_exec - now).num_seconds().max(0) as u64;
-                    log::info!(
-                        "[CronTask] Task {} next execution in {} seconds (based on lastExecutedAt)",
-                        task_id_owned, wait_secs
-                    );
-                    Duration::from_secs(wait_secs)
+                    log::info!("[CronTask] Task {} next execution at {} (in {} seconds, based on lastExecutedAt)",
+                        task_id_owned, next_exec, (next_exec - now).num_seconds());
+                    Some(next_exec)
                 } else {
-                    // Already past due, execute soon
                     log::info!("[CronTask] Task {} is past due, executing in 5 seconds", task_id_owned);
-                    Duration::from_secs(5)
+                    Some(now + chrono::Duration::seconds(5))
                 }
             } else {
-                // No previous execution but execution_count > 0 (edge case, shouldn't happen)
-                // Wait full interval to be safe
                 log::info!("[CronTask] Task {} no lastExecutedAt but count={}, waiting full interval", task_id_owned, execution_count);
-                interval_duration
+                Some(Utc::now() + chrono::Duration::seconds(interval_secs))
             };
 
-            // Wait for initial period
-            tokio::time::sleep(initial_wait).await;
-
-            // Create interval timer for subsequent executions (used for Every/fallback, not Cron)
-            let mut timer = interval(interval_duration);
-            // Skip the first immediate tick since we already waited
-            timer.tick().await;
+            // Wait for initial period using wall-clock polling (survives system sleep)
+            if let Some(target) = initial_target {
+                if !sleep_until_wallclock(target, &shutdown, &task_id_owned).await {
+                    // Shutdown requested during wait
+                    let mut active = active_schedulers.write().await;
+                    active.remove(&task_id_owned);
+                    return;
+                }
+            }
 
             loop {
 
@@ -783,12 +803,8 @@ impl CronTaskManager {
                     let executing = executing_tasks.read().await;
                     if executing.contains(&task_id_owned) {
                         log::warn!("[CronTask] Task {} is still executing, skipping this interval", task_id_owned);
-                        // Wait before checking again (short poll for cron, full interval for fixed)
-                        if is_cron_expr {
-                            tokio::time::sleep(Duration::from_secs(30)).await;
-                        } else {
-                            timer.tick().await;
-                        }
+                        // Short wait before checking again
+                        tokio::time::sleep(Duration::from_secs(30)).await;
                         continue;
                     }
                 }
@@ -801,12 +817,8 @@ impl CronTaskManager {
 
                 let Some(handle) = handle_opt else {
                     log::error!("[CronTask] No app handle available for task {}, will retry next interval", task_id_owned);
-                    // Wait before retrying (prevents tight loop)
-                    if is_cron_expr {
-                        tokio::time::sleep(Duration::from_secs(30)).await;
-                    } else {
-                        timer.tick().await;
-                    }
+                    // Short wait before retrying (prevents tight loop)
+                    tokio::time::sleep(Duration::from_secs(30)).await;
                     continue;
                 };
 
@@ -1026,24 +1038,35 @@ impl CronTaskManager {
                     log::warn!("[CronTask] Failed to save task state: {}", e);
                 }
 
-                // Wait for the next execution time
-                // For cron expressions, recalculate dynamically; for fixed intervals, use timer
-                if is_cron_expr {
+                // Wait for the next execution time using wall-clock polling.
+                // This survives system sleep/suspend — after wake, the poll detects
+                // that wall-clock time has passed and fires within ≤30 seconds.
+                let next_target = if is_cron_expr {
                     if let Some((ref expr, ref tz)) = cron_expr_info {
-                        match next_cron_fire_duration(expr, tz.as_deref()) {
-                            Ok(wait) => {
-                                log::info!("[CronTask] Task {} cron next fire in {} seconds", task_id_owned, wait.as_secs());
-                                tokio::time::sleep(wait).await;
+                        match next_cron_fire_time(expr, tz.as_deref()) {
+                            Ok(target) => {
+                                log::info!("[CronTask] Task {} cron next fire at {} (in {} seconds)",
+                                    task_id_owned, target, (target - Utc::now()).num_seconds());
+                                target
                             }
                             Err(e) => {
                                 log::error!("[CronTask] Task {} cron schedule error: {}, stopping", task_id_owned, e);
                                 break;
                             }
                         }
+                    } else {
+                        break; // Should not happen — cron_expr_info is always Some for is_cron_expr
                     }
                 } else {
-                    log::info!("[CronTask] Task {} waiting {} minutes for next execution", task_id_owned, interval_mins);
-                    timer.tick().await;
+                    // Fixed interval: next = now + interval
+                    let target = Utc::now() + chrono::Duration::seconds(interval_secs);
+                    log::info!("[CronTask] Task {} next execution at {} (in {} minutes)",
+                        task_id_owned, target, interval_mins);
+                    target
+                };
+                if !sleep_until_wallclock(next_target, &shutdown, &task_id_owned).await {
+                    log::info!("[CronTask] Task {} shutdown during wait", task_id_owned);
+                    break;
                 }
             }
 
