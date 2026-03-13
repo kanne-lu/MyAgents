@@ -1314,14 +1314,27 @@ export default function TabProvider({
                         if (!seenIdsRef.current.has(msgId)) {
                             seenIdsRef.current.add(msgId);
 
-                            // Prefer backend-provided attachments (authoritative, includes savedPath).
-                            // Fall back to frontend queued message snapshot for preview URLs.
+                            // Merge backend attachments (authoritative path/size) with frontend preview URLs.
+                            // Backend savedAttachments have relativePath but no previewUrl;
+                            // frontend queuedMessages have the original data URL previews.
                             let attachments = payload.userMessage.attachments;
-                            if (!attachments?.length) {
-                                const queuedMsg = queuedMessagesRef.current?.find(
-                                    q => q.queueId === payload.queueId
-                                );
-                                attachments = queuedMsg?.images?.map(img => ({
+                            // Look up queued message by real queueId first;
+                            // fall back to first opt-* entry when queue:started arrives
+                            // before .then() replaces the optimistic ID (known race).
+                            const queuedMsg = queuedMessagesRef.current?.find(
+                                q => q.queueId === payload.queueId
+                            ) ?? queuedMessagesRef.current?.find(
+                                q => q.queueId.startsWith('opt-') && q.images?.length
+                            );
+                            if (attachments?.length && queuedMsg?.images?.length) {
+                                // Merge: enrich server attachments with frontend previewUrl
+                                attachments = attachments.map(att => {
+                                    const match = queuedMsg.images!.find(img => img.name === att.name);
+                                    return match?.preview ? { ...att, previewUrl: match.preview } : att;
+                                });
+                            } else if (!attachments?.length && queuedMsg?.images?.length) {
+                                // Fallback: server sent no attachments, use frontend snapshot
+                                attachments = queuedMsg.images.map(img => ({
                                     id: img.id,
                                     name: img.name,
                                     size: 0,
