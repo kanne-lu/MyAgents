@@ -7,6 +7,7 @@ import {
     DEFAULT_CONFIG,
     type ModelEntity,
     type Project,
+    type ModelAliases,
     type Provider,
     type ProviderVerifyStatus,
     PRESET_PROVIDERS,
@@ -71,6 +72,8 @@ export interface ConfigActionsValue {
     // Preset custom models
     savePresetCustomModels: (providerId: string, models: ModelEntity[]) => Promise<void>;
     removePresetCustomModel: (providerId: string, modelId: string) => Promise<void>;
+    // Provider model aliases (SDK sub-agent model mapping)
+    saveProviderModelAliases: (providerId: string, aliases: ModelAliases) => Promise<void>;
     // API Keys
     saveApiKey: (providerId: string, apiKey: string) => Promise<void>;
     deleteApiKey: (providerId: string) => Promise<void>;
@@ -394,6 +397,20 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         setConfig(newConfig);
     }, []);
 
+    const saveProviderModelAliases = useCallback(async (providerId: string, aliases: ModelAliases) => {
+        // Strip empty strings — prevent sending model: "" upstream
+        const cleaned: ModelAliases = {};
+        if (aliases.sonnet) cleaned.sonnet = aliases.sonnet;
+        if (aliases.opus) cleaned.opus = aliases.opus;
+        if (aliases.haiku) cleaned.haiku = aliases.haiku;
+        const newConfig = await atomicModifyConfig(c => {
+            const newAliases = { ...c.providerModelAliases, [providerId]: cleaned };
+            return { ...c, providerModelAliases: newAliases };
+        });
+        setConfig(newConfig);
+        await rebuildAndPersistAvailableProviders();
+    }, []);
+
     // ============= Memoized Context Values =============
 
     const data = useMemo<ConfigDataValue>(() => ({
@@ -404,14 +421,14 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         updateConfig, refreshConfig, reload: load, refreshProviderData,
         addProject, updateProject, patchProject, removeProject, touchProject,
         addCustomProvider, updateCustomProvider, deleteCustomProvider, refreshProviders,
-        savePresetCustomModels, removePresetCustomModel,
+        savePresetCustomModels, removePresetCustomModel, saveProviderModelAliases,
         saveApiKey, deleteApiKey,
         saveProviderVerifyStatus,
     }), [
         updateConfig, refreshConfig, load, refreshProviderData,
         addProject, updateProject, patchProject, removeProject, touchProject,
         addCustomProvider, updateCustomProvider, deleteCustomProvider, refreshProviders,
-        savePresetCustomModels, removePresetCustomModel,
+        savePresetCustomModels, removePresetCustomModel, saveProviderModelAliases,
         saveApiKey, deleteApiKey,
         saveProviderVerifyStatus,
     ]);

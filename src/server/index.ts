@@ -6608,6 +6608,12 @@ async function main() {
       if (pathname === '/v1/messages' && request.method === 'POST') {
         const bridgeConfig = getOpenAiBridgeConfig();
         if (bridgeConfig) {
+          // Diagnostic: log incoming model name to verify sub-agent requests reach the bridge
+          try {
+            const clonedReq = request.clone();
+            const body = await clonedReq.json() as { model?: string };
+            console.log(`[bridge] Incoming request: model=${body.model ?? '(none)'}, bridge_model_override=${bridgeConfig.model ?? '(none)'}`);
+          } catch { /* ignore parse errors for diagnostic */ }
           try {
             return await bridgeHandler(request);
           } catch (error) {

@@ -1,4 +1,4 @@
-import { Check, Download, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Square, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Download, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Square, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -19,7 +19,9 @@ import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
     getModelsDisplay,
+    getEffectiveModelAliases,
     PRESET_PROVIDERS,
+    type ModelAliases,
     type Provider,
     type ProviderAuthType,
     type ApiProtocol,
@@ -134,6 +136,9 @@ interface ProviderEditForm {
     editAuthType?: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
     editMaxOutputTokens?: string;
     editUpstreamFormat?: 'chat_completions' | 'responses';
+    // Model alias mapping (sub-agent model redirection)
+    editModelAliases?: ModelAliases;
+    showAdvanced?: boolean;
 }
 
 interface SettingsProps {
@@ -266,6 +271,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         deleteCustomProvider: deleteCustomProviderService,
         savePresetCustomModels,
         removePresetCustomModel: _removePresetCustomModel,
+        saveProviderModelAliases,
     } = useConfig();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -1579,11 +1585,14 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const openProviderManage = (provider: Provider) => {
         // For preset providers, we allow adding custom models
         // For custom providers, we can edit all fields
+        const effectiveAliases = getEffectiveModelAliases(provider, config.providerModelAliases);
         setEditingProvider({
             provider,
             customModels: [],  // TODO: Load from persisted custom models if any
             removedModels: [], // 标记要删除的已保存模型
             newModelInput: '',
+            editModelAliases: effectiveAliases ? { ...effectiveAliases } : { sonnet: '', opus: '', haiku: '' },
+            showAdvanced: false,
             // 为自定义供应商初始化编辑字段
             ...(provider.isBuiltin ? {} : {
                 editName: provider.name,
@@ -1637,7 +1646,16 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     // Save provider edits
     const saveProviderEdits = async () => {
         if (!editingProvider) return;
-        const { provider, customModels, removedModels, editName, editCloudProvider, editApiProtocol, editBaseUrl, editAuthType } = editingProvider;
+        const { provider, customModels, removedModels, editName, editCloudProvider, editApiProtocol, editBaseUrl, editAuthType, editModelAliases } = editingProvider;
+
+        // Save model aliases for preset providers (custom providers store aliases on the Provider object itself)
+        if (provider.isBuiltin && editModelAliases && provider.id !== 'anthropic-sub' && provider.id !== 'anthropic-api') {
+            try {
+                await saveProviderModelAliases(provider.id, editModelAliases);
+            } catch (error) {
+                console.error('[Settings] Failed to save model aliases:', error);
+            }
+        }
 
         if (provider.isBuiltin) {
             // For preset providers: save user-added custom models
@@ -1704,6 +1722,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 apiProtocol: editApiProtocol === 'openai' ? 'openai' : undefined,
                 maxOutputTokens: editApiProtocol === 'openai' && editingProvider?.editMaxOutputTokens ? parsePositiveInt(editingProvider.editMaxOutputTokens) : undefined,
                 upstreamFormat: editApiProtocol === 'openai' && editingProvider?.editUpstreamFormat !== 'chat_completions' ? editingProvider?.editUpstreamFormat : undefined,
+                modelAliases: editModelAliases
+                    ? Object.fromEntries(Object.entries(editModelAliases).filter(([, v]) => v)) as ModelAliases
+                    : undefined,
                 config: {
                     ...provider.config,
                     baseUrl: editBaseUrl.trim(),
@@ -4510,6 +4531,60 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     </button>
                                 </div>
                             </div>
+
+                            {/* Advanced Options - Model Alias Mapping (not shown for Anthropic providers) */}
+                            {editingProvider.provider.id !== 'anthropic-sub' && editingProvider.provider.id !== 'anthropic-api' && (
+                                <div className="border-t border-[var(--line)] pt-3">
+                                    <button
+                                        type="button"
+                                        onClick={() => setEditingProvider((p) => p ? { ...p, showAdvanced: !p.showAdvanced } : null)}
+                                        className="flex w-full items-center gap-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                                    >
+                                        <ChevronDown className={`h-4 w-4 transition-transform ${editingProvider.showAdvanced ? '' : '-rotate-90'}`} />
+                                        高级选项
+                                    </button>
+                                    {editingProvider.showAdvanced && (() => {
+                                        const aliasModels = [
+                                            { value: '', label: '未设置' },
+                                            ...editingProvider.provider.models
+                                                .filter(m => !editingProvider.removedModels.includes(m.model))
+                                                .map(m => ({ value: m.model, label: m.modelName })),
+                                            ...editingProvider.customModels.map(m => ({ value: m, label: m })),
+                                        ];
+                                        const ALIAS_LABELS: Record<string, string> = {
+                                            opus: 'Opus（大杯）',
+                                            sonnet: 'Sonnet（中杯）',
+                                            haiku: 'Haiku（小杯）',
+                                        };
+                                        return (
+                                            <div className="mt-3">
+                                                <label className="mb-1 block text-sm font-medium text-[var(--ink)]">子 Agent 模型映射</label>
+                                                <p className="mb-3 text-xs leading-relaxed text-[var(--ink-muted)]">
+                                                    Opus 大杯、Sonnet 中杯、Haiku 小杯 — 映射到此供应商的实际模型
+                                                </p>
+                                                <div className="space-y-2.5">
+                                                    {(['opus', 'sonnet', 'haiku'] as const).map((alias) => (
+                                                        <div key={alias} className="flex items-center gap-2.5">
+                                                            <span className="w-[90px] shrink-0 text-xs text-[var(--ink-muted)]">{ALIAS_LABELS[alias]}</span>
+                                                            <CustomSelect
+                                                                value={editingProvider.editModelAliases?.[alias] || ''}
+                                                                options={aliasModels}
+                                                                onChange={(v) => setEditingProvider((p) => p ? {
+                                                                    ...p,
+                                                                    editModelAliases: { ...p.editModelAliases, [alias]: v },
+                                                                } : null)}
+                                                                placeholder="未设置"
+                                                                compact
+                                                                className="flex-1"
+                                                            />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        );
+                                    })()}
+                                </div>
+                            )}
                         </div>
 
                         <div className="flex-shrink-0 border-t border-[var(--line)] px-6 pt-6 pb-4">

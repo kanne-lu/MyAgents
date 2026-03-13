@@ -54,6 +54,18 @@ export interface ModelEntity {
 export type ModelId = string;
 
 /**
+ * Model alias mapping for non-Anthropic providers.
+ * Maps SDK model aliases (sonnet/opus/haiku) to provider-specific model IDs.
+ * When Claude Agent SDK sub-agents use hardcoded model aliases like "haiku",
+ * the bridge translates them to the actual provider model via this mapping.
+ */
+export interface ModelAliases {
+  sonnet?: string;  // e.g., 'deepseek-chat'
+  opus?: string;    // e.g., 'deepseek-reasoner'
+  haiku?: string;   // e.g., 'deepseek-chat'
+}
+
+/**
  * Get the display name for a model
  */
 export function getModelDisplayName(provider: Provider, modelId: string): string {
@@ -133,6 +145,10 @@ export interface Provider {
 
   // 模型列表 - 使用新的 ModelEntity 结构
   models: ModelEntity[];
+
+  // SDK 模型别名映射（非 Anthropic provider 的子 Agent 模型重定向）
+  // SDK 内置子 Agent (如 Explore) 会硬编码 model: "haiku"，通过此映射转为实际模型
+  modelAliases?: ModelAliases;
 
   // 用户输入的 API Key (运行时填充，不持久化到 provider 定义)
   apiKey?: string;
@@ -283,6 +299,10 @@ export interface AppConfig {
   // while keeping preset definitions unchanged (updated with app releases)
   presetCustomModels?: Record<string, ModelEntity[]>;
 
+  // ===== Provider Model Aliases (user overrides) =====
+  // Maps provider ID → user-configured model alias overrides (merged with preset defaults)
+  providerModelAliases?: Record<string, ModelAliases>;
+
   // ===== MCP Configuration =====
   // Custom MCP servers added by user (merged with presets)
   mcpServers?: McpServerDefinition[];
@@ -395,6 +415,7 @@ export const PRESET_PROVIDERS: Provider[] = [
       timeout: 600000,
       disableNonessential: true,
     },
+    modelAliases: { sonnet: 'deepseek-chat', opus: 'deepseek-reasoner', haiku: 'deepseek-chat' },
     models: [
       { model: 'deepseek-chat', modelName: 'DeepSeek Chat', modelSeries: 'deepseek' },
       { model: 'deepseek-reasoner', modelName: 'DeepSeek Reasoner', modelSeries: 'deepseek' },
@@ -413,6 +434,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://api.moonshot.cn/anthropic',
     },
+    modelAliases: { sonnet: 'kimi-k2.5', opus: 'kimi-k2.5', haiku: 'kimi-k2-thinking-turbo' },
     models: [
       { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot' },
       { model: 'kimi-k2-thinking-turbo', modelName: 'Kimi K2 Thinking', modelSeries: 'moonshot' },
@@ -434,6 +456,7 @@ export const PRESET_PROVIDERS: Provider[] = [
       timeout: 600000,
       disableNonessential: true,
     },
+    modelAliases: { sonnet: 'glm-4.7', opus: 'glm-5', haiku: 'glm-4.5-air' },
     models: [
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu' },
       { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu' },
@@ -453,6 +476,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://api.minimaxi.com/anthropic',
     },
+    modelAliases: { sonnet: 'MiniMax-M2.5', opus: 'MiniMax-M2.5', haiku: 'MiniMax-M2.5-lightning' },
     models: [
       { model: 'MiniMax-M2.5', modelName: 'MiniMax M2.5', modelSeries: 'minimax' },
       { model: 'MiniMax-M2.5-lightning', modelName: 'MiniMax M2.5 Lightning', modelSeries: 'minimax' },
@@ -475,6 +499,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     },
+    modelAliases: { sonnet: 'gemini-3.1-pro-preview', opus: 'gemini-3.1-pro-preview', haiku: 'gemini-3-flash-preview' },
     models: [
       { model: 'gemini-2.5-pro', modelName: 'Gemini 2.5 Pro', modelSeries: 'google' },
       { model: 'gemini-2.5-flash', modelName: 'Gemini 2.5 Flash', modelSeries: 'google' },
@@ -497,6 +522,7 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://ark.cn-beijing.volces.com/api/coding',
       disableNonessential: true,
     },
+    modelAliases: { sonnet: 'doubao-seed-2.0-code', opus: 'doubao-seed-2.0-code', haiku: 'doubao-seed-2.0-code' },
     models: [
       { model: 'doubao-seed-2.0-code', modelName: 'Doubao Seed 2.0 Code', modelSeries: 'volcengine' },
       { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'volcengine' },
@@ -518,6 +544,7 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://ark.cn-beijing.volces.com/api/compatible',
       disableNonessential: true,
     },
+    modelAliases: { sonnet: 'doubao-seed-2-0-pro-260215', opus: 'doubao-seed-2-0-pro-260215', haiku: 'doubao-seed-2-0-lite-260215' },
     models: [
       { model: 'doubao-seed-2-0-pro-260215', modelName: 'Doubao Seed 2.0 Pro', modelSeries: 'volcengine' },
       { model: 'doubao-seed-2-0-code-preview-260215', modelName: 'Doubao Seed 2.0 Code Preview', modelSeries: 'volcengine' },
@@ -537,6 +564,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://api.siliconflow.cn/',
     },
+    modelAliases: { sonnet: 'Pro/deepseek-ai/DeepSeek-V3.2', opus: 'Pro/moonshotai/Kimi-K2.5', haiku: 'stepfun-ai/Step-3.5-Flash' },
     models: [
       { model: 'Pro/moonshotai/Kimi-K2.5', modelName: 'Kimi K2.5', modelSeries: 'siliconflow' },
       { model: 'Pro/zai-org/GLM-4.7', modelName: 'GLM 4.7', modelSeries: 'siliconflow' },
@@ -559,6 +587,7 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://zenmux.ai/api/anthropic',
       disableNonessential: true,
     },
+    modelAliases: { sonnet: 'anthropic/claude-sonnet-4.6', opus: 'anthropic/claude-opus-4.6', haiku: 'volcengine/doubao-seed-2.0-lite' },
     models: [
       { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google' },
       { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
@@ -583,6 +612,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
     },
+    modelAliases: { sonnet: 'qwen3.5-plus', opus: 'qwen3.5-plus', haiku: 'qwen3.5-plus' },
     models: [
       { model: 'qwen3.5-plus', modelName: 'Qwen 3.5 Plus', modelSeries: 'aliyun' },
       { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'aliyun' },
@@ -596,18 +626,25 @@ export const PRESET_PROVIDERS: Provider[] = [
     vendor: 'OpenRouter',
     cloudProvider: '云服务商',
     type: 'api',
-    primaryModel: 'openai/gpt-5.2-codex',
+    primaryModel: 'google/gemini-3.1-pro-preview',
     isBuiltin: true,
     authType: 'auth_token_clear_api_key',
     websiteUrl: 'https://openrouter.ai/',
     config: {
       baseUrl: 'https://openrouter.ai/api',
     },
+    modelAliases: { sonnet: 'google/gemini-3.1-pro-preview', opus: 'google/gemini-3.1-pro-preview', haiku: 'google/gemini-3-flash-preview' },
     models: [
-      { model: 'openai/gpt-5.2-codex', modelName: 'GPT-5.2 Codex', modelSeries: 'openai' },
-      { model: 'openai/gpt-5.2-pro', modelName: 'GPT-5.2 Pro', modelSeries: 'openai' },
-      { model: 'google/gemini-3-pro-preview', modelName: 'Gemini 3 Pro', modelSeries: 'google' },
+      { model: 'google/gemini-3.1-flash-lite-preview', modelName: 'Gemini 3.1 Flash Lite', modelSeries: 'google' },
       { model: 'google/gemini-3-flash-preview', modelName: 'Gemini 3 Flash', modelSeries: 'google' },
+      { model: 'google/gemini-3.1-pro-preview', modelName: 'Gemini 3.1 Pro', modelSeries: 'google' },
+      { model: 'anthropic/claude-sonnet-4.6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
+      { model: 'anthropic/claude-opus-4.6', modelName: 'Claude Opus 4.6', modelSeries: 'claude' },
+      { model: 'anthropic/claude-haiku-4.5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
+      { model: 'openai/gpt-5.4', modelName: 'GPT-5.4', modelSeries: 'openai' },
+      { model: 'openai/gpt-5.4-pro', modelName: 'GPT-5.4 Pro', modelSeries: 'openai' },
+      { model: 'openai/gpt-5.3-codex', modelName: 'GPT-5.3 Codex', modelSeries: 'openai' },
+      { model: 'openai/gpt-5.3-chat', modelName: 'GPT-5.3 Chat', modelSeries: 'openai' },
     ],
   },
 ];
@@ -738,6 +775,27 @@ export const MCP_DISCOVERY_LINKS = [
  */
 export function getPresetMcpServer(id: string): McpServerDefinition | undefined {
   return PRESET_MCP_SERVERS.find(s => s.id === id);
+}
+
+/**
+ * Get effective model aliases for a provider (preset defaults merged with user overrides).
+ * Anthropic providers don't need aliases (SDK natively supports their models).
+ */
+export function getEffectiveModelAliases(
+  provider: Provider,
+  userOverrides?: Record<string, ModelAliases>,
+): ModelAliases | undefined {
+  // Anthropic providers don't need alias mapping
+  if (provider.id === 'anthropic-sub' || provider.id === 'anthropic-api') return undefined;
+  const defaults = provider.modelAliases ?? {};
+  const overrides = userOverrides?.[provider.id];
+  if (overrides) {
+    // User has explicit overrides — merge with defaults (overrides win, including empty strings)
+    return { ...defaults, ...overrides };
+  }
+  // No user overrides — return preset defaults (or undefined if none)
+  if (!defaults.sonnet && !defaults.opus && !defaults.haiku) return undefined;
+  return defaults;
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
