@@ -9,6 +9,7 @@ import { v4 as uuid } from 'uuid';
 
 import ScheduleTypeTabs from './ScheduleTypeTabs';
 import CustomSelect from '@/components/CustomSelect';
+import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useConfig } from '@/hooks/useConfig';
 import { useToast } from '@/components/Toast';
 import * as cronClient from '@/api/cronTaskClient';
@@ -132,7 +133,11 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
   }, [onClose]);
 
   const projectOptions = useMemo(() =>
-    projects.map(p => ({ value: p.path, label: p.name || p.path.split('/').pop() || p.path })),
+    projects.map(p => ({
+      value: p.path,
+      label: p.name || p.path.split('/').pop() || p.path,
+      icon: <WorkspaceIcon icon={p.icon} size={16} />,
+    })),
     [projects]
   );
 

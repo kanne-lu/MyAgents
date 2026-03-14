@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { BarChart2, Bell, Check, Clock, Flag, History, Pencil, Play, Square, Trash2, X } from 'lucide-react';
+import { BarChart2, Bell, Check, Clock, FileText, Flag, FolderOpen, History, MessageSquare, Pencil, Play, Square, Trash2, X } from 'lucide-react';
 
 import type { CronTask, CronSchedule, CronEndConditions } from '@/types/cronTask';
 import {
@@ -16,7 +16,9 @@ import {
     MIN_CRON_INTERVAL,
 } from '@/types/cronTask';
 import { getFolderName } from '@/utils/taskCenterUtils';
+import WorkspaceIcon from './launcher/WorkspaceIcon';
 import { useToast } from './Toast';
+import { useConfig } from '@/hooks/useConfig';
 import ConfirmDialog from './ConfirmDialog';
 import TaskRunHistory from './scheduled-tasks/TaskRunHistory';
 import ScheduleTypeTabs from './scheduled-tasks/ScheduleTypeTabs';
@@ -76,6 +78,8 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
 
 export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, onResume, onStop }: CronTaskDetailPanelProps) {
     const toast = useToast();
+    const { projects } = useConfig();
+    const project = useMemo(() => projects.find(p => p.path === task.workspacePath), [projects, task.workspacePath]);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
@@ -230,26 +234,44 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                         ) : (
                             /* ====== DETAIL MODE ====== */
                             <>
-                                <div className="space-y-3">
-                                    <DetailField label="任务名称" value={displayName} />
-                                    <DetailField label="执行 Agent" value={getFolderName(task.workspacePath)} />
-                                    {botInfo && <DetailField label="来源" value={`${botInfo.name} (${botInfo.platform})`} />}
+                                {/* 基本信息 */}
+                                <div>
+                                    <SectionHeader icon={FolderOpen}>基本信息</SectionHeader>
+                                    <div className="mt-3 space-y-3">
+                                        <DetailField label="任务名称" value={displayName} />
+                                        <div>
+                                            <span className="text-[13px] text-[var(--ink-muted)]">执行 Agent</span>
+                                            <div className="mt-0.5 flex items-center gap-2">
+                                                <WorkspaceIcon icon={project?.icon} size={16} />
+                                                <span className="text-sm text-[var(--ink)]">{getFolderName(task.workspacePath)}</span>
+                                            </div>
+                                        </div>
+                                        {botInfo && <DetailField label="来源" value={`${botInfo.name} (${botInfo.platform})`} />}
+                                    </div>
                                 </div>
 
+                                <div className="border-t border-[var(--line)]" />
+
+                                {/* AI 指令 */}
                                 {task.prompt && (
                                     <>
-                                        <div className="border-t border-[var(--line)]" />
                                         <div>
-                                            <span className="text-[13px] text-[var(--ink-muted)]">AI 指令</span>
-                                            <div className="mt-1.5 rounded-lg border border-[var(--line)] px-3.5 py-3 text-[13px] leading-relaxed text-[var(--ink-secondary)] whitespace-pre-wrap break-words">{task.prompt}</div>
+                                            <SectionHeader icon={FileText}>AI 指令</SectionHeader>
+                                            <div className="mt-2 rounded-lg border border-[var(--line)] px-3.5 py-3 text-[13px] leading-relaxed text-[var(--ink-secondary)] whitespace-pre-wrap break-words">{task.prompt}</div>
                                         </div>
+                                        <div className="border-t border-[var(--line)]" />
                                     </>
                                 )}
 
-                                <div className="border-t border-[var(--line)]" />
-                                <DetailField label="执行模式" value={runModeLabel} />
+                                {/* 执行模式 */}
+                                <div>
+                                    <SectionHeader icon={MessageSquare}>执行模式</SectionHeader>
+                                    <p className="mt-2 text-sm text-[var(--ink)]">{runModeLabel}</p>
+                                </div>
 
                                 <div className="border-t border-[var(--line)]" />
+
+                                {/* 执行计划 */}
                                 <div>
                                     <SectionHeader icon={Clock}>执行计划</SectionHeader>
                                     <div className="mt-2 flex items-center justify-between rounded-lg border border-[var(--line)] px-3.5 py-3">
@@ -261,6 +283,8 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                 </div>
 
                                 <div className="border-t border-[var(--line)]" />
+
+                                {/* 结束条件与通知 */}
                                 <div>
                                     <SectionHeader icon={Flag}>结束条件与通知</SectionHeader>
                                     <div className="mt-2 flex flex-wrap gap-2">
@@ -272,17 +296,21 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                 </div>
 
                                 <div className="border-t border-[var(--line)]" />
+
+                                {/* 运行统计 */}
                                 <div>
                                     <SectionHeader icon={BarChart2}>运行统计</SectionHeader>
-                                    <div className="mt-2 flex flex-wrap gap-x-6 gap-y-2">
-                                        <DetailField label="执行次数" value={task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : `${task.executionCount} 次`} inline />
-                                        <DetailField label="上次执行" value={task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString('zh-CN') : '尚未执行'} inline />
-                                        {task.exitReason && <DetailField label="退出原因" value={task.exitReason} inline />}
+                                    <div className="mt-2 space-y-1.5">
+                                        <DetailField label="执行次数" value={task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : `${task.executionCount} 次`} />
+                                        <DetailField label="上次执行" value={task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString('zh-CN') : '尚未执行'} />
+                                        {task.exitReason && <DetailField label="退出原因" value={task.exitReason} />}
                                     </div>
                                     {task.lastError && <p className="mt-1.5 text-[12px] text-[var(--error)]">{task.lastError}</p>}
                                 </div>
 
                                 <div className="border-t border-[var(--line)]" />
+
+                                {/* 执行历史 */}
                                 <div>
                                     <SectionHeader icon={History}>执行历史</SectionHeader>
                                     <div className="mt-2"><TaskRunHistory taskId={task.id} /></div>
