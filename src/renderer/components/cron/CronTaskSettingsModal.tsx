@@ -213,7 +213,7 @@ function CronTaskSettingsForm({
               </div>
               <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
                 {executionTarget === 'current_session'
-                  ? '在当前对话中循环执行，保持上下文'
+                  ? '在当前对话中定时执行，保持上下文'
                   : '创建独立定时任务，不占用当前对话'}
               </p>
             </div>
