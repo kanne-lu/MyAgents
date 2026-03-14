@@ -201,8 +201,32 @@ export type InteractionScenario =
 | 桌面聊天 | base-identity | channel-desktop | — |
 | IM Bot | base-identity | channel-im | heartbeat |
 | Cron 任务 | base-identity | channel-desktop | cron-task |
+| AI 创建定时任务 | base-identity | channel-desktop / channel-im | — (通过 `im-cron` MCP 工具) |
 
 **调用方式**：`agent-session.ts` 维护 process-global `currentScenario`，`index.ts` 在各场景入口调用 `setInteractionScenario()` 设置，session 启动时通过 `buildSystemPromptAppend(currentScenario)` 注入到 SDK 的 `systemPrompt.append`。
+
+### 5b. 定时任务系统 (v0.1.42)
+
+**Rust 层**（`src-tauri/src/cron_task.rs`）：
+- `CronTaskManager` — 单例，管理任务 CRUD、tokio 调度循环、持久化、崩溃恢复
+- 支持三种 `CronSchedule`：`Every { minutes, start_at? }` / `Cron { expr, tz? }` / `At { at }`
+- 调度器使用 wall-clock polling（`sleep_until_wallclock`），系统休眠后能正确唤醒
+- 持久化：`~/.myagents/cron_tasks.json`（原子写入），执行记录 `~/.myagents/cron_runs/<taskId>.jsonl`
+- `load_tasks_from_file` 采用逐条 fallback 反序列化（单条损坏不影响其他）
+- Management API 端点：`/api/cron/{create,list,update,delete,run,runs,status}`
+
+**Bun 层**（`src/server/tools/im-cron-tool.ts`）：
+- `im-cron` MCP server — **所有 Session 可用**（不仅 IM Bot）
+- 桌面 Session 通过 `sessionCronContext` 提供上下文，IM 通过 `imCronContext`
+- 始终信任（`canUseTool` auto-allow），`list`/`status` 按工作区过滤
+- `add` 返回结构化 JSON，前端渲染为 `CronTaskCard`
+
+**前端**：
+- `TaskCreateModal` — 独立创建弹窗（任务中心/首页入口）
+- `CronTaskSettingsModal` — Chat 内定时面板（执行模式：当前对话/新开对话）
+- `CronTaskDetailPanel` — 详情+编辑双模式面板
+- `ScheduleTypeTabs` / `CronExpressionInput` — 可视化调度构建器
+- `CronTaskCard` — 对话流内任务卡片
 
 > **注意**：模板内容以字符串常量内联在 `system-prompt.ts` 中（因 bun build 会硬编码 `__dirname`，禁止用 `readFileSync` 加载资源）。
 
