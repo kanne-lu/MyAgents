@@ -319,27 +319,27 @@ export default memo(function TaskCenterOverlay({
 
                     {/* Right: Cron tasks */}
                     <div className="flex w-[340px] shrink-0 flex-col border-l border-[var(--line)] pl-5">
-                        <div className="mb-3 flex items-center justify-between">
-                            <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
-                                定时任务
-                            </h3>
-                            <button
-                                onClick={() => setShowCreateModal(true)}
-                                className="flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] transition-colors"
-                            >
-                                <Plus className="h-3 w-3" />
-                                新建
-                            </button>
-                        </div>
+                        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
+                            定时任务
+                        </h3>
 
                         <div className="flex-1 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
-                            {sortedCronTasks.length === 0 ? (
-                                <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
-                                    暂无定时任务
-                                </div>
-                            ) : (
-                                <div className="space-y-1">
-                                    {sortedCronTasks.map(task => {
+                            <div className="space-y-1">
+                                {/* Create button — first item, matching RecentTasks style */}
+                                <button
+                                    onClick={() => setShowCreateModal(true)}
+                                    className="mb-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors"
+                                >
+                                    <Plus className="h-3.5 w-3.5" />
+                                    新建定时任务
+                                </button>
+
+                                {sortedCronTasks.length === 0 ? (
+                                    <div className="py-6 text-center text-[13px] text-[var(--ink-muted)]/60">
+                                        暂无定时任务
+                                    </div>
+                                ) : (
+                                    sortedCronTasks.map(task => {
                                         const botInfo = task.sourceBotId
                                             ? cronBotInfoMap.get(task.sourceBotId)
                                             : undefined;
@@ -379,9 +379,9 @@ export default memo(function TaskCenterOverlay({
                                                 </div>
                                             </button>
                                         );
-                                    })}
-                                </div>
-                            )}
+                                    })
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>

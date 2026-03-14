@@ -357,7 +357,7 @@ function TabHeader({
                 className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
                     activeTab === 'sessions'
                         ? 'text-[var(--ink-muted)]'
-                        : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'
+                        : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
                 }`}
             >
                 最近任务
@@ -370,7 +370,7 @@ function TabHeader({
                 className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
                     activeTab === 'cron'
                         ? 'text-[var(--ink-muted)]'
-                        : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'
+                        : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
                 }`}
             >
                 定时任务
