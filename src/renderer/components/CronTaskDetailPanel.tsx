@@ -4,7 +4,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bell, Check, Clock, Pencil, Play, Square, Trash2, X } from 'lucide-react';
+import { BarChart2, Bell, Check, Clock, Flag, History, Pencil, Play, Square, Trash2, X } from 'lucide-react';
 
 import type { CronTask, CronSchedule, CronEndConditions } from '@/types/cronTask';
 import {
@@ -199,7 +199,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 {!isAtSchedule && (
                                     <div>
-                                        <SectionHeader>结束条件</SectionHeader>
+                                        <SectionHeader icon={Flag}>结束条件</SectionHeader>
                                         <div className="mt-3 space-y-3">
                                             <div className="flex gap-2">
                                                 <button type="button" onClick={() => setEditEndMode('conditional')} className={`flex-1 rounded-lg border px-4 py-2 text-sm font-medium transition ${editEndMode === 'conditional' ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]' : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'}`}>条件停止</button>
@@ -262,7 +262,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 <div className="border-t border-[var(--line)]" />
                                 <div>
-                                    <SectionHeader>结束条件与通知</SectionHeader>
+                                    <SectionHeader icon={Flag}>结束条件与通知</SectionHeader>
                                     <div className="mt-2 flex flex-wrap gap-2">
                                         <DetailTag label={task.endConditions.deadline ? `截止 ${new Date(task.endConditions.deadline).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '无截止'} />
                                         <DetailTag label={task.endConditions.maxExecutions ? `最多 ${task.endConditions.maxExecutions} 次` : '无限次'} />
@@ -273,7 +273,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 <div className="border-t border-[var(--line)]" />
                                 <div>
-                                    <SectionHeader>运行统计</SectionHeader>
+                                    <SectionHeader icon={BarChart2}>运行统计</SectionHeader>
                                     <div className="mt-2 flex flex-wrap gap-x-6 gap-y-2">
                                         <DetailField label="执行次数" value={task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : `${task.executionCount} 次`} inline />
                                         <DetailField label="上次执行" value={task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString('zh-CN') : '尚未执行'} inline />
@@ -284,7 +284,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 <div className="border-t border-[var(--line)]" />
                                 <div>
-                                    <SectionHeader>执行历史</SectionHeader>
+                                    <SectionHeader icon={History}>执行历史</SectionHeader>
                                     <div className="mt-2"><TaskRunHistory taskId={task.id} /></div>
                                 </div>
                             </>

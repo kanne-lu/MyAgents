@@ -4,7 +4,7 @@
  */
 
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
-import { X, Clock, Bell, Check } from 'lucide-react';
+import { X, Clock, Bell, Check, Flag } from 'lucide-react';
 import { v4 as uuid } from 'uuid';
 
 import ScheduleTypeTabs from './ScheduleTypeTabs';
@@ -261,7 +261,7 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
           {/* 结束条件 */}
           {!isAtSchedule && (
             <div>
-              <SectionHeader>结束条件</SectionHeader>
+              <SectionHeader icon={Flag}>结束条件</SectionHeader>
               <div className="mt-3 space-y-3">
                 {/* Segmented control — equal width, matches 循环设置 */}
                 <div className="flex gap-2">

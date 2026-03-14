@@ -199,10 +199,10 @@ export default function CronExpressionInput({ expr, tz, onChange }: CronExpressi
                 key={opt.value}
                 type="button"
                 onClick={() => handleFreqChange(opt.value)}
-                className={`rounded-[var(--radius-sm)] border px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
                   freq === opt.value
-                    ? 'border-[var(--accent)] bg-[var(--accent-warm-subtle)] text-[var(--accent)]'
-                    : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)]'
+                    ? 'bg-[var(--accent)] text-white'
+                    : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
                 }`}
               >
                 {opt.label}
