@@ -78,7 +78,7 @@ export default function CustomSelect({
 
             {/* Dropdown panel */}
             {isOpen && (
-                <div className="absolute left-0 top-full z-50 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md">
+                <div className="absolute left-0 top-full z-[300] mt-1 max-h-60 w-full overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md">
                     {options.map(option => (
                         <button
                             key={option.value}

@@ -122,6 +122,7 @@ struct CreateCronResponse {
 #[serde(rename_all = "camelCase")]
 struct ListCronQuery {
     source_bot_id: Option<String>,
+    workspace_path: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,7 +197,7 @@ async fn create_cron_handler(
     };
 
     let interval_minutes = match &req.schedule {
-        Some(CronSchedule::Every { minutes }) => *minutes,
+        Some(CronSchedule::Every { minutes, .. }) => *minutes,
         Some(CronSchedule::At { .. }) => 60, // placeholder, not used for one-shot
         Some(CronSchedule::Cron { .. }) => 60, // placeholder, calculated by cron expression
         None => req.interval_minutes.unwrap_or(30),
@@ -232,10 +233,15 @@ async fn create_cron_handler(
                 log::warn!("[management-api] Started task {} but failed to start scheduler: {}", task_id, e);
             }
 
+            // Fetch enriched task to get computed nextExecutionAt
+            let next_exec = manager.get_task(&task_id).await
+                .and_then(|t| t.next_execution_at);
+
             Json(serde_json::json!({
                 "ok": true,
                 "taskId": task.id,
-                "status": "running"
+                "status": "running",
+                "nextExecutionAt": next_exec
             }))
         }
         Err(e) => Json(serde_json::json!({
@@ -252,6 +258,8 @@ async fn list_cron_handler(
 
     let tasks = if let Some(bot_id) = &query.source_bot_id {
         manager.get_tasks_for_bot(bot_id).await
+    } else if let Some(workspace) = &query.workspace_path {
+        manager.get_tasks_for_workspace(workspace).await
     } else {
         manager.get_all_tasks().await
     };
@@ -346,14 +354,21 @@ async fn runs_cron_handler(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusQuery {
-    bot_id: String,
+    bot_id: Option<String>,
+    workspace_path: Option<String>,
 }
 
 async fn status_cron_handler(
     Query(params): Query<StatusQuery>,
 ) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
-    let tasks = manager.get_tasks_for_bot(&params.bot_id).await;
+    let tasks = if let Some(bot_id) = &params.bot_id {
+        manager.get_tasks_for_bot(bot_id).await
+    } else if let Some(workspace) = &params.workspace_path {
+        manager.get_tasks_for_workspace(workspace).await
+    } else {
+        manager.get_all_tasks().await
+    };
 
     let total = tasks.len();
     let running = tasks.iter().filter(|t| t.status == cron_task::TaskStatus::Running).count();

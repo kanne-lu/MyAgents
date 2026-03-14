@@ -159,6 +159,8 @@ pub fn run() {
             cron_task::cmd_mark_task_executing,
             cron_task::cmd_mark_task_complete,
             cron_task::cmd_is_task_executing,
+            cron_task::cmd_get_cron_runs,
+            cron_task::cmd_update_cron_task_fields,
             // Session activation commands (for Session singleton)
             cmd_get_session_activation,
             cmd_activate_session,
@@ -297,7 +299,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 cron_task::initialize_cron_manager(cron_app_handle).await;
             });
-            log::info!("[App] Cron task manager initialized");
+            ulog_info!("[App] Cron task manager initialization scheduled");
 
             // Auto-start IM Bot if previously enabled (3s delay)
             im::schedule_auto_start(app.handle().clone());

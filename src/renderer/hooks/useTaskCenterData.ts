@@ -224,6 +224,15 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             });
             unlisteners.push(u5);
 
+            // Task updated (fields edited via cmd_update_cron_task_fields)
+            const u6 = await listen('cron:task-updated', () => {
+                if (!mounted) return;
+                getAllCronTasks().then(tasks => {
+                    if (mounted) setCronTasks(tasks);
+                }).catch(() => {});
+            });
+            unlisteners.push(u6);
+
             // Agent status changes (channel started/stopped, session created)
             const u7 = await listen('agent:status-changed', () => {
                 if (!mounted) return;

@@ -7,7 +7,7 @@ import { getScriptDir, getBundledBunDir, getAgentBrowserCliPath } from './utils/
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
-import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
+import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext, clearImMediaContext } from './tools/im-media-tool';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 // Side-effect imports: each registers itself in the builtin MCP registry
@@ -889,13 +889,13 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     return { allowed: false, reason: '定时任务工具只能在定时任务执行期间使用' };
   }
 
-  // Special case: im-cron is a built-in MCP server for IM Bot scheduled tasks
+  // Special case: im-cron is a built-in MCP server for scheduled tasks (all sessions)
+  // Always allowed when management API is available (tool checks context internally)
   if (serverId === 'im-cron') {
-    const imCtx = getImCronContext();
-    if (imCtx) {
+    if (process.env.MYAGENTS_MANAGEMENT_PORT) {
       return { allowed: true };
     }
-    return { allowed: false, reason: 'IM 定时任务工具只能在 IM Bot 会话中使用' };
+    return { allowed: false, reason: '定时任务管理 API 不可用' };
   }
 
   // Case 1: MCP not set (null) - allow all (backward compatible)
@@ -1001,11 +1001,12 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
     console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
   }
 
-  // Add IM cron tool if we're in an IM context with management API available
-  const imCronCtx = getImCronContext();
-  if (imCronCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
+  // Add cron tool for ALL sessions when management API is available
+  // IM sessions use imCronContext (with delivery), regular sessions use sessionCronContext
+  if (process.env.MYAGENTS_MANAGEMENT_PORT) {
     result['im-cron'] = imCronToolServer;
-    console.log(`[agent] Added im-cron MCP server for bot ${imCronCtx.botId}`);
+    const imCronCtx = getImCronContext();
+    console.log(`[agent] Added im-cron MCP server${imCronCtx ? ` for bot ${imCronCtx.botId}` : ' (session mode)'}`);
   }
 
   // Add IM media tool if we're in an IM context with management API available
@@ -3969,6 +3970,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     const promptGen = messageGenerator();
 
+    // Set session cron context so the im-cron tool can create tasks for non-IM sessions
+    // IM sessions set imCronContext separately (in the IM message handler in index.ts)
+    if (process.env.MYAGENTS_MANAGEMENT_PORT && !getImCronContext()) {
+      setSessionCronContext({
+        sessionId: sessionId,
+        workspacePath: agentDir,
+        model: currentModel,
+        permissionMode: currentPermissionMode,
+        providerEnv: currentProviderEnv,
+      });
+    }
+
     // Build common query options (shared between normal start and "already in use" fallback)
     const commonQueryOptions = {
       enableFileCheckpointing: true,
@@ -5114,6 +5127,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     }
 
     clearCronTaskContext();
+    clearSessionCronContext();
     clearImMediaContext();
     resolveTermination!();
 

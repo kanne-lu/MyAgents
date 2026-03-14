@@ -2,7 +2,7 @@
 // Communicates with Rust CronTaskManager via Tauri commands
 
 import { isTauriEnvironment } from '@/utils/browserMock';
-import type { CronTask, CronTaskConfig } from '@/types/cronTask';
+import type { CronTask, CronTaskConfig, CronRunRecord, CronSchedule, CronEndConditions } from '@/types/cronTask';
 
 // Cached invoke function to avoid repeated dynamic imports
 let cachedInvoke: typeof import('@tauri-apps/api/core').invoke | null = null;
@@ -138,3 +138,27 @@ export const markTaskComplete = (taskId: string): Promise<void> =>
 /** Check if a task is currently executing */
 export const isTaskExecuting = (taskId: string): Promise<boolean> =>
   invokeCommandWithFallback('cmd_is_task_executing', { taskId }, false);
+
+// ============= Cron Task Run History =============
+
+/** Get execution history (run records) for a cron task */
+export const getCronRuns = (taskId: string, limit?: number): Promise<CronRunRecord[]> =>
+  invokeCommandWithFallback('cmd_get_cron_runs', { taskId, limit }, []);
+
+// ============= Cron Task Field Updates =============
+
+/** Update editable fields of a cron task */
+export const updateCronTaskFields = (
+  taskId: string,
+  fields: {
+    name?: string;
+    prompt?: string;
+    schedule?: CronSchedule;
+    intervalMinutes?: number;
+    endConditions?: CronEndConditions;
+    notifyEnabled?: boolean;
+    model?: string;
+    permissionMode?: string;
+  }
+): Promise<CronTask> =>
+  invokeCommand('cmd_update_cron_task_fields', { taskId, ...fields });

@@ -5,7 +5,7 @@
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { BarChart2, Clock, Trash2, X } from 'lucide-react';
+import { BarChart2, Clock, Plus, Trash2, X } from 'lucide-react';
 
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
@@ -26,6 +26,7 @@ import {
     formatScheduleDescription,
     formatNextExecution,
 } from '@/types/cronTask';
+import TaskCreateModal from '@/components/scheduled-tasks/TaskCreateModal';
 
 interface TaskCenterOverlayProps {
     projects: Project[];
@@ -60,6 +61,7 @@ export default memo(function TaskCenterOverlay({
     const [workspaceFilter, setWorkspaceFilter] = useState<string>('all');
     const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
+    const [showCreateModal, setShowCreateModal] = useState(false);
 
     // Unique workspace entries for dropdown (name + icon)
     const workspaceOptions = useMemo(() => {
@@ -317,9 +319,18 @@ export default memo(function TaskCenterOverlay({
 
                     {/* Right: Cron tasks */}
                     <div className="flex w-[340px] shrink-0 flex-col border-l border-[var(--line)] pl-5">
-                        <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
-                            定时任务
-                        </h3>
+                        <div className="mb-3 flex items-center justify-between">
+                            <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/60">
+                                定时任务
+                            </h3>
+                            <button
+                                onClick={() => setShowCreateModal(true)}
+                                className="flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] transition-colors"
+                            >
+                                <Plus className="h-3 w-3" />
+                                新建
+                            </button>
+                        </div>
 
                         <div className="flex-1 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
                             {sortedCronTasks.length === 0 ? (
@@ -391,6 +402,11 @@ export default memo(function TaskCenterOverlay({
                     sessionId={statsSession.id}
                     sessionTitle={statsSession.title}
                     onClose={() => setStatsSession(null)}
+                />
+            )}
+            {showCreateModal && (
+                <TaskCreateModal
+                    onClose={() => setShowCreateModal(false)}
                 />
             )}
         </div>

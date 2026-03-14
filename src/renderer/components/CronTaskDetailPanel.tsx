@@ -15,6 +15,7 @@ import {
 } from '@/types/cronTask';
 import { getFolderName } from '@/utils/taskCenterUtils';
 import ConfirmDialog from './ConfirmDialog';
+import TaskRunHistory from './scheduled-tasks/TaskRunHistory';
 
 interface CronTaskDetailPanelProps {
     task: CronTask;
@@ -191,7 +192,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             />
                             {task.exitReason && <InfoRow label="退出原因" value={task.exitReason} />}
                             {task.lastError && (
-                                <div className="mt-1 rounded bg-red-500/10 px-2.5 py-1.5 text-[12px] text-red-600 dark:text-red-400">
+                                <div className="mt-1 rounded bg-[var(--error-bg)] px-2.5 py-1.5 text-[12px] text-[var(--error)]">
                                     {task.lastError}
                                 </div>
                             )}
@@ -211,6 +212,14 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             </div>
                         </div>
 
+                        {/* Execution history */}
+                        <div className="mb-4">
+                            <h4 className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/50">
+                                执行历史
+                            </h4>
+                            <TaskRunHistory taskId={task.id} />
+                        </div>
+
                         {/* Prompt preview */}
                         {task.prompt && (
                             <div>
@@ -228,7 +237,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                     <div className="flex items-center justify-between border-t border-[var(--line)] px-5 py-3">
                         <button
                             onClick={() => setShowDeleteConfirm(true)}
-                            className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium text-[var(--error)] transition-colors hover:bg-red-500/10"
+                            className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[12px] font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
                         >
                             <Trash2 className="h-3.5 w-3.5" />
                             删除任务
@@ -237,7 +246,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             <button
                                 onClick={() => setShowStopConfirm(true)}
                                 disabled={isStopping}
-                                className="flex items-center gap-1.5 rounded-full border border-[var(--error)]/30 px-4 py-1.5 text-[12px] font-semibold text-[var(--error)] transition-colors hover:bg-red-500/10 disabled:opacity-50"
+                                className="flex items-center gap-1.5 rounded-full border border-[var(--error)]/30 px-4 py-1.5 text-[12px] font-semibold text-[var(--error)] transition-colors hover:bg-[var(--error-bg)] disabled:opacity-50"
                             >
                                 <Square className="h-3.5 w-3.5" />
                                 {isStopping ? '停止中...' : '停止任务'}

@@ -4,7 +4,7 @@
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { AlertCircle, ArrowRight, BarChart2, Clock, MessageSquare, RefreshCw, Timer, Trash2 } from 'lucide-react';
+import { AlertCircle, ArrowRight, BarChart2, Clock, MessageSquare, Plus, RefreshCw, Timer, Trash2 } from 'lucide-react';
 
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from './WorkspaceIcon';
@@ -23,8 +23,11 @@ import {
     formatNextExecution,
 } from '@/types/cronTask';
 import type { Project } from '@/config/types';
+import TaskCreateModal from '@/components/scheduled-tasks/TaskCreateModal';
 
 const DISPLAY_COUNT = 5;
+/** Cron tab shows fewer items because the "新建" button takes one row's worth of height */
+const CRON_DISPLAY_COUNT = 4;
 /** Fixed min-height for 5 rows (each ~36px + 2px gap) to prevent layout shift */
 const LIST_MIN_HEIGHT = 'min-h-[188px]';
 
@@ -52,6 +55,7 @@ export default memo(function RecentTasks({
     const [activeTab, setActiveTab] = useState<ActiveTab>('sessions');
     const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
+    const [showCreateModal, setShowCreateModal] = useState(false);
 
     // Top 5 sessions — filter to those with a matching visible project first, then slice
     const displaySessions = useMemo(() => {
@@ -75,7 +79,7 @@ export default memo(function RecentTasks({
                 const bTime = new Date(b.updatedAt || b.createdAt).getTime();
                 return bTime - aTime;
             })
-            .slice(0, DISPLAY_COUNT);
+            .slice(0, CRON_DISPLAY_COUNT);
     }, [cronTasks]);
 
     const getProjectForSession = useCallback(
@@ -244,9 +248,17 @@ export default memo(function RecentTasks({
             {/* CronTasks tab */}
             {activeTab === 'cron' && (
                 <div className={LIST_MIN_HEIGHT}>
+                    {/* Create button */}
+                    <button
+                        onClick={() => setShowCreateModal(true)}
+                        className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors"
+                    >
+                        <Plus className="h-3.5 w-3.5" />
+                        新建定时任务
+                    </button>
                     {displayCronTasks.length === 0 ? (
-                        <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
-                            <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
+                        <div className={`flex items-center justify-center py-6`}>
+                            <div className="text-center">
                                 <Timer className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
                                 <p className="text-[13px] text-[var(--ink-muted)]/70">暂无定时任务</p>
                             </div>
@@ -319,6 +331,11 @@ export default memo(function RecentTasks({
                     sessionId={statsSession.id}
                     sessionTitle={statsSession.title}
                     onClose={() => setStatsSession(null)}
+                />
+            )}
+            {showCreateModal && (
+                <TaskCreateModal
+                    onClose={() => setShowCreateModal(false)}
                 />
             )}
         </div>
