@@ -823,6 +823,16 @@ export function setSessionModel(model: string): void {
   }
 }
 
+/** Set provider env (called by Rust IM router via /api/provider/set on sidecar creation).
+ * This ensures the Sidecar uses the correct provider BEFORE pre-warm starts. */
+export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): void {
+  const oldLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
+  const newLabel = providerEnv?.baseUrl ?? 'anthropic';
+  if (oldLabel === newLabel && currentProviderEnv?.apiKey === providerEnv?.apiKey) return;
+  currentProviderEnv = providerEnv;
+  console.log(`[agent] session provider env set: ${oldLabel} -> ${newLabel}`);
+}
+
 /**
  * Schedule a pre-warm of the SDK subprocess and MCP servers.
  * Uses debounce to batch rapid config changes during tab initialization.

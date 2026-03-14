@@ -5924,6 +5924,19 @@ async function main() {
         }
       }
 
+      // POST /api/provider/set - Set provider env for this session (called by Rust IM router on sidecar creation)
+      if (pathname === '/api/provider/set' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { providerEnv?: Record<string, unknown> };
+          const { setSessionProviderEnv } = await import('./agent-session');
+          setSessionProviderEnv(payload?.providerEnv as import('./agent-session').ProviderEnv | undefined);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/provider/set] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set provider' }, 500);
+        }
+      }
+
       // POST /api/session/permission-mode - Set permission mode for this session (called by Rust IM router)
       if (pathname === '/api/session/permission-mode' && request.method === 'POST') {
         try {

@@ -1641,6 +1641,7 @@ async fn create_bot_instance<R: Runtime>(
                         // 4b. Sync AI config to newly created Sidecar
                         if is_new_sidecar {
                             let model = task_model.read().await.clone();
+                            let penv = task_provider_env.read().await.clone();
                             task_router
                                 .lock()
                                 .await
@@ -1648,6 +1649,7 @@ async fn create_bot_instance<R: Runtime>(
                                     port,
                                     model.as_deref(),
                                     task_mcp_json.as_deref(),
+                                    penv.as_ref(),
                                 )
                                 .await;
                         }
@@ -2125,6 +2127,7 @@ async fn create_bot_instance<R: Runtime>(
             hb_config,
             hb_bot_label,
             Arc::clone(&current_model),
+            Arc::clone(&current_provider_env),
             Arc::clone(&mcp_servers_json),
         );
         let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
@@ -3231,7 +3234,10 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                     heartbeat_wake_tx: None,
                                     heartbeat_config: None,
                                     current_model: Arc::new(RwLock::new(agent_config.model.clone())),
-                                    current_provider_env: Arc::new(RwLock::new(None)),
+                                    current_provider_env: Arc::new(RwLock::new(
+                                        agent_config.provider_env_json.as_ref()
+                                            .and_then(|s| serde_json::from_str(s).ok())
+                                    )),
                                     permission_mode: Arc::new(RwLock::new(agent_config.permission_mode.clone())),
                                     mcp_servers_json: Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
                                 }
@@ -3893,16 +3899,24 @@ async fn update_bot_config_internal<R: Runtime>(
                     }
                 }
                 let ports = router.active_sidecar_ports();
+                // Provider env sync (parsed from patch string)
+                let parsed_provider_env: Option<serde_json::Value> = patch_provider_env.as_ref()
+                    .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() });
+                if patch_provider_env.is_some() {
+                    for port in &ports {
+                        router.sync_ai_config(*port, None, None, parsed_provider_env.as_ref()).await;
+                    }
+                }
                 // Model sync
                 if patch_model.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, patch_model.as_deref(), None).await;
+                        router.sync_ai_config(*port, patch_model.as_deref(), None, None).await;
                     }
                 }
                 // MCP sync (runtime JSON, not enabled-list)
                 if patch_mcp_json.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, None, patch_mcp_json.as_deref()).await;
+                        router.sync_ai_config(*port, None, patch_mcp_json.as_deref(), None).await;
                     }
                 }
                 // Permission mode sync to Sidecar
@@ -4435,7 +4449,10 @@ pub async fn cmd_start_agent_channel(
             heartbeat_wake_tx: None,
             heartbeat_config: None,
             current_model: Arc::new(RwLock::new(agentConfig.model.clone())),
-            current_provider_env: Arc::new(RwLock::new(None)),
+            current_provider_env: Arc::new(RwLock::new(
+                agentConfig.provider_env_json.as_ref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+            )),
             permission_mode: Arc::new(RwLock::new(agentConfig.permission_mode.clone())),
             mcp_servers_json: Arc::new(RwLock::new(agentConfig.mcp_servers_json.clone())),
         }
@@ -4851,18 +4868,25 @@ pub async fn cmd_update_agent_config(
         }
 
         // Push config changes to all active Sidecar ports (same as legacy update_bot_config_internal)
+        let parsed_provider_env: Option<serde_json::Value> = patch.provider_env_json.as_ref()
+            .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() });
         for (_ch_id, ch_inst) in &agent.channels {
             let router = ch_inst.bot_instance.router.lock().await;
             let ports = router.active_sidecar_ports();
             if !ports.is_empty() {
+                if patch.provider_env_json.is_some() {
+                    for port in &ports {
+                        router.sync_ai_config(*port, None, None, parsed_provider_env.as_ref()).await;
+                    }
+                }
                 if patch.model.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, patch.model.as_deref(), None).await;
+                        router.sync_ai_config(*port, patch.model.as_deref(), None, None).await;
                     }
                 }
                 if patch.mcp_servers_json.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, None, patch.mcp_servers_json.as_deref()).await;
+                        router.sync_ai_config(*port, None, patch.mcp_servers_json.as_deref(), None).await;
                     }
                 }
                 if let Some(ref pm) = patch.permission_mode {

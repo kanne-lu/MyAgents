@@ -1819,10 +1819,11 @@ fn send_task_notification(
         format!("任务 #{} 已完成", task.execution_count + 1)
     };
 
-    // Use tauri notification plugin
+    // Use tauri notification plugin — include tab_id for frontend navigation
     let _ = handle.emit("notification:show", serde_json::json!({
         "title": title,
-        "body": body
+        "body": body,
+        "tabId": task.tab_id
     }));
 }
 
@@ -2142,7 +2143,7 @@ async fn deliver_cron_result_to_bot(
 
     // Extract Arc refs from instance, then drop guard early to avoid
     // holding the lock during potentially slow ensure_sidecar (~2s).
-    let (router, current_model, mcp_servers_json, wake_tx) = {
+    let (router, current_model, current_provider_env, mcp_servers_json, wake_tx) = {
         // Try Agent state first (v0.1.41)
         let agent_refs = if let Some(agent_state) = handle.try_state::<crate::im::ManagedAgents>() {
             let agents_guard = agent_state.lock().await;
@@ -2152,6 +2153,7 @@ async fn deliver_cron_result_to_bot(
                     found = Some((
                         std::sync::Arc::clone(&ch.bot_instance.router),
                         std::sync::Arc::clone(&ch.bot_instance.current_model),
+                        std::sync::Arc::clone(&ch.bot_instance.current_provider_env),
                         std::sync::Arc::clone(&ch.bot_instance.mcp_servers_json),
                         ch.bot_instance.heartbeat_wake_tx.clone(),
                     ));
@@ -2178,6 +2180,7 @@ async fn deliver_cron_result_to_bot(
             (
                 std::sync::Arc::clone(&instance.router),
                 std::sync::Arc::clone(&instance.current_model),
+                std::sync::Arc::clone(&instance.current_provider_env),
                 std::sync::Arc::clone(&instance.mcp_servers_json),
                 instance.heartbeat_wake_tx.clone(),
             )
@@ -2216,9 +2219,10 @@ async fn deliver_cron_result_to_bot(
         // Sync AI config for newly created sidecar
         if is_new_sidecar && port > 0 {
             let model = current_model.read().await.clone();
+            let penv = current_provider_env.read().await.clone();
             let mcp = mcp_servers_json.read().await.clone();
             router.lock().await
-                .sync_ai_config(port, model.as_deref(), mcp.as_deref())
+                .sync_ai_config(port, model.as_deref(), mcp.as_deref(), penv.as_ref())
                 .await;
             ulog_info!("[CronTask] Woke up sidecar for bot {} on port {}", delivery.bot_id, port);
         }
