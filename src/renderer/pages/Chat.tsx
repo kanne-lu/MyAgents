@@ -1046,10 +1046,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             await startCronTaskIpc(task.id);
             await startCronScheduler(task.id);
             setCronCardTask(task);
-            // Disable cron mode — task is standalone, input returns to normal
             disableCronMode();
+            setIsLoading(false);
             toastRef.current?.success('定时任务已创建');
           } catch (err) {
+            disableCronMode();
+            setIsLoading(false);
             toastRef.current?.error(`创建失败: ${err instanceof Error ? err.message : String(err)}`);
           }
           return;

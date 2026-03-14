@@ -95,7 +95,7 @@ export function useCronTask(options: UseCronTaskOptions) {
   // Note: model, permissionMode, and providerEnv are captured here to ensure the task uses
   // the same settings that were active when the user enabled cron mode,
   // not the settings at execution time (which might have changed)
-  const enableCronMode = useCallback((config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'>) => {
+  const enableCronMode = useCallback((config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'> & { executionTarget?: 'current_session' | 'new_task' }) => {
     setState({
       isEnabled: true,
       config: {
@@ -107,6 +107,8 @@ export function useCronTask(options: UseCronTaskOptions) {
         model: config.model,
         permissionMode: config.permissionMode,
         providerEnv: config.providerEnv,
+        schedule: config.schedule,
+        executionTarget: config.executionTarget,
       },
       task: null,
       isStarting: false,
