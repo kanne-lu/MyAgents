@@ -1,45 +1,32 @@
 // Cron Task Settings Modal - Configure scheduled task parameters
-import { X, Timer, Calendar, AlertCircle, Bell } from 'lucide-react';
+// Redesigned for v0.1.42: adds execution mode (当前对话/新开对话) + ScheduleTypeTabs (3 schedule types)
+import { X, Clock, Bell, Flag, MessageSquare, AlertCircle } from 'lucide-react';
 import { useState, useCallback, useMemo, useRef } from 'react';
-import type { CronEndConditions, CronRunMode, CronTaskConfig } from '@/types/cronTask';
-import { CRON_INTERVAL_PRESETS, MIN_CRON_INTERVAL, formatCronInterval } from '@/types/cronTask';
+import type { CronEndConditions, CronRunMode, CronTaskConfig, CronSchedule } from '@/types/cronTask';
+import { MIN_CRON_INTERVAL } from '@/types/cronTask';
+import ScheduleTypeTabs from '@/components/scheduled-tasks/ScheduleTypeTabs';
 
-/** Custom Toggle Switch component - matches design system */
+/** Toggle Switch */
 function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
   return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={enabled}
-      onClick={() => onChange(!enabled)}
-      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 ${
+    <button type="button" role="switch" aria-checked={enabled} onClick={() => onChange(!enabled)}
+      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors ${
         enabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
-      }`}
-    >
-      <span
-        className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm ring-0 transition-transform ${
-          enabled ? 'translate-x-4' : 'translate-x-0.5'
-        }`}
-      />
+      }`}>
+      <span className={`pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform ${
+        enabled ? 'translate-x-4' : 'translate-x-0.5'
+      }`} />
     </button>
   );
 }
 
-/** Custom Checkbox component - consistent styling */
+/** Checkbox */
 function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label?: string }) {
   return (
-    <button
-      type="button"
-      role="checkbox"
-      aria-checked={checked}
-      aria-label={label}
-      onClick={() => onChange(!checked)}
+    <button type="button" role="checkbox" aria-checked={checked} aria-label={label} onClick={() => onChange(!checked)}
       className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded border-2 transition-colors ${
-        checked
-          ? 'border-[var(--accent)] bg-[var(--accent)]'
-          : 'border-[var(--line-strong)] bg-transparent hover:border-[var(--accent-muted)]'
-      }`}
-    >
+        checked ? 'border-[var(--accent)] bg-[var(--accent)]' : 'border-[var(--line-strong)] bg-transparent hover:border-[var(--accent-muted)]'
+      }`}>
       {checked && (
         <svg className="h-3 w-3 text-white" viewBox="0 0 12 12" fill="none">
           <path d="M2.5 6L5 8.5L9.5 3.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -49,8 +36,34 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
   );
 }
 
-/** End mode type */
+function SectionHeader({ icon: Icon, children }: { icon: typeof Clock; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2">
+      <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
+      <h3 className="text-[14px] font-semibold text-[var(--ink)]">{children}</h3>
+    </div>
+  );
+}
+
+function PillButton({ selected, onClick, children }: { selected: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button type="button" onClick={onClick}
+      className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+        selected ? 'bg-[var(--accent)] text-white' : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
+      }`}>{children}</button>
+  );
+}
+
 type EndMode = 'conditional' | 'forever';
+
+/** Execution target: current chat session or new standalone task */
+export type ExecutionTarget = 'current_session' | 'new_task';
+
+/** Extended config returned by onConfirm — includes executionTarget and schedule */
+export type CronSettingsResult = Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'> & {
+  executionTarget: ExecutionTarget;
+  schedule?: CronSchedule;
+};
 
 /** Configuration that can be passed to restore previous settings */
 type InitialConfig = {
@@ -64,75 +77,14 @@ type InitialConfig = {
 interface CronTaskSettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onConfirm: (config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'>) => void;
-  /** Initial prompt from input field (used when no previous config exists) */
+  onConfirm: (config: CronSettingsResult) => void;
   initialPrompt?: string;
-  /** Previous configuration to restore (takes precedence over initialPrompt) */
   initialConfig?: InitialConfig | null;
 }
 
-/** Format Date to datetime-local input value (YYYY-MM-DDTHH:mm) */
-function formatDateForInput(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  return `${year}-${month}-${day}T${hours}:${minutes}`;
-}
-
-/** Helper to get default deadline (current time + 24 hours) */
-function getDefaultDeadline(): string {
-  const date = new Date();
-  date.setHours(date.getHours() + 24);
-  return formatDateForInput(date);
-}
-
-/** Helper to compute initial form values from config or defaults */
-function computeInitialValues(initialPrompt: string, initialConfig: InitialConfig | null) {
-  if (initialConfig) {
-    const isPreset = CRON_INTERVAL_PRESETS.some(p => p.value === initialConfig.intervalMinutes);
-    const endCond = initialConfig.endConditions;
-
-    const deadlineValue = endCond.deadline
-      ? formatDateForInput(new Date(endCond.deadline))
-      : '';
-
-    // Determine end mode: forever if no conditions are set
-    const hasAnyCondition = endCond.deadline || endCond.maxExecutions !== undefined || endCond.aiCanExit;
-    const endMode: EndMode = hasAnyCondition ? 'conditional' : 'forever';
-
-    return {
-      prompt: initialConfig.prompt,
-      intervalMinutes: initialConfig.intervalMinutes,
-      isCustomInterval: !isPreset,
-      customIntervalInput: !isPreset ? String(initialConfig.intervalMinutes) : '60',
-      runMode: initialConfig.runMode,
-      notifyEnabled: initialConfig.notifyEnabled,
-      endMode,
-      useDeadline: !!endCond.deadline,
-      deadline: deadlineValue || getDefaultDeadline(),
-      useMaxExecutions: endCond.maxExecutions !== undefined,
-      maxExecutions: endCond.maxExecutions ?? 10,
-      aiCanExit: endCond.aiCanExit,
-    };
-  }
-
-  // Default values: 15 min interval, conditional end with deadline selected
-  return {
-    prompt: initialPrompt,
-    intervalMinutes: 15,
-    isCustomInterval: false,
-    customIntervalInput: '60',
-    runMode: 'single_session' as CronRunMode,
-    notifyEnabled: true,
-    endMode: 'conditional' as EndMode,
-    useDeadline: true,
-    deadline: getDefaultDeadline(),
-    useMaxExecutions: false,
-    maxExecutions: 10,
-    aiCanExit: false,
-  };
+function toLocalDateTimeString(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /** Inner form component - remounts when modal opens to reset state */
@@ -142,335 +94,206 @@ function CronTaskSettingsForm({
   onClose,
   onConfirm,
 }: Omit<CronTaskSettingsModalProps, 'isOpen'>) {
-  // Compute initial values once on mount
-  const initial = computeInitialValues(initialPrompt ?? '', initialConfig ?? null);
+  // Execution target: current session (legacy behavior) or new standalone task
+  const [executionTarget, setExecutionTarget] = useState<ExecutionTarget>('current_session');
 
-  // Form state - initialized from computed values
-  const [prompt] = useState(initial.prompt);
-  const [intervalMinutes, setIntervalMinutes] = useState(initial.intervalMinutes);
-  const [isCustomInterval, setIsCustomInterval] = useState(initial.isCustomInterval);
-  const [customIntervalInput, setCustomIntervalInput] = useState(initial.customIntervalInput);
-  const [runMode] = useState<CronRunMode>(initial.runMode);
-  const [notifyEnabled, setNotifyEnabled] = useState(initial.notifyEnabled);
+  // Schedule state
+  const [schedule, setSchedule] = useState<CronSchedule | null>(initialConfig?.intervalMinutes ? null : null);
+  const [intervalMinutes, setIntervalMinutes] = useState(initialConfig?.intervalMinutes ?? 30);
 
-  // End mode: conditional or forever
-  const [endMode, setEndMode] = useState<EndMode>(initial.endMode);
+  // Run mode (only for current_session — new_task always uses new_session)
+  const runMode: CronRunMode = executionTarget === 'current_session' ? 'single_session' : 'new_session';
 
-  // End conditions (only used when endMode is 'conditional')
-  const [useDeadline, setUseDeadline] = useState(initial.useDeadline);
-  const [deadline, setDeadline] = useState(initial.deadline);
-  const [useMaxExecutions, setUseMaxExecutions] = useState(initial.useMaxExecutions);
-  const [maxExecutions, setMaxExecutions] = useState(initial.maxExecutions);
-  const [aiCanExit, setAiCanExit] = useState(initial.aiCanExit);
+  const [notifyEnabled, setNotifyEnabled] = useState(initialConfig?.notifyEnabled ?? true);
 
-  // Handle interval preset selection
-  const handlePresetSelect = useCallback((minutes: number) => {
-    setIntervalMinutes(minutes);
-    setIsCustomInterval(false);
+  // End conditions — pre-compute initial values to avoid purity issues
+  const [endCondInit] = useState(() => {
+    const ec = initialConfig?.endConditions;
+    const hasCond = ec && (ec.deadline || ec.maxExecutions !== undefined || ec.aiCanExit);
+    return {
+      mode: (hasCond ? 'conditional' : 'forever') as EndMode,
+      useDeadline: !!ec?.deadline,
+      deadline: ec?.deadline ? toLocalDateTimeString(new Date(ec.deadline)) : toLocalDateTimeString(new Date(Date.now() + 86400000)),
+      useMaxExec: ec?.maxExecutions !== undefined,
+      maxExec: ec?.maxExecutions ?? 10,
+      aiCanExit: ec?.aiCanExit ?? false,
+    };
+  });
+  const [endMode, setEndMode] = useState<EndMode>(endCondInit.mode);
+  const [useDeadline, setUseDeadline] = useState(endCondInit.useDeadline);
+  const [deadline, setDeadline] = useState(endCondInit.deadline);
+  const [useMaxExecutions, setUseMaxExecutions] = useState(endCondInit.useMaxExec);
+  const [maxExecutions, setMaxExecutions] = useState(endCondInit.maxExec);
+  const [aiCanExit, setAiCanExit] = useState(endCondInit.aiCanExit);
+
+  const isAtSchedule = schedule?.kind === 'at';
+
+  const handleScheduleChange = useCallback((s: CronSchedule | null, m: number) => {
+    setSchedule(s);
+    setIntervalMinutes(m);
   }, []);
 
-  // Handle custom interval change
-  const handleCustomIntervalChange = useCallback((value: string) => {
-    setCustomIntervalInput(value);
-    const parsed = parseInt(value, 10);
-    if (!isNaN(parsed) && parsed >= MIN_CRON_INTERVAL) {
-      setIntervalMinutes(parsed);
-    }
-  }, []);
-
-  // Enable custom interval mode
-  const enableCustomInterval = useCallback(() => {
-    setIsCustomInterval(true);
-    setCustomIntervalInput(String(intervalMinutes));
-  }, [intervalMinutes]);
-
-  // Validation errors
+  // Validation
   const validationErrors = useMemo(() => {
     const errors: string[] = [];
-    if (intervalMinutes < MIN_CRON_INTERVAL) errors.push(`循环间隔不能小于 ${MIN_CRON_INTERVAL} 分钟`);
-    if (endMode === 'conditional') {
-      if (useDeadline && !deadline) errors.push('请选择截止时间');
-      if (useMaxExecutions && maxExecutions < 1) errors.push('执行次数至少为 1');
-      // At least one condition must be selected
+    if (!schedule && intervalMinutes < MIN_CRON_INTERVAL) errors.push(`间隔不能小于 ${MIN_CRON_INTERVAL} 分钟`);
+    if (schedule?.kind === 'at') {
+      const atTime = new Date(schedule.at).getTime();
+      // Validate at confirm time, not render time — just check if parseable here
+      if (isNaN(atTime)) errors.push('请输入有效的执行时间');
+    }
+    if (endMode === 'conditional' && !isAtSchedule) {
       if (!useDeadline && !useMaxExecutions && !aiCanExit) {
-        errors.push('请至少选择一个结束条件，或选择「永久循环」');
+        errors.push('请至少选择一个结束条件');
       }
     }
-    if (isCustomInterval) {
-      const parsed = parseInt(customIntervalInput, 10);
-      if (isNaN(parsed)) errors.push('请输入有效的间隔时间');
-    }
     return errors;
-  }, [intervalMinutes, endMode, useDeadline, deadline, useMaxExecutions, maxExecutions, aiCanExit, isCustomInterval, customIntervalInput]);
+  }, [schedule, intervalMinutes, endMode, useDeadline, useMaxExecutions, aiCanExit, isAtSchedule]);
 
   const isValid = validationErrors.length === 0;
 
-  // Get minimum datetime for deadline input (now + 1 minute)
-  // Note: Empty deps is intentional - recalculating on every render is unnecessary
-  // for a short-lived modal, and the backend validates the deadline anyway
-  const minDeadline = useMemo(() => {
-    const now = new Date();
-    now.setMinutes(now.getMinutes() + 1);
-    return formatDateForInput(now);
-  }, []);
-
-  // Handle confirm
   const handleConfirm = useCallback(() => {
     if (!isValid) return;
 
-    const endConditions: CronEndConditions = {
-      aiCanExit: endMode === 'conditional' ? aiCanExit : false,
-    };
-
-    if (endMode === 'conditional') {
-      if (useDeadline && deadline) {
-        endConditions.deadline = new Date(deadline).toISOString();
-      }
-      if (useMaxExecutions) {
-        endConditions.maxExecutions = maxExecutions;
-      }
-    }
-    // In 'forever' mode, no end conditions are set
+    const endConditions: CronEndConditions = isAtSchedule
+      ? { aiCanExit: false }
+      : endMode === 'forever'
+        ? { aiCanExit: false }
+        : {
+            deadline: useDeadline && deadline ? new Date(deadline).toISOString() : undefined,
+            maxExecutions: useMaxExecutions ? maxExecutions : undefined,
+            aiCanExit,
+          };
 
     onConfirm({
-      prompt: prompt.trim(),
-      intervalMinutes,
+      prompt: (initialPrompt ?? '').trim(),
+      intervalMinutes: schedule?.kind === 'every' ? schedule.minutes : intervalMinutes,
       endConditions,
       runMode,
       notifyEnabled,
+      executionTarget,
+      schedule: schedule ?? undefined,
     });
-  }, [isValid, prompt, intervalMinutes, runMode, notifyEnabled, endMode, aiCanExit, useDeadline, deadline, useMaxExecutions, maxExecutions, onConfirm]);
+  }, [isValid, initialPrompt, schedule, intervalMinutes, runMode, notifyEnabled, endMode, aiCanExit, useDeadline, deadline, useMaxExecutions, maxExecutions, executionTarget, isAtSchedule, onConfirm]);
 
-  // Only close on genuine clicks (mousedown + mouseup both on backdrop).
-  // Prevents closing when user drags a text selection out of the modal.
-  // The backdrop (absolute inset-0) is below the modal (relative z-10) so mousedown
-  // on modal content never fires on the backdrop — no extra reset needed.
+  // Backdrop click handling
   const mouseDownOnBackdropRef = useRef(false);
-
-  const handleBackdropMouseDown = useCallback(() => {
-    mouseDownOnBackdropRef.current = true;
-  }, []);
-
+  const handleBackdropMouseDown = useCallback(() => { mouseDownOnBackdropRef.current = true; }, []);
   const handleBackdropClick = useCallback(() => {
-    if (mouseDownOnBackdropRef.current) {
-      onClose();
-    }
+    if (mouseDownOnBackdropRef.current) onClose();
     mouseDownOnBackdropRef.current = false;
   }, [onClose]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/30 backdrop-blur-sm"
-        onMouseDown={handleBackdropMouseDown}
-        onClick={handleBackdropClick}
-      />
+      <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" onMouseDown={handleBackdropMouseDown} onClick={handleBackdropClick} />
 
-      {/* Modal */}
-      <div className="relative z-10 w-full max-w-lg rounded-xl bg-[var(--paper-elevated)] p-6 shadow-xl">
+      <div className="relative z-10 flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-xl">
         {/* Header */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Timer className="h-5 w-5 text-[var(--heartbeat)]" />
-            <h2 className="text-lg font-semibold text-[var(--ink)]">循环</h2>
+        <div className="flex shrink-0 items-center justify-between px-6 py-4">
+          <div className="flex items-center gap-2.5">
+            <Clock className="h-4 w-4 text-[var(--accent)]" />
+            <h2 className="text-[15px] font-semibold text-[var(--ink)]">定时任务</h2>
           </div>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-          >
-            <X className="h-5 w-5" />
+          <button onClick={onClose} className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+            <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="mt-4 space-y-5">
-          {/* Feature Introduction */}
-          <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] p-4">
-            <p className="text-sm leading-relaxed text-[var(--ink-secondary)]">
-              循环将赋予 AI 按照时间间隔，循环执行任务的能力。
-            </p>
-            <p className="mt-2 text-sm leading-relaxed text-[var(--ink-secondary)]">
-              一旦您在面板内设置开启循环，发送信息后，这段信息就会被按照间隔，不断发送给 AI。
-            </p>
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-6 pb-6 space-y-6">
+
+          {/* ── 执行模式 ── */}
+          <div>
+            <SectionHeader icon={MessageSquare}>执行模式</SectionHeader>
+            <div className="mt-3">
+              <div className="flex gap-2">
+                <PillButton selected={executionTarget === 'current_session'} onClick={() => setExecutionTarget('current_session')}>当前对话</PillButton>
+                <PillButton selected={executionTarget === 'new_task'} onClick={() => setExecutionTarget('new_task')}>新开对话</PillButton>
+              </div>
+              <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+                {executionTarget === 'current_session'
+                  ? '在当前对话中循环执行，保持上下文'
+                  : '创建独立定时任务，不占用当前对话'}
+              </p>
+            </div>
           </div>
 
-          {/* Interval Selection */}
+          <div className="border-t border-[var(--line)]" />
+
+          {/* ── 执行计划 ── */}
           <div>
-            <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-[var(--ink)]">
-              <Timer className="h-4 w-4" />
-              循环间隔
-            </label>
-            <div className="flex flex-wrap gap-2">
-              {CRON_INTERVAL_PRESETS.map((preset) => (
-                <button
-                  key={preset.value}
-                  type="button"
-                  onClick={() => handlePresetSelect(preset.value)}
-                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
-                    !isCustomInterval && intervalMinutes === preset.value
-                      ? 'bg-[var(--accent)] text-white'
-                      : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                  }`}
-                >
-                  {preset.label}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={enableCustomInterval}
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
-                  isCustomInterval
-                    ? 'bg-[var(--accent)] text-white'
-                    : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
-                }`}
-              >
-                自定义
-              </button>
+            <SectionHeader icon={Clock}>执行计划</SectionHeader>
+            <div className="mt-3">
+              <ScheduleTypeTabs value={schedule} intervalMinutes={intervalMinutes} onChange={handleScheduleChange} />
             </div>
-            {isCustomInterval && (
-              <div className="mt-2 flex items-center gap-2">
-                <input
-                  type="number"
-                  value={customIntervalInput}
-                  onChange={(e) => handleCustomIntervalChange(e.target.value)}
-                  min={MIN_CRON_INTERVAL}
-                  className="w-24 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none"
-                />
-                <span className="text-sm text-[var(--ink-muted)]">分钟</span>
-                {/* Only show hour conversion when >= 60 minutes */}
-                {intervalMinutes >= 60 && (
-                  <span className="text-xs text-[var(--ink-secondary)]">
-                    ({formatCronInterval(intervalMinutes)})
-                  </span>
+          </div>
+
+          <div className="border-t border-[var(--line)]" />
+
+          {/* ── 结束条件 ── */}
+          {!isAtSchedule && (
+            <div>
+              <SectionHeader icon={Flag}>结束条件</SectionHeader>
+              <div className="mt-3 space-y-3">
+                <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
+                  <button type="button" onClick={() => setEndMode('forever')}
+                    className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                      endMode === 'forever' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                    }`}>永久运行</button>
+                  <button type="button" onClick={() => setEndMode('conditional')}
+                    className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                      endMode === 'conditional' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                    }`}>条件停止</button>
+                </div>
+
+                {endMode === 'conditional' && (
+                  <>
+                    <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)]">
+                      <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
+                        onClick={() => setUseDeadline(!useDeadline)}>
+                        <div className="flex items-center gap-2.5">
+                          <Checkbox checked={useDeadline} onChange={setUseDeadline} label="截止时间" />
+                          <span className="text-sm text-[var(--ink)]">截止时间</span>
+                        </div>
+                        <input type="datetime-local" value={deadline} onChange={e => setDeadline(e.target.value)}
+                          onClick={e => e.stopPropagation()}
+                          className={`w-44 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!useDeadline ? 'opacity-50' : ''}`} />
+                      </div>
+                      <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
+                        onClick={() => setUseMaxExecutions(!useMaxExecutions)}>
+                        <div className="flex items-center gap-2.5">
+                          <Checkbox checked={useMaxExecutions} onChange={setUseMaxExecutions} label="执行次数" />
+                          <span className="text-sm text-[var(--ink)]">执行次数</span>
+                        </div>
+                        <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                          <input type="number" value={maxExecutions} onChange={e => setMaxExecutions(parseInt(e.target.value, 10) || 1)}
+                            min={1} max={999}
+                            className={`w-16 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-center text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!useMaxExecutions ? 'opacity-50' : ''}`} />
+                          <span className={`text-sm text-[var(--ink-secondary)] ${!useMaxExecutions ? 'opacity-50' : ''}`}>次</span>
+                        </div>
+                      </div>
+                      <div className="flex cursor-pointer items-center justify-between px-3 py-2.5"
+                        onClick={() => setAiCanExit(!aiCanExit)}>
+                        <div className="flex items-center gap-2.5">
+                          <Checkbox checked={aiCanExit} onChange={setAiCanExit} label="允许 AI 自主结束任务" />
+                          <span className="text-sm text-[var(--ink)]">允许 AI 自主结束任务</span>
+                        </div>
+                        <div className="w-16 h-[26px]" />
+                      </div>
+                    </div>
+                    <p className="text-[13px] text-[var(--ink-muted)]">可多选，满足任一条件时任务将自动停止</p>
+                  </>
                 )}
               </div>
-            )}
-          </div>
-
-          {/* End Conditions */}
-          <div>
-            <label className="mb-2 flex items-center gap-1.5 text-sm font-medium text-[var(--ink)]">
-              <Calendar className="h-4 w-4" />
-              结束条件
-            </label>
-
-            {/* End Mode Toggle Buttons */}
-            <div className="mb-3 grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => setEndMode('conditional')}
-                className={`rounded-lg border px-4 py-2 text-sm font-medium transition ${
-                  endMode === 'conditional'
-                    ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
-                    : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:border-[var(--line-strong)] hover:bg-[var(--paper-inset)]'
-                }`}
-              >
-                条件循环
-              </button>
-              <button
-                type="button"
-                onClick={() => setEndMode('forever')}
-                className={`rounded-lg border px-4 py-2 text-sm font-medium transition ${
-                  endMode === 'forever'
-                    ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
-                    : 'border-[var(--line)] bg-[var(--paper)] text-[var(--ink)] hover:border-[var(--line-strong)] hover:bg-[var(--paper-inset)]'
-                }`}
-              >
-                永久循环
-              </button>
             </div>
+          )}
 
-            {/* Conditional End Options */}
-            {endMode === 'conditional' && (
-              <div className="space-y-0 rounded-lg border border-[var(--line)] bg-[var(--paper)]">
-                {/* Deadline */}
-                <div
-                  className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
-                  onClick={() => setUseDeadline(!useDeadline)}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Checkbox
-                      checked={useDeadline}
-                      onChange={setUseDeadline}
-                      label="截止时间"
-                    />
-                    <span className="text-sm text-[var(--ink)]">截止时间</span>
-                  </div>
-                  <input
-                    type="datetime-local"
-                    value={deadline}
-                    onChange={(e) => setDeadline(e.target.value)}
-                    onClick={(e) => e.stopPropagation()}
-                    min={minDeadline}
-                    className={`w-44 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${
-                      !useDeadline ? 'opacity-50' : ''
-                    }`}
-                  />
-                </div>
-
-                {/* Max Executions */}
-                <div
-                  className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
-                  onClick={() => setUseMaxExecutions(!useMaxExecutions)}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Checkbox
-                      checked={useMaxExecutions}
-                      onChange={setUseMaxExecutions}
-                      label="执行次数"
-                    />
-                    <span className="text-sm text-[var(--ink)]">执行次数</span>
-                  </div>
-                  <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="number"
-                      value={maxExecutions}
-                      onChange={(e) => setMaxExecutions(parseInt(e.target.value, 10) || 1)}
-                      min={1}
-                      max={999}
-                      className={`w-16 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-center text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${
-                        !useMaxExecutions ? 'opacity-50' : ''
-                      }`}
-                    />
-                    <span className={`text-sm text-[var(--ink-secondary)] ${!useMaxExecutions ? 'opacity-50' : ''}`}>次</span>
-                  </div>
-                </div>
-
-                {/* AI Can Exit */}
-                <div
-                  className="flex cursor-pointer items-center justify-between px-3 py-2.5"
-                  onClick={() => setAiCanExit(!aiCanExit)}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Checkbox
-                      checked={aiCanExit}
-                      onChange={setAiCanExit}
-                      label="允许 AI 自主结束任务"
-                    />
-                    <span className="text-sm text-[var(--ink)]">
-                      允许 AI 自主结束任务
-                    </span>
-                  </div>
-                  {/* Placeholder to maintain consistent row height */}
-                  <div className="w-16 h-[26px]" />
-                </div>
-              </div>
-            )}
-
-            {endMode === 'conditional' && (
-              <p className="mt-2 text-xs text-[var(--ink-secondary)]">
-                可多选，满足任一条件时任务将自动停止
-              </p>
-            )}
-          </div>
-
-          {/* Notification Toggle */}
-          <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] p-3">
-            <div className="flex items-center gap-2">
-              <Bell className="h-4 w-4 text-[var(--ink-secondary)]" />
-              <label className="text-sm text-[var(--ink)]">
-                每次执行完即发送通知
-              </label>
+          {/* ── 通知 ── */}
+          <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
+            <div className="flex items-center gap-2.5">
+              <Bell className="h-4 w-4 text-[var(--ink-muted)]" />
+              <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
             </div>
             <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
           </div>
@@ -480,27 +303,17 @@ function CronTaskSettingsForm({
             <div className="flex items-start gap-2 rounded-lg border border-[var(--error)]/30 bg-[var(--error)]/5 p-3">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--error)]" />
               <div className="text-xs text-[var(--error)]">
-                {validationErrors.map((err, i) => (
-                  <p key={i}>{err}</p>
-                ))}
+                {validationErrors.map((err, i) => <p key={i}>{err}</p>)}
               </div>
             </div>
           )}
         </div>
 
-        {/* Actions */}
-        <div className="mt-6 flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-secondary)] transition hover:bg-[var(--paper-inset)]"
-          >
-            取消
-          </button>
-          <button
-            onClick={handleConfirm}
-            disabled={!isValid}
-            className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition hover:bg-[var(--accent-warm-hover)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
+        {/* Footer */}
+        <div className="flex shrink-0 items-center justify-end gap-2.5 border-t border-[var(--line)] px-6 py-3.5">
+          <button onClick={onClose} className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)]">取消</button>
+          <button onClick={handleConfirm} disabled={!isValid}
+            className="rounded-lg bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white transition hover:bg-[var(--accent-warm-hover)] disabled:cursor-not-allowed disabled:opacity-50">
             确认
           </button>
         </div>
@@ -509,10 +322,6 @@ function CronTaskSettingsForm({
   );
 }
 
-/**
- * Outer wrapper component that conditionally renders the form.
- * This ensures the form remounts when the modal opens, resetting all state.
- */
 export default function CronTaskSettingsModal({
   isOpen,
   onClose,
@@ -520,7 +329,6 @@ export default function CronTaskSettingsModal({
   initialPrompt = '',
   initialConfig = null,
 }: CronTaskSettingsModalProps) {
-  // Only render the form when modal is open - this causes remount on open
   if (!isOpen) return null;
 
   return (
