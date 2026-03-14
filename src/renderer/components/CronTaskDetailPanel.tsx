@@ -209,19 +209,25 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                                 <button type="button" onClick={() => setEditEndMode('conditional')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${editEndMode === 'conditional' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>条件停止</button>
                                                 <button type="button" onClick={() => setEditEndMode('forever')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${editEndMode === 'forever' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>永久运行</button>
                                             </div>
-                                            {editEndMode === 'conditional' && (
-                                                <div className="space-y-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] p-3">
-                                                    <div className="flex items-center justify-between">
-                                                        <Checkbox checked={!!editDeadline} onChange={v => setEditDeadline(v ? new Date(Date.now() + 86400000).toISOString().slice(0, 16) : '')} label="截止时间" />
-                                                        {editDeadline && <input type="datetime-local" value={editDeadline.slice(0, 16)} onChange={e => setEditDeadline(e.target.value)} className="rounded-lg border border-[var(--line)] bg-transparent px-2.5 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none" />}
-                                                    </div>
-                                                    <div className="flex items-center justify-between">
-                                                        <Checkbox checked={!!editMaxExec} onChange={v => setEditMaxExec(v ? '10' : '')} label="执行次数" />
-                                                        {editMaxExec && <div className="flex items-center gap-1.5"><input type="number" min={1} max={999} value={editMaxExec} onChange={e => setEditMaxExec(e.target.value)} className="w-16 rounded-lg border border-[var(--line)] bg-transparent px-2 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none" /><span className="text-xs text-[var(--ink-muted)]">次</span></div>}
-                                                    </div>
-                                                    <Checkbox checked={editAiCanExit} onChange={setEditAiCanExit} label="允许 AI 自主结束任务" />
+                                            <div className={`rounded-lg border border-[var(--line)] bg-[var(--paper)] transition-opacity ${editEndMode === 'forever' ? 'opacity-40 pointer-events-none' : ''}`}>
+                                                <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5" onClick={() => setEditDeadline(editDeadline ? '' : new Date(Date.now() + 86400000).toISOString().slice(0, 16))}>
+                                                    <Checkbox checked={!!editDeadline} onChange={v => setEditDeadline(v ? new Date(Date.now() + 86400000).toISOString().slice(0, 16) : '')} label="截止时间" />
+                                                    <input type="datetime-local" value={editDeadline.slice(0, 16)} onChange={e => setEditDeadline(e.target.value)} onClick={e => e.stopPropagation()}
+                                                        className={`w-44 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!editDeadline ? 'opacity-50' : ''}`} />
                                                 </div>
-                                            )}
+                                                <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5" onClick={() => setEditMaxExec(editMaxExec ? '' : '10')}>
+                                                    <Checkbox checked={!!editMaxExec} onChange={v => setEditMaxExec(v ? '10' : '')} label="执行次数" />
+                                                    <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                                                        <input type="number" min={1} max={999} value={editMaxExec || 10} onChange={e => setEditMaxExec(e.target.value)}
+                                                            className={`w-16 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-center text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!editMaxExec ? 'opacity-50' : ''}`} />
+                                                        <span className={`text-sm text-[var(--ink-secondary)] ${!editMaxExec ? 'opacity-50' : ''}`}>次</span>
+                                                    </div>
+                                                </div>
+                                                <div className="flex cursor-pointer items-center justify-between px-3 py-2.5" onClick={() => setEditAiCanExit(!editAiCanExit)}>
+                                                    <Checkbox checked={editAiCanExit} onChange={setEditAiCanExit} label="允许 AI 自主结束任务" />
+                                                    <div className="w-16 h-[26px]" />
+                                                </div>
+                                            </div>
                                         </div>
                                     </div>
                                 )}

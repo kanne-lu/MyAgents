@@ -285,26 +285,30 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
                     }`}>永久运行</button>
                 </div>
 
-                {endConditionMode === 'conditional' && (
-                  <div className="space-y-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] p-3">
-                    <div className="flex items-center justify-between">
-                      <Checkbox checked={!!deadline} onChange={v => setDeadline(v ? toLocalDateTimeString(new Date(Date.now() + 86400000)) : '')} label="截止时间" />
-                      {deadline && <input type="datetime-local" value={deadline} onChange={e => setDeadline(e.target.value)}
-                        className="rounded-lg border border-[var(--line)] bg-transparent px-2.5 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none" />}
-                    </div>
-                    <div className="flex items-center justify-between">
-                      <Checkbox checked={!!maxExecutions} onChange={v => setMaxExecutions(v ? '10' : '')} label="执行次数" />
-                      {maxExecutions && (
-                        <div className="flex items-center gap-1.5">
-                          <input type="number" min={1} max={999} value={maxExecutions} onChange={e => setMaxExecutions(e.target.value)}
-                            className="w-16 rounded-lg border border-[var(--line)] bg-transparent px-2 py-1.5 text-xs text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none" />
-                          <span className="text-xs text-[var(--ink-muted)]">次</span>
-                        </div>
-                      )}
-                    </div>
-                    <Checkbox checked={aiCanExit} onChange={setAiCanExit} label="允许 AI 自主结束任务" />
+                {/* Condition options — always rendered, disabled when "永久运行" */}
+                <div className={`rounded-lg border border-[var(--line)] bg-[var(--paper)] transition-opacity ${endConditionMode === 'forever' ? 'opacity-40 pointer-events-none' : ''}`}>
+                  <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
+                    onClick={() => setDeadline(deadline ? '' : toLocalDateTimeString(new Date(Date.now() + 86400000)))}>
+                    <Checkbox checked={!!deadline} onChange={v => setDeadline(v ? toLocalDateTimeString(new Date(Date.now() + 86400000)) : '')} label="截止时间" />
+                    <input type="datetime-local" value={deadline} onChange={e => setDeadline(e.target.value)}
+                      onClick={e => e.stopPropagation()}
+                      className={`w-44 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!deadline ? 'opacity-50' : ''}`} />
                   </div>
-                )}
+                  <div className="flex cursor-pointer items-center justify-between border-b border-[var(--line)] px-3 py-2.5"
+                    onClick={() => setMaxExecutions(maxExecutions ? '' : '10')}>
+                    <Checkbox checked={!!maxExecutions} onChange={v => setMaxExecutions(v ? '10' : '')} label="执行次数" />
+                    <div className="flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
+                      <input type="number" min={1} max={999} value={maxExecutions || 10} onChange={e => setMaxExecutions(e.target.value)}
+                        className={`w-16 rounded-md border border-[var(--line)] bg-[var(--paper)] px-2 py-1 text-center text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none ${!maxExecutions ? 'opacity-50' : ''}`} />
+                      <span className={`text-sm text-[var(--ink-secondary)] ${!maxExecutions ? 'opacity-50' : ''}`}>次</span>
+                    </div>
+                  </div>
+                  <div className="flex cursor-pointer items-center justify-between px-3 py-2.5"
+                    onClick={() => setAiCanExit(!aiCanExit)}>
+                    <Checkbox checked={aiCanExit} onChange={setAiCanExit} label="允许 AI 自主结束任务" />
+                    <div className="w-16 h-[26px]" />
+                  </div>
+                </div>
 
                 <p className="text-[13px] text-[var(--ink-muted)]">可多选，满足任一条件时任务将自动停止</p>
               </div>
