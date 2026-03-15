@@ -10,7 +10,7 @@ import { getAllCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
 import { loadAppConfig } from '@/config/configService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { CronTask } from '@/types/cronTask';
-import type { ImBotConfig } from '../../shared/types/im';
+import type { AgentConfig } from '../../shared/types/agent';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
 import { CUSTOM_EVENTS } from '../../shared/constants';
@@ -46,7 +46,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
     const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>([]);
     const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
-    const [imBotConfigs, setImBotConfigs] = useState<ImBotConfig[]>([]);
+    const [agents, setAgents] = useState<AgentConfig[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const isMountedRef = useRef(true);
@@ -83,7 +83,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             setCronTasks(tasksData);
             setBackgroundSessionIds(bgSessions);
             setAgentStatuses(agentStatusResult);
-            setImBotConfigs(appConfig?.imBotConfigs ?? []);
+            setAgents(appConfig?.agents ?? []);
         } catch (err) {
             if (!isMountedRef.current) return;
             console.error('[useTaskCenterData] Failed to load data:', err);
@@ -289,14 +289,19 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         return map;
     }, [sessions, cronTasks, backgroundSessionIds, agentStatuses]);
 
-    // Compute cron bot info map (memoized)
+    // Compute cron bot info map from agents[].channels[] (memoized)
     const cronBotInfoMap = useMemo(() => {
         const map = new Map<string, { name: string; platform: string }>();
-        for (const botConfig of imBotConfigs) {
-            map.set(botConfig.id, { name: botConfig.name, platform: botConfig.platform });
+        for (const agent of agents) {
+            for (const channel of agent.channels) {
+                map.set(channel.id, {
+                    name: channel.name || agent.name,
+                    platform: channel.type,
+                });
+            }
         }
         return map;
-    }, [imBotConfigs]);
+    }, [agents]);
 
     const refresh = useCallback(() => {
         void fetchData(0);

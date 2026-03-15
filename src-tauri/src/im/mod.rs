@@ -3749,7 +3749,7 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
 
 #[deprecated(note = "Use cmd_start_agent_channel instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_start_im_bot(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -3835,7 +3835,7 @@ pub async fn cmd_start_im_bot(
 
 #[deprecated(note = "Use cmd_stop_agent_channel instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_stop_im_bot(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -3850,7 +3850,7 @@ pub async fn cmd_stop_im_bot(
 
 #[deprecated(note = "Use cmd_agent_channel_status instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_im_bot_status(
     imState: tauri::State<'_, ManagedImBots>,
     agentState: tauri::State<'_, ManagedAgents>,
@@ -3900,7 +3900,7 @@ pub async fn cmd_im_bot_status(
 
 #[deprecated(note = "Use cmd_all_agents_status instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_im_all_bots_status(
     imState: tauri::State<'_, ManagedImBots>,
 ) -> Result<HashMap<String, ImBotStatus>, String> {
@@ -4323,7 +4323,7 @@ fn read_available_providers_from_disk() -> Option<String> {
 /// Unified config update command: replaces all 6 old hot-update commands.
 #[deprecated(note = "Use cmd_update_agent_config instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_update_im_bot_config(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -4337,7 +4337,7 @@ pub async fn cmd_update_im_bot_config(
 /// Returns the hot-reloadable config as a JSON object; returns null fields if bot is not running.
 #[deprecated(note = "Use cmd_agent_channel_status or cmd_agent_status instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_get_im_bot_runtime_config(
     imState: tauri::State<'_, ManagedImBots>,
     botId: String,
@@ -4365,7 +4365,7 @@ pub async fn cmd_get_im_bot_runtime_config(
 /// Add a new bot config to disk.
 #[deprecated(note = "Use addAgentConfig on the frontend instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_add_im_bot_config(
     app_handle: AppHandle,
     botConfig: serde_json::Value,
@@ -4383,7 +4383,7 @@ pub async fn cmd_add_im_bot_config(
 /// Remove a bot config from disk (stops the bot first if running).
 #[deprecated(note = "Use removeAgentConfig on the frontend instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_remove_im_bot_config(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -5123,7 +5123,7 @@ pub async fn cmd_update_agent_config(
     patch: AgentConfigPatch,
 ) -> Result<(), String> {
     // Hot-reload running instance if present (runtime only — disk persistence
-    // is handled by the TypeScript patchAgentConfig service to maintain the imBotConfigs shim)
+    // is handled by the TypeScript patchAgentConfig service)
     let agents_guard = agentState.lock().await;
     if let Some(agent) = agents_guard.get(&agentId) {
         if let Some(ref model) = patch.model {
@@ -5270,7 +5270,7 @@ pub async fn cmd_delete_agent(
         let _ = shutdown_bot_instance(ch_inst.bot_instance, &sidecarManager, &ch_id).await;
     }
 
-    // Remove from disk
+    // Remove from disk (config.json entry + agent data directory)
     let aid = agentId.clone();
     tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
@@ -5296,6 +5296,16 @@ pub async fn cmd_delete_agent(
         }
         std::fs::rename(&tmp_path, &config_path)
             .map_err(|e| format!("[agent] Failed to rename: {}", e))?;
+
+        // Clean up agent data directory (~/.myagents/agents/{agentId}/)
+        let agent_data_dir = home.join(".myagents").join("agents").join(&aid);
+        if agent_data_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&agent_data_dir) {
+                log::warn!("[agent] Failed to remove agent data dir {:?}: {}", agent_data_dir, e);
+            } else {
+                log::info!("[agent] Removed agent data dir {:?}", agent_data_dir);
+            }
+        }
 
         Ok::<(), String>(())
     }).await.map_err(|e| format!("spawn_blocking: {}", e))??;

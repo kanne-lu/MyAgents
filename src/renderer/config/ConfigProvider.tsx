@@ -156,6 +156,36 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 await saveProjects(loadedProjects);
             }
 
+            // One-time cleanup: remove imBotConfigs entries whose credentials
+            // now exist in agents[].channels[] (post-migration duplicates)
+            if (loadedConfig.agents?.length && loadedConfig.imBotConfigs?.length) {
+                // Collect all credential fingerprints from agent channels
+                const agentCredentials = new Set<string>();
+                for (const agent of loadedConfig.agents) {
+                    for (const ch of agent.channels) {
+                        if (ch.feishuAppId) agentCredentials.add(`feishu:${ch.feishuAppId}`);
+                        if (ch.botToken) agentCredentials.add(`botToken:${ch.botToken}`);
+                        if (ch.dingtalkClientId) agentCredentials.add(`dingtalk:${ch.dingtalkClientId}`);
+                        if (ch.openclawPluginConfig?.appId) agentCredentials.add(`openclaw:${ch.openclawPluginConfig.appId}`);
+                    }
+                }
+
+                const remaining = loadedConfig.imBotConfigs.filter(bot => {
+                    if (bot.feishuAppId && agentCredentials.has(`feishu:${bot.feishuAppId}`)) return false;
+                    if (bot.botToken && agentCredentials.has(`botToken:${bot.botToken}`)) return false;
+                    if (bot.dingtalkClientId && agentCredentials.has(`dingtalk:${bot.dingtalkClientId}`)) return false;
+                    if (bot.openclawPluginConfig?.appId && agentCredentials.has(`openclaw:${bot.openclawPluginConfig.appId}`)) return false;
+                    return true;
+                });
+
+                const removedCount = loadedConfig.imBotConfigs.length - remaining.length;
+                if (removedCount > 0) {
+                    console.log(`[ConfigProvider] Cleaning up ${removedCount} legacy imBotConfigs entry(ies) already migrated to agents`);
+                    loadedConfig.imBotConfigs = remaining;
+                    await atomicModifyConfig(c => ({ ...c, imBotConfigs: remaining }));
+                }
+            }
+
             await rebuildAndPersistAvailableProviders();
 
             if (!isMountedRef.current) return;

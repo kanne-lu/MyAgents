@@ -303,12 +303,17 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleOpenCronDetail = useCallback((task: CronTask) => setSelectedCronTask(task), []);
     const handleCloseCronDetail = useCallback(() => setSelectedCronTask(null), []);
 
-    // Derive bot info for selected cron task from config
+    // Derive bot info for selected cron task from agents[].channels[]
     const selectedTaskBotInfo = useMemo(() => {
-        if (!selectedCronTask?.sourceBotId || !config.imBotConfigs) return undefined;
-        const bot = config.imBotConfigs.find(b => b.id === selectedCronTask.sourceBotId);
-        return bot ? { name: bot.name, platform: bot.platform } : undefined;
-    }, [selectedCronTask?.sourceBotId, config.imBotConfigs]);
+        if (!selectedCronTask?.sourceBotId || !config.agents) return undefined;
+        for (const agent of config.agents) {
+            const channel = agent.channels.find(ch => ch.id === selectedCronTask.sourceBotId);
+            if (channel) {
+                return { name: channel.name || agent.name, platform: channel.type };
+            }
+        }
+        return undefined;
+    }, [selectedCronTask?.sourceBotId, config.agents]);
 
     // Stable callback for overlay session open (avoids inline function in render)
     const handleOverlayOpenTask = useCallback((session: SessionMetadata, project: Project) => {

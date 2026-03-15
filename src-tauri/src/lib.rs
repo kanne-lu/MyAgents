@@ -185,25 +185,8 @@ pub fn run() {
             cmd_get_background_sessions,
             // Proxy hot-reload
             cmd_propagate_proxy,
-            // IM Bot commands (deprecated — use Agent commands instead)
-            #[allow(deprecated)]
-            im::cmd_start_im_bot,
-            #[allow(deprecated)]
-            im::cmd_stop_im_bot,
-            #[allow(deprecated)]
-            im::cmd_im_bot_status,
-            #[allow(deprecated)]
-            im::cmd_im_all_bots_status,
+            // IM Bot commands (non-deprecated survivors)
             im::cmd_im_conversations,
-            // IM Bot unified config commands (v0.1.26, deprecated)
-            #[allow(deprecated)]
-            im::cmd_update_im_bot_config,
-            #[allow(deprecated)]
-            im::cmd_get_im_bot_runtime_config,
-            #[allow(deprecated)]
-            im::cmd_add_im_bot_config,
-            #[allow(deprecated)]
-            im::cmd_remove_im_bot_config,
             // Group permission commands (v0.1.28)
             im::cmd_approve_group,
             im::cmd_reject_group,
