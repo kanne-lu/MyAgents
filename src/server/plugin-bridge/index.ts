@@ -408,7 +408,11 @@ const server = Bun.serve({
       const session = new FeishuStreamingSession(creds, (msg) => console.log(`[streaming] ${msg}`));
 
       try {
-        await session.start(body.chatId, body.receiveIdType || 'chat_id', {
+        // Auto-detect receive_id_type from ID prefix: ou_=open_id, oc_=chat_id, on_=union_id
+        const autoIdType = body.chatId.startsWith('ou_') ? 'open_id'
+          : body.chatId.startsWith('on_') ? 'union_id'
+          : 'chat_id';
+        await session.start(body.chatId, body.receiveIdType || autoIdType, {
           replyToMessageId: body.replyToMessageId,
           replyInThread: body.replyInThread,
           rootId: body.rootId,
