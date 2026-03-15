@@ -71,11 +71,14 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
         // Return an OpenClaw-format config with the plugin's channel settings
         // Use currentPluginId as channel key (not hardcoded 'feishu') so any plugin
         // can resolve its own config via cfg.channels[pluginId]
+        // Force dmPolicy/groupPolicy=open — MyAgents handles access control at Rust layer
         return {
           channels: {
             [currentPluginId]: {
               enabled: true,
               ...bridgePluginConfig,
+              dmPolicy: 'open',
+              groupPolicy: 'open',
             },
           },
         };
