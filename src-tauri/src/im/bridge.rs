@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::im::adapter::{AdapterResult, ImAdapter, ImStreamAdapter};
 use crate::im::types::ImMessage;
-use crate::{ulog_info, ulog_error, ulog_debug};
+use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 
 // ===== Bridge Sender Registry =====
 // Lets management API route inbound messages from Bridge → processing loop.
@@ -664,8 +664,8 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         bun_path, bridge_script, plugin_dir, port, rust_port
     );
 
-    let mut child = std::process::Command::new(&bun_path)
-        .arg(bridge_script.to_string_lossy().as_ref())
+    let mut cmd = std::process::Command::new(&bun_path);
+    cmd.arg(bridge_script.to_string_lossy().as_ref())
         // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
         // can find and kill orphaned bridge processes after a crash
         .arg("--myagents-sidecar")
@@ -678,10 +678,42 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .arg("--bot-id")
         .arg(bot_id)
         // Pass config via env var to avoid leaking secrets in `ps` process listing
-        .env("BRIDGE_PLUGIN_CONFIG", &config_json)
-        // Prevent system proxy (Clash/V2Ray) from intercepting localhost traffic
-        .env("NO_PROXY", "127.0.0.1,localhost")
-        .env("no_proxy", "127.0.0.1,localhost")
+        .env("BRIDGE_PLUGIN_CONFIG", &config_json);
+
+    // Inject proxy env vars (same logic as sidecar.rs) so plugin HTTP calls
+    // (e.g. Feishu API via axios/fetch) use MyAgents' configured proxy
+    if let Some(proxy_settings) = crate::proxy_config::read_proxy_settings() {
+        match crate::proxy_config::get_proxy_url(&proxy_settings) {
+            Ok(proxy_url) => {
+                ulog_info!("[bridge] Injecting proxy for plugin: {}", proxy_url);
+                cmd.env("HTTP_PROXY", &proxy_url);
+                cmd.env("HTTPS_PROXY", &proxy_url);
+                cmd.env("http_proxy", &proxy_url);
+                cmd.env("https_proxy", &proxy_url);
+                cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+                cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+            }
+            Err(e) => {
+                ulog_warn!("[bridge] Invalid proxy config ({}), stripping proxy env vars", e);
+                for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                             "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"] {
+                    cmd.env_remove(var);
+                }
+            }
+        }
+    } else {
+        // No MyAgents proxy configured: strip inherited system proxy env vars
+        // so the Bridge doesn't accidentally use Clash/V2Ray system proxy
+        ulog_debug!("[bridge] No proxy configured, stripping inherited proxy env vars");
+        for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                     "ALL_PROXY", "all_proxy"] {
+            cmd.env_remove(var);
+        }
+        cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+        cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+    }
+
+    let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
