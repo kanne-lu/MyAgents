@@ -19,6 +19,8 @@ use tokio::sync::{mpsc, Mutex};
 use crate::im::adapter::{AdapterResult, ImAdapter, ImStreamAdapter};
 use crate::im::types::ImMessage;
 use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
+// Note: ulog_* macros write to BOTH system log AND unified log (~/.myagents/logs/unified-*.log)
+// This is critical for bridge stdout/stderr — using log::info! only writes to system log.
 
 // ===== Bridge Sender Registry =====
 // Lets management API route inbound messages from Bridge → processing loop.
@@ -719,7 +721,7 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .spawn()
         .map_err(|e| format!("Failed to spawn bridge process: {}", e))?;
 
-    // Pipe stdout/stderr to unified log (same pattern as sidecar.rs)
+    // Pipe stdout/stderr to unified log
     {
         use std::io::{BufRead, BufReader};
         if let Some(stdout) = child.stdout.take() {
@@ -727,7 +729,7 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
             std::thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().flatten() {
-                    log::info!("[bridge-out][{}] {}", bot_id_clone, line);
+                    ulog_info!("[bridge-out][{}] {}", bot_id_clone, line);
                 }
             });
         }
@@ -736,7 +738,7 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().flatten() {
-                    log::error!("[bridge-err][{}] {}", bot_id_clone, line);
+                    ulog_error!("[bridge-err][{}] {}", bot_id_clone, line);
                 }
             });
         }
