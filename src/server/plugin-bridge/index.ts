@@ -94,6 +94,29 @@ async function loadPlugin() {
 
   console.log(`[plugin-bridge] Loading plugin: ${entryModule}`);
 
+  // CRITICAL: Patch axios BEFORE importing the plugin.
+  // @larksuiteoapi/node-sdk creates `defaultHttpInstance = axios.create()` at import time.
+  // Bun's default axios http adapter has a compatibility bug where connections are silently
+  // closed after ~30s, causing all SDK API calls to hang. Setting a 10s timeout prevents
+  // the 30s hang and lets the plugin's error handling (retry/fallback) kick in faster.
+  try {
+    const axiosModule = await import(`${pluginDir}/node_modules/axios`);
+    const axios = axiosModule.default || axiosModule;
+    if (typeof axios?.create === 'function') {
+      const origCreate = axios.create.bind(axios);
+      axios.create = (...args: unknown[]) => {
+        const instance = origCreate(...(args as [Record<string, unknown>]));
+        if (!instance.defaults.timeout || instance.defaults.timeout > 10000) {
+          instance.defaults.timeout = 10000;
+        }
+        return instance;
+      };
+      console.log('[plugin-bridge] Patched axios.create with 10s timeout for Bun compatibility');
+    }
+  } catch {
+    // axios not installed in plugin dir — no patch needed
+  }
+
   // Import the plugin module
   const pluginModule = await import(`${pluginDir}/node_modules/${entryModule}`);
 
