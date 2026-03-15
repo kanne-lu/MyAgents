@@ -980,7 +980,71 @@ async fn install_sdk_shim<R: tauri::Runtime>(
     copy_dir_recursive(&shim_src, &shim_dst).await?;
 
     ulog_info!("[bridge] SDK shim installed from {:?} → {:?}", shim_src, shim_dst);
+
+    // Patch @larksuiteoapi/node-sdk to use a fetch-based axios adapter.
+    // Bun's default axios http adapter has a bug where socket connections are
+    // silently closed, causing 30s hangs. This patch replaces the SDK's
+    // defaultHttpInstance with one using native fetch (252ms vs 30278ms).
+    patch_lark_sdk_for_bun(plugin_dir).await;
+
     Ok(())
+}
+
+/// Patch @larksuiteoapi/node-sdk's defaultHttpInstance to use a fetch-based
+/// axios adapter instead of the default Node.js http adapter (incompatible with Bun).
+async fn patch_lark_sdk_for_bun(plugin_dir: &std::path::Path) {
+    let sdk_file = plugin_dir
+        .join("node_modules")
+        .join("@larksuiteoapi")
+        .join("node-sdk")
+        .join("lib")
+        .join("index.js");
+
+    if !sdk_file.exists() {
+        return; // Not a Lark SDK plugin, skip
+    }
+
+    let code = match tokio::fs::read_to_string(&sdk_file).await {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let target = r#"const defaultHttpInstance = axios__default["default"].create();"#;
+    if !code.contains(target) {
+        return; // Already patched or different SDK version
+    }
+
+    // Minimal fetch-based adapter that replaces axios's Node.js http adapter
+    let adapter = concat!(
+        "function bunFetchAdapter(c){return new Promise(async(r,j)=>{try{",
+        "let u=c.baseURL?c.baseURL+c.url:c.url;",
+        "let h={};if(c.headers)for(let[k,v]of Object.entries(c.headers))if(v!=null)h[k]=String(v);",
+        "if(c.params){let q=new URLSearchParams();for(let[k,v]of Object.entries(c.params)){",
+        "if(Array.isArray(v))v.forEach(i=>q.append(k,String(i)));",
+        "else if(v!=null)q.append(k,String(v))}",
+        "let s=q.toString();if(s)u+=(u.includes('?')?'&':'?')+s}",
+        "let m=(c.method||'get').toUpperCase();",
+        "let opts={method:m,headers:h};",
+        "if(c.data&&m!=='GET'&&m!=='HEAD'&&m!=='OPTIONS'){",
+        "opts.body=typeof c.data==='string'?c.data:JSON.stringify(c.data)}",
+        "let resp=await fetch(u,opts);",
+        "let d;try{d=await resp.json()}catch{d=await resp.text()}",
+        "r({data:d,status:resp.status,statusText:resp.statusText,",
+        "headers:Object.fromEntries(resp.headers.entries()),config:c,request:{}})",
+        "}catch(e){j(e)}})}",
+    );
+
+    let replacement = format!(
+        "{}; const defaultHttpInstance = axios__default[\"default\"].create({{adapter: bunFetchAdapter}});",
+        adapter
+    );
+
+    let patched = code.replace(target, &replacement);
+    if let Err(e) = tokio::fs::write(&sdk_file, patched).await {
+        ulog_warn!("[bridge] Failed to patch Lark SDK for Bun: {}", e);
+    } else {
+        ulog_info!("[bridge] Patched @larksuiteoapi/node-sdk with fetch adapter for Bun compatibility");
+    }
 }
 
 /// Resolve npm spec to the package directory name in node_modules.
