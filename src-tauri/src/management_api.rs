@@ -615,13 +615,15 @@ async fn handle_bridge_message(
     use crate::im::bridge;
     use crate::im::types::{ImMessage, ImPlatform, ImSourceType};
 
-    // Validate plugin_id: reject empty, path separators, and built-in platform names
+    // Validate plugin_id: reject empty, path separators, and colons.
+    // Note: built-in platform names ("feishu" etc.) are allowed because OpenClaw plugins
+    // may legitimately use them as channel IDs (e.g. official Feishu plugin = "feishu").
+    // Bridge routing uses botId (UUID), not pluginId, so there's no collision.
     let plugin_id = payload.plugin_id.trim().to_string();
     if plugin_id.is_empty()
         || plugin_id.contains('/')
         || plugin_id.contains('\\')
         || plugin_id.contains(':')
-        || matches!(plugin_id.as_str(), "telegram" | "feishu" | "dingtalk")
     {
         return (
             axum::http::StatusCode::BAD_REQUEST,

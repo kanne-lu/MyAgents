@@ -190,7 +190,10 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const text = String(ctx.BodyForAgent || ctx.Body || ctx.body || ctx.RawBody || '');
           const senderId = String(ctx.SenderId || ctx.senderId || '');
           const senderName = String(ctx.SenderName || ctx.senderName || '');
-          const chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          // Feishu plugin sets From = "feishu:ou_xxx" (prefixed); strip the channel prefix
+          // to get the raw chat/user ID that Rust expects
+          let chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
