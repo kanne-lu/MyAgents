@@ -92,12 +92,12 @@ export default function ChannelWizard({
     const openclawPluginId = isOpenClaw ? platform.slice('openclaw:'.length) : undefined;
     const promoted = isOpenClaw ? findPromotedByPlatform(platform) : undefined;
 
-    // OpenClaw: config(1) → start/complete(2)  — no workspace (Agent has one), no user binding
+    // OpenClaw: config(1) → start(2) → binding(3)
     // Telegram: credentials(1) → binding(2)
     // Feishu:   credentials(1) → permissions(2) → binding(3)
     // DingTalk: credentials(1) → permissions(2) → binding(3)
-    const totalSteps = isOpenClaw ? 2 : (isFeishu || isDingtalk) ? 3 : 2;
-    const bindingStep = isOpenClaw ? -1 : totalSteps; // OpenClaw has no binding step
+    const totalSteps = isOpenClaw ? 3 : (isFeishu || isDingtalk) ? 3 : 2;
+    const bindingStep = totalSteps; // All platforms have binding as the last step
 
     const [step, setStep] = useState(1);
     // Telegram credentials
@@ -282,7 +282,7 @@ export default function ChannelWizard({
         return invoke<ChannelStatusData | null>('cmd_agent_channel_status', { agentId: agent.id, channelId: channelCfg.id });
     }, [agent]);
 
-    // OpenClaw: step 2 = start + complete
+    // OpenClaw: step 2 = start channel, then advance to binding step
     const handleOpenClawStart = useCallback(async () => {
         if (!isTauriEnvironment()) return;
         setStarting(true);
@@ -300,8 +300,8 @@ export default function ChannelWizard({
 
             if (isMountedRef.current) {
                 track('agent_channel_create', { platform });
-                toastRef.current.success('Channel 启动成功！');
-                onComplete(channelId);
+                toastRef.current.success('Channel 启动成功，请完成用户绑定');
+                setStep(3); // Advance to binding step
             }
         } catch (err) {
             if (isMountedRef.current) {
@@ -310,7 +310,7 @@ export default function ChannelWizard({
         } finally {
             if (isMountedRef.current) setStarting(false);
         }
-    }, [buildChannelConfig, agent, channelId, platform, startChannel, refreshConfig, onComplete]);
+    }, [buildChannelConfig, agent, platform, startChannel, refreshConfig]);
 
     // Handle "Next" for all steps
     const handleNext = useCallback(async () => {
@@ -476,7 +476,8 @@ export default function ChannelWizard({
     const stepLabel = (() => {
         if (isOpenClaw) {
             if (step === 1) return '配置插件';
-            return '确认并启动';
+            if (step === 2) return '确认并启动';
+            return '绑定用户';
         }
         if (isDingtalk) {
             if (step === 1) return '配置应用凭证';
@@ -1009,23 +1010,23 @@ export default function ChannelWizard({
                 </div>
             )}
 
-            {/* Binding step (built-in platforms only) */}
-            {!isOpenClaw && step === bindingStep && (
+            {/* Binding step (all platforms) */}
+            {step === bindingStep && (
                 <div className="space-y-6">
                     {/* Action bar at top */}
                     {renderActionBar({
-                        onBack: () => setStep((isFeishu || isDingtalk) ? 2 : 1),
+                        onBack: () => setStep((isFeishu || isDingtalk || isOpenClaw) ? 2 : 1),
                         onNext: handleComplete,
                         nextLabel: '完成',
                         nextIcon: <Check className="h-4 w-4" />,
                     })}
 
-                    {(isFeishu || isDingtalk) ? (
+                    {(isFeishu || isDingtalk || isOpenClaw) ? (
                         botStatus?.bindCode && (
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={allowedUsers.length > 0}
-                                platformName={isDingtalk ? '钉钉' : '飞书'}
+                                platformName={isOpenClaw ? platformLabel : isDingtalk ? '钉钉' : '飞书'}
                             />
                         )
                     ) : (
@@ -1046,7 +1047,7 @@ export default function ChannelWizard({
                         </>
                     )}
 
-                    {(isFeishu || isDingtalk) && allowedUsers.length > 0 && (
+                    {(isFeishu || isDingtalk || isOpenClaw) && allowedUsers.length > 0 && (
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                             <WhitelistManager
                                 users={allowedUsers}

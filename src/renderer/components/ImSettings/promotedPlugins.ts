@@ -68,9 +68,6 @@ export const PROMOTED_PLUGINS: PromotedPlugin[] = [
         badge: 'official',
         requiredFields: ['appId', 'appSecret'],
         defaultConfig: {
-            dmPolicy: 'open',
-            groupPolicy: 'open',
-            requireMention: 'true',
             streaming: 'true',
         },
         setupGuide: {

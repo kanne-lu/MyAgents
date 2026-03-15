@@ -1082,7 +1082,8 @@ async fn create_bot_instance<R: Runtime>(
                     let is_telegram_bind = text.starts_with("/start BIND_");
                     let is_feishu_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Feishu;
                     let is_dingtalk_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Dingtalk;
-                    if is_telegram_bind || is_feishu_bind || is_dingtalk_bind {
+                    let is_openclaw_bind = text.starts_with("BIND_") && matches!(msg.platform, ImPlatform::OpenClaw(_));
+                    if is_telegram_bind || is_feishu_bind || is_dingtalk_bind || is_openclaw_bind {
                         // If sender is already bound, silently ignore stale BIND_ messages
                         // (Feishu may re-deliver old messages after bot restart clears dedup cache)
                         let already_bound = {
@@ -1604,12 +1605,26 @@ async fn create_bot_instance<R: Runtime>(
                         // No pending approval — fall through to regular message handling
                     }
 
-                    // ── Group access control (v0.1.28) ──────────
-                    // OpenClaw (Bridge) plugins handle their own access control
-                    // (dmPolicy/groupPolicy/allowFrom/requireMention) internally —
-                    // skip MyAgents whitelist + mention checks for Bridge platforms.
+                    // ── Access control ──────────
+                    // All platforms (including Bridge/OpenClaw) go through the Rust
+                    // whitelist. Bridge plugins use dmPolicy=open at the plugin level;
+                    // actual access control is enforced here via BIND_xxx + allowedUsers.
                     let is_bridge_platform = matches!(msg.platform, ImPlatform::OpenClaw(_));
-                    if msg.source_type == ImSourceType::Group && !is_bridge_platform {
+
+                    // Private message whitelist check for Bridge platforms
+                    // (Bridge plugins use dmPolicy=open, access control is at Rust layer)
+                    if msg.source_type == ImSourceType::Private && is_bridge_platform {
+                        let is_allowed = {
+                            let users = allowed_users_for_loop.read().await;
+                            users.is_empty() || users.contains(&msg.sender_id)
+                        };
+                        if !is_allowed {
+                            ulog_info!("[im] Bridge private message from {} blocked (not in allowedUsers)", msg.sender_id);
+                            continue;
+                        }
+                    }
+
+                    if msg.source_type == ImSourceType::Group {
                         // Check if sender is a whitelisted user OR group is approved
                         let is_allowed_user = {
                             let users = allowed_users_for_loop.read().await;

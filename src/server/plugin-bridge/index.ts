@@ -138,6 +138,11 @@ async function loadPlugin() {
       [capturedPlugin.id]: {
         enabled: true,
         ...pluginConfig,
+        // Force open policies — MyAgents handles access control at the Rust layer
+        // via BIND_xxx codes + allowedUsers whitelist. OpenClaw's pairing mechanism
+        // requires an external dashboard that MyAgents doesn't have.
+        dmPolicy: 'open',
+        groupPolicy: 'open',
       },
     },
   };
