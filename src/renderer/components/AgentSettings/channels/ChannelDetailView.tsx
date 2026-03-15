@@ -103,7 +103,7 @@ export default function ChannelDetailView({
 
     // Find channel from agent config
     const channel = useMemo(
-        () => agent.channels.find(c => c.id === channelId),
+        () => agent.channels?.find(c => c.id === channelId),
         [agent.channels, channelId],
     );
 
@@ -161,7 +161,7 @@ export default function ChannelDetailView({
 
     // Patch channel config in agent
     const patchChannel = useCallback(async (patch: Partial<ChannelConfig>) => {
-        const updatedChannels = agent.channels.map(ch =>
+        const updatedChannels = (agent.channels ?? []).map(ch =>
             ch.id === channelId ? { ...ch, ...patch } : ch,
         );
         await patchAgentConfig(agent.id, { channels: updatedChannels });
@@ -211,7 +211,7 @@ export default function ChannelDetailView({
                                 ? `@${status.botUsername}`
                                 : status.botUsername;
                             if (ch?.name !== displayName) {
-                                const updatedChannels = agent.channels.map(c =>
+                                const updatedChannels = (agent.channels ?? []).map(c =>
                                     c.id === channelId ? { ...c, name: displayName } : c,
                                 );
                                 patchAgentConfig(agent.id, { channels: updatedChannels })
@@ -346,7 +346,7 @@ export default function ChannelDetailView({
                     // May not be running
                 }
             }
-            const updatedChannels = agent.channels.filter(ch => ch.id !== channelId);
+            const updatedChannels = (agent.channels ?? []).filter(ch => ch.id !== channelId);
             await patchAgentConfig(agent.id, { channels: updatedChannels });
             track('agent_channel_remove', { platform: channelRef.current?.type ?? 'unknown' });
             toastRef.current.success('Channel 已删除');

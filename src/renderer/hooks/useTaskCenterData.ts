@@ -293,7 +293,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     const cronBotInfoMap = useMemo(() => {
         const map = new Map<string, { name: string; platform: string }>();
         for (const agent of agents) {
-            for (const channel of agent.channels) {
+            for (const channel of (agent.channels ?? [])) {
                 map.set(channel.id, {
                     name: channel.name || agent.name,
                     platform: channel.type,

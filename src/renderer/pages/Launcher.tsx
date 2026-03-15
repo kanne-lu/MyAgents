@@ -307,7 +307,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const selectedTaskBotInfo = useMemo(() => {
         if (!selectedCronTask?.sourceBotId || !config.agents) return undefined;
         for (const agent of config.agents) {
-            const channel = agent.channels.find(ch => ch.id === selectedCronTask.sourceBotId);
+            const channel = agent.channels?.find(ch => ch.id === selectedCronTask.sourceBotId);
             if (channel) {
                 return { name: channel.name || agent.name, platform: channel.type };
             }

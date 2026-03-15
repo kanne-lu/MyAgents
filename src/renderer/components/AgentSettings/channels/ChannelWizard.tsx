@@ -362,7 +362,7 @@ export default function ChannelWizard({
             const channelCfg = { ...buildChannelConfig(), setupCompleted: true };
 
             // Save channel to agent config (dedup: replace if same ID exists from a previous attempt)
-            const existingChannels = agent.channels.filter(ch => ch.id !== channelCfg.id);
+            const existingChannels = (agent.channels ?? []).filter(ch => ch.id !== channelCfg.id);
             await patchAgentConfig(agent.id, {
                 channels: [...existingChannels, channelCfg],
             });
@@ -411,10 +411,10 @@ export default function ChannelWizard({
 
         // Check for duplicate credentials — against existing channels in this agent + other agents
         const allChannels = [
-            ...agent.channels.filter(ch => ch.id !== channelId && ch.setupCompleted),
+            ...(agent.channels ?? []).filter(ch => ch.id !== channelId && ch.setupCompleted),
             ...(config.agents ?? [])
                 .filter(a => a.id !== agent.id)
-                .flatMap(a => a.channels.filter(ch => ch.setupCompleted)),
+                .flatMap(a => (a.channels ?? []).filter(ch => ch.setupCompleted)),
         ];
         if (isFeishu) {
             if (allChannels.some(ch => ch.feishuAppId === feishuAppId.trim())) {
@@ -440,7 +440,7 @@ export default function ChannelWizard({
             const channelCfg = buildChannelConfig();
 
             // Save channel to agent config (dedup: replace if same ID exists from a previous attempt)
-            const existingChannels = agent.channels.filter(ch => ch.id !== channelCfg.id);
+            const existingChannels = (agent.channels ?? []).filter(ch => ch.id !== channelCfg.id);
             await patchAgentConfig(agent.id, {
                 channels: [...existingChannels, channelCfg],
             });
@@ -462,7 +462,7 @@ export default function ChannelWizard({
                 // Save channel name from verification
                 if (status?.botUsername) {
                     const displayName = platform === 'telegram' ? `@${status.botUsername}` : status.botUsername;
-                    const updatedChannels = agent.channels
+                    const updatedChannels = (agent.channels ?? [])
                         .filter(ch => ch.id !== channelId)
                         .concat([{ ...channelCfg, name: displayName }]);
                     await patchAgentConfig(agent.id, { channels: updatedChannels });
@@ -488,12 +488,12 @@ export default function ChannelWizard({
         const { loadAppConfig } = await import('@/config/configService');
         const latest = await loadAppConfig();
         const latestAgent = (latest.agents ?? []).find(a => a.id === agent.id);
-        const diskChannel = latestAgent?.channels.find(ch => ch.id === channelId);
+        const diskChannel = latestAgent?.channels?.find(ch => ch.id === channelId);
         const diskUsers = diskChannel?.allowedUsers ?? [];
         const mergedUsers = [...new Set([...diskUsers, ...allowedUsers])];
 
         // Update channel with setupCompleted + merged users
-        const updatedChannels = (latestAgent?.channels ?? agent.channels).map(ch =>
+        const updatedChannels = (latestAgent?.channels ?? agent.channels ?? []).map(ch =>
             ch.id === channelId
                 ? { ...ch, setupCompleted: true, allowedUsers: mergedUsers }
                 : ch,
@@ -517,7 +517,7 @@ export default function ChannelWizard({
         }
 
         // Remove channel from agent config
-        const updatedChannels = agent.channels.filter(ch => ch.id !== channelId);
+        const updatedChannels = (agent.channels ?? []).filter(ch => ch.id !== channelId);
         await patchAgentConfig(agent.id, { channels: updatedChannels });
         await refreshConfig();
 

@@ -41,6 +41,24 @@ import {
 import { migrateImBotConfigsToAgents, persistAgents } from './services/agentConfigService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 
+/**
+ * Normalize agents loaded from disk: ensure every agent has a `channels` array.
+ * External tools (e.g., AI bots editing config.json) may produce agents without
+ * the `channels` field, which would crash downstream iteration.
+ * Returns true if any agent was repaired (caller should persist).
+ */
+function normalizeAgents(config: AppConfig): boolean {
+    if (!config.agents) return false;
+    let repaired = false;
+    for (const agent of config.agents) {
+        if (!Array.isArray(agent.channels)) {
+            agent.channels = [];
+            repaired = true;
+        }
+    }
+    return repaired;
+}
+
 // ============= Context Types =============
 
 export interface ConfigDataValue {
@@ -165,7 +183,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 // Collect all credential fingerprints from agent channels
                 const agentCredentials = new Set<string>();
                 for (const agent of loadedConfig.agents) {
-                    for (const ch of agent.channels) {
+                    for (const ch of (agent.channels ?? [])) {
                         if (ch.feishuAppId) agentCredentials.add(`feishu:${ch.feishuAppId}`);
                         if (ch.botToken) agentCredentials.add(`botToken:${ch.botToken}`);
                         if (ch.dingtalkClientId) agentCredentials.add(`dingtalk:${ch.dingtalkClientId}`);
@@ -190,6 +208,12 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             }
 
             await rebuildAndPersistAvailableProviders();
+
+            // Normalize agents and self-heal corrupted config on disk
+            if (normalizeAgents(loadedConfig) && loadedConfig.agents) {
+                await persistAgents(loadedConfig.agents);
+                console.log('[ConfigProvider] Repaired agents with missing channels — persisted to disk');
+            }
 
             if (!isMountedRef.current) return;
             setConfig(loadedConfig);
@@ -225,6 +249,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         const refreshOnEvent = () => {
             if (!isMountedRef.current) return;
             loadAppConfig().then(latest => {
+                normalizeAgents(latest);
                 if (isMountedRef.current) setConfig(latest);
             }).catch(err => {
                 console.error('[ConfigProvider] Failed to refresh config after config-changed:', err);
@@ -261,6 +286,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     const refreshConfig = useCallback(async () => {
         try {
             const latest = await loadAppConfig();
+            normalizeAgents(latest);
             if (isMountedRef.current) setConfig(latest);
         } catch (err) {
             console.error('[ConfigProvider] Failed to refresh config:', err);

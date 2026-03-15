@@ -170,7 +170,7 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
           </button>
         </div>
 
-        {agent.channels.length === 0 && (
+        {(agent.channels?.length ?? 0) === 0 && (
           <div className="flex flex-col items-center rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/30 py-6">
             <p className="text-xs text-[var(--ink-subtle)]">
               尚未添加任何 Channel。点击上方「添加」来添加 IM 渠道。
@@ -179,7 +179,7 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
         )}
 
         <div className="space-y-2">
-          {agent.channels.map(channel => {
+          {(agent.channels ?? []).map(channel => {
             const chStatus = getChannelStatus(status, channel.id);
             const isRunning = chStatus?.status === 'online' || chStatus?.status === 'connecting';
             const isLoading = loading === channel.id;

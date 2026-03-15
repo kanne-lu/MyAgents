@@ -4,6 +4,10 @@
  *
  * Must be a class component (React limitation for error boundaries).
  * Placed in main.tsx outside all providers to catch everything.
+ *
+ * IMPORTANT: Uses hardcoded fallback colors (not CSS variables) to ensure
+ * the error UI is always visible, even when CSS hasn't loaded or vars are
+ * missing. CSS vars are used as primary with hardcoded fallbacks.
  */
 
 import { Component } from 'react';
@@ -42,21 +46,22 @@ export default class AppErrorBoundary extends Component<Props, State> {
             return this.props.children;
         }
 
+        // Hardcoded fallback colors ensure visibility even without CSS variables
         return (
             <div style={{
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 height: '100vh',
-                backgroundColor: 'var(--paper)',
-                color: 'var(--ink)',
+                backgroundColor: 'var(--paper, #fafafa)',
+                color: 'var(--ink, #1a1a1a)',
                 fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
             }}>
                 <div style={{
                     maxWidth: 420,
                     padding: 32,
                     borderRadius: 12,
-                    backgroundColor: 'var(--paper-inset)',
+                    backgroundColor: 'var(--paper-inset, #f0f0f0)',
                     textAlign: 'center',
                 }}>
                     <h2 style={{ margin: '0 0 12px', fontSize: 18, fontWeight: 600 }}>
@@ -65,7 +70,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
                     <p style={{
                         margin: '0 0 20px',
                         fontSize: 13,
-                        color: 'var(--ink-muted)',
+                        color: 'var(--ink-muted, #666)',
                         lineHeight: 1.5,
                     }}>
                         {this.state.error?.message || '发生了未知错误'}
@@ -76,8 +81,8 @@ export default class AppErrorBoundary extends Component<Props, State> {
                             padding: '8px 24px',
                             fontSize: 14,
                             fontWeight: 500,
-                            color: 'var(--paper)',
-                            backgroundColor: 'var(--accent)',
+                            color: '#fff',
+                            backgroundColor: 'var(--accent, #2563eb)',
                             border: 'none',
                             borderRadius: 8,
                             cursor: 'pointer',

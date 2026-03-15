@@ -28,7 +28,7 @@ function chLabel(t: string) {
 function deriveState(p: Project, a?: AgentConfig, s?: AgentStatusData): ProactiveState {
     if (!p.isAgent || !a) return 'basic';
     if (!a.enabled) return 'basic';
-    if (!a.channels.length) return 'pending';
+    if (!(a.channels?.length)) return 'pending';
     if (s) {
         if (s.channels.some(c => c.status === 'online' || c.status === 'connecting')) return 'active';
         if (s.channels.some(c => c.status === 'error')) return 'error';
@@ -129,7 +129,7 @@ export default memo(function WorkspaceCard({
                         <div className="mt-1 flex flex-wrap items-center gap-1">
                             {state === 'pending' ? (
                                 <span className="text-[11px] text-[var(--accent-warm)]">待配置聊天机器人</span>
-                            ) : agent?.channels.map(ch => {
+                            ) : (agent?.channels ?? []).map(ch => {
                                 const runtime = agentStatus?.channels.find(c => c.channelId === ch.id);
                                 const isOn = runtime?.status === 'online' || runtime?.status === 'connecting';
                                 const isErr = runtime?.status === 'error';

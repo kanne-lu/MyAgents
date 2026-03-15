@@ -73,7 +73,7 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
         let stoppedCount = 0;
         if (isTauriEnvironment()) {
           const { invoke } = await import('@tauri-apps/api/core');
-          for (const ch of agent.channels) {
+          for (const ch of (agent.channels ?? [])) {
             try {
               await invoke('cmd_stop_agent_channel', { agentId: agent.id, channelId: ch.id });
               stoppedCount++;
@@ -96,7 +96,7 @@ export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabPro
           return loadAppConfig();
         })(), agent.id);
         if (latestAgent && isTauriEnvironment()) {
-          const startable = latestAgent.channels.filter(ch => ch.enabled && ch.setupCompleted);
+          const startable = (latestAgent.channels ?? []).filter(ch => ch.enabled && ch.setupCompleted);
           let startedCount = 0;
           for (const ch of startable) {
             try {

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
@@ -427,7 +427,11 @@ export default function App() {
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();
       clearLogServerUrl();
-      void stopAllSidecars();
+      // NOTE: Do NOT call stopAllSidecars() here.
+      // This cleanup runs on ANY unmount (including error boundary recovery),
+      // not just app exit. Killing the sidecar during error recovery creates a
+      // death loop: error → unmount → kill sidecar → sidecar unavailable → more errors.
+      // Rust handles sidecar cleanup on actual exit (WindowEvent::Destroyed, ExitRequested).
     };
   }, [startGlobalSidecarSilent]);
 

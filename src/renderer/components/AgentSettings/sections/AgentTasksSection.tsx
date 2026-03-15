@@ -46,7 +46,7 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
       const all = await getAllCronTasks();
       if (!isMountedRef.current) return;
       // Filter tasks by agent's channel IDs (sourceBotId matches channel ID)
-      const channelIds = new Set(agent.channels.map(ch => ch.id));
+      const channelIds = new Set((agent.channels ?? []).map(ch => ch.id));
       setTasks(all.filter(t => t.sourceBotId && channelIds.has(t.sourceBotId)));
     } catch {
       // Silent — tasks are optional
