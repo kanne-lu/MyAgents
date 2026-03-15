@@ -962,7 +962,7 @@ export default function ChannelWizard({
                 </div>
             )}
 
-            {/* OpenClaw Step 2: Confirm + Start */}
+            {/* OpenClaw Step 2: Setup guide (for promoted plugins like feishu) + Confirm + Start */}
             {isOpenClaw && step === 2 && (
                 <div className="space-y-6">
                     {/* Action bar at top */}
@@ -975,10 +975,68 @@ export default function ChannelWizard({
                         nextIcon: !starting ? <Check className="h-4 w-4" /> : undefined,
                     })}
 
+                    {/* Feishu-specific: Permissions + Events + Publish guide (reuse built-in feishu setup) */}
+                    {promoted?.pluginId === 'openclaw-lark' && (
+                        <>
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-sm font-medium text-[var(--ink)]">2. 配置权限</h3>
+                                <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">权限管理</span></li>
+                                    <li>点击 <span className="font-medium text-[var(--ink)]">批量导入</span></li>
+                                    <li>粘贴以下 JSON（一键导入所有需要的权限）：</li>
+                                </ol>
+                                <div className="mt-3 relative">
+                                    <button
+                                        onClick={handleCopyPermJson}
+                                        className="absolute right-2 top-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                        title="复制 JSON"
+                                    >
+                                        {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
+                                    </button>
+                                    <pre className="overflow-x-auto rounded-lg bg-[var(--paper-inset)] p-3 text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                                        {FEISHU_PERMISSIONS_JSON}
+                                    </pre>
+                                </div>
+                                <img src={feishuStep2PermImg} alt="飞书权限管理 - 批量导入" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                            </div>
+
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-sm font-medium text-[var(--ink)]">3. 配置事件订阅</h3>
+                                <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
+                                    <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
+                                    <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px]">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                                </ol>
+                                <img src={feishuStep2EventImg} alt="飞书事件与回调 - 事件配置" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                            </div>
+
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-sm font-medium text-[var(--ink)]">4. 添加机器人能力并发布</h3>
+                                <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span>，找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击添加</li>
+                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span>，点击 <span className="font-medium text-[var(--ink)]">创建版本</span>，提交发布</li>
+                                </ol>
+                                <img src={feishuStep2AddBotImg} alt="飞书添加机器人能力" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                            </div>
+                        </>
+                    )}
+
+                    {/* Promoted plugin setup guide steps (non-feishu plugins) */}
+                    {promoted && promoted.pluginId !== 'openclaw-lark' && promoted.setupGuide?.steps && (
+                        <>
+                            {promoted.setupGuide.steps.map((s, i) => (
+                                <div key={i} className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                    <p className="text-sm text-[var(--ink-muted)]">{s.caption}</p>
+                                    <img src={s.image} alt={s.alt} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                </div>
+                            ))}
+                        </>
+                    )}
+
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                         <h3 className="text-sm font-medium text-[var(--ink)]">确认配置</h3>
                         <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                            确认以下信息无误后启动 Channel
+                            确认以上设置完成后，点击「启动 Channel」
                         </p>
 
                         <div className="mt-4 space-y-3">
