@@ -1,6 +1,6 @@
 // Hook for managing cron task state within a Tab
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { CronTask, CronTaskConfig, CronEndConditions, CronRunMode, CronTaskTriggerPayload } from '@/types/cronTask';
+import type { CronTask, CronTaskConfig, CronEndConditions, CronRunMode, CronTaskTriggerPayload, CronSchedule } from '@/types/cronTask';
 import {
   createCronTask,
   startCronTask,
@@ -32,6 +32,10 @@ export interface CronTaskState {
     permissionMode?: string;
     /** Provider environment (captured at task creation time) */
     providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' };
+    /** Flexible schedule (overrides intervalMinutes when present) */
+    schedule?: CronSchedule;
+    /** Execution target: current_session (legacy) or new_task (standalone) */
+    executionTarget?: 'current_session' | 'new_task';
   } | null;
   /** Active cron task (after creation) */
   task: CronTask | null;
@@ -91,7 +95,7 @@ export function useCronTask(options: UseCronTaskOptions) {
   // Note: model, permissionMode, and providerEnv are captured here to ensure the task uses
   // the same settings that were active when the user enabled cron mode,
   // not the settings at execution time (which might have changed)
-  const enableCronMode = useCallback((config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'>) => {
+  const enableCronMode = useCallback((config: Omit<CronTaskConfig, 'workspacePath' | 'sessionId' | 'tabId'> & { executionTarget?: 'current_session' | 'new_task' }) => {
     setState({
       isEnabled: true,
       config: {
@@ -103,6 +107,8 @@ export function useCronTask(options: UseCronTaskOptions) {
         model: config.model,
         permissionMode: config.permissionMode,
         providerEnv: config.providerEnv,
+        schedule: config.schedule,
+        executionTarget: config.executionTarget,
       },
       task: null,
       isStarting: false,
@@ -180,6 +186,7 @@ export function useCronTask(options: UseCronTaskOptions) {
         model: currentConfig.model,
         permissionMode: currentConfig.permissionMode,
         providerEnv: currentConfig.providerEnv,
+        schedule: currentConfig.schedule,
       });
 
       // Start the task (updates status to 'running')

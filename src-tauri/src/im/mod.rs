@@ -254,6 +254,70 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Bridge(a) => a.preferred_throttle_ms(),
         }
     }
+    fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> {
+        match self {
+            Self::Telegram(a) => a.bridge_context(),
+            Self::Feishu(a) => a.bridge_context(),
+            Self::Dingtalk(a) => a.bridge_context(),
+            Self::Bridge(a) => a.bridge_context(),
+        }
+    }
+    fn supports_streaming(&self) -> bool {
+        match self {
+            Self::Telegram(a) => a.supports_streaming(),
+            Self::Feishu(a) => a.supports_streaming(),
+            Self::Dingtalk(a) => a.supports_streaming(),
+            Self::Bridge(a) => a.supports_streaming(),
+        }
+    }
+    async fn start_stream(&self, chat_id: &str, initial_text: &str) -> adapter::AdapterResult<String> {
+        match self {
+            Self::Telegram(a) => a.start_stream(chat_id, initial_text).await,
+            Self::Feishu(a) => a.start_stream(chat_id, initial_text).await,
+            Self::Dingtalk(a) => a.start_stream(chat_id, initial_text).await,
+            Self::Bridge(a) => a.start_stream(chat_id, initial_text).await,
+        }
+    }
+    async fn stream_chunk(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+        text: &str,
+        sequence: u32,
+        is_thinking: bool,
+    ) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking).await,
+            Self::Feishu(a) => a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking).await,
+            Self::Dingtalk(a) => a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking).await,
+            Self::Bridge(a) => a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking).await,
+        }
+    }
+    async fn finalize_stream(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+        final_text: &str,
+    ) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => a.finalize_stream(chat_id, stream_id, final_text).await,
+            Self::Feishu(a) => a.finalize_stream(chat_id, stream_id, final_text).await,
+            Self::Dingtalk(a) => a.finalize_stream(chat_id, stream_id, final_text).await,
+            Self::Bridge(a) => a.finalize_stream(chat_id, stream_id, final_text).await,
+        }
+    }
+    async fn abort_stream(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+    ) -> adapter::AdapterResult<()> {
+        match self {
+            Self::Telegram(a) => a.abort_stream(chat_id, stream_id).await,
+            Self::Feishu(a) => a.abort_stream(chat_id, stream_id).await,
+            Self::Dingtalk(a) => a.abort_stream(chat_id, stream_id).await,
+            Self::Bridge(a) => a.abort_stream(chat_id, stream_id).await,
+        }
+    }
 }
 
 /// Managed state for the IM Bot subsystem (multi-bot: bot_id → instance)
@@ -662,6 +726,12 @@ async fn create_bot_instance<R: Runtime>(
                 bp.port,
             );
             bridge_adapter.sync_capabilities().await;
+            // Override with user-configured tool groups (if set in channel config)
+            if let Some(ref groups) = config.openclaw_enabled_tool_groups {
+                if !groups.is_empty() {
+                    bridge_adapter.set_enabled_tool_groups(groups.clone());
+                }
+            }
             let adapter = Arc::new(AnyAdapter::Bridge(Arc::new(bridge_adapter)));
             bridge_process_handle = Some(bp);
             adapter
@@ -1012,7 +1082,8 @@ async fn create_bot_instance<R: Runtime>(
                     let is_telegram_bind = text.starts_with("/start BIND_");
                     let is_feishu_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Feishu;
                     let is_dingtalk_bind = text.starts_with("BIND_") && msg.platform == ImPlatform::Dingtalk;
-                    if is_telegram_bind || is_feishu_bind || is_dingtalk_bind {
+                    let is_openclaw_bind = text.starts_with("BIND_") && matches!(msg.platform, ImPlatform::OpenClaw(_));
+                    if is_telegram_bind || is_feishu_bind || is_dingtalk_bind || is_openclaw_bind {
                         // If sender is already bound, silently ignore stale BIND_ messages
                         // (Feishu may re-deliver old messages after bot restart clears dedup cache)
                         let already_bound = {
@@ -1534,7 +1605,25 @@ async fn create_bot_instance<R: Runtime>(
                         // No pending approval — fall through to regular message handling
                     }
 
-                    // ── Group access control (v0.1.28) ──────────
+                    // ── Access control ──────────
+                    // All platforms (including Bridge/OpenClaw) go through the Rust
+                    // whitelist. Bridge plugins use dmPolicy=open at the plugin level;
+                    // actual access control is enforced here via BIND_xxx + allowedUsers.
+                    let is_bridge_platform = matches!(msg.platform, ImPlatform::OpenClaw(_));
+
+                    // Private message whitelist check for Bridge platforms
+                    // (Bridge plugins use dmPolicy=open, access control is at Rust layer)
+                    if msg.source_type == ImSourceType::Private && is_bridge_platform {
+                        let is_allowed = {
+                            let users = allowed_users_for_loop.read().await;
+                            users.is_empty() || users.contains(&msg.sender_id)
+                        };
+                        if !is_allowed {
+                            ulog_info!("[im] Bridge private message from {} blocked (not in allowedUsers)", msg.sender_id);
+                            continue;
+                        }
+                    }
+
                     if msg.source_type == ImSourceType::Group {
                         // Check if sender is a whitelisted user OR group is approved
                         let is_allowed_user = {
@@ -1641,6 +1730,7 @@ async fn create_bot_instance<R: Runtime>(
                         // 4b. Sync AI config to newly created Sidecar
                         if is_new_sidecar {
                             let model = task_model.read().await.clone();
+                            let penv = task_provider_env.read().await.clone();
                             task_router
                                 .lock()
                                 .await
@@ -1648,6 +1738,7 @@ async fn create_bot_instance<R: Runtime>(
                                     port,
                                     model.as_deref(),
                                     task_mcp_json.as_deref(),
+                                    penv.as_ref(),
                                 )
                                 .await;
                         }
@@ -1700,6 +1791,24 @@ async fn create_bot_instance<R: Runtime>(
                         };
 
                         // 5. SSE stream: route message + stream response to Telegram
+                        //    Spawn keepalive to prevent idle collection during long agentic tasks.
+                        //    stream_to_im() can run 30+ min for multi-tool-use turns, during which
+                        //    heartbeat can't touch last_active (blocked by peer lock).
+                        let keepalive = tokio::spawn({
+                            let router = Arc::clone(&task_router);
+                            let key = session_key.clone();
+                            async move {
+                                let mut tick = tokio::time::interval(
+                                    std::time::Duration::from_secs(300),
+                                );
+                                tick.tick().await; // skip immediate first tick
+                                loop {
+                                    tick.tick().await;
+                                    router.lock().await.touch_session_activity(&key);
+                                }
+                            }
+                        });
+
                         let penv = task_provider_env.read().await.clone();
                         let task_model_val = task_model.read().await.clone();
                         let images = if image_payloads.is_empty() {
@@ -1761,6 +1870,7 @@ async fn create_bot_instance<R: Runtime>(
                                     .send_message(&chat_id, &user_msg)
                                     .await;
                                 task_adapter.ack_clear(&chat_id, &message_id).await;
+                                keepalive.abort();
                                 return;
                             }
                         };
@@ -1884,6 +1994,9 @@ async fn create_bot_instance<R: Runtime>(
                         task_health
                             .set_buffered_messages(task_buffer.lock().await.len())
                             .await;
+
+                        // Stream + buffer replay done — stop keepalive
+                        keepalive.abort();
 
                         // Cleanup: release guards, then remove stale peer_lock entry
                         drop(_permit);
@@ -2103,6 +2216,7 @@ async fn create_bot_instance<R: Runtime>(
             hb_config,
             hb_bot_label,
             Arc::clone(&current_model),
+            Arc::clone(&current_provider_env),
             Arc::clone(&mcp_servers_json),
         );
         let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
@@ -2386,6 +2500,16 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
             body["groupToolsDeny"] = json!(gc.tools_deny);
         }
     }
+    // Bridge plugin context — pass bridge port + tool groups to sidecar
+    if let Some((bridge_port, bridge_plugin_id, tool_groups)) = adapter.bridge_context() {
+        body["bridgePort"] = json!(bridge_port);
+        body["bridgePluginId"] = json!(bridge_plugin_id);
+        body["bridgeEnabledToolGroups"] = json!(tool_groups);
+        body["senderId"] = json!(msg.sender_id);
+        ulog_info!("[im-stream] Bridge context: port={}, plugin={}, groups={:?}", bridge_port, bridge_plugin_id, tool_groups);
+    } else {
+        ulog_info!("[im-stream] No bridge context (non-Bridge adapter)");
+    }
     let url = format!("http://127.0.0.1:{}/api/im/chat", port);
     ulog_info!("[im-stream] POST {} (SSE)", url);
 
@@ -2400,6 +2524,13 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         let status = response.status().as_u16();
         let error_text = response.text().await.unwrap_or_default();
         return Err(RouteError::Response(status, error_text));
+    }
+
+    // === Streaming protocol branch ===
+    // If the adapter supports the streaming protocol (e.g. CardKit), use
+    // the dedicated streaming flow instead of the edit-based draft flow.
+    if adapter.supports_streaming() {
+        return stream_to_im_streaming(adapter, chat_id, response, pending_approvals, port).await;
     }
 
     // === SSE stream consumption + multi-draft management ===
@@ -2634,6 +2765,210 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         } else {
             let _ = adapter.send_message(chat_id, "(No response)").await;
         }
+    }
+    Ok(session_id)
+}
+
+/// Streaming-protocol variant of `stream_to_im`.
+///
+/// Uses `adapter.start_stream()` / `stream_chunk()` / `finalize_stream()` /
+/// `abort_stream()` instead of the edit-based draft message flow.
+/// Called only when `adapter.supports_streaming()` returns true.
+async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
+    adapter: &A,
+    chat_id: &str,
+    response: reqwest::Response,
+    pending_approvals: &PendingApprovals,
+    sidecar_port: u16,
+) -> Result<Option<String>, RouteError> {
+    let mut byte_stream = response.bytes_stream();
+    let mut buffer = String::new();
+
+    // Current stream state
+    let mut stream_id: Option<String> = None;
+    let mut block_text = String::new();
+    let mut sequence: u32 = 0;
+    let mut any_text_sent = false;
+    let mut session_id: Option<String> = None;
+
+    while let Some(chunk_result) = byte_stream.next().await {
+        let chunk = chunk_result
+            .map_err(|e| RouteError::Unavailable(format!("SSE stream error: {}", e)))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_str: String = buffer.drain(..pos).collect();
+            buffer.drain(..2); // consume "\n\n"
+
+            if event_str.starts_with(':') {
+                continue;
+            }
+
+            let data = extract_sse_data(&event_str);
+            if data.is_empty() {
+                continue;
+            }
+
+            let json_val: serde_json::Value = match serde_json::from_str(&data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            match json_val["type"].as_str().unwrap_or("") {
+                "partial" => {
+                    if let Some(text) = json_val["text"].as_str() {
+                        block_text = text.to_string();
+
+                        if stream_id.is_none() && !block_text.trim().is_empty() && has_sentence_boundary(&block_text) {
+                            // First meaningful text → start the stream
+                            match adapter.start_stream(chat_id, &block_text).await {
+                                Ok(sid) if !sid.is_empty() => {
+                                    stream_id = Some(sid);
+                                    sequence = 1;
+                                    any_text_sent = true;
+                                }
+                                Ok(_) => {
+                                    ulog_warn!("[im-stream] start_stream returned empty stream_id");
+                                }
+                                Err(e) => {
+                                    ulog_warn!("[im-stream] start_stream failed: {}", e);
+                                }
+                            }
+                        } else if let Some(ref sid) = stream_id {
+                            // Subsequent chunk → push to stream
+                            sequence += 1;
+                            if let Err(e) = adapter.stream_chunk(chat_id, sid, &block_text, sequence, false).await {
+                                ulog_warn!("[im-stream] stream_chunk failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                "activity" => {
+                    // Non-text block (thinking, tool_use).
+                    // If we have an active stream, send a thinking indicator.
+                    if let Some(ref sid) = stream_id {
+                        sequence += 1;
+                        let _ = adapter.stream_chunk(chat_id, sid, "", sequence, true).await;
+                    }
+                }
+                "block-end" => {
+                    let final_text = json_val["text"]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| block_text.clone());
+
+                    if !final_text.trim().is_empty() {
+                        if let Some(ref sid) = stream_id {
+                            // Finalize the stream with final content
+                            if let Err(e) = adapter.finalize_stream(chat_id, sid, &final_text).await {
+                                ulog_warn!("[im-stream] finalize_stream failed: {}", e);
+                            }
+                            any_text_sent = true;
+                        } else {
+                            // No stream was started (very fast response) → send directly
+                            let _ = adapter.send_message(chat_id, &final_text).await;
+                            any_text_sent = true;
+                        }
+                    } else if let Some(ref sid) = stream_id {
+                        // Whitespace-only block — abort the stream
+                        let _ = adapter.abort_stream(chat_id, sid).await;
+                    }
+
+                    // Reset for next block
+                    block_text.clear();
+                    stream_id = None;
+                    sequence = 0;
+                }
+                "complete" => {
+                    session_id = json_val["sessionId"].as_str().map(String::from);
+                    let silent = json_val["silent"].as_bool().unwrap_or(false);
+
+                    if silent {
+                        // Group "always" mode: AI decided not to reply
+                        if let Some(ref sid) = stream_id {
+                            let _ = adapter.abort_stream(chat_id, sid).await;
+                        }
+                        return Ok(session_id);
+                    }
+
+                    // Flush remaining block text
+                    if !block_text.trim().is_empty() {
+                        if let Some(ref sid) = stream_id {
+                            if let Err(e) = adapter.finalize_stream(chat_id, sid, &block_text).await {
+                                ulog_warn!("[im-stream] final finalize_stream failed: {}", e);
+                            }
+                            any_text_sent = true;
+                        } else {
+                            let _ = adapter.send_message(chat_id, &block_text).await;
+                            any_text_sent = true;
+                        }
+                    } else if let Some(ref sid) = stream_id {
+                        let _ = adapter.abort_stream(chat_id, sid).await;
+                    }
+
+                    if !any_text_sent {
+                        let _ = adapter.send_message(chat_id, "(No response)").await;
+                    }
+                    return Ok(session_id);
+                }
+                "permission-request" => {
+                    let request_id = json_val["requestId"].as_str().unwrap_or("").to_string();
+                    let tool_name = json_val["toolName"].as_str().unwrap_or("unknown").to_string();
+                    let tool_input = json_val["input"].as_str().unwrap_or("").to_string();
+
+                    ulog_info!(
+                        "[im-stream] Permission request (streaming): tool={}, rid={}",
+                        tool_name,
+                        &request_id[..request_id.len().min(16)]
+                    );
+
+                    let card_msg_id = match adapter.send_approval_card(chat_id, &request_id, &tool_name, &tool_input).await {
+                        Ok(Some(mid)) => mid,
+                        Ok(None) => String::new(),
+                        Err(e) => {
+                            ulog_error!("[im-stream] Failed to send approval card: {}", e);
+                            String::new()
+                        }
+                    };
+                    {
+                        let mut guard = pending_approvals.lock().await;
+                        let now = Instant::now();
+                        guard.retain(|_, p| now.duration_since(p.created_at) < Duration::from_secs(15 * 60));
+                        guard.insert(request_id, PendingApproval {
+                            sidecar_port,
+                            chat_id: chat_id.to_string(),
+                            card_message_id: card_msg_id,
+                            created_at: now,
+                        });
+                    }
+                }
+                "error" => {
+                    let error = json_val["error"].as_str().unwrap_or("Unknown error");
+                    // Abort any active stream
+                    if let Some(ref sid) = stream_id {
+                        let _ = adapter.abort_stream(chat_id, sid).await;
+                    }
+                    return Err(RouteError::Response(500, error.to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Stream disconnected unexpectedly
+    if !block_text.trim().is_empty() {
+        if let Some(ref sid) = stream_id {
+            let _ = adapter.finalize_stream(chat_id, sid, &block_text).await;
+            any_text_sent = true;
+        } else {
+            let _ = adapter.send_message(chat_id, &block_text).await;
+            any_text_sent = true;
+        }
+    } else if let Some(ref sid) = stream_id {
+        let _ = adapter.abort_stream(chat_id, sid).await;
+    }
+    if !any_text_sent {
+        let _ = adapter.send_message(chat_id, "(No response)").await;
     }
     Ok(session_id)
 }
@@ -3209,7 +3544,10 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                     heartbeat_wake_tx: None,
                                     heartbeat_config: None,
                                     current_model: Arc::new(RwLock::new(agent_config.model.clone())),
-                                    current_provider_env: Arc::new(RwLock::new(None)),
+                                    current_provider_env: Arc::new(RwLock::new(
+                                        agent_config.provider_env_json.as_ref()
+                                            .and_then(|s| serde_json::from_str(s).ok())
+                                    )),
                                     permission_mode: Arc::new(RwLock::new(agent_config.permission_mode.clone())),
                                     mcp_servers_json: Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
                                 }
@@ -3426,7 +3764,7 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
 
 #[deprecated(note = "Use cmd_start_agent_channel instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_start_im_bot(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -3497,6 +3835,7 @@ pub async fn cmd_start_im_bot(
         openclaw_plugin_id: openclawPluginId,
         openclaw_npm_spec: openclawNpmSpec,
         openclaw_plugin_config: openclawPluginConfig,
+        openclaw_enabled_tool_groups: None, // Legacy bot path — tool groups set via Agent channel config
     };
 
     start_im_bot(
@@ -3511,7 +3850,7 @@ pub async fn cmd_start_im_bot(
 
 #[deprecated(note = "Use cmd_stop_agent_channel instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_stop_im_bot(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -3526,7 +3865,7 @@ pub async fn cmd_stop_im_bot(
 
 #[deprecated(note = "Use cmd_agent_channel_status instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_im_bot_status(
     imState: tauri::State<'_, ManagedImBots>,
     agentState: tauri::State<'_, ManagedAgents>,
@@ -3576,7 +3915,7 @@ pub async fn cmd_im_bot_status(
 
 #[deprecated(note = "Use cmd_all_agents_status instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_im_all_bots_status(
     imState: tauri::State<'_, ManagedImBots>,
 ) -> Result<HashMap<String, ImBotStatus>, String> {
@@ -3631,12 +3970,39 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
     let mut config: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
 
-    let bots = config.get_mut("imBotConfigs")
-        .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| format!("[im] No imBotConfigs in config.json"))?;
-    let bot = bots.iter_mut()
-        .find(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id))
-        .ok_or_else(|| format!("[im] Bot {} not found in config.json", bot_id))?;
+    // Find the bot/channel entry: search legacy imBotConfigs first, then agents[].channels[] (v0.1.42)
+    // Use JSON Pointer path to locate the entry, then get a mutable reference.
+    enum BotLocation { Legacy(usize), AgentChannel(usize, usize) }
+    let location = {
+        let mut found: Option<BotLocation> = None;
+        if let Some(bots) = config.get("imBotConfigs").and_then(|v| v.as_array()) {
+            for (i, b) in bots.iter().enumerate() {
+                if b.get("id").and_then(|v| v.as_str()) == Some(bot_id) {
+                    found = Some(BotLocation::Legacy(i));
+                    break;
+                }
+            }
+        }
+        if found.is_none() {
+            if let Some(agents) = config.get("agents").and_then(|v| v.as_array()) {
+                'search: for (ai, agent) in agents.iter().enumerate() {
+                    if let Some(channels) = agent.get("channels").and_then(|v| v.as_array()) {
+                        for (ci, ch) in channels.iter().enumerate() {
+                            if ch.get("id").and_then(|v| v.as_str()) == Some(bot_id) {
+                                found = Some(BotLocation::AgentChannel(ai, ci));
+                                break 'search;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        found.ok_or_else(|| format!("[im] Bot {} not found in config.json", bot_id))?
+    };
+    let bot = match location {
+        BotLocation::Legacy(i) => &mut config["imBotConfigs"][i],
+        BotLocation::AgentChannel(ai, ci) => &mut config["agents"][ai]["channels"][ci],
+    };
 
     // Apply patch fields: None = skip, Some("") = remove field, Some(val) = set
     macro_rules! apply_string_field {
@@ -3809,6 +4175,7 @@ async fn update_bot_config_internal<R: Runtime>(
         group_activation: patch_group_activation.clone(),
         group_tools_deny: patch_group_tools_deny.clone(),
         openclaw_plugin_config: patch.openclaw_plugin_config.clone(),
+        openclaw_enabled_tool_groups: patch.openclaw_enabled_tool_groups.clone(),
     };
     let bid_for_disk = bid.clone();
     tokio::task::spawn_blocking(move || {
@@ -3871,16 +4238,24 @@ async fn update_bot_config_internal<R: Runtime>(
                     }
                 }
                 let ports = router.active_sidecar_ports();
+                // Provider env sync (parsed from patch string)
+                let parsed_provider_env: Option<serde_json::Value> = patch_provider_env.as_ref()
+                    .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() });
+                if patch_provider_env.is_some() {
+                    for port in &ports {
+                        router.sync_ai_config(*port, None, None, parsed_provider_env.as_ref()).await;
+                    }
+                }
                 // Model sync
                 if patch_model.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, patch_model.as_deref(), None).await;
+                        router.sync_ai_config(*port, patch_model.as_deref(), None, None).await;
                     }
                 }
                 // MCP sync (runtime JSON, not enabled-list)
                 if patch_mcp_json.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, None, patch_mcp_json.as_deref()).await;
+                        router.sync_ai_config(*port, None, patch_mcp_json.as_deref(), None).await;
                     }
                 }
                 // Permission mode sync to Sidecar
@@ -3990,7 +4365,7 @@ fn read_available_providers_from_disk() -> Option<String> {
 /// Unified config update command: replaces all 6 old hot-update commands.
 #[deprecated(note = "Use cmd_update_agent_config instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_update_im_bot_config(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -4004,7 +4379,7 @@ pub async fn cmd_update_im_bot_config(
 /// Returns the hot-reloadable config as a JSON object; returns null fields if bot is not running.
 #[deprecated(note = "Use cmd_agent_channel_status or cmd_agent_status instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_get_im_bot_runtime_config(
     imState: tauri::State<'_, ManagedImBots>,
     botId: String,
@@ -4032,7 +4407,7 @@ pub async fn cmd_get_im_bot_runtime_config(
 /// Add a new bot config to disk.
 #[deprecated(note = "Use addAgentConfig on the frontend instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_add_im_bot_config(
     app_handle: AppHandle,
     botConfig: serde_json::Value,
@@ -4050,7 +4425,7 @@ pub async fn cmd_add_im_bot_config(
 /// Remove a bot config from disk (stops the bot first if running).
 #[deprecated(note = "Use removeAgentConfig on the frontend instead")]
 #[tauri::command]
-#[allow(non_snake_case, deprecated)]
+#[allow(non_snake_case, deprecated, dead_code)]
 pub async fn cmd_remove_im_bot_config(
     app_handle: AppHandle,
     imState: tauri::State<'_, ManagedImBots>,
@@ -4413,7 +4788,10 @@ pub async fn cmd_start_agent_channel(
             heartbeat_wake_tx: None,
             heartbeat_config: None,
             current_model: Arc::new(RwLock::new(agentConfig.model.clone())),
-            current_provider_env: Arc::new(RwLock::new(None)),
+            current_provider_env: Arc::new(RwLock::new(
+                agentConfig.provider_env_json.as_ref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+            )),
             permission_mode: Arc::new(RwLock::new(agentConfig.permission_mode.clone())),
             mcp_servers_json: Arc::new(RwLock::new(agentConfig.mcp_servers_json.clone())),
         }
@@ -4787,7 +5165,7 @@ pub async fn cmd_update_agent_config(
     patch: AgentConfigPatch,
 ) -> Result<(), String> {
     // Hot-reload running instance if present (runtime only — disk persistence
-    // is handled by the TypeScript patchAgentConfig service to maintain the imBotConfigs shim)
+    // is handled by the TypeScript patchAgentConfig service)
     let agents_guard = agentState.lock().await;
     if let Some(agent) = agents_guard.get(&agentId) {
         if let Some(ref model) = patch.model {
@@ -4829,18 +5207,25 @@ pub async fn cmd_update_agent_config(
         }
 
         // Push config changes to all active Sidecar ports (same as legacy update_bot_config_internal)
+        let parsed_provider_env: Option<serde_json::Value> = patch.provider_env_json.as_ref()
+            .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() });
         for (_ch_id, ch_inst) in &agent.channels {
             let router = ch_inst.bot_instance.router.lock().await;
             let ports = router.active_sidecar_ports();
             if !ports.is_empty() {
+                if patch.provider_env_json.is_some() {
+                    for port in &ports {
+                        router.sync_ai_config(*port, None, None, parsed_provider_env.as_ref()).await;
+                    }
+                }
                 if patch.model.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, patch.model.as_deref(), None).await;
+                        router.sync_ai_config(*port, patch.model.as_deref(), None, None).await;
                     }
                 }
                 if patch.mcp_servers_json.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, None, patch.mcp_servers_json.as_deref()).await;
+                        router.sync_ai_config(*port, None, patch.mcp_servers_json.as_deref(), None).await;
                     }
                 }
                 if let Some(ref pm) = patch.permission_mode {
@@ -4927,7 +5312,7 @@ pub async fn cmd_delete_agent(
         let _ = shutdown_bot_instance(ch_inst.bot_instance, &sidecarManager, &ch_id).await;
     }
 
-    // Remove from disk
+    // Remove from disk (config.json entry + agent data directory)
     let aid = agentId.clone();
     tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
@@ -4953,6 +5338,16 @@ pub async fn cmd_delete_agent(
         }
         std::fs::rename(&tmp_path, &config_path)
             .map_err(|e| format!("[agent] Failed to rename: {}", e))?;
+
+        // Clean up agent data directory (~/.myagents/agents/{agentId}/)
+        let agent_data_dir = home.join(".myagents").join("agents").join(&aid);
+        if agent_data_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&agent_data_dir) {
+                log::warn!("[agent] Failed to remove agent data dir {:?}: {}", agent_data_dir, e);
+            } else {
+                log::info!("[agent] Removed agent data dir {:?}", agent_data_dir);
+            }
+        }
 
         Ok::<(), String>(())
     }).await.map_err(|e| format!("spawn_blocking: {}", e))??;

@@ -29,6 +29,7 @@ import {
 } from './tools/cron-tools';
 import { setImCronContext } from './tools/im-cron-tool';
 import { setImMediaContext } from './tools/im-media-tool';
+import { setImBridgeToolsContext } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 // NOTE: builtin MCP side-effect imports (registerBuiltinMcp calls) live in agent-session.ts,
 // which is imported by this file — no need to duplicate them here.
@@ -1516,7 +1517,7 @@ async function main() {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
-        const { taskId, prompt, aiCanExit, permissionMode, model, providerEnv, intervalMinutes, executionNumber } = payload;
+        const { taskId, prompt, aiCanExit, model, providerEnv, intervalMinutes, executionNumber } = payload;
 
         if (!taskId || !prompt) {
           return jsonResponse({ success: false, error: 'taskId and prompt are required.' }, 400);
@@ -1540,7 +1541,9 @@ async function main() {
         try {
           console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} interval=${intervalMinutes}min exec#=${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
           // Send the user's original prompt (clean, without wrapper templates)
-          await enqueueUserMessage(prompt, [], permissionMode ?? 'auto', model, providerEnv);
+          // Cron tasks are unattended — force fullAgency so tool permission requests
+          // don't block indefinitely waiting for a user who isn't present.
+          await enqueueUserMessage(prompt, [], 'fullAgency', model, providerEnv);
           // Reset scenario after enqueue — already consumed by startStreamingSession()
           resetInteractionScenario();
           return jsonResponse({ success: true });
@@ -1570,7 +1573,7 @@ async function main() {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
-        const { taskId, prompt, sessionId, aiCanExit, permissionMode, model, providerEnv, runMode, intervalMinutes, executionNumber } = payload;
+        const { taskId, prompt, sessionId, aiCanExit, model, providerEnv, runMode, intervalMinutes, executionNumber } = payload;
 
         if (!taskId || !prompt) {
           return jsonResponse({ success: false, error: 'taskId and prompt are required.' }, 400);
@@ -1646,7 +1649,9 @@ async function main() {
           // Enqueue the message (this starts the async execution)
           // Send the user's original prompt (clean, without wrapper templates)
           console.log('[cron] execute-sync: about to enqueue user message');
-          const enqueueResult = await enqueueUserMessage(prompt, [], permissionMode ?? 'auto', model, providerEnv);
+          // Cron tasks are unattended — force fullAgency so tool permission requests
+          // (e.g. Bash) don't block forever waiting for human approval.
+          const enqueueResult = await enqueueUserMessage(prompt, [], 'fullAgency', model, providerEnv);
           console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
           // Wait for session to become idle (execution complete)
@@ -5924,6 +5929,19 @@ async function main() {
         }
       }
 
+      // POST /api/provider/set - Set provider env for this session (called by Rust IM router on sidecar creation)
+      if (pathname === '/api/provider/set' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { providerEnv?: Record<string, unknown> };
+          const { setSessionProviderEnv } = await import('./agent-session');
+          setSessionProviderEnv(payload?.providerEnv as import('./agent-session').ProviderEnv | undefined);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/provider/set] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set provider' }, 500);
+        }
+      }
+
       // POST /api/session/permission-mode - Set permission mode for this session (called by Rust IM router)
       if (pathname === '/api/session/permission-mode' && request.method === 'POST') {
         try {
@@ -6128,6 +6146,11 @@ async function main() {
             isFirstGroupTurn?: boolean;
             pendingHistory?: string;
             groupToolsDeny?: string[];
+            // Bridge plugin tools context (v0.1.42)
+            bridgePort?: number;
+            bridgePluginId?: string;
+            bridgeEnabledToolGroups?: string[];
+            senderId?: string;
           };
 
           const hasContent = payload.message?.trim() || (payload.images && payload.images.length > 0);
@@ -6159,6 +6182,16 @@ async function main() {
               chatId: payload.sourceId,
               platform: payload.source.split('_')[0],
             });
+
+            // Set Bridge tools context if this is an OpenClaw plugin session with tools
+            if (payload.bridgePort && payload.bridgePluginId) {
+              setImBridgeToolsContext({
+                bridgePort: payload.bridgePort,
+                pluginId: payload.bridgePluginId,
+                enabledToolGroups: payload.bridgeEnabledToolGroups || [],
+                senderId: payload.senderId,
+              });
+            }
           }
 
           // Set IM interaction scenario (L1 + L2-im + L3-heartbeat).

@@ -30,12 +30,14 @@ interface PlatformEntry {
   iconElement?: React.ReactNode;
   badge: string;       // '内置' | '插件' | '插件·已安装'
   badgeVariant: 'builtin' | 'plugin';
+  platformBadge?: 'builtin' | 'official' | 'deprecated' | 'plugin';
+  deprecationNotice?: string;
   plugin?: InstalledPlugin;
 }
 
 const STATIC_PLATFORMS: PlatformEntry[] = [
   { id: 'telegram', name: 'Telegram', description: '通过 Telegram Bot 远程使用 AI Agent', icon: telegramIcon, badge: '内置', badgeVariant: 'builtin' },
-  { id: 'feishu', name: '飞书', description: '通过飞书自建应用 Bot 远程使用 AI Agent', icon: feishuIcon, badge: '内置', badgeVariant: 'builtin' },
+  { id: 'feishu', name: '飞书', description: '通过飞书自建应用 Bot 远程使用 AI Agent', icon: feishuIcon, badge: '内置', badgeVariant: 'builtin', platformBadge: 'deprecated', deprecationNotice: '推荐迁移到官方插件版本' },
   { id: 'dingtalk', name: '钉钉', description: '通过钉钉自建应用 Bot 远程使用 AI Agent', icon: dingtalkIcon, badge: '内置', badgeVariant: 'builtin' },
 ];
 
@@ -203,8 +205,21 @@ export default function BotPlatformRegistry() {
                 <img src={p.icon} alt={p.name} className="h-12 w-12 rounded-xl" />
               ) : p.iconElement ?? null}
               <div className="text-center">
-                <p className="text-sm font-medium text-[var(--ink)]">{p.name}</p>
+                <div className="flex items-center justify-center gap-1.5">
+                  <p className="text-sm font-medium text-[var(--ink)]">{p.name}</p>
+                  {p.platformBadge === 'deprecated' && (
+                    <span className="rounded-full bg-[var(--error)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--error)]">
+                      即将下线
+                    </span>
+                  )}
+                </div>
                 <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{p.description}</p>
+                {p.deprecationNotice && (
+                  <p className="mt-1 flex items-center justify-center gap-1 text-[10px] text-[var(--warning)]">
+                    <span>⚠</span>
+                    <span>{p.deprecationNotice}</span>
+                  </p>
+                )}
               </div>
               {p.plugin ? (
                 <div className="flex items-center gap-2">
@@ -257,7 +272,14 @@ export default function BotPlatformRegistry() {
                   <img src={pp.icon} alt={pp.name} className="h-12 w-12 rounded-xl" />
                 )}
                 <div className="text-center">
-                  <p className="text-sm font-medium text-[var(--ink)]">{pp.name}</p>
+                  <div className="flex items-center justify-center gap-1.5">
+                    <p className="text-sm font-medium text-[var(--ink)]">{pp.name}</p>
+                    {pp.badge === 'official' && (
+                      <span className="rounded-full bg-[#3370FF]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#3370FF]">
+                        官方
+                      </span>
+                    )}
+                  </div>
                   <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{pp.description}</p>
                 </div>
                 {isInstalled ? (

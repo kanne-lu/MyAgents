@@ -2,8 +2,15 @@
  * OpenClaw Plugin API Compatibility Shim
  *
  * Provides the `OpenClawPluginApi` interface that plugins call during registration.
- * Captures the registered channel plugin for the bridge to use.
+ * Captures the registered channel plugin and tool definitions for the bridge to use.
  */
+
+export interface CapturedTool {
+  factory: (ctx: Record<string, unknown>) => Record<string, unknown> | Record<string, unknown>[] | null;
+  name: string;
+  pluginId: string;
+  optional: boolean;
+}
 
 export interface CapturedPlugin {
   id: string;
@@ -22,6 +29,7 @@ export interface CapturedPlugin {
  */
 export function createCompatApi(config: Record<string, unknown>) {
   let capturedPlugin: CapturedPlugin | null = null;
+  const capturedTools: CapturedTool[] = [];
 
   const api = {
     /**
@@ -71,9 +79,41 @@ export function createCompatApi(config: Record<string, unknown>) {
      */
     runtime: null as unknown,
 
-    // Other OpenClaw API methods — no-op stubs
+    // Other OpenClaw API methods — capture tools, no-op stubs for the rest.
     // Plugins may call any of these during register(); must not throw.
-    registerTool() {},
+
+    /**
+     * Called by plugins to register tools.
+     * Accepts either:
+     *   - A factory function: (ctx) => tool | tool[]
+     *   - A direct tool object: { name, description, parameters, execute }
+     * Second arg (opts) may contain { name, optional }.
+     */
+    registerTool(
+      factoryOrTool: ((ctx: Record<string, unknown>) => Record<string, unknown> | Record<string, unknown>[] | null) | Record<string, unknown>,
+      opts?: Record<string, unknown>,
+    ) {
+      let factory: CapturedTool['factory'];
+      let toolName: string;
+
+      if (typeof factoryOrTool === 'function') {
+        // Factory function pattern: registerTool((ctx) => tool, { name })
+        factory = factoryOrTool as CapturedTool['factory'];
+        toolName = String(opts?.name || 'unknown');
+      } else {
+        // Direct tool object pattern: registerTool({ name, description, parameters, execute })
+        const toolObj = factoryOrTool;
+        toolName = String(opts?.name || toolObj.name || 'unknown');
+        factory = () => toolObj;
+      }
+
+      const pluginId = capturedPlugin?.id || 'unknown';
+      const optional = opts?.optional === true;
+
+      capturedTools.push({ factory, name: toolName, pluginId, optional });
+      console.log(`[compat-api] Tool registered: ${toolName} (plugin=${pluginId}, optional=${optional})`);
+    },
+
     registerAgent() {},
     registerSkill() {},
     registerHook() {},
@@ -81,11 +121,33 @@ export function createCompatApi(config: Record<string, unknown>) {
     registerAction() {},
     registerProvider() {},
 
+    // Event emitter API — plugins register lifecycle hooks via api.on()
+    on(_event: string, _handler: (...args: unknown[]) => void) {},
+    off(_event: string, _handler: (...args: unknown[]) => void) {},
+    emit(_event: string, ..._args: unknown[]) {},
+
+    // Command registration — Bridge doesn't support chat commands
+    registerCommand(_cmd: Record<string, unknown>) {},
+    registerChatCommand(_cmd: Record<string, unknown>) {},
+
+    // MCP tool registration — no-op (Bridge uses its own MCP proxy)
+    registerMcpServer(_server: unknown) {},
+
+    // Catch-all for any other API methods plugins might call
+    [Symbol.for('bridge-compat')]: true,
+
     /**
      * Get the captured plugin after registration.
      */
     getCapturedPlugin(): CapturedPlugin | null {
       return capturedPlugin;
+    },
+
+    /**
+     * Get all captured tool definitions after registration.
+     */
+    getCapturedTools(): CapturedTool[] {
+      return capturedTools;
     },
   };
 

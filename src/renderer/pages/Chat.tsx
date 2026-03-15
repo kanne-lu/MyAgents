@@ -20,7 +20,12 @@ import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
-import { getSessionCronTask, updateCronTaskTab, isTaskExecuting } from '@/api/cronTaskClient';
+import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
+import type { CronTask } from '@/types/cronTask';
+import { formatScheduleDescription } from '@/types/cronTask';
+import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
+import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
+import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { type PermissionMode, type McpServerDefinition } from '@/config/types';
@@ -184,6 +189,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Cron task state
   const [showCronSettings, setShowCronSettings] = useState(false);
   const [cronPrompt, setCronPrompt] = useState('');
+  const [cronCardTask, setCronCardTask] = useState<CronTask | null>(null);
+  const [cronDetailTask, setCronDetailTask] = useState<CronTask | null>(null);
 
   // Track permission mode before AI-triggered plan mode (for restore on ExitPlanMode)
   const prePlanPermissionModeRef = useRef<PermissionMode | null>(null);
@@ -1019,9 +1026,37 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       // If cron mode is enabled and task hasn't started yet, start the task
       const cron = cronStateRef.current;
       if (cron.isEnabled && !cron.task && cron.config) {
-        // Start the cron task - pass prompt directly to avoid React state timing issues
-        // The prompt is passed as a parameter because updateCronConfig() is async
-        // and the state wouldn't be updated before startCronTask() is called
+        if (cron.config.executionTarget === 'new_task') {
+          // ── New standalone task: create independently, show card in chat ──
+          try {
+            const sessionId = `cron-standalone-${crypto.randomUUID()}`;
+            const task = await createCronTask({
+              workspacePath: agentDir,
+              sessionId,
+              prompt: text,
+              intervalMinutes: cron.config.intervalMinutes,
+              endConditions: cron.config.endConditions,
+              runMode: 'new_session',
+              notifyEnabled: cron.config.notifyEnabled,
+              model: cron.config.model,
+              permissionMode: cron.config.permissionMode,
+              providerEnv: cron.config.providerEnv,
+              schedule: cron.config.schedule,
+            });
+            await startCronTaskIpc(task.id);
+            await startCronScheduler(task.id);
+            setCronCardTask(task);
+            disableCronMode();
+            setIsLoading(false);
+            toastRef.current?.success('定时任务已创建');
+          } catch (err) {
+            disableCronMode();
+            setIsLoading(false);
+            toastRef.current?.error(`创建失败: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          return;
+        }
+        // ── Current session: legacy cron behavior ──
         await startCronTask(text);
         return; // startCronTask handles the message sending via onExecute callback
       }
@@ -1476,6 +1511,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onRewind={handleRewind}
               onRetry={handleRetry}
             />
+
+            {/* Inline cron task card — shown in message flow after creating a "新开对话" task */}
+            {cronCardTask && (
+              <div className="mx-auto w-full max-w-3xl px-4 py-2">
+                <CronTaskCard
+                  taskId={cronCardTask.id}
+                  name={cronCardTask.name || cronCardTask.prompt.slice(0, 20)}
+                  scheduleDesc={formatScheduleDescription(cronCardTask)}
+                  onOpenDetail={task => { setCronDetailTask(task); setCronCardTask(null); }}
+                />
+              </div>
+            )}
           </FileActionProvider>
 
           {/* Floating input with integrated cron task components */}
@@ -1585,9 +1632,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         onClose={() => setShowCronSettings(false)}
         initialPrompt={cronPrompt}
         initialConfig={cronState.config}
-        onConfirm={(config) => {
-          // Pass current model, permissionMode, and providerEnv to ensure the cron task
-          // uses the same settings that are active when user enables cron mode
+        onConfirm={async (config: CronSettingsResult) => {
           const providerEnv = currentProvider && currentProvider.type !== 'subscription' ? {
             baseUrl: currentProvider.config.baseUrl,
             apiKey: apiKeys[currentProvider.id],
@@ -1597,29 +1642,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             upstreamFormat: currentProvider.upstreamFormat,
           } : undefined;
 
-          // If task is already running, only update config (preserves task state)
-          // Otherwise, enable cron mode which will prepare for a new task
+          // Both paths: enable cron mode (shows status bar, waits for user to type and send)
+          // The difference is handled at send time based on executionTarget
+          const enrichedConfig = {
+            ...config,
+            model: selectedModel,
+            permissionMode: permissionMode,
+            providerEnv: providerEnv,
+            executionTarget: config.executionTarget,
+          };
+
           if (cronState.task) {
-            // Task is running - update config without resetting task state
-            updateRunningConfig({
-              ...config,
-              model: selectedModel,
-              permissionMode: permissionMode,
-              providerEnv: providerEnv,
-            });
+            updateRunningConfig(enrichedConfig);
           } else {
-            // No task running - enable cron mode normally
-            enableCronMode({
-              ...config,
-              model: selectedModel,
-              permissionMode: permissionMode,
-              providerEnv: providerEnv,
-            });
+            enableCronMode(enrichedConfig);
           }
-          // Track cron_enable event
+
           track('cron_enable', {
             interval_minutes: config.intervalMinutes,
             run_mode: config.runMode,
+            execution_target: config.executionTarget,
             has_time_limit: !!config.endConditions.deadline,
             has_count_limit: !!(config.endConditions.maxExecutions && config.endConditions.maxExecutions > 0),
             notify_enabled: config.notifyEnabled,
@@ -1627,6 +1669,36 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           setShowCronSettings(false);
         }}
       />
+
+      {/* Cron task detail panel */}
+      {cronDetailTask && (
+        <CronTaskDetailPanel
+          task={cronDetailTask}
+          onClose={() => setCronDetailTask(null)}
+          onDelete={async (taskId) => {
+            const { deleteCronTask } = await import('@/api/cronTaskClient');
+            await deleteCronTask(taskId);
+            setCronDetailTask(null);
+            toastRef.current?.success('任务已删除');
+          }}
+          onResume={async (taskId) => {
+            await startCronTaskIpc(taskId);
+            await startCronScheduler(taskId);
+            const { getCronTask } = await import('@/api/cronTaskClient');
+            const updated = await getCronTask(taskId);
+            setCronDetailTask(updated);
+            toastRef.current?.success('任务已恢复');
+          }}
+          onStop={async (taskId) => {
+            const { stopCronTask } = await import('@/api/cronTaskClient');
+            await stopCronTask(taskId);
+            const { getCronTask } = await import('@/api/cronTaskClient');
+            const updated = await getCronTask(taskId);
+            setCronDetailTask(updated);
+            toastRef.current?.success('任务已停止');
+          }}
+        />
+      )}
     </div>
   );
 }

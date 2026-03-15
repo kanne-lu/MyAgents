@@ -47,6 +47,7 @@ pub struct HeartbeatRunner {
     executing: Arc<Mutex<bool>>,
     // Hot-reloadable config refs — needed to sync AI config when waking up an idle-collected sidecar
     current_model: Arc<RwLock<Option<String>>>,
+    current_provider_env: Arc<RwLock<Option<serde_json::Value>>>,
     mcp_servers_json: Arc<RwLock<Option<String>>>,
 }
 
@@ -57,6 +58,7 @@ impl HeartbeatRunner {
         config: HeartbeatConfig,
         bot_label: String,
         current_model: Arc<RwLock<Option<String>>>,
+        current_provider_env: Arc<RwLock<Option<serde_json::Value>>>,
         mcp_servers_json: Arc<RwLock<Option<String>>>,
     ) -> (Self, Arc<RwLock<HeartbeatConfig>>) {
         let config = Arc::new(RwLock::new(config));
@@ -67,6 +69,7 @@ impl HeartbeatRunner {
             http_client: crate::local_http::json_client(Duration::from_secs(330)), // 5.5 min (heartbeat timeout is 5 min)
             executing: Arc::new(Mutex::new(false)),
             current_model,
+            current_provider_env,
             mcp_servers_json,
         };
         (runner, config)
@@ -272,9 +275,10 @@ impl HeartbeatRunner {
         // Sync AI config for newly created sidecar (same as user message flow)
         if is_new_sidecar {
             let model = self.current_model.read().await.clone();
+            let penv = self.current_provider_env.read().await.clone();
             let mcp = self.mcp_servers_json.read().await.clone();
             router.lock().await
-                .sync_ai_config(port, model.as_deref(), mcp.as_deref())
+                .sync_ai_config(port, model.as_deref(), mcp.as_deref(), penv.as_ref())
                 .await;
             ulog_info!("[heartbeat] Woke up sidecar for {} on port {}", self.bot_label, port);
         }

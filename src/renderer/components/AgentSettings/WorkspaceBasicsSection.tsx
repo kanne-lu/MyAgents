@@ -70,6 +70,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       if (updates.permissionMode !== undefined) agentPatch.permissionMode = updates.permissionMode || 'plan';
       if (updates.mcpEnabledServers !== undefined) agentPatch.mcpEnabledServers = updates.mcpEnabledServers;
       if (Object.keys(agentPatch).length > 0) {
+        // patchAgentConfig auto-resolves providerEnvJson when providerId changes
         await patchAgentConfig(agent.id, agentPatch as Partial<Omit<AgentConfig, 'id'>>);
       }
     }

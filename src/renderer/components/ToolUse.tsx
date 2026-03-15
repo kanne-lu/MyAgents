@@ -17,6 +17,16 @@ import TodoWriteTool from './tools/TodoWriteTool';
 import WebFetchTool from './tools/WebFetchTool';
 import WebSearchTool from './tools/WebSearchTool';
 import WriteTool from './tools/WriteTool';
+import CronTaskCard from './scheduled-tasks/CronTaskCard';
+
+/** Parse cron tool result JSON, returning structured data for card rendering or null on failure */
+function parseCronResult(result: string): { taskId: string; name?: string; scheduleDesc?: string; nextExecutionAt?: string } | null {
+  try {
+    const parsed = JSON.parse(result);
+    if (parsed.ok && parsed.taskId) return parsed;
+  } catch { /* invalid JSON, fall through */ }
+  return null;
+}
 
 interface ToolUseProps {
   tool: ToolUseSimple;
@@ -61,6 +71,23 @@ export default function ToolUse({ tool }: ToolUseProps) {
       // Route edge-tts MCP tools to custom component
       if (tool.name.startsWith('mcp__edge-tts__')) {
         return <EdgeTtsTool tool={tool} />;
+      }
+      // Route cron tool results to task card
+      if (
+        (tool.name.startsWith('mcp__cron-tools__') || tool.name.startsWith('mcp__im-cron__'))
+        && tool.result
+      ) {
+        const cronResult = parseCronResult(tool.result);
+        if (cronResult) {
+          return (
+            <CronTaskCard
+              taskId={cronResult.taskId}
+              name={cronResult.name}
+              scheduleDesc={cronResult.scheduleDesc}
+              nextExecutionAt={cronResult.nextExecutionAt}
+            />
+          );
+        }
       }
 
       // Fallback for unknown tools - show raw JSON

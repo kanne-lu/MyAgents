@@ -144,6 +144,69 @@ pub trait ImStreamAdapter: ImAdapter {
 
     /// Preferred throttle interval in ms for draft edits. Default 1000ms.
     fn preferred_throttle_ms(&self) -> u64 { 1000 }
+
+    /// Bridge context for OpenClaw plugin adapters.
+    /// Returns (bridge_port, plugin_id, enabled_tool_groups) if this is a Bridge adapter.
+    /// Default: None (not a Bridge adapter).
+    fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> { None }
+
+    // ===== CardKit Streaming Protocol =====
+    // These methods enable adapters to use a dedicated streaming protocol
+    // (e.g., Feishu CardKit streaming, Bridge plugin streaming) instead of
+    // the default edit-based draft message flow.
+    //
+    // Default implementations are no-ops / stubs. Adapters that support
+    // streaming MUST override `supports_streaming()` to return `true` and
+    // provide real implementations for the other methods.
+
+    /// Whether this adapter supports the streaming protocol.
+    /// When true, `stream_to_im` will use `start_stream` / `stream_chunk` /
+    /// `finalize_stream` / `abort_stream` instead of the edit-based flow.
+    fn supports_streaming(&self) -> bool { false }
+
+    /// Start a streaming session. Returns a stream_id for subsequent chunks.
+    /// Default: returns empty string (never called when `supports_streaming` is false).
+    fn start_stream(
+        &self,
+        _chat_id: &str,
+        _initial_text: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<String>> + Send {
+        async { Ok(String::new()) }
+    }
+
+    /// Push a content chunk to an active stream.
+    /// Default: no-op (never called when `supports_streaming` is false).
+    fn stream_chunk(
+        &self,
+        _chat_id: &str,
+        _stream_id: &str,
+        _text: &str,
+        _sequence: u32,
+        _is_thinking: bool,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send {
+        async { Ok(()) }
+    }
+
+    /// Finalize a stream with final content.
+    /// Default: no-op (never called when `supports_streaming` is false).
+    fn finalize_stream(
+        &self,
+        _chat_id: &str,
+        _stream_id: &str,
+        _final_text: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send {
+        async { Ok(()) }
+    }
+
+    /// Abort an active stream.
+    /// Default: no-op.
+    fn abort_stream(
+        &self,
+        _chat_id: &str,
+        _stream_id: &str,
+    ) -> impl std::future::Future<Output = AdapterResult<()>> + Send {
+        async { Ok(()) }
+    }
 }
 
 /// Split a message into chunks at natural break points (paragraph, line, sentence, word).

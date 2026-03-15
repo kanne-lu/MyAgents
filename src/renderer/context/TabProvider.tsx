@@ -99,6 +99,8 @@ interface TabProviderProps {
     onSessionIdChange?: (newSessionId: string) => void;
     /** Callback when session title changes (auto-generated or renamed) */
     onTitleChange?: (title: string) => void;
+    /** Callback when unread state changes (message completed on non-active tab) */
+    onUnreadChange?: (hasUnread: boolean) => void;
     // Note: sidecarPort prop removed - now using Session-centric Sidecar (Owner model)
     // Port is dynamically retrieved via getSessionPort(sessionId)
 }
@@ -202,6 +204,7 @@ export default function TabProvider({
     onGeneratingChange,
     onSessionIdChange,
     onTitleChange,
+    onUnreadChange,
 }: TabProviderProps) {
     // Core state
     // currentSessionId tracks the actual loaded session (starts from prop, updated by loadSession)
@@ -296,6 +299,11 @@ export default function TabProvider({
     onSessionIdChangeRef.current = onSessionIdChange;
     const onTitleChangeRef = useRef(onTitleChange);
     onTitleChangeRef.current = onTitleChange;
+    const onUnreadChangeRef = useRef(onUnreadChange);
+    onUnreadChangeRef.current = onUnreadChange;
+    // Ref for isActive to avoid stale closures in SSE event handlers
+    const isActiveRef = useRef(isActive);
+    isActiveRef.current = isActive;
 
     // Auto-title generation refs
     const autoTitleAttemptedRef = useRef(false);
@@ -947,7 +955,12 @@ export default function TabProvider({
                 });
 
                 // Send system notification if user is not focused on the app
-                notifyMessageComplete();
+                notifyMessageComplete(tabId);
+
+                // Mark tab as unread if user is viewing a different tab
+                if (!isActiveRef.current) {
+                    onUnreadChangeRef.current?.(true);
+                }
 
                 // Track message_complete event with usage data
                 const completePayload = data as {

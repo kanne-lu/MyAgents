@@ -2,6 +2,7 @@ import React from 'react';
 import { createRoot } from 'react-dom/client';
 
 import App from './App';
+import AppErrorBoundary from './components/AppErrorBoundary';
 import { ConfigProvider } from './config/ConfigProvider';
 import { ToastProvider } from './components/Toast';
 import { ImagePreviewProvider } from './context/ImagePreviewContext';
@@ -29,11 +30,13 @@ const root = createRoot(document.getElementById('root')!);
 // Note: React.StrictMode removed to prevent double-rendering of SSE effects in development
 // StrictMode causes useEffect to run twice, which duplicates SSE events and thinking blocks
 root.render(
-  <ConfigProvider>
-    <ToastProvider>
-      <ImagePreviewProvider>
-        <App />
-      </ImagePreviewProvider>
-    </ToastProvider>
-  </ConfigProvider>
+  <AppErrorBoundary>
+    <ConfigProvider>
+      <ToastProvider>
+        <ImagePreviewProvider>
+          <App />
+        </ImagePreviewProvider>
+      </ToastProvider>
+    </ConfigProvider>
+  </AppErrorBoundary>
 );

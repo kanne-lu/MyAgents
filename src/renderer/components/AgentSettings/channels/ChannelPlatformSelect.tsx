@@ -9,7 +9,6 @@ import type { ChannelType } from '../../../../shared/types/agent';
 import type { InstalledPlugin } from '../../../../shared/types/im';
 import { PROMOTED_PLUGINS } from '../../ImSettings/promotedPlugins';
 import telegramIcon from '../../ImSettings/assets/telegram.png';
-import feishuIcon from '../../ImSettings/assets/feishu.jpeg';
 import dingtalkIcon from '../../ImSettings/assets/dingtalk.svg';
 
 interface PlatformEntry {
@@ -23,7 +22,7 @@ interface PlatformEntry {
 
 const STATIC_PLATFORMS: PlatformEntry[] = [
   { id: 'telegram', name: 'Telegram', description: '通过 Telegram Bot 远程使用 AI Agent', icon: telegramIcon },
-  { id: 'feishu', name: '飞书', description: '通过飞书自建应用 Bot 远程使用 AI Agent', icon: feishuIcon },
+  // 内置飞书已被官方 OpenClaw 插件替代（在 PROMOTED_PLUGINS 中），新用户不再显示
   { id: 'dingtalk', name: '钉钉', description: '通过钉钉自建应用 Bot 远程使用 AI Agent', icon: dingtalkIcon },
 ];
 
@@ -43,6 +42,8 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
   const toast = useToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const isMountedRef = useRef(true);
+  useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -63,12 +64,14 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('cmd_uninstall_openclaw_plugin', { pluginId: pendingUninstall.pluginId });
+      if (!isMountedRef.current) return;
       setInstalledPlugins(prev => prev.filter(p => p.pluginId !== pendingUninstall.pluginId));
       toastRef.current.success(`已卸载 ${pendingUninstall.manifest?.name || pendingUninstall.pluginId}`);
     } catch (err) {
+      if (!isMountedRef.current) return;
       toastRef.current.error(String(err));
     } finally {
-      setPendingUninstall(null);
+      if (isMountedRef.current) setPendingUninstall(null);
     }
   }, [pendingUninstall]);
 
@@ -84,12 +87,14 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       const result = await invoke<InstalledPlugin>('cmd_install_openclaw_plugin', { npmSpec: promoted.npmSpec });
+      if (!isMountedRef.current) return;
       setInstalledPlugins(prev => [...prev, result]);
       onSelect(`openclaw:${result.pluginId}` as ChannelType);
     } catch (err) {
+      if (!isMountedRef.current) return;
       toastRef.current.error(`安装失败: ${err}`);
     } finally {
-      setAutoInstalling(null);
+      if (isMountedRef.current) setAutoInstalling(null);
     }
   }, [installedPlugins, onSelect]);
 
@@ -141,10 +146,7 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
         {allPlatforms.map(p => (
           <div key={p.id} className="group relative">
             <button
-              onClick={() => {
-                if (p.plugin) onSelect(p.id);
-                else onSelect(p.id);
-              }}
+              onClick={() => onSelect(p.id)}
               className="flex w-full flex-col items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-6 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px]"
             >
               {p.icon ? (

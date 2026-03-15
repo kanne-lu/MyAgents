@@ -60,6 +60,8 @@ export interface ChannelConfig {
   openclawNpmSpec?: string;
   openclawPluginConfig?: Record<string, string>;
   openclawManifest?: Record<string, string>;
+  /** Enabled tool groups for OpenClaw plugins with tools (e.g. feishu) */
+  openclawEnabledToolGroups?: string[];
 
   // User management
   allowedUsers?: string[];

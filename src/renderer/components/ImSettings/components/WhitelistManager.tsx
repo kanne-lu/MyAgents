@@ -12,6 +12,10 @@ export default function WhitelistManager({
     platform?: ImPlatform;
 }) {
     const [newUser, setNewUser] = useState('');
+    const placeholderText = platform === 'telegram' ? 'Telegram 用户名或 User ID'
+        : platform === 'feishu' ? '飞书 Open ID'
+        : platform === 'dingtalk' ? '钉钉 User ID'
+        : '用户 ID';
 
     const handleAdd = useCallback(() => {
         const trimmed = newUser.trim();
@@ -28,8 +32,9 @@ export default function WhitelistManager({
         onChange(users.filter(u => u !== user));
     }, [users, onChange]);
 
-    // Feishu/DingTalk: read-only display (users can't know their internal ID)
-    if (platform === 'feishu' || platform === 'dingtalk') {
+    // Feishu/DingTalk/OpenClaw: read-only display (users bind via BIND codes, can't know their internal ID)
+    const isBindCodePlatform = platform === 'feishu' || platform === 'dingtalk' || platform.startsWith('openclaw:');
+    if (isBindCodePlatform) {
         return (
             <div className="space-y-3">
                 <label className="text-sm font-medium text-[var(--ink)]">已绑定用户</label>
@@ -69,7 +74,7 @@ export default function WhitelistManager({
                     value={newUser}
                     onChange={(e) => setNewUser(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-                    placeholder="Telegram 用户名或 User ID"
+                    placeholder={placeholderText}
                     className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--ink)] focus:outline-none"
                 />
                 <button
@@ -100,7 +105,7 @@ export default function WhitelistManager({
                 </div>
             ) : (
                 <p className="text-xs text-[var(--ink-muted)]">
-                    未添加白名单用户。启动 Bot 后可通过二维码快速绑定，或手动添加用户名 / User ID。
+                    未添加白名单用户。启动 Bot 后可通过口令绑定，或手动添加用户 ID。
                 </p>
             )}
         </div>

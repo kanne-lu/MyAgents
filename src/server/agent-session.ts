@@ -7,8 +7,9 @@ import { getScriptDir, getBundledBunDir, getAgentBrowserCliPath } from './utils/
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { resizeImageIfNeeded, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
-import { imCronToolServer, getImCronContext } from './tools/im-cron-tool';
-import { imMediaToolServer, getImMediaContext, clearImMediaContext } from './tools/im-media-tool';
+import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
+import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
+import { imBridgeToolServer, getImBridgeToolsContext } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
@@ -823,6 +824,16 @@ export function setSessionModel(model: string): void {
   }
 }
 
+/** Set provider env (called by Rust IM router via /api/provider/set on sidecar creation).
+ * This ensures the Sidecar uses the correct provider BEFORE pre-warm starts. */
+export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): void {
+  const oldLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
+  const newLabel = providerEnv?.baseUrl ?? 'anthropic';
+  if (oldLabel === newLabel && currentProviderEnv?.apiKey === providerEnv?.apiKey) return;
+  currentProviderEnv = providerEnv;
+  console.log(`[agent] session provider env set: ${oldLabel} -> ${newLabel}`);
+}
+
 /**
  * Schedule a pre-warm of the SDK subprocess and MCP servers.
  * Uses debounce to batch rapid config changes during tab initialization.
@@ -889,13 +900,13 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     return { allowed: false, reason: '定时任务工具只能在定时任务执行期间使用' };
   }
 
-  // Special case: im-cron is a built-in MCP server for IM Bot scheduled tasks
+  // Special case: im-cron is a built-in MCP server for scheduled tasks (all sessions)
+  // Always allowed when management API is available (tool checks context internally)
   if (serverId === 'im-cron') {
-    const imCtx = getImCronContext();
-    if (imCtx) {
+    if (process.env.MYAGENTS_MANAGEMENT_PORT) {
       return { allowed: true };
     }
-    return { allowed: false, reason: 'IM 定时任务工具只能在 IM Bot 会话中使用' };
+    return { allowed: false, reason: '定时任务管理 API 不可用' };
   }
 
   // Case 1: MCP not set (null) - allow all (backward compatible)
@@ -1001,11 +1012,12 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
     console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
   }
 
-  // Add IM cron tool if we're in an IM context with management API available
-  const imCronCtx = getImCronContext();
-  if (imCronCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
+  // Add cron tool for ALL sessions when management API is available
+  // IM sessions use imCronContext (with delivery), regular sessions use sessionCronContext
+  if (process.env.MYAGENTS_MANAGEMENT_PORT) {
     result['im-cron'] = imCronToolServer;
-    console.log(`[agent] Added im-cron MCP server for bot ${imCronCtx.botId}`);
+    const imCronCtx = getImCronContext();
+    console.log(`[agent] Added im-cron MCP server${imCronCtx ? ` for bot ${imCronCtx.botId}` : ' (session mode)'}`);
   }
 
   // Add IM media tool if we're in an IM context with management API available
@@ -1013,6 +1025,16 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
   if (imMediaCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
     result['im-media'] = imMediaToolServer;
     console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
+  }
+
+  // Add Bridge tools proxy if we're in an IM context with a plugin bridge that has tools
+  const bridgeToolsCtx = getImBridgeToolsContext();
+  if (bridgeToolsCtx) {
+    result['im-bridge-tools'] = imBridgeToolServer;
+    const groups = bridgeToolsCtx.enabledToolGroups.length > 0
+      ? bridgeToolsCtx.enabledToolGroups.join(',')
+      : 'all (no filter)';
+    console.log(`[agent] Added im-bridge-tools MCP server for plugin ${bridgeToolsCtx.pluginId} (groups: ${groups})`);
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
@@ -3969,6 +3991,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     const promptGen = messageGenerator();
 
+    // Set session cron context so the im-cron tool can create tasks for non-IM sessions
+    // IM sessions set imCronContext separately (in the IM message handler in index.ts)
+    if (process.env.MYAGENTS_MANAGEMENT_PORT && !getImCronContext()) {
+      setSessionCronContext({
+        sessionId: sessionId,
+        workspacePath: agentDir,
+        model: currentModel,
+        permissionMode: currentPermissionMode,
+        providerEnv: currentProviderEnv,
+      });
+    }
+
     // Build common query options (shared between normal start and "already in use" fallback)
     const commonQueryOptions = {
       enableFileCheckpointing: true,
@@ -5114,7 +5148,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     }
 
     clearCronTaskContext();
-    clearImMediaContext();
+    clearSessionCronContext();
+    // NOTE: Do NOT clear im-media / im-bridge-tools here.
+    // These are Sidecar-scoped contexts (set by Rust IM router via /api/im/chat),
+    // not session-scoped. Clearing them on session end (including /new resets)
+    // causes pre-warm to rebuild MCP servers without bridge tools, leaving the
+    // AI with no feishu/plugin capabilities until the next IM message arrives.
+    // They are cleared when the Sidecar Owner is fully released (IM Bot stops).
     resolveTermination!();
 
     if (wasPreWarming) {

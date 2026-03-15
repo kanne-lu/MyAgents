@@ -63,7 +63,7 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
       {agents.map(agent => {
         const agentStatus = statuses[agent.id];
         const onlineChannels = agentStatus?.channels.filter(ch => ch.status === 'online').length ?? 0;
-        const totalChannels = agent.channels.length;
+        const totalChannels = agent.channels?.length ?? 0;
         const statusColor = getStatusColor(onlineChannels, totalChannels, agent.enabled);
         const proj = projectByAgentId.get(agent.id);
         const displayName = proj?.displayName || proj?.name || agent.name;
@@ -106,7 +106,7 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
 
               {/* Channel badges */}
               <div className="mt-1.5 flex flex-wrap gap-1">
-                {agent.channels.map(ch => (
+                {(agent.channels ?? []).map(ch => (
                   <span key={ch.id} className="rounded px-1.5 py-0.5 text-[10px] bg-[var(--paper-inset)] text-[var(--ink-muted)]">
                     {getPlatformBadge(ch.type)}
                   </span>

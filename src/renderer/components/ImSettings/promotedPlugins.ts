@@ -8,6 +8,11 @@
 import qqbotIcon from './assets/qqbot.png';
 import qqbotStep1Img from './assets/qqbot_step1_index.png';
 import qqbotStep2Img from './assets/qqbot_step2_credentials.png';
+import feishuIcon from './assets/feishu.jpeg';
+import feishuStep1Img from './assets/feishu_step1.png';
+import feishuStep2EventsImg from './assets/feishu_step2_events.png';
+import feishuStep2PermissionsImg from './assets/feishu_step2_permissions.png';
+import feishuStep2AddBotImg from './assets/feishu_step2_5_add_bot.png';
 
 export interface PromotedPlugin {
     /** Plugin ID — must match InstalledPlugin.pluginId after installation */
@@ -22,6 +27,12 @@ export interface PromotedPlugin {
     icon: string;
     /** Brand color for badges and accents */
     platformColor: string;
+    /** Optional badge type for promoted plugins */
+    badge?: 'official' | 'community';
+    /** Required config field keys (pre-populate in wizard if plugin's isConfigured pattern is non-standard) */
+    requiredFields?: string[];
+    /** Default config values merged into pluginConfig when creating a new channel */
+    defaultConfig?: Record<string, string>;
     /** Custom setup guidance for the wizard config step */
     setupGuide?: {
         /** Section title in config panel (e.g. "QQ Bot 应用凭证") */
@@ -47,6 +58,48 @@ export interface PromotedPlugin {
 }
 
 export const PROMOTED_PLUGINS: PromotedPlugin[] = [
+    {
+        pluginId: 'openclaw-lark',
+        npmSpec: '@larksuite/openclaw-lark',
+        name: '飞书 Bot（官方插件）',
+        description: '飞书开放平台官方 OpenClaw 插件，支持文档/表格/日历等深度集成',
+        icon: feishuIcon,
+        platformColor: '#3370FF',
+        badge: 'official',
+        requiredFields: ['appId', 'appSecret'],
+        defaultConfig: {
+            streaming: 'true',
+        },
+        setupGuide: {
+            credentialTitle: '飞书应用凭证',
+            credentialHint: '前往飞书开放平台创建自建应用，获取 App ID 和 App Secret',
+            credentialHintLink: 'https://open.feishu.cn/app',
+            steps: [
+                {
+                    image: feishuStep1Img,
+                    alt: '飞书开放平台 — 创建自建应用',
+                    caption: '1. 前往飞书开放平台，创建企业自建应用',
+                    captionLinkText: '飞书开放平台',
+                    captionLinkUrl: 'https://open.feishu.cn/app',
+                },
+                {
+                    image: feishuStep2EventsImg,
+                    alt: '飞书应用 — 配置事件订阅',
+                    caption: '2. 在「事件订阅」中启用所需事件',
+                },
+                {
+                    image: feishuStep2PermissionsImg,
+                    alt: '飞书应用 — 配置权限',
+                    caption: '3. 在「权限管理」中开通所需权限',
+                },
+                {
+                    image: feishuStep2AddBotImg,
+                    alt: '飞书应用 — 添加机器人能力',
+                    caption: '4. 在「应用能力」中添加「机器人」能力',
+                },
+            ],
+        },
+    },
     {
         pluginId: 'qqbot',
         npmSpec: '@sliverp/qqbot',

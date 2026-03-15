@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.42] - 2026-03-16
+
+### Added
+- **定时任务能力升级**：支持独立创建定时任务（从任务中心/首页直接创建，无需先打开 Chat）、三种调度类型（固定间隔/Cron 表达式/一次性）、执行模式选择（新开对话/连续对话）、可视化调度构建器、执行历史查看
+- **定时任务详情页编辑模式**：点击编辑切换为内联编辑视图，支持修改调度计划、结束条件、通知设置
+- **Chat 定时面板改造**：执行模式选择 + 三种调度类型 + 新开对话路径
+- **飞书官方 OpenClaw 插件接入**：CardKit Streaming、工具桥接（多维表格/日历/任务/群聊等 25 个工具）、SDK Shim 兼容层
+- **Tab 状态指示器**：运行中/思考中圆点 + 自定义 tooltip + 通知点击自动跳转
+- **WebView 崩溃保护**：React Error Boundary + Rust 心跳监控自动恢复
+
+### Fixed
+- **Windows 白屏死循环**：agent.channels undefined 导致 React 崩溃 → 错误边界卸载 App → cleanup 杀 sidecar → 死循环。防御性归一化 + 移除 useEffect cleanup 中的 stopAllSidecars
+- **定时任务 loading 卡死**：Cron 执行改用 fullAgency 权限，避免 Bash 等工具 permission request 在无人值守时永远阻塞
+- **定时任务创建后列表不刷新**：RecentTasks 传 onCreated 回调给 TaskCreateModal
+- **im-cron 跨 workspace 安全漏洞**：添加 verifyTaskOwnership 校验，防止跨 session 修改/删除其他工作区的任务
+- **CronTaskSettingsModal executionTarget 重置**：从 initialConfig 初始化，防止重开 modal 时静默重置
+- **CronTaskDetailPanel 缺 isMountedRef guard**：4 个 async handler 添加 unmount 保护
+- **无效 Cron 表达式可提交**：cron 表达式格式验证加入 errors
+- **通知导航 hijack**：timeout 从 10s 缩至 2s，仅 hidden→visible 转换时消费
+- **CustomSelect dropdown 滚动脱离**：添加 scroll/resize 事件监听动态更新位置
+- **「允许 AI 自主结束任务」选项隐藏**：永久运行模式下也显示该选项
+- **/new 后飞书 Bridge 工具丢失**：IM context（im-media/im-bridge-tools）改为 Sidecar 级别生命周期，不在 session 结束时清除
+- **IM Bot provider 不同步**：patchAgentConfig 自动解析 providerEnvJson + AgentInstance 初始化补全
+- **飞书插件消息处理崩溃**：compat-runtime 补全 config/logging/system 模块
+- **Bridge 进程不使用代理配置**：导致飞书 API 超时
+- **CardKit streaming 400 错误**：withReplyDispatcher 返回值修复
+- **IM Bot idle collector 误杀长任务 sidecar**
+
+### Changed
+- **「循环」文案统一改为「定时」**
+- **添加 IM Bot 选择平台隐藏内置飞书**：由官方插件版本替代
+- **任务中心 tag 文案统一**：Feishu→飞书、QQ Bot→QQ，与 Agent 工作区一致
+
+---
+
 ## [0.1.41] - 2026-03-14
 
 ### Added

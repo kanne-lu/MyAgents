@@ -11,7 +11,7 @@ export function getAgentById(config: AppConfig, agentId: string): AgentConfig | 
 }
 
 export function getChannelById(agent: AgentConfig, channelId: string): ChannelConfig | undefined {
-  return agent.channels.find(c => c.id === channelId);
+  return agent.channels?.find(c => c.id === channelId);
 }
 
 export function getAgentByWorkspacePath(config: AppConfig, workspacePath: string): AgentConfig | undefined {
@@ -180,6 +180,37 @@ export async function patchAgentConfig(
     }
   }
 
+  // If providerId changed but providerEnvJson was NOT explicitly provided,
+  // auto-resolve from provider registry + stored API keys.
+  // This is the "pit of success" pattern: callers only need to set providerId,
+  // credentials are resolved centrally so IM Bot / CronTask always get correct provider env.
+  let resolvedProviderEnvJson: string | undefined | null;
+  let shouldUpdateProviderEnv = false;
+  if ('providerId' in patch && !('providerEnvJson' in patch)) {
+    shouldUpdateProviderEnv = true;
+    try {
+      const { getAllProviders, loadApiKeys } = await import('./providerService');
+      const [allProviders, apiKeys] = await Promise.all([getAllProviders(), loadApiKeys()]);
+      const provider = allProviders.find(p => p.id === patch.providerId);
+      if (provider && provider.type !== 'subscription') {
+        resolvedProviderEnvJson = JSON.stringify({
+          baseUrl: provider.config.baseUrl,
+          apiKey: apiKeys[provider.id],
+          authType: provider.authType,
+          apiProtocol: provider.apiProtocol,
+          maxOutputTokens: provider.maxOutputTokens,
+          upstreamFormat: provider.upstreamFormat,
+        });
+      } else {
+        // Subscription provider (e.g. Anthropic) or unknown — clear providerEnvJson
+        resolvedProviderEnvJson = undefined;
+      }
+    } catch (e) {
+      console.warn('[agentConfigService] Failed to resolve provider env:', e);
+      shouldUpdateProviderEnv = false;
+    }
+  }
+
   await atomicModifyConfig(config => {
     const agents = [...(config.agents || [])];
     const idx = agents.findIndex(a => a.id === agentId);
@@ -192,6 +223,10 @@ export async function patchAgentConfig(
       ...(resolvedMcpJson !== undefined || 'mcpEnabledServers' in patch
         ? { mcpServersJson: resolvedMcpJson }
         : {}),
+      // Persist resolved provider env alongside providerId
+      ...(shouldUpdateProviderEnv
+        ? { providerEnvJson: resolvedProviderEnvJson ?? undefined }
+        : {}),
     };
     updated = agents[idx];
     return {
@@ -202,7 +237,12 @@ export async function patchAgentConfig(
 
   // Hot-reload runtime state if any runtime-sensitive field changed
   if (updated) {
-    await syncAgentRuntime(agentId, patch, updated, resolvedMcpJson);
+    // If providerEnvJson was auto-resolved (not in original patch), inject it
+    // so syncAgentRuntime pushes the new credentials to the running agent
+    const effectivePatch = shouldUpdateProviderEnv
+      ? { ...patch, providerEnvJson: resolvedProviderEnvJson ?? undefined }
+      : patch;
+    await syncAgentRuntime(agentId, effectivePatch, updated, resolvedMcpJson);
   }
 
   return updated;
@@ -348,6 +388,7 @@ export async function invokeStartAgentChannel(
       openclawNpmSpec: channel.openclawNpmSpec,
       openclawPluginConfig: channel.openclawPluginConfig,
       openclawManifest: channel.openclawManifest,
+      openclawEnabledToolGroups: channel.openclawEnabledToolGroups,
       allowedUsers: channel.allowedUsers || [],
       groupPermissions: channel.groupPermissions || [],
       groupActivation: channel.groupActivation,

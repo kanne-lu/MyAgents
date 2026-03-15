@@ -21,6 +21,11 @@ const NOTIFY_THROTTLE_MS = 3000; // 3 seconds between notifications
 // Track window visibility state (updated by useTrayEvents hook)
 let isWindowVisible = true;
 
+// Pending navigation: when a notification is sent, store tabId + timestamp
+// so that on window focus-regain we can auto-switch to the relevant tab
+const PENDING_NAV_TIMEOUT_MS = 2_000; // 2 second window
+let pendingNavigation: { tabId: string; timestamp: number } | null = null;
+
 /**
  * Update window visibility state
  * Called by useTrayEvents when window is hidden/shown
@@ -75,9 +80,10 @@ async function ensurePermission(): Promise<boolean> {
 
 /**
  * Send a system notification
- * Only sends if user is not focused on the app
+ * Only sends if user is not focused on the app.
+ * If tabId is provided, stores it as pending navigation target.
  */
-async function notify(title: string, body?: string): Promise<void> {
+async function notify(title: string, body?: string, tabId?: string): Promise<void> {
     // Only notify when user is not focused
     if (!shouldNotify()) {
         return;
@@ -98,16 +104,55 @@ async function notify(title: string, body?: string): Promise<void> {
 
     try {
         sendNotification({ title, body });
+        // Store pending navigation AFTER successful send
+        if (tabId) {
+            pendingNavigation = { tabId, timestamp: now };
+        }
     } catch (error) {
         console.warn('[Notification] Failed to send notification:', error);
     }
 }
 
 /**
- * Notify that AI has completed a response
+ * Store a pending navigation target (for notifications sent from outside the service,
+ * e.g. cron task notifications from Rust layer)
  */
-export function notifyMessageComplete(): void {
-    void notify('MyAgents - 任务完成', '请您查看结果');
+export function setPendingNavigation(tabId: string): void {
+    pendingNavigation = { tabId, timestamp: Date.now() };
+}
+
+/**
+ * Consume the pending navigation target if within the time window.
+ * Returns the tabId to navigate to, or null if expired/absent.
+ * One-time consumption: clears the pending state after reading.
+ */
+export function consumePendingNavigation(): string | null {
+    if (!pendingNavigation) return null;
+
+    const elapsed = Date.now() - pendingNavigation.timestamp;
+    const tabId = pendingNavigation.tabId;
+    pendingNavigation = null; // always consume
+
+    if (elapsed <= PENDING_NAV_TIMEOUT_MS) {
+        return tabId;
+    }
+    return null;
+}
+
+/**
+ * Notify that AI has completed a response.
+ * @param tabId - If provided, stores as pending navigation target for click-to-navigate
+ */
+export function notifyMessageComplete(tabId?: string): void {
+    void notify('MyAgents - 任务完成', '请您查看结果', tabId);
+}
+
+/**
+ * Notify that a cron task has completed (triggered by Rust notification:show event).
+ * Sends an OS notification and stores pending navigation if tabId is provided.
+ */
+export function notifyCronTaskComplete(title: string, body: string, tabId?: string): void {
+    void notify(title, body, tabId);
 }
 
 /**

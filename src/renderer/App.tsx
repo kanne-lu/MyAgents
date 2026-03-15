@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import { initAnalytics, track } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, stopAllSidecars, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
@@ -11,6 +11,7 @@ import TabProvider from '@/context/TabProvider';
 import { useToast } from '@/components/Toast';
 import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
+import { notifyCronTaskComplete } from '@/services/notificationService';
 import { useConfig } from '@/hooks/useConfig';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Chat from '@/pages/Chat';
@@ -68,6 +69,7 @@ interface TabContentProps {
   onNewSession: (tabId: string) => Promise<boolean>;
   onUpdateGenerating: (tabId: string, isGenerating: boolean) => void;
   onUpdateTitle: (tabId: string, title: string) => void;
+  onUpdateUnread: (tabId: string, hasUnread: boolean) => void;
   onRenameSession: (tabId: string, newTitle: string) => void;
   onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
   onClearInitialMessage: (tabId: string) => void;
@@ -85,7 +87,7 @@ interface TabContentProps {
 const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error,
   onLaunchProject, onBack, onSwitchSession, onNewSession,
-  onUpdateGenerating, onUpdateTitle, onRenameSession, onUpdateSessionId, onClearInitialMessage,
+  onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onUpdateSessionId, onClearInitialMessage,
   onClearJoinedExistingSidecar,
   settingsInitialSection, settingsInitialMcpId, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading,
@@ -124,6 +126,7 @@ const MemoizedTabContent = memo(function TabContent({
           isActive={isActive}
           onGeneratingChange={(isGenerating) => onUpdateGenerating(tab.id, isGenerating)}
           onTitleChange={(title) => onUpdateTitle(tab.id, title)}
+          onUnreadChange={(hasUnread) => onUpdateUnread(tab.id, hasUnread)}
           onSessionIdChange={(newSessionId) => onUpdateSessionId(tab.id, newSessionId)}
         >
           <Chat
@@ -424,7 +427,11 @@ export default function App() {
       // Flush any pending frontend logs before shutdown
       forceFlushLogs();
       clearLogServerUrl();
-      void stopAllSidecars();
+      // NOTE: Do NOT call stopAllSidecars() here.
+      // This cleanup runs on ANY unmount (including error boundary recovery),
+      // not just app exit. Killing the sidecar during error recovery creates a
+      // death loop: error → unmount → kill sidecar → sidecar unavailable → more errors.
+      // Rust handles sidecar cleanup on actual exit (WindowEvent::Destroyed, ExitRequested).
     };
   }, [startGlobalSidecarSilent]);
 
@@ -460,6 +467,17 @@ export default function App() {
   // Update tab title (called from TabProvider when auto-title or rename occurs)
   const updateTabTitle = useCallback((tabId: string, title: string) => {
     setTabs(prev => prev.map(t => t.id === tabId ? { ...t, title } : t));
+  }, []);
+
+  // Update tab unread state (called from TabProvider when message completes on non-active tab)
+  const updateTabUnread = useCallback((tabId: string, hasUnread: boolean) => {
+    setTabs(prev => {
+      const tab = prev.find(t => t.id === tabId);
+      if (tab && tab.hasUnread !== hasUnread) {
+        return prev.map(t => t.id === tabId ? { ...t, hasUnread } : t);
+      }
+      return prev; // no-op: avoid unnecessary re-render
+    });
   }, []);
 
   // Update tab sessionId when backend creates real session (called from TabProvider)
@@ -1258,6 +1276,20 @@ export default function App() {
     setActiveTabId(tabId);
   }, []);
 
+  // Clear unread indicator whenever active tab changes (covers all activation paths:
+  // handleSelectTab, keyboard shortcuts, session jumps, cron navigation, etc.)
+  useEffect(() => {
+    if (activeTabId) {
+      setTabs(prev => {
+        const tab = prev.find(t => t.id === activeTabId);
+        if (tab?.hasUnread) {
+          return prev.map(t => t.id === activeTabId ? { ...t, hasUnread: false } : t);
+        }
+        return prev;
+      });
+    }
+  }, [activeTabId]);
+
   // Trackpad two-finger horizontal swipe to switch tabs (follow-along animation)
   useTabSwipeGesture({ contentRef, tabsRef, activeTabIdRef, onSwitchTab: handleSelectTab });
 
@@ -1456,6 +1488,13 @@ export default function App() {
   useTrayEvents({
     minimizeToTray: config.minimizeToTray,
     onOpenSettings: () => handleOpenSettings('general'),
+    onNavigateToTab: (tabId: string) => {
+      // Verify the tab still exists before switching
+      const exists = tabsRef.current.some(t => t.id === tabId);
+      if (exists) {
+        handleSelectTab(tabId);
+      }
+    },
     onExitRequested: async () => {
       // Check for running cron tasks
       try {
@@ -1479,6 +1518,46 @@ export default function App() {
       return true;
     },
   });
+
+  // Listen for cron task notifications from Rust (notification:show)
+  // Store tabId as pending navigation so focus-regain auto-switches to the tab
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+
+    let unlisten: (() => void) | null = null;
+    const setup = async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen<{ title: string; body: string; tabId?: string | null }>(
+        'notification:show',
+        (event) => {
+          const { title, body, tabId } = event.payload;
+          // Send actual OS notification (Rust only emits the event, doesn't send OS notification)
+          notifyCronTaskComplete(title, body, tabId ?? undefined);
+        }
+      );
+    };
+    setup();
+    return () => { unlisten?.(); };
+  }, []);
+
+  // WebView heartbeat: signal Rust every 10s that the frontend is alive.
+  // Rust monitors this and reloads the page if heartbeats go stale (white screen recovery).
+  useEffect(() => {
+    if (!isTauriEnvironment()) return;
+
+    let timer: ReturnType<typeof setInterval> | null = null;
+    let cancelled = false;
+    const start = async () => {
+      const { invoke } = await import('@tauri-apps/api/core');
+      if (cancelled) return; // Component unmounted before import resolved
+      invoke('webview_heartbeat').catch(() => {});
+      timer = setInterval(() => {
+        invoke('webview_heartbeat').catch(() => {});
+      }, 10_000);
+    };
+    start();
+    return () => { cancelled = true; if (timer) clearInterval(timer); };
+  }, []);
 
   return (
     <div className="flex h-screen flex-col bg-[var(--paper)]">
@@ -1515,6 +1594,7 @@ export default function App() {
             onNewSession={handleNewSession}
             onUpdateGenerating={updateTabGenerating}
             onUpdateTitle={updateTabTitle}
+            onUpdateUnread={updateTabUnread}
             onRenameSession={handleRenameSession}
             onUpdateSessionId={updateTabSessionId}
             onClearInitialMessage={clearInitialMessage}

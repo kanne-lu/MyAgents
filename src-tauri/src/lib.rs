@@ -12,6 +12,7 @@ mod sidecar;
 mod sse_proxy;
 mod tray;
 mod updater;
+mod webview_health;
 
 use sidecar::{
     cleanup_stale_sidecars, create_sidecar_state, stop_all_sidecars,
@@ -71,6 +72,7 @@ pub fn run() {
     let cleanup_done_for_exit = cleanup_done.clone();
     let cleanup_done_for_tray_exit = cleanup_done.clone();
     let cleanup_done_for_monitor = cleanup_done.clone();
+    let cleanup_done_for_webview = cleanup_done.clone();
 
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
@@ -97,6 +99,7 @@ pub fn run() {
         .manage(sse_proxy_state)
         .manage(im_bot_state)
         .manage(agent_state)
+        .manage(webview_health::WebviewHealthState::new())
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -126,6 +129,8 @@ pub fn run() {
             updater::test_update_connectivity,
             updater::check_pending_update,
             updater::install_pending_update,
+            // WebView health heartbeat
+            webview_health::webview_heartbeat,
             // Platform & device info
             commands::cmd_get_platform,
             commands::cmd_get_device_id,
@@ -159,6 +164,8 @@ pub fn run() {
             cron_task::cmd_mark_task_executing,
             cron_task::cmd_mark_task_complete,
             cron_task::cmd_is_task_executing,
+            cron_task::cmd_get_cron_runs,
+            cron_task::cmd_update_cron_task_fields,
             // Session activation commands (for Session singleton)
             cmd_get_session_activation,
             cmd_activate_session,
@@ -178,25 +185,8 @@ pub fn run() {
             cmd_get_background_sessions,
             // Proxy hot-reload
             cmd_propagate_proxy,
-            // IM Bot commands (deprecated — use Agent commands instead)
-            #[allow(deprecated)]
-            im::cmd_start_im_bot,
-            #[allow(deprecated)]
-            im::cmd_stop_im_bot,
-            #[allow(deprecated)]
-            im::cmd_im_bot_status,
-            #[allow(deprecated)]
-            im::cmd_im_all_bots_status,
+            // IM Bot commands (non-deprecated survivors)
             im::cmd_im_conversations,
-            // IM Bot unified config commands (v0.1.26, deprecated)
-            #[allow(deprecated)]
-            im::cmd_update_im_bot_config,
-            #[allow(deprecated)]
-            im::cmd_get_im_bot_runtime_config,
-            #[allow(deprecated)]
-            im::cmd_add_im_bot_config,
-            #[allow(deprecated)]
-            im::cmd_remove_im_bot_config,
             // Group permission commands (v0.1.28)
             im::cmd_approve_group,
             im::cmd_reject_group,
@@ -297,7 +287,7 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 cron_task::initialize_cron_manager(cron_app_handle).await;
             });
-            log::info!("[App] Cron task manager initialized");
+            ulog_info!("[App] Cron task manager initialization scheduled");
 
             // Auto-start IM Bot if previously enabled (3s delay)
             im::schedule_auto_start(app.handle().clone());
@@ -320,6 +310,19 @@ pub fn run() {
                 ).await;
             });
             log::info!("[App] Global sidecar health monitor spawned");
+
+            // Start WebView health monitor (heartbeat-based crash detection)
+            // Gets the managed WebviewHealthState and shares the inner AtomicU64 with the monitor
+            let app_handle_for_webview = app.handle().clone();
+            let webview_heartbeat = app.state::<webview_health::WebviewHealthState>().tracker();
+            tauri::async_runtime::spawn(async move {
+                webview_health::monitor_webview_health(
+                    app_handle_for_webview,
+                    webview_heartbeat,
+                    cleanup_done_for_webview,
+                ).await;
+            });
+            log::info!("[App] WebView health monitor spawned");
 
             // Start background update check (5 second delay to let app initialize)
             log::info!("[App] Setup complete, spawning background update check task...");

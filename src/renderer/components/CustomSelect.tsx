@@ -1,6 +1,7 @@
 /**
  * CustomSelect - Custom dropdown select component
- * Replaces native <select> with styled dropdown matching design system
+ * Replaces native <select> with styled dropdown matching design system.
+ * Uses fixed positioning so dropdown is never clipped by overflow:hidden parents.
  */
 
 import { Check, ChevronDown } from 'lucide-react';
@@ -39,6 +40,37 @@ export default function CustomSelect({
 }: CustomSelectProps) {
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
+    const triggerRef = useRef<HTMLButtonElement>(null);
+    const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
+
+    // Compute dropdown position from trigger's bounding rect
+    const updatePosition = useCallback(() => {
+        if (!triggerRef.current) return;
+        const rect = triggerRef.current.getBoundingClientRect();
+        setDropdownStyle({
+            position: 'fixed',
+            top: rect.bottom + 4,
+            left: rect.left,
+            width: rect.width,
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        updatePosition();
+    }, [isOpen, updatePosition]);
+
+    // Reposition dropdown on scroll/resize to prevent detachment from trigger
+    useEffect(() => {
+        if (!isOpen) return;
+        const handleRepositionOrClose = () => updatePosition();
+        window.addEventListener('scroll', handleRepositionOrClose, true);
+        window.addEventListener('resize', handleRepositionOrClose);
+        return () => {
+            window.removeEventListener('scroll', handleRepositionOrClose, true);
+            window.removeEventListener('resize', handleRepositionOrClose);
+        };
+    }, [isOpen, updatePosition]);
 
     // Close on click outside
     useEffect(() => {
@@ -63,6 +95,7 @@ export default function CustomSelect({
         <div ref={containerRef} className={`relative ${className ?? ''}`}>
             {/* Trigger */}
             <button
+                ref={triggerRef}
                 type="button"
                 onClick={() => setIsOpen(!isOpen)}
                 className={`flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] text-left transition-colors hover:border-[var(--ink-subtle)] ${compact ? 'px-2 py-1 text-[11px]' : 'px-3 py-2 text-xs'}`}
@@ -76,9 +109,12 @@ export default function CustomSelect({
                 <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)] transition-transform ${isOpen ? 'rotate-180' : ''}`} />
             </button>
 
-            {/* Dropdown panel */}
+            {/* Dropdown panel — fixed position to escape overflow clipping */}
             {isOpen && (
-                <div className="absolute left-0 top-full z-50 mt-1 max-h-60 w-full overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md">
+                <div
+                    className="z-[300] max-h-60 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md"
+                    style={dropdownStyle}
+                >
                     {options.map(option => (
                         <button
                             key={option.value}

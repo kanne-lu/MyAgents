@@ -29,7 +29,7 @@ export interface CronEndConditions {
  */
 export type CronSchedule =
   | { kind: 'at'; at: string }
-  | { kind: 'every'; minutes: number }
+  | { kind: 'every'; minutes: number; startAt?: string }
   | { kind: 'cron'; expr: string; tz?: string };
 
 /**
@@ -98,6 +98,26 @@ export interface CronTaskConfig {
   permissionMode?: string;
   model?: string;
   providerEnv?: CronTaskProviderEnv;
+  /** Flexible schedule (overrides intervalMinutes) */
+  schedule?: CronSchedule;
+  /** Human-readable name */
+  name?: string;
+}
+
+/**
+ * A single execution record for a cron task (from JSONL)
+ */
+export interface CronRunRecord {
+  /** Unix timestamp (ms) */
+  ts: number;
+  /** Whether execution succeeded */
+  ok: boolean;
+  /** Execution duration in ms */
+  durationMs: number;
+  /** AI output text */
+  content?: string;
+  /** Error message on failure */
+  error?: string;
 }
 
 /**
@@ -172,29 +192,74 @@ export function getCronStatusText(status: CronTaskStatus): string {
 export function getCronStatusColor(status: CronTaskStatus): string {
   switch (status) {
     case 'running':
-      return 'text-green-600';
+      return 'text-[var(--success)]';
     case 'stopped':
-      return 'text-gray-600';
+      return 'text-[var(--ink-muted)]';
     default:
       return 'text-[var(--ink-muted)]';
   }
 }
 
 /**
- * Format schedule description for display
+ * Format schedule description for display.
+ * Uses cronstrue for human-readable cron expression translation.
  */
 export function formatScheduleDescription(task: CronTask): string {
   if (task.schedule) {
     switch (task.schedule.kind) {
       case 'at':
-        return `定时执行: ${new Date(task.schedule.at).toLocaleString('zh-CN')}`;
+        return `定时: ${new Date(task.schedule.at).toLocaleString('zh-CN')}`;
       case 'every':
         return `每 ${formatCronInterval(task.schedule.minutes)}`;
       case 'cron':
-        return `Cron: ${task.schedule.expr}${task.schedule.tz ? ` (${task.schedule.tz})` : ''}`;
+        return formatCronExpression(task.schedule.expr);
     }
   }
   return `每 ${formatCronInterval(task.intervalMinutes)}`;
+}
+
+/**
+ * Translate a cron expression to human-readable Chinese text.
+ * Falls back to raw expression on parse error.
+ */
+let _cronstrueToString: ((expr: string, opts?: Record<string, unknown>) => string) | null = null;
+
+async function loadCronstrue() {
+  if (!_cronstrueToString) {
+    const mod = await import('cronstrue/i18n');
+    // cronstrue exports both default and named toString
+    _cronstrueToString = mod.toString as (expr: string, opts?: Record<string, unknown>) => string;
+  }
+  return _cronstrueToString;
+}
+
+/**
+ * Translate a cron expression to human-readable Chinese text (sync).
+ * Uses lazy-loaded cronstrue. Falls back to raw expression if not loaded yet or on error.
+ */
+export function formatCronExpression(expr: string): string {
+  if (_cronstrueToString) {
+    try {
+      return _cronstrueToString(expr, { locale: 'zh_CN' });
+    } catch {
+      return `Cron: ${expr}`;
+    }
+  }
+  // Trigger async load for next call
+  loadCronstrue();
+  return `Cron: ${expr}`;
+}
+
+/**
+ * Async version that guarantees cronstrue is loaded
+ */
+export async function formatCronExpressionAsync(expr: string): Promise<string> {
+  const fn = await loadCronstrue();
+  try {
+    return fn(expr, { locale: 'zh_CN' });
+  } catch {
+    return `Cron: ${expr}`;
+  }
 }
 
 /**

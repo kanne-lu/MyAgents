@@ -1533,10 +1533,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       ? 'bg-[var(--heartbeat-bg)] text-[var(--heartbeat)] hover:bg-[var(--heartbeat)]/20'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
-                  title={cronModeEnabled ? '循环已启用' : '开启循环'}
+                  title={cronModeEnabled ? '定时已启用' : '定时'}
                 >
                   <Timer className="h-3.5 w-3.5" />
-                  <span className="toolbar-label">循环</span>
+                  <span className="toolbar-label">定时</span>
                 </button>
               )}
             </div>

@@ -21,6 +21,7 @@ export interface Tab {
     view: 'launcher' | 'chat' | 'settings';
     title: string;            // Display title for the tab
     isGenerating?: boolean;   // true = AI is outputting, used for close confirmation
+    hasUnread?: boolean;      // true = task completed but user hasn't viewed this tab yet
     initialMessage?: InitialMessage;  // Launcher → Chat auto-send message
     // Note: cronTaskId and sidecarPort are no longer stored in Tab.
     // Sidecar lifecycle is now managed by SidecarManager's Owner model.

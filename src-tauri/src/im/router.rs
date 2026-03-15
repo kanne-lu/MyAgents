@@ -549,15 +549,25 @@ impl SessionRouter {
         self.default_workspace = path;
     }
 
-    /// Sync AI config (model + MCP) to a newly created Sidecar.
+    /// Sync AI config (model + MCP + provider) to a newly created Sidecar.
     /// Called after ensure_sidecar returns is_new=true.
     pub async fn sync_ai_config(
         &self,
         port: u16,
         model: Option<&str>,
         mcp_servers_json: Option<&str>,
+        provider_env: Option<&serde_json::Value>,
     ) {
-        // 1. Model
+        // 1. Provider env (sync BEFORE model so pre-warm uses the correct provider)
+        if let Some(penv) = provider_env {
+            let url = format!("http://127.0.0.1:{}/api/provider/set", port);
+            match self.http_client.post(&url).json(&json!({ "providerEnv": penv })).send().await {
+                Ok(_) => ulog_info!("[im-router] Synced provider env to port {}", port),
+                Err(e) => ulog_warn!("[im-router] Failed to sync provider env to port {}: {}", port, e),
+            }
+        }
+
+        // 2. Model
         if let Some(model_id) = model {
             let url = format!("http://127.0.0.1:{}/api/model/set", port);
             match self.http_client.post(&url).json(&json!({ "model": model_id })).send().await {
@@ -566,7 +576,7 @@ impl SessionRouter {
             }
         }
 
-        // 2. MCP servers
+        // 3. MCP servers
         if let Some(mcp_json) = mcp_servers_json {
             if let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(mcp_json) {
                 let url = format!("http://127.0.0.1:{}/api/mcp/set", port);

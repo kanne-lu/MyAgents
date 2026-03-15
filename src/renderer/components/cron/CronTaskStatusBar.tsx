@@ -21,7 +21,7 @@ export default function CronTaskStatusBar({
       <div className="flex items-center gap-2">
         <Timer className="h-4 w-4 text-[var(--heartbeat)]" />
         <span className="text-sm font-medium text-[var(--heartbeat)]">
-          循环模式
+          定时模式
         </span>
         <span className="text-sm text-[var(--ink-muted)]">
           每 {formatCronInterval(intervalMinutes)} 执行一次
@@ -40,7 +40,7 @@ export default function CronTaskStatusBar({
           type="button"
           onClick={onCancel}
           className="rounded-md p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--heartbeat-bg)] hover:text-[var(--heartbeat)]"
-          title="取消循环"
+          title="取消定时"
         >
           <X className="h-4 w-4" />
         </button>

@@ -35,34 +35,103 @@ import { findPromotedByPlatform } from '../../ImSettings/promotedPlugins';
 const FEISHU_PERMISSIONS_JSON = `{
   "scopes": {
     "tenant": [
-      "aily:file:read",
-      "aily:file:write",
-      "application:application.app_message_stats.overview:readonly",
-      "application:application:self_manage",
-      "application:bot.menu:write",
-      "cardkit:card:write",
       "contact:contact.base:readonly",
-      "contact:user.employee_id:readonly",
-      "corehr:file:download",
-      "docs:document.content:read",
-      "event:ip_list",
-      "im:chat",
-      "im:chat.access_event.bot_p2p_chat:read",
-      "im:chat.members:bot_access",
-      "im:message",
+      "docx:document:readonly",
+      "im:chat:read",
+      "im:chat:update",
       "im:message.group_at_msg:readonly",
-      "im:message.group_msg",
       "im:message.p2p_msg:readonly",
+      "im:message.pins:read",
+      "im:message.pins:write_only",
+      "im:message.reactions:read",
+      "im:message.reactions:write_only",
       "im:message:readonly",
+      "im:message:recall",
       "im:message:send_as_bot",
+      "im:message:send_multi_users",
+      "im:message:send_sys_msg",
+      "im:message:update",
       "im:resource",
-      "sheets:spreadsheet",
-      "wiki:wiki:readonly"
+      "application:application:self_manage",
+      "cardkit:card:write",
+      "cardkit:card:read"
     ],
     "user": [
-      "aily:file:read",
-      "aily:file:write",
-      "im:chat.access_event.bot_p2p_chat:read"
+      "contact:user.employee_id:readonly",
+      "offline_access",
+      "base:app:copy",
+      "base:field:create",
+      "base:field:delete",
+      "base:field:read",
+      "base:field:update",
+      "base:record:create",
+      "base:record:delete",
+      "base:record:retrieve",
+      "base:record:update",
+      "base:table:create",
+      "base:table:delete",
+      "base:table:read",
+      "base:table:update",
+      "base:view:read",
+      "base:view:write_only",
+      "base:app:create",
+      "base:app:update",
+      "base:app:read",
+      "sheets:spreadsheet.meta:read",
+      "sheets:spreadsheet:read",
+      "sheets:spreadsheet:create",
+      "sheets:spreadsheet:write_only",
+      "docs:document:export",
+      "docs:document.media:upload",
+      "board:whiteboard:node:create",
+      "board:whiteboard:node:read",
+      "calendar:calendar:read",
+      "calendar:calendar.event:create",
+      "calendar:calendar.event:delete",
+      "calendar:calendar.event:read",
+      "calendar:calendar.event:reply",
+      "calendar:calendar.event:update",
+      "calendar:calendar.free_busy:read",
+      "contact:contact.base:readonly",
+      "contact:user.base:readonly",
+      "contact:user:search",
+      "docs:document.comment:create",
+      "docs:document.comment:read",
+      "docs:document.comment:update",
+      "docs:document.media:download",
+      "docs:document:copy",
+      "docx:document:create",
+      "docx:document:readonly",
+      "docx:document:write_only",
+      "drive:drive.metadata:readonly",
+      "drive:file:download",
+      "drive:file:upload",
+      "im:chat.members:read",
+      "im:chat:read",
+      "im:message",
+      "im:message.group_msg:get_as_user",
+      "im:message.p2p_msg:get_as_user",
+      "im:message:readonly",
+      "search:docs:read",
+      "search:message",
+      "space:document:delete",
+      "space:document:move",
+      "space:document:retrieve",
+      "task:comment:read",
+      "task:comment:write",
+      "task:task:read",
+      "task:task:write",
+      "task:task:writeonly",
+      "task:tasklist:read",
+      "task:tasklist:write",
+      "wiki:node:copy",
+      "wiki:node:create",
+      "wiki:node:move",
+      "wiki:node:read",
+      "wiki:node:retrieve",
+      "wiki:space:read",
+      "wiki:space:retrieve",
+      "wiki:space:write_only"
     ]
   }
 }`;
@@ -92,12 +161,12 @@ export default function ChannelWizard({
     const openclawPluginId = isOpenClaw ? platform.slice('openclaw:'.length) : undefined;
     const promoted = isOpenClaw ? findPromotedByPlatform(platform) : undefined;
 
-    // OpenClaw: config(1) → start/complete(2)  — no workspace (Agent has one), no user binding
+    // OpenClaw: config(1) → start(2) → binding(3)
     // Telegram: credentials(1) → binding(2)
     // Feishu:   credentials(1) → permissions(2) → binding(3)
     // DingTalk: credentials(1) → permissions(2) → binding(3)
-    const totalSteps = isOpenClaw ? 2 : (isFeishu || isDingtalk) ? 3 : 2;
-    const bindingStep = isOpenClaw ? -1 : totalSteps; // OpenClaw has no binding step
+    const totalSteps = isOpenClaw ? 3 : (isFeishu || isDingtalk) ? 3 : 2;
+    const bindingStep = totalSteps; // All platforms have binding as the last step
 
     const [step, setStep] = useState(1);
     // Telegram credentials
@@ -145,14 +214,18 @@ export default function ChannelWizard({
                     // Pre-populate custom fields from requiredFields if no schema
                     const hasSchema = found.manifest?.configSchema?.properties
                         && Object.keys(found.manifest.configSchema.properties).length > 0;
-                    if (!hasSchema && found.requiredFields?.length) {
-                        setOpenclawCustomFields(found.requiredFields.map(k => ({ key: k, value: '' })));
+                    // Try plugin's extracted requiredFields first, fallback to promoted plugin's hardcoded list
+                    const reqFields = found.requiredFields?.length
+                        ? found.requiredFields
+                        : promoted?.requiredFields;
+                    if (!hasSchema && reqFields?.length) {
+                        setOpenclawCustomFields(reqFields.map(k => ({ key: k, value: '' })));
                     }
                 }
             } catch { /* ignore */ }
         })();
         return () => { cancelled = true; };
-    }, [isOpenClaw, openclawPluginId]);
+    }, [isOpenClaw, openclawPluginId, promoted?.requiredFields]);
 
     // OpenClaw config schema helpers
     const openclawSchemaProps = installedPlugin?.manifest?.configSchema?.properties as
@@ -239,7 +312,11 @@ export default function ChannelWizard({
     const buildChannelConfig = useCallback((): ChannelConfig => {
         if (isOpenClaw) {
             const pluginConfig = buildOpenclawConfig();
+            // Merge promoted plugin defaults (e.g. dmPolicy: 'open') under user values
+            const mergedConfig = { ...(promoted?.defaultConfig ?? {}), ...pluginConfig };
             const pluginName = promoted?.name || installedPlugin?.manifest?.name || openclawPluginId || 'Plugin Bot';
+            // Default enabled tool groups: all except 'perm' (sensitive)
+            const defaultToolGroups = ['doc', 'chat', 'wiki_drive', 'bitable'];
             return {
                 id: channelId,
                 type: platform,
@@ -249,7 +326,8 @@ export default function ChannelWizard({
                 setupCompleted: false,
                 openclawPluginId: openclawPluginId,
                 openclawNpmSpec: installedPlugin?.npmSpec,
-                openclawPluginConfig: Object.keys(pluginConfig).length > 0 ? pluginConfig : undefined,
+                openclawPluginConfig: Object.keys(mergedConfig).length > 0 ? mergedConfig : undefined,
+                openclawEnabledToolGroups: defaultToolGroups,
             };
         }
         return {
@@ -276,16 +354,17 @@ export default function ChannelWizard({
         return invoke<ChannelStatusData | null>('cmd_agent_channel_status', { agentId: agent.id, channelId: channelCfg.id });
     }, [agent]);
 
-    // OpenClaw: step 2 = start + complete
+    // OpenClaw: step 2 = start channel, then advance to binding step
     const handleOpenClawStart = useCallback(async () => {
         if (!isTauriEnvironment()) return;
         setStarting(true);
         try {
             const channelCfg = { ...buildChannelConfig(), setupCompleted: true };
 
-            // Save channel to agent config
+            // Save channel to agent config (dedup: replace if same ID exists from a previous attempt)
+            const existingChannels = (agent.channels ?? []).filter(ch => ch.id !== channelCfg.id);
             await patchAgentConfig(agent.id, {
-                channels: [...agent.channels, channelCfg],
+                channels: [...existingChannels, channelCfg],
             });
             await refreshConfig();
 
@@ -294,8 +373,8 @@ export default function ChannelWizard({
 
             if (isMountedRef.current) {
                 track('agent_channel_create', { platform });
-                toastRef.current.success('Channel 启动成功！');
-                onComplete(channelId);
+                toastRef.current.success('Channel 启动成功，请完成用户绑定');
+                setStep(3); // Advance to binding step
             }
         } catch (err) {
             if (isMountedRef.current) {
@@ -304,7 +383,7 @@ export default function ChannelWizard({
         } finally {
             if (isMountedRef.current) setStarting(false);
         }
-    }, [buildChannelConfig, agent, channelId, platform, startChannel, refreshConfig, onComplete]);
+    }, [buildChannelConfig, agent, platform, startChannel, refreshConfig]);
 
     // Handle "Next" for all steps
     const handleNext = useCallback(async () => {
@@ -332,10 +411,10 @@ export default function ChannelWizard({
 
         // Check for duplicate credentials — against existing channels in this agent + other agents
         const allChannels = [
-            ...agent.channels.filter(ch => ch.id !== channelId && ch.setupCompleted),
+            ...(agent.channels ?? []).filter(ch => ch.id !== channelId && ch.setupCompleted),
             ...(config.agents ?? [])
                 .filter(a => a.id !== agent.id)
-                .flatMap(a => a.channels.filter(ch => ch.setupCompleted)),
+                .flatMap(a => (a.channels ?? []).filter(ch => ch.setupCompleted)),
         ];
         if (isFeishu) {
             if (allChannels.some(ch => ch.feishuAppId === feishuAppId.trim())) {
@@ -360,9 +439,10 @@ export default function ChannelWizard({
         try {
             const channelCfg = buildChannelConfig();
 
-            // Save channel to agent config
+            // Save channel to agent config (dedup: replace if same ID exists from a previous attempt)
+            const existingChannels = (agent.channels ?? []).filter(ch => ch.id !== channelCfg.id);
             await patchAgentConfig(agent.id, {
-                channels: [...agent.channels, channelCfg],
+                channels: [...existingChannels, channelCfg],
             });
             await refreshConfig();
 
@@ -382,7 +462,7 @@ export default function ChannelWizard({
                 // Save channel name from verification
                 if (status?.botUsername) {
                     const displayName = platform === 'telegram' ? `@${status.botUsername}` : status.botUsername;
-                    const updatedChannels = agent.channels
+                    const updatedChannels = (agent.channels ?? [])
                         .filter(ch => ch.id !== channelId)
                         .concat([{ ...channelCfg, name: displayName }]);
                     await patchAgentConfig(agent.id, { channels: updatedChannels });
@@ -408,12 +488,12 @@ export default function ChannelWizard({
         const { loadAppConfig } = await import('@/config/configService');
         const latest = await loadAppConfig();
         const latestAgent = (latest.agents ?? []).find(a => a.id === agent.id);
-        const diskChannel = latestAgent?.channels.find(ch => ch.id === channelId);
+        const diskChannel = latestAgent?.channels?.find(ch => ch.id === channelId);
         const diskUsers = diskChannel?.allowedUsers ?? [];
         const mergedUsers = [...new Set([...diskUsers, ...allowedUsers])];
 
         // Update channel with setupCompleted + merged users
-        const updatedChannels = (latestAgent?.channels ?? agent.channels).map(ch =>
+        const updatedChannels = (latestAgent?.channels ?? agent.channels ?? []).map(ch =>
             ch.id === channelId
                 ? { ...ch, setupCompleted: true, allowedUsers: mergedUsers }
                 : ch,
@@ -437,7 +517,7 @@ export default function ChannelWizard({
         }
 
         // Remove channel from agent config
-        const updatedChannels = agent.channels.filter(ch => ch.id !== channelId);
+        const updatedChannels = (agent.channels ?? []).filter(ch => ch.id !== channelId);
         await patchAgentConfig(agent.id, { channels: updatedChannels });
         await refreshConfig();
 
@@ -470,7 +550,8 @@ export default function ChannelWizard({
     const stepLabel = (() => {
         if (isOpenClaw) {
             if (step === 1) return '配置插件';
-            return '确认并启动';
+            if (step === 2) return '确认并启动';
+            return '绑定用户';
         }
         if (isDingtalk) {
             if (step === 1) return '配置应用凭证';
@@ -952,7 +1033,7 @@ export default function ChannelWizard({
                 </div>
             )}
 
-            {/* OpenClaw Step 2: Confirm + Start */}
+            {/* OpenClaw Step 2: Setup guide (for promoted plugins like feishu) + Confirm + Start */}
             {isOpenClaw && step === 2 && (
                 <div className="space-y-6">
                     {/* Action bar at top */}
@@ -965,10 +1046,68 @@ export default function ChannelWizard({
                         nextIcon: !starting ? <Check className="h-4 w-4" /> : undefined,
                     })}
 
+                    {/* Feishu-specific: Permissions + Events + Publish guide (reuse built-in feishu setup) */}
+                    {promoted?.pluginId === 'openclaw-lark' && (
+                        <>
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-sm font-medium text-[var(--ink)]">2. 配置权限</h3>
+                                <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">权限管理</span></li>
+                                    <li>点击 <span className="font-medium text-[var(--ink)]">批量导入</span></li>
+                                    <li>粘贴以下 JSON（一键导入所有需要的权限）：</li>
+                                </ol>
+                                <div className="mt-3 relative">
+                                    <button
+                                        onClick={handleCopyPermJson}
+                                        className="absolute right-2 top-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                        title="复制 JSON"
+                                    >
+                                        {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
+                                    </button>
+                                    <pre className="overflow-x-auto rounded-lg bg-[var(--paper-inset)] p-3 text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                                        {FEISHU_PERMISSIONS_JSON}
+                                    </pre>
+                                </div>
+                                <img src={feishuStep2PermImg} alt="飞书权限管理 - 批量导入" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                            </div>
+
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-sm font-medium text-[var(--ink)]">3. 配置事件订阅</h3>
+                                <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
+                                    <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
+                                    <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px]">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                                </ol>
+                                <img src={feishuStep2EventImg} alt="飞书事件与回调 - 事件配置" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                            </div>
+
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-sm font-medium text-[var(--ink)]">4. 添加机器人能力并发布</h3>
+                                <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
+                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">添加应用能力</span>，找到 <span className="font-medium text-[var(--ink)]">机器人</span> 卡片，点击添加</li>
+                                    <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">版本管理与发布</span>，点击 <span className="font-medium text-[var(--ink)]">创建版本</span>，提交发布</li>
+                                </ol>
+                                <img src={feishuStep2AddBotImg} alt="飞书添加机器人能力" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                            </div>
+                        </>
+                    )}
+
+                    {/* Promoted plugin setup guide steps (non-feishu plugins) */}
+                    {promoted && promoted.pluginId !== 'openclaw-lark' && promoted.setupGuide?.steps && (
+                        <>
+                            {promoted.setupGuide.steps.map((s, i) => (
+                                <div key={i} className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                    <p className="text-sm text-[var(--ink-muted)]">{s.caption}</p>
+                                    <img src={s.image} alt={s.alt} className="mt-4 w-full rounded-lg border border-[var(--line)]" />
+                                </div>
+                            ))}
+                        </>
+                    )}
+
                     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                         <h3 className="text-sm font-medium text-[var(--ink)]">确认配置</h3>
                         <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
-                            确认以下信息无误后启动 Channel
+                            确认以上设置完成后，点击「启动 Channel」
                         </p>
 
                         <div className="mt-4 space-y-3">
@@ -1003,23 +1142,23 @@ export default function ChannelWizard({
                 </div>
             )}
 
-            {/* Binding step (built-in platforms only) */}
-            {!isOpenClaw && step === bindingStep && (
+            {/* Binding step (all platforms) */}
+            {step === bindingStep && (
                 <div className="space-y-6">
                     {/* Action bar at top */}
                     {renderActionBar({
-                        onBack: () => setStep((isFeishu || isDingtalk) ? 2 : 1),
+                        onBack: () => setStep((isFeishu || isDingtalk || isOpenClaw) ? 2 : 1),
                         onNext: handleComplete,
                         nextLabel: '完成',
                         nextIcon: <Check className="h-4 w-4" />,
                     })}
 
-                    {(isFeishu || isDingtalk) ? (
+                    {(isFeishu || isDingtalk || isOpenClaw) ? (
                         botStatus?.bindCode && (
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={allowedUsers.length > 0}
-                                platformName={isDingtalk ? '钉钉' : '飞书'}
+                                platformName={isOpenClaw ? platformLabel : isDingtalk ? '钉钉' : '飞书'}
                             />
                         )
                     ) : (
@@ -1040,7 +1179,7 @@ export default function ChannelWizard({
                         </>
                     )}
 
-                    {(isFeishu || isDingtalk) && allowedUsers.length > 0 && (
+                    {(isFeishu || isDingtalk || isOpenClaw) && allowedUsers.length > 0 && (
                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                             <WhitelistManager
                                 users={allowedUsers}

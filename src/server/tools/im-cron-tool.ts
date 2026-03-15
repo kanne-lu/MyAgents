@@ -1,4 +1,5 @@
-// IM Bot Cron Tool — AI-driven scheduled task management for IM Bots
+// Cron Tool — AI-driven scheduled task management for all Sidecar sessions
+// Supports both IM Bot sessions (with delivery) and regular Chat sessions
 // Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for cron task CRUD
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
@@ -38,6 +39,32 @@ export function getImCronContext(): ImCronContext | null {
   return imCronContext;
 }
 
+// ===== Session Cron Context (for non-IM sessions) =====
+
+export interface SessionCronContext {
+  sessionId: string;
+  workspacePath: string;
+  model?: string;
+  permissionMode?: string;
+  providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' };
+}
+
+let sessionCronContext: SessionCronContext | null = null;
+
+export function setSessionCronContext(ctx: SessionCronContext): void {
+  sessionCronContext = ctx;
+  console.log(`[im-cron] Session cron context set: sessionId=${ctx.sessionId}`);
+}
+
+export function clearSessionCronContext(): void {
+  sessionCronContext = null;
+  console.log('[im-cron] Session cron context cleared');
+}
+
+export function getSessionCronContext(): SessionCronContext | null {
+  return sessionCronContext;
+}
+
 // ===== Management API client =====
 
 const MANAGEMENT_PORT = process.env.MYAGENTS_MANAGEMENT_PORT;
@@ -58,6 +85,42 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
 
   const resp = await fetch(url, options);
   return resp.json();
+}
+
+// ===== Ownership verification =====
+
+/**
+ * Verify that a task belongs to the current session's workspace (or IM bot).
+ * Prevents cross-session/cross-workspace task manipulation.
+ * Returns an error CallToolResult if verification fails, or null if OK.
+ */
+async function verifyTaskOwnership(taskId: string, action: string): Promise<CallToolResult | null> {
+  const ctx = imCronContext || sessionCronContext;
+  if (!ctx) {
+    return {
+      content: [{ type: 'text', text: `Error: No cron context available. Cannot ${action} tasks without session context.` }],
+      isError: true,
+    };
+  }
+
+  // Build query: IM sessions filter by botId, desktop sessions by workspace
+  const query = imCronContext
+    ? `?sourceBotId=${encodeURIComponent(imCronContext.botId)}`
+    : `?workspacePath=${encodeURIComponent(ctx.workspacePath)}`;
+
+  const result = await managementApi(`/api/cron/list${query}`) as {
+    tasks: Array<{ id: string }>;
+  };
+
+  const taskBelongsToContext = result.tasks.some(t => t.id === taskId);
+  if (!taskBelongsToContext) {
+    return {
+      content: [{ type: 'text', text: `Error: Task ${taskId} does not belong to this workspace. You can only ${action} tasks within the current workspace.` }],
+      isError: true,
+    };
+  }
+
+  return null; // ownership verified
 }
 
 // ===== Tool handler =====
@@ -112,37 +175,56 @@ async function imCronToolHandler(args: {
             isError: true,
           };
         }
-        if (!imCronContext) {
+
+        // Resolve context: prefer IM context, fall back to session context
+        const addCtx = imCronContext || sessionCronContext;
+        if (!addCtx) {
           return {
-            content: [{ type: 'text', text: 'Error: No IM context available. This tool can only be used within an IM Bot session.' }],
+            content: [{ type: 'text', text: 'Error: No cron context available. Cannot create scheduled tasks without session context.' }],
             isError: true,
           };
         }
 
-        const result = await managementApi('/api/cron/create', 'POST', {
+        // Build create payload — IM sessions include delivery info, regular sessions do not
+        const createPayload: Record<string, unknown> = {
           name: args.job.name,
           schedule: args.job.schedule,
           message: args.job.message,
           sessionTarget: args.job.sessionTarget ?? 'new_session',
-          sourceBotId: imCronContext.botId,
-          delivery: {
+          workspacePath: addCtx.workspacePath,
+          model: addCtx.model,
+          permissionMode: addCtx.permissionMode ?? 'auto',
+          providerEnv: addCtx.providerEnv,
+          intervalMinutes: args.job.schedule.kind === 'every' ? args.job.schedule.minutes : 30,
+        };
+
+        // IM-specific fields: sourceBotId and delivery for result routing
+        if (imCronContext) {
+          createPayload.sourceBotId = imCronContext.botId;
+          createPayload.delivery = {
             botId: imCronContext.botId,
             chatId: imCronContext.chatId,
             platform: imCronContext.platform,
-          },
-          workspacePath: imCronContext.workspacePath,
-          model: imCronContext.model,
-          permissionMode: imCronContext.permissionMode ?? 'auto',
-          providerEnv: imCronContext.providerEnv,
-          intervalMinutes: args.job.schedule.kind === 'every' ? args.job.schedule.minutes : 30,
-        }) as { ok: boolean; taskId?: string; error?: string };
+          };
+        }
+
+        const result = await managementApi('/api/cron/create', 'POST', createPayload) as {
+          ok: boolean; taskId?: string; nextExecutionAt?: string; error?: string;
+        };
 
         if (result.ok) {
+          const scheduleDescription = formatSchedule(args.job.schedule);
+          const resultJson = {
+            ok: true,
+            taskId: result.taskId,
+            name: args.job.name || args.job.message.substring(0, 20),
+            schedule: args.job.schedule,
+            scheduleDesc: scheduleDescription,
+            nextExecutionAt: result.nextExecutionAt,
+            message: `Scheduled task created. ${scheduleDescription}`,
+          };
           return {
-            content: [{
-              type: 'text',
-              text: `Scheduled task created successfully.\nTask ID: ${result.taskId}\nSchedule: ${formatSchedule(args.job.schedule)}\nMessage: ${args.job.message}`,
-            }],
+            content: [{ type: 'text', text: JSON.stringify(resultJson) }],
           };
         }
         return {
@@ -152,7 +234,13 @@ async function imCronToolHandler(args: {
       }
 
       case 'list': {
-        const query = imCronContext ? `?sourceBotId=${encodeURIComponent(imCronContext.botId)}` : '';
+        // Filter by sourceBotId for IM sessions, by workspace for desktop sessions
+        const listCtx = imCronContext || sessionCronContext;
+        const query = imCronContext
+          ? `?sourceBotId=${encodeURIComponent(imCronContext.botId)}`
+          : listCtx?.workspacePath
+            ? `?workspacePath=${encodeURIComponent(listCtx.workspacePath)}`
+            : '';
         const result = await managementApi(`/api/cron/list${query}`) as {
           tasks: Array<{
             id: string;
@@ -191,6 +279,10 @@ async function imCronToolHandler(args: {
           };
         }
 
+        // Verify task belongs to current workspace
+        const updateOwnershipError = await verifyTaskOwnership(args.taskId, 'update');
+        if (updateOwnershipError) return updateOwnershipError;
+
         // Normalize patch: map "message" → "prompt" (tool schema uses "message", backend uses "prompt")
         // Also defensively handle AI nesting fields inside "job" (matching "add" schema structure)
         const rawPatch: Record<string, unknown> = { ...args.patch };
@@ -223,6 +315,11 @@ async function imCronToolHandler(args: {
             isError: true,
           };
         }
+
+        // Verify task belongs to current workspace
+        const removeOwnershipError = await verifyTaskOwnership(args.taskId, 'remove');
+        if (removeOwnershipError) return removeOwnershipError;
+
         const result = await managementApi('/api/cron/delete', 'POST', {
           taskId: args.taskId,
         }) as { ok: boolean; error?: string };
@@ -239,6 +336,11 @@ async function imCronToolHandler(args: {
             isError: true,
           };
         }
+
+        // Verify task belongs to current workspace
+        const runOwnershipError = await verifyTaskOwnership(args.taskId, 'trigger');
+        if (runOwnershipError) return runOwnershipError;
+
         const result = await managementApi('/api/cron/run', 'POST', {
           taskId: args.taskId,
         }) as { ok: boolean; error?: string };
@@ -255,6 +357,11 @@ async function imCronToolHandler(args: {
             isError: true,
           };
         }
+
+        // Verify task belongs to current workspace
+        const runsOwnershipError = await verifyTaskOwnership(args.taskId, 'view execution history of');
+        if (runsOwnershipError) return runsOwnershipError;
+
         const limit = args.limit || 20;
         const resp = await managementApi(
           `/api/cron/runs?taskId=${encodeURIComponent(args.taskId)}&limit=${limit}`,
@@ -280,14 +387,15 @@ async function imCronToolHandler(args: {
       }
 
       case 'status': {
-        if (!imCronContext) {
-          return {
-            content: [{ type: 'text', text: 'Error: No IM context available.' }],
-            isError: true,
-          };
-        }
+        // For IM sessions, filter by botId; for desktop sessions, filter by workspace
+        const statusCtx = imCronContext || sessionCronContext;
+        const statusQuery = imCronContext
+          ? `?botId=${encodeURIComponent(imCronContext.botId)}`
+          : statusCtx?.workspacePath
+            ? `?workspacePath=${encodeURIComponent(statusCtx.workspacePath)}`
+            : '';
         const resp = await managementApi(
-          `/api/cron/status?botId=${encodeURIComponent(imCronContext.botId)}`,
+          `/api/cron/status${statusQuery}`,
         ) as { ok: boolean; totalTasks: number; runningTasks: number; lastExecutedAt?: string; nextExecutionAt?: string };
 
         const parts = [
@@ -303,7 +411,7 @@ async function imCronToolHandler(args: {
       case 'wake': {
         if (!imCronContext) {
           return {
-            content: [{ type: 'text', text: 'Error: No IM context available.' }],
+            content: [{ type: 'text', text: 'Error: "wake" action is only available in IM Bot sessions.' }],
             isError: true,
           };
         }
@@ -367,7 +475,8 @@ Schedules can be:
 - "every": Recurring at fixed intervals (minimum 5 minutes)
 - "cron": Standard cron expression with optional timezone
 
-The task runs independently in a new AI session. Results are delivered to this chat.`,
+The task runs independently in a new AI session. In IM Bot sessions, results are delivered to the chat. In desktop sessions, results are stored and viewable via the "runs" action.
+Note: "wake" action is only available in IM Bot sessions.`,
         {
           action: z.enum(['list', 'add', 'update', 'remove', 'run', 'runs', 'status', 'wake'])
             .describe('Action to perform'),

@@ -31,6 +31,7 @@ import type { ChannelStatusData } from '@/hooks/useAgentStatuses';
 import { isOpenClawPlatform } from '../../../../shared/types/im';
 import type { InstalledPlugin } from '../../../../shared/types/im';
 import { findPromotedByPlatform } from '../../ImSettings/promotedPlugins';
+import OpenClawToolGroupsSelector from './OpenClawToolGroupsSelector';
 
 // ===== OpenClaw Plugin Config Editor =====
 function OpenClawConfigEditor({
@@ -102,7 +103,7 @@ export default function ChannelDetailView({
 
     // Find channel from agent config
     const channel = useMemo(
-        () => agent.channels.find(c => c.id === channelId),
+        () => agent.channels?.find(c => c.id === channelId),
         [agent.channels, channelId],
     );
 
@@ -160,7 +161,7 @@ export default function ChannelDetailView({
 
     // Patch channel config in agent
     const patchChannel = useCallback(async (patch: Partial<ChannelConfig>) => {
-        const updatedChannels = agent.channels.map(ch =>
+        const updatedChannels = (agent.channels ?? []).map(ch =>
             ch.id === channelId ? { ...ch, ...patch } : ch,
         );
         await patchAgentConfig(agent.id, { channels: updatedChannels });
@@ -210,7 +211,7 @@ export default function ChannelDetailView({
                                 ? `@${status.botUsername}`
                                 : status.botUsername;
                             if (ch?.name !== displayName) {
-                                const updatedChannels = agent.channels.map(c =>
+                                const updatedChannels = (agent.channels ?? []).map(c =>
                                     c.id === channelId ? { ...c, name: displayName } : c,
                                 );
                                 patchAgentConfig(agent.id, { channels: updatedChannels })
@@ -345,7 +346,7 @@ export default function ChannelDetailView({
                     // May not be running
                 }
             }
-            const updatedChannels = agent.channels.filter(ch => ch.id !== channelId);
+            const updatedChannels = (agent.channels ?? []).filter(ch => ch.id !== channelId);
             await patchAgentConfig(agent.id, { channels: updatedChannels });
             track('agent_channel_remove', { platform: channelRef.current?.type ?? 'unknown' });
             toastRef.current.success('Channel 已删除');
@@ -601,8 +602,19 @@ export default function ChannelDetailView({
                 )}
             </div>
 
-            {/* User binding — not for OpenClaw */}
-            {!isOpenClaw && (
+            {/* OpenClaw Tool Groups (e.g. feishu) */}
+            {isOpenClaw && channel.openclawPluginId && (
+                <OpenClawToolGroupsSelector
+                    enabledGroups={channel.openclawEnabledToolGroups}
+                    onChange={async (newGroups) => {
+                        await patchChannel({ openclawEnabledToolGroups: newGroups });
+                    }}
+                    pluginId={channel.openclawPluginId}
+                />
+            )}
+
+            {/* User binding — all platforms including OpenClaw (Rust handles BIND codes) */}
+            {(
             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]">
                 <button
                     type="button"
@@ -621,11 +633,11 @@ export default function ChannelDetailView({
                 </button>
                 {isBindingExpanded && (
                     <div className="space-y-5 px-5 pb-5">
-                        {isRunning && (channel.type === 'feishu' || channel.type === 'dingtalk') && botStatus?.bindCode && (
+                        {isRunning && (channel.type === 'feishu' || channel.type === 'dingtalk' || isOpenClaw) && botStatus?.bindCode && (
                             <BindCodePanel
                                 bindCode={botStatus.bindCode}
                                 hasWhitelistUsers={(channel.allowedUsers?.length ?? 0) > 0}
-                                platformName={channel.type === 'dingtalk' ? '钉钉' : '飞书'}
+                                platformName={channel.type === 'dingtalk' ? '钉钉' : channel.type === 'feishu' ? '飞书' : (channel.name || '插件 Bot')}
                             />
                         )}
                         {isRunning && channel.type === 'telegram' && botStatus?.bindUrl && (

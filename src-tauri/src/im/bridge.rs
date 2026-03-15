@@ -18,7 +18,9 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::im::adapter::{AdapterResult, ImAdapter, ImStreamAdapter};
 use crate::im::types::ImMessage;
-use crate::{ulog_info, ulog_error, ulog_debug};
+use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
+// Note: ulog_* macros write to BOTH system log AND unified log (~/.myagents/logs/unified-*.log)
+// This is critical for bridge stdout/stderr — using log::info! only writes to system log.
 
 // ===== Bridge Sender Registry =====
 // Lets management API route inbound messages from Bridge → processing loop.
@@ -74,6 +76,9 @@ pub struct BridgeAdapter {
     client: Client,
     #[allow(dead_code)]
     max_msg_length: usize,
+    supports_streaming: bool,
+    supports_cardkit: bool,
+    enabled_tool_groups: Vec<String>,
 }
 
 impl BridgeAdapter {
@@ -84,10 +89,13 @@ impl BridgeAdapter {
             bridge_port,
             client,
             max_msg_length: 4096,
+            supports_streaming: false,
+            supports_cardkit: false,
+            enabled_tool_groups: Vec::new(),
         }
     }
 
-    /// Fetch plugin capabilities from bridge and update max_msg_length.
+    /// Fetch plugin capabilities from bridge and update max_msg_length + streaming flags.
     /// Called once after bridge is verified healthy.
     pub async fn sync_capabilities(&mut self) {
         match self.client.get(self.url("/capabilities")).send().await {
@@ -97,12 +105,39 @@ impl BridgeAdapter {
                         self.max_msg_length = limit as usize;
                         ulog_info!("[bridge:{}] textChunkLimit = {}", self.plugin_id, limit);
                     }
+                    // CardKit / streaming capability flags (nested under capabilities object)
+                    let caps = &body["capabilities"];
+                    if caps["streaming"].as_bool() == Some(true) {
+                        self.supports_streaming = true;
+                        ulog_info!("[bridge:{}] streaming enabled", self.plugin_id);
+                    }
+                    if caps["streamingCardKit"].as_bool() == Some(true) {
+                        self.supports_cardkit = true;
+                        ulog_info!("[bridge:{}] CardKit enabled", self.plugin_id);
+                    }
+                    // Tool groups
+                    if let Some(groups) = caps["toolGroups"].as_array() {
+                        self.enabled_tool_groups = groups.iter()
+                            .filter_map(|g| g.as_str().map(String::from))
+                            .collect();
+                        if !self.enabled_tool_groups.is_empty() {
+                            ulog_info!("[bridge:{}] tool groups: {:?}", self.plugin_id, self.enabled_tool_groups);
+                        }
+                    }
                 }
             }
             _ => {
                 ulog_debug!("[bridge:{}] Could not fetch capabilities, using defaults", self.plugin_id);
             }
         }
+    }
+
+    /// Override enabled tool groups with user-configured selection.
+    /// Called after sync_capabilities() to replace plugin-declared groups
+    /// with the user's choices from the channel config UI.
+    pub fn set_enabled_tool_groups(&mut self, groups: Vec<String>) {
+        ulog_info!("[bridge:{}] user-configured tool groups: {:?}", self.plugin_id, groups);
+        self.enabled_tool_groups = groups;
     }
 
     fn url(&self, path: &str) -> String {
@@ -425,6 +460,121 @@ impl ImStreamAdapter for BridgeAdapter {
     fn preferred_throttle_ms(&self) -> u64 {
         1000
     }
+
+    fn bridge_context(&self) -> Option<(u16, String, Vec<String>)> {
+        Some((self.bridge_port, self.plugin_id.clone(), self.enabled_tool_groups.clone()))
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.supports_streaming
+    }
+
+    async fn start_stream(
+        &self,
+        chat_id: &str,
+        initial_text: &str,
+    ) -> AdapterResult<String> {
+        let body = json!({
+            "chatId": chat_id,
+            "initialContent": initial_text,
+            "streamMode": if self.supports_cardkit { "cardkit" } else { "text" },
+        });
+        let resp = self.client
+            .post(self.url("/start-stream"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge start-stream failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge start-stream returned {}: {}", status, text));
+        }
+
+        let resp_body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Ok(resp_body["streamId"].as_str().unwrap_or("").to_string())
+    }
+
+    async fn stream_chunk(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+        text: &str,
+        sequence: u32,
+        is_thinking: bool,
+    ) -> AdapterResult<()> {
+        let body = json!({
+            "chatId": chat_id,
+            "streamId": stream_id,
+            "content": text,
+            "sequence": sequence,
+            "isThinking": is_thinking,
+        });
+        let resp = self.client
+            .post(self.url("/stream-chunk"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge stream-chunk failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge stream-chunk returned {}: {}", status, text));
+        }
+        Ok(())
+    }
+
+    async fn finalize_stream(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+        final_text: &str,
+    ) -> AdapterResult<()> {
+        let body = json!({
+            "chatId": chat_id,
+            "streamId": stream_id,
+            "finalContent": final_text,
+        });
+        let resp = self.client
+            .post(self.url("/finalize-stream"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge finalize-stream failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge finalize-stream returned {}: {}", status, text));
+        }
+        Ok(())
+    }
+
+    async fn abort_stream(
+        &self,
+        chat_id: &str,
+        stream_id: &str,
+    ) -> AdapterResult<()> {
+        let body = json!({
+            "chatId": chat_id,
+            "streamId": stream_id,
+        });
+        let resp = self.client
+            .post(self.url("/abort-stream"))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Bridge abort-stream failed: {}", e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!("Bridge abort-stream returned {}: {}", status, text));
+        }
+        Ok(())
+    }
 }
 
 // ===== Bridge Process Management =====
@@ -516,8 +666,8 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         bun_path, bridge_script, plugin_dir, port, rust_port
     );
 
-    let mut child = std::process::Command::new(&bun_path)
-        .arg(bridge_script.to_string_lossy().as_ref())
+    let mut cmd = std::process::Command::new(&bun_path);
+    cmd.arg(bridge_script.to_string_lossy().as_ref())
         // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
         // can find and kill orphaned bridge processes after a crash
         .arg("--myagents-sidecar")
@@ -530,16 +680,48 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .arg("--bot-id")
         .arg(bot_id)
         // Pass config via env var to avoid leaking secrets in `ps` process listing
-        .env("BRIDGE_PLUGIN_CONFIG", &config_json)
-        // Prevent system proxy (Clash/V2Ray) from intercepting localhost traffic
-        .env("NO_PROXY", "127.0.0.1,localhost")
-        .env("no_proxy", "127.0.0.1,localhost")
+        .env("BRIDGE_PLUGIN_CONFIG", &config_json);
+
+    // Inject proxy env vars (same logic as sidecar.rs) so plugin HTTP calls
+    // (e.g. Feishu API via axios/fetch) use MyAgents' configured proxy
+    if let Some(proxy_settings) = crate::proxy_config::read_proxy_settings() {
+        match crate::proxy_config::get_proxy_url(&proxy_settings) {
+            Ok(proxy_url) => {
+                ulog_info!("[bridge] Injecting proxy for plugin: {}", proxy_url);
+                cmd.env("HTTP_PROXY", &proxy_url);
+                cmd.env("HTTPS_PROXY", &proxy_url);
+                cmd.env("http_proxy", &proxy_url);
+                cmd.env("https_proxy", &proxy_url);
+                cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+                cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+            }
+            Err(e) => {
+                ulog_warn!("[bridge] Invalid proxy config ({}), stripping proxy env vars", e);
+                for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                             "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"] {
+                    cmd.env_remove(var);
+                }
+            }
+        }
+    } else {
+        // No MyAgents proxy configured: strip inherited system proxy env vars
+        // so the Bridge doesn't accidentally use Clash/V2Ray system proxy
+        ulog_debug!("[bridge] No proxy configured, stripping inherited proxy env vars");
+        for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                     "ALL_PROXY", "all_proxy"] {
+            cmd.env_remove(var);
+        }
+        cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+        cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+    }
+
+    let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to spawn bridge process: {}", e))?;
 
-    // Pipe stdout/stderr to unified log (same pattern as sidecar.rs)
+    // Pipe stdout/stderr to unified log
     {
         use std::io::{BufRead, BufReader};
         if let Some(stdout) = child.stdout.take() {
@@ -547,7 +729,7 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
             std::thread::spawn(move || {
                 let reader = BufReader::new(stdout);
                 for line in reader.lines().flatten() {
-                    log::info!("[bridge-out][{}] {}", bot_id_clone, line);
+                    ulog_info!("[bridge-out][{}] {}", bot_id_clone, line);
                 }
             });
         }
@@ -556,7 +738,7 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
             std::thread::spawn(move || {
                 let reader = BufReader::new(stderr);
                 for line in reader.lines().flatten() {
-                    log::error!("[bridge-err][{}] {}", bot_id_clone, line);
+                    ulog_error!("[bridge-err][{}] {}", bot_id_clone, line);
                 }
             });
         }
@@ -798,7 +980,71 @@ async fn install_sdk_shim<R: tauri::Runtime>(
     copy_dir_recursive(&shim_src, &shim_dst).await?;
 
     ulog_info!("[bridge] SDK shim installed from {:?} → {:?}", shim_src, shim_dst);
+
+    // Patch @larksuiteoapi/node-sdk to use a fetch-based axios adapter.
+    // Bun's default axios http adapter has a bug where socket connections are
+    // silently closed, causing 30s hangs. This patch replaces the SDK's
+    // defaultHttpInstance with one using native fetch (252ms vs 30278ms).
+    patch_lark_sdk_for_bun(plugin_dir).await;
+
     Ok(())
+}
+
+/// Patch @larksuiteoapi/node-sdk's defaultHttpInstance to use a fetch-based
+/// axios adapter instead of the default Node.js http adapter (incompatible with Bun).
+async fn patch_lark_sdk_for_bun(plugin_dir: &std::path::Path) {
+    let sdk_file = plugin_dir
+        .join("node_modules")
+        .join("@larksuiteoapi")
+        .join("node-sdk")
+        .join("lib")
+        .join("index.js");
+
+    if !sdk_file.exists() {
+        return; // Not a Lark SDK plugin, skip
+    }
+
+    let code = match tokio::fs::read_to_string(&sdk_file).await {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let target = r#"const defaultHttpInstance = axios__default["default"].create();"#;
+    if !code.contains(target) {
+        return; // Already patched or different SDK version
+    }
+
+    // Minimal fetch-based adapter that replaces axios's Node.js http adapter
+    let adapter = concat!(
+        "function bunFetchAdapter(c){return new Promise(async(r,j)=>{try{",
+        "let u=c.baseURL?c.baseURL+c.url:c.url;",
+        "let h={};if(c.headers)for(let[k,v]of Object.entries(c.headers))if(v!=null)h[k]=String(v);",
+        "if(c.params){let q=new URLSearchParams();for(let[k,v]of Object.entries(c.params)){",
+        "if(Array.isArray(v))v.forEach(i=>q.append(k,String(i)));",
+        "else if(v!=null)q.append(k,String(v))}",
+        "let s=q.toString();if(s)u+=(u.includes('?')?'&':'?')+s}",
+        "let m=(c.method||'get').toUpperCase();",
+        "let opts={method:m,headers:h};",
+        "if(c.data&&m!=='GET'&&m!=='HEAD'&&m!=='OPTIONS'){",
+        "opts.body=typeof c.data==='string'?c.data:JSON.stringify(c.data)}",
+        "let resp=await fetch(u,opts);",
+        "let d;try{d=await resp.json()}catch{d=await resp.text()}",
+        "r({data:d,status:resp.status,statusText:resp.statusText,",
+        "headers:Object.fromEntries(resp.headers.entries()),config:c,request:{}})",
+        "}catch(e){j(e)}})}",
+    );
+
+    let replacement = format!(
+        "{}; const defaultHttpInstance = axios__default[\"default\"].create({{adapter: bunFetchAdapter}});",
+        adapter
+    );
+
+    let patched = code.replace(target, &replacement);
+    if let Err(e) = tokio::fs::write(&sdk_file, patched).await {
+        ulog_warn!("[bridge] Failed to patch Lark SDK for Bun: {}", e);
+    } else {
+        ulog_info!("[bridge] Patched @larksuiteoapi/node-sdk with fetch adapter for Bun compatibility");
+    }
 }
 
 /// Resolve npm spec to the package directory name in node_modules.

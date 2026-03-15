@@ -39,6 +39,7 @@ pub struct BotConfigPatch {
     pub group_tools_deny: Option<Vec<String>>,
     // ===== OpenClaw Channel Plugin =====
     pub openclaw_plugin_config: Option<serde_json::Value>,
+    pub openclaw_enabled_tool_groups: Option<Vec<String>>,
 }
 
 /// IM platform type
@@ -299,6 +300,8 @@ pub struct ImConfig {
     pub openclaw_npm_spec: Option<String>,
     #[serde(default)]
     pub openclaw_plugin_config: Option<serde_json::Value>,
+    #[serde(default)]
+    pub openclaw_enabled_tool_groups: Option<Vec<String>>,
 }
 
 fn default_platform() -> ImPlatform {
@@ -333,6 +336,7 @@ impl Default for ImConfig {
             openclaw_plugin_id: None,
             openclaw_npm_spec: None,
             openclaw_plugin_config: None,
+            openclaw_enabled_tool_groups: None,
         }
     }
 }
@@ -683,6 +687,8 @@ pub struct ChannelConfigRust {
     pub openclaw_plugin_config: Option<serde_json::Value>,
     #[serde(default)]
     pub openclaw_manifest: Option<serde_json::Value>,
+    #[serde(default)]
+    pub openclaw_enabled_tool_groups: Option<Vec<String>>,
 
     // User management
     #[serde(default)]
@@ -817,6 +823,7 @@ impl ChannelConfigRust {
             openclaw_plugin_id: self.openclaw_plugin_id.clone(),
             openclaw_npm_spec: self.openclaw_npm_spec.clone(),
             openclaw_plugin_config: self.openclaw_plugin_config.clone(),
+            openclaw_enabled_tool_groups: self.openclaw_enabled_tool_groups.clone(),
         }
     }
 }

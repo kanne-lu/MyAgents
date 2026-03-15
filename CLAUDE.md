@@ -39,7 +39,7 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 ### Tab-scoped 隔离
 
-每个 Chat Tab 拥有独立的 Bun Sidecar 进程（Tab/CronTask/BackgroundCompletion/ImBot 四种 Owner 共享 SidecarManager）。MUST 在 Tab 内使用 `useTabState()` 返回的 `apiGet`/`apiPost`，**禁止**在 Tab 内使用全局 `apiPostJson`/`apiGetJson`（会发到 Global Sidecar）。
+每个 Chat Tab 拥有独立的 Bun Sidecar 进程（Tab/CronTask/BackgroundCompletion/Agent 四种 Owner 共享 SidecarManager）。MUST 在 Tab 内使用 `useTabState()` 返回的 `apiGet`/`apiPost`，**禁止**在 Tab 内使用全局 `apiPostJson`/`apiGetJson`（会发到 Global Sidecar）。
 
 ### Rust 代理层
 
@@ -66,11 +66,22 @@ npm run typecheck && npm run lint  # 代码质量检查
 - 持久 Session 中 pre-warm 就是最终 session，用户消息通过 `wakeGenerator()` 注入。任何 `!preWarm` 条件守卫都可能导致逻辑在持久模式下永远不执行
 - 新增配置同步端点时，确保 `currentXxx` 变量在 pre-warm 前已设置
 
+### 定时任务系统
+
+Rust `CronTaskManager` 统一管理所有定时任务（Chat 定时、独立创建、AI 工具调用、IM Cron、Heartbeat），支持三种调度：固定间隔 / Cron 表达式 / 一次性。Cron Tool（`im-cron` MCP server）已泛化为**所有 Session 可用**（不仅 IM Bot），始终信任。新增 `CronTask` 字段 MUST 带 `#[serde(default)]`。详见 @specs/tech_docs/architecture.md 的「定时任务系统」节。
+
 ### Config 持久化（disk-first）
 
 `AppConfig` 同时存在于磁盘（config.json）和 React 状态中，两者可能不同步。`useConfig` 已重构为 `ConfigDataContext` + `ConfigActionsContext` 双 Context 分离。写入配置时 MUST 以磁盘为准（`await loadAppConfig()` 读最新再合并），禁止直接使用 React `config` 状态写盘。
 
-IM Bot 配置通过 Rust 命令 `cmd_update_im_bot_config` 写盘，写盘后 MUST 调用 `refreshConfig()` 同步 React 状态。
+Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST 调用 `refreshConfig()` 同步 React 状态。
+
+### Plugin Bridge（OpenClaw 插件）
+
+- Bridge 是独立 Bun 进程，MUST 与 Sidecar 保持同等待遇：环境变量注入（`proxy_config`、`NO_PROXY`）、日志宏（`ulog_*` 不是 `log::*`）、config 查询范围（`imBotConfigs` + `agents[].channels[]`）
+- Bun 对 Node.js `http` 模块兼容性不完整，使用 axios 的 npm 包可能静默挂起。新接入插件 MUST 验证其 HTTP 调用在 Bun 下正常（不能只验证 import 成功）
+- 兼容层验证 MUST 跑完整消息收发链路（不能只验证 `register()` 成功）
+- 详细架构：@specs/research/openclaw_sdk_shim_analysis.md
 
 ---
 
@@ -92,6 +103,8 @@ IM Bot 配置通过 Rust 命令 `cmd_update_im_bot_config` 写盘，写盘后 MU
 | 日志日期用 UTC `toISOString` | 与本地日期文件名不匹配 | 统一用 `localDate()`（`src/shared/logTime.ts`） |
 | UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 design_guide.md |
 | Plugin Bridge 用裸 `reqwest::Client` | 系统代理 → 502 | `local_http::json_client()` — Bridge 进程也在 localhost |
+| CronTask 新增字段不加 `#[serde(default)]` | 旧版 JSON 反序列化失败 | 非核心字段 MUST 加 `#[serde(default)]` |
+| Rust 子进程日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
 
 ---
 
@@ -101,6 +114,7 @@ IM Bot 配置通过 Rust 命令 `cmd_update_im_bot_config` 写盘，写盘后 MU
 
 - **IM Bot 问题**：搜 `[feishu]` `[im]` `[telegram]` `[dingtalk]` `[bridge]` `[openclaw]`
 - **AI/Agent 异常**：搜 `[agent]` `pre-warm` `timeout`
+- **定时任务问题**：搜 `[CronTask]`（初始化/恢复/执行日志已切换到统一日志 `ulog_*`）
 - **Rust 层问题**：额外查系统日志 `/Users/{user}/Library/Logs/com.myagents.app/MyAgents.log`
 
 详细日志架构：@specs/tech_docs/unified_logging.md

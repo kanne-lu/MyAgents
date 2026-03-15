@@ -35,7 +35,7 @@ export default function ChannelConfigPanel({ agent, channel, onBack, onChanged }
     : PLATFORM_LABELS[channel.type] || channel.type;
 
   const updateChannel = useCallback(async (patch: Partial<ChannelConfig>) => {
-    const updatedChannels = agent.channels.map(ch =>
+    const updatedChannels = (agent.channels ?? []).map(ch =>
       ch.id === channel.id ? { ...ch, ...patch } : ch,
     );
     await patchAgentConfig(agent.id, { channels: updatedChannels });
@@ -86,7 +86,7 @@ export default function ChannelConfigPanel({ agent, channel, onBack, onChanged }
   const handleRemoveChannel = useCallback(async () => {
     // Stop running channel before removing from config
     await stopRunningChannel();
-    const updatedChannels = agent.channels.filter(ch => ch.id !== channel.id);
+    const updatedChannels = (agent.channels ?? []).filter(ch => ch.id !== channel.id);
     await patchAgentConfig(agent.id, { channels: updatedChannels });
     if (isMountedRef.current) {
       onChanged();

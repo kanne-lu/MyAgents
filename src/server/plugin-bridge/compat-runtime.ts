@@ -57,9 +57,59 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
   // Mutable — updated after plugin registration when actual ID is known
   let currentPluginId = pluginId;
 
+  // Parse the plugin config once (passed via env var by Bridge spawner)
+  const bridgePluginConfig = JSON.parse(process.env.BRIDGE_PLUGIN_CONFIG || '{}');
+
   const runtime = {
     /** Update the plugin ID after registration */
     setPluginId(id: string) { currentPluginId = id; },
+
+    // ===== Config =====
+    // LarkClient.runtime.config.loadConfig() is called during message handling
+    config: {
+      loadConfig() {
+        console.log('[compat-timing] config.loadConfig() called');
+
+        // Return an OpenClaw-format config with the plugin's channel settings
+        // Use currentPluginId as channel key (not hardcoded 'feishu') so any plugin
+        // can resolve its own config via cfg.channels[pluginId]
+        // Force dmPolicy/groupPolicy=open — MyAgents handles access control at Rust layer
+        return {
+          channels: {
+            [currentPluginId]: {
+              enabled: true,
+              ...bridgePluginConfig,
+              dmPolicy: 'open',
+              groupPolicy: 'open',
+            },
+          },
+        };
+      },
+      async writeConfigFile(_cfg: unknown) {
+        // No-op — Bridge doesn't write config files
+      },
+    },
+
+    // ===== Logging =====
+    // LarkClient.runtime.logging.getChildLogger() is called for plugin logging
+    logging: {
+      getChildLogger(opts: Record<string, unknown>) {
+        const prefix = opts?.name ? `[${opts.name}]` : '[plugin]';
+        return {
+          info: (...args: unknown[]) => console.log(prefix, ...args),
+          warn: (...args: unknown[]) => console.warn(prefix, ...args),
+          error: (...args: unknown[]) => console.error(prefix, ...args),
+          debug: (...args: unknown[]) => console.debug(prefix, ...args),
+        };
+      },
+    },
+
+    // ===== System events =====
+    // Plugins call core.system.enqueueSystemEvent() during message dispatch
+    system: {
+      enqueueSystemEvent(_event: unknown) {},
+      getSystemEvents() { return []; },
+    },
 
     channel: {
       // ===== Activity tracking =====
@@ -91,6 +141,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
         },
 
         finalizeInboundContext(ctx: Record<string, unknown>) {
+          console.log(`[compat-timing] finalizeInboundContext called, Body len=${String(ctx.Body || '').length}`);
           return ctx;
         },
 
@@ -106,9 +157,40 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           return { dispatch: async () => {} };
         },
 
-        async dispatchReplyFromConfig(_params: Record<string, unknown>) {},
+        /**
+         * Feishu plugin calls dispatchReplyFromConfig() which is a higher-level
+         * API than dispatchReplyWithBufferedBlockDispatcher(). Route it through
+         * the same interception point so messages reach Rust.
+         */
+        async dispatchReplyFromConfig(params: Record<string, unknown>) {
+          const t0 = Date.now();
+          console.log(`[compat-timing] dispatchReplyFromConfig ENTER`);
+          const ctx = (params.ctx || params) as Record<string, unknown>;
+          const result = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg: params.cfg as Record<string, unknown> });
+          console.log(`[compat-timing] dispatchReplyFromConfig EXIT (+${Date.now() - t0}ms)`);
+          return result;
+        },
 
-        async withReplyDispatcher(_params: Record<string, unknown>) {},
+        /**
+         * Feishu plugin wraps dispatch calls in withReplyDispatcher({ run }).
+         * Execute the run function which will call dispatchReplyFromConfig,
+         * which now correctly routes to our interception point.
+         */
+        async withReplyDispatcher(params: Record<string, unknown>) {
+          const t0 = Date.now();
+          console.log(`[compat-timing] withReplyDispatcher ENTER`);
+          const run = params.run as (() => Promise<unknown>) | undefined;
+          if (typeof run === 'function') {
+            try {
+              await run();
+              console.log(`[compat-timing] withReplyDispatcher run() OK (+${Date.now() - t0}ms)`);
+            } catch (err) {
+              console.error(`[compat-timing] withReplyDispatcher run() THREW (+${Date.now() - t0}ms):`, err);
+            }
+          }
+          // Plugin destructures { queuedFinal, counts } from the return value
+          return { queuedFinal: 0, counts: {} };
+        },
 
         /**
          * Core interception point: instead of calling `deliver()`, we POST
@@ -124,18 +206,26 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const text = String(ctx.BodyForAgent || ctx.Body || ctx.body || ctx.RawBody || '');
           const senderId = String(ctx.SenderId || ctx.senderId || '');
           const senderName = String(ctx.SenderName || ctx.senderName || '');
-          const chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          // Feishu plugin sets From = "feishu:ou_xxx" (prefixed); strip the channel prefix
+          // to get the raw chat/user ID that Rust expects
+          let chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
-          const isMention = ctx.IsMention ?? ctx.isMention ?? true;
+          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention ?? true;
+
+          // Extract attachment-related fields (for Feishu file/image forwarding, threaded replies, etc.)
+          const attachments = (ctx.Attachments || ctx.attachments || undefined) as Record<string, unknown>[] | undefined;
+          const replyToMessageId = String(ctx.ReplyToMessageId || ctx.replyToMessageId || '') || undefined;
 
           if (!text.trim()) {
             console.log('[compat-runtime] Empty message, skipping');
             return;
           }
 
-          console.log(`[compat-runtime] Dispatching message to Rust: sender=${senderId} chat=${chatId} len=${text.length}`);
+          const t0 = Date.now();
+          console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher ENTER: sender=${senderId} chat=${chatId} len=${text.length}`);
 
           try {
             const resp = await fetch(`${rustBaseUrl}/api/im-bridge/message`, {
@@ -152,15 +242,18 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
                 messageId: messageId || undefined,
                 groupId: groupId || undefined,
                 isMention,
+                attachments: attachments || undefined,
+                replyToMessageId: replyToMessageId || undefined,
               }),
             });
 
+            console.log(`[compat-timing] Rust POST completed (+${Date.now() - t0}ms) status=${resp.status}`);
             if (!resp.ok) {
               const body = await resp.text();
               console.error(`[compat-runtime] Rust returned ${resp.status}: ${body}`);
             }
           } catch (err) {
-            console.error('[compat-runtime] Failed to POST to Rust:', err);
+            console.error(`[compat-timing] Rust POST FAILED (+${Date.now() - t0}ms):`, err);
           }
 
           // Do NOT call the deliver callback — AI reply comes back via /send-text
@@ -214,9 +307,9 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
       },
 
       // ===== Pairing (device binding) =====
-      // No-op — MyAgents uses its own allowedUsers mechanism.
+      // No-op — MyAgents uses its own allowedUsers mechanism via BIND codes.
       pairing: {
-        buildPairingReply: () => '',
+        buildPairingReply: () => { console.log('[compat-timing] pairing.buildPairingReply called'); return ''; },
         readAllowFromStore: async () => [],
         upsertPairingRequest: async () => ({}),
       },

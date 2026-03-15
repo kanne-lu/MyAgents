@@ -59,7 +59,7 @@ export default memo(function SortableTabItem({
             data-tab-id={tab.id}
             title={tooltipTitle}
             className={`
-                group relative flex h-8 min-w-[100px] max-w-[200px] cursor-default items-center
+                group/tab relative flex h-8 min-w-[100px] max-w-[200px] cursor-default items-center
                 rounded-lg px-3 transition-colors duration-150 flex-shrink-0
                 ${isDragging ? 'shadow-lg ring-2 ring-[var(--accent)]/30' : ''}
                 ${isActive
@@ -84,6 +84,23 @@ export default memo(function SortableTabItem({
                 {displayTitle}
             </span>
 
+            {/* Status dot indicator — streaming (pulsing green, always visible) or unread (static warm, non-active only) */}
+            {tab.isGenerating && (
+                <>
+                    <span className="relative ml-1 flex h-1.5 w-1.5 flex-shrink-0" aria-hidden="true">
+                        <span className="absolute inset-0 rounded-full bg-[var(--success)]" />
+                        <span className="absolute inset-0 rounded-full bg-[var(--success)] animate-[tab-dot-pulse_1.6s_cubic-bezier(.22,.61,.36,1)_infinite]" />
+                    </span>
+                    <span className="sr-only">AI 正在输出</span>
+                </>
+            )}
+            {!isActive && !tab.isGenerating && tab.hasUnread && (
+                <>
+                    <span className="ml-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-[var(--accent-warm)]" aria-hidden="true" />
+                    <span className="sr-only">有未读消息</span>
+                </>
+            )}
+
             {/* Close button — enlarged hit area (24×24) with visual icon (12×12) */}
             <button
                 className={`
@@ -91,7 +108,7 @@ export default memo(function SortableTabItem({
                     transition-all duration-150
                     ${isActive
                         ? 'opacity-60 hover:bg-[var(--ink)]/10 hover:opacity-100'
-                        : 'opacity-0 group-hover:opacity-60 hover:!bg-[var(--ink)]/10 hover:!opacity-100'
+                        : 'opacity-0 group-hover/tab:opacity-60 hover:!bg-[var(--ink)]/10 hover:!opacity-100'
                     }
                 `}
                 onClick={(e) => {
@@ -107,6 +124,7 @@ export default memo(function SortableTabItem({
             {isActive && (
                 <div className="absolute bottom-0.5 left-3 right-3 h-0.5 rounded-full bg-[var(--accent)]" />
             )}
+
         </div>
     );
 });

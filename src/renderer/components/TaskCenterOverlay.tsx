@@ -5,7 +5,7 @@
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { BarChart2, Clock, Trash2, X } from 'lucide-react';
+import { BarChart2, Clock, Plus, Trash2, X } from 'lucide-react';
 
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
@@ -26,6 +26,7 @@ import {
     formatScheduleDescription,
     formatNextExecution,
 } from '@/types/cronTask';
+import TaskCreateModal from '@/components/scheduled-tasks/TaskCreateModal';
 
 interface TaskCenterOverlayProps {
     projects: Project[];
@@ -60,6 +61,7 @@ export default memo(function TaskCenterOverlay({
     const [workspaceFilter, setWorkspaceFilter] = useState<string>('all');
     const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
+    const [showCreateModal, setShowCreateModal] = useState(false);
 
     // Unique workspace entries for dropdown (name + icon)
     const workspaceOptions = useMemo(() => {
@@ -322,13 +324,22 @@ export default memo(function TaskCenterOverlay({
                         </h3>
 
                         <div className="flex-1 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
-                            {sortedCronTasks.length === 0 ? (
-                                <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
-                                    暂无定时任务
-                                </div>
-                            ) : (
-                                <div className="space-y-1">
-                                    {sortedCronTasks.map(task => {
+                            <div className="space-y-1">
+                                {/* Create button — first item, matching RecentTasks style */}
+                                <button
+                                    onClick={() => setShowCreateModal(true)}
+                                    className="mb-1 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] transition-colors"
+                                >
+                                    <Plus className="h-3.5 w-3.5" />
+                                    新建定时任务
+                                </button>
+
+                                {sortedCronTasks.length === 0 ? (
+                                    <div className="py-6 text-center text-[13px] text-[var(--ink-muted)]/60">
+                                        暂无定时任务
+                                    </div>
+                                ) : (
+                                    sortedCronTasks.map(task => {
                                         const botInfo = task.sourceBotId
                                             ? cronBotInfoMap.get(task.sourceBotId)
                                             : undefined;
@@ -368,9 +379,9 @@ export default memo(function TaskCenterOverlay({
                                                 </div>
                                             </button>
                                         );
-                                    })}
-                                </div>
-                            )}
+                                    })
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -391,6 +402,11 @@ export default memo(function TaskCenterOverlay({
                     sessionId={statsSession.id}
                     sessionTitle={statsSession.title}
                     onClose={() => setStatsSession(null)}
+                />
+            )}
+            {showCreateModal && (
+                <TaskCreateModal
+                    onClose={() => setShowCreateModal(false)}
                 />
             )}
         </div>

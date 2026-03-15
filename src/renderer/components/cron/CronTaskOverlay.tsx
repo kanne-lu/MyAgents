@@ -108,7 +108,7 @@ export default function CronTaskOverlay({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-[var(--ink)]">
-              循环运行中
+              定时运行中
             </span>
             {timeDisplay && (
               <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-xs ${
