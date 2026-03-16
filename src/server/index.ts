@@ -6436,16 +6436,25 @@ async function main() {
 
           // --- Gate: Read HEARTBEAT.md from workspace root ---
           // The actual checklist lives in HEARTBEAT.md, not in config.
-          // If the file is empty/missing AND no system events AND not high-priority → skip AI call.
+          // If the file body is empty/missing AND no system events → skip AI call.
           const heartbeatMdPath = join(currentAgentDir, 'HEARTBEAT.md');
           let heartbeatMdContent = '';
           try {
-            heartbeatMdContent = readFileSync(heartbeatMdPath, 'utf-8').trim();
+            const rawContent = readFileSync(heartbeatMdPath, 'utf-8');
+            // Strip YAML frontmatter — only the body is used as prompt
+            heartbeatMdContent = stripYamlFrontmatter(rawContent);
           } catch {
-            // File doesn't exist — create an empty one so the user knows where to edit
+            // File doesn't exist — create with descriptive frontmatter
             try {
-              writeFileSync(heartbeatMdPath, '', 'utf-8');
-              console.log(`[im/heartbeat] Created empty HEARTBEAT.md at ${heartbeatMdPath}`);
+              const defaultHeartbeat = `---
+description: >
+  心跳清单 — Agent 按心跳间隔定时苏醒时会读取本文件的正文部分作为指令执行。
+  正文为空时心跳会静默跳过（回复 HEARTBEAT_OK）。
+  你可以在正文中写入需要 Agent 定期检查的任务、监控项或提醒事项。
+---
+`;
+              writeFileSync(heartbeatMdPath, defaultHeartbeat, 'utf-8');
+              console.log(`[im/heartbeat] Created HEARTBEAT.md with frontmatter at ${heartbeatMdPath}`);
             } catch (writeErr) {
               console.warn(`[im/heartbeat] Failed to create HEARTBEAT.md: ${writeErr}`);
             }
@@ -6487,8 +6496,8 @@ async function main() {
             }
           }
 
-          // Wrap the entire heartbeat message in <HEARTBEAT> tags
-          enrichedPrompt = `<HEARTBEAT>\n${enrichedPrompt}\n</HEARTBEAT>`;
+          // Wrap the entire heartbeat message in <system-reminder><HEARTBEAT> tags
+          enrichedPrompt = `<system-reminder>\n<HEARTBEAT>\n${enrichedPrompt}\n</HEARTBEAT>\n</system-reminder>`;
 
           const {
             enqueueUserMessage, waitForSessionIdle, getMessages,
