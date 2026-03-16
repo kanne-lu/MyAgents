@@ -76,13 +76,13 @@ export function extractPlatformDisplay(sessionKey: string): string {
         const channelType = parts[2] ?? 'unknown';
         if (channelType.startsWith('openclaw:')) {
             const pluginId = channelType.slice('openclaw:'.length);
-            const promoted = findPromotedPlugin(pluginId);
-            return promoted?.name ?? PLATFORM_DISPLAY_NAMES[pluginId] ?? (pluginId.charAt(0).toUpperCase() + pluginId.slice(1));
+            // PLATFORM_DISPLAY_NAMES takes priority (concise labels like "QQ"),
+            // promoted plugin name is fallback (may be verbose like "QQ Bot")
+            return PLATFORM_DISPLAY_NAMES[pluginId] ?? findPromotedPlugin(pluginId)?.name ?? (pluginId.charAt(0).toUpperCase() + pluginId.slice(1));
         }
         if (channelType === 'openclaw' && parts[3]) {
             const pluginChannelId = parts[3];
-            const promoted = findPromotedPlugin(pluginChannelId);
-            return promoted?.name ?? PLATFORM_DISPLAY_NAMES[pluginChannelId] ?? (pluginChannelId.charAt(0).toUpperCase() + pluginChannelId.slice(1));
+            return PLATFORM_DISPLAY_NAMES[pluginChannelId] ?? findPromotedPlugin(pluginChannelId)?.name ?? (pluginChannelId.charAt(0).toUpperCase() + pluginChannelId.slice(1));
         }
         return PLATFORM_DISPLAY_NAMES[channelType] ?? (channelType.charAt(0).toUpperCase() + channelType.slice(1));
     }
@@ -90,8 +90,7 @@ export function extractPlatformDisplay(sessionKey: string): string {
     const platform = parts[1] ?? 'unknown';
     if (platform === 'openclaw' && parts[2]) {
         const channelId = parts[2];
-        const promoted = findPromotedPlugin(channelId);
-        return promoted?.name ?? (PLATFORM_DISPLAY_NAMES[channelId] ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1)));
+        return PLATFORM_DISPLAY_NAMES[channelId] ?? findPromotedPlugin(channelId)?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
     }
     return PLATFORM_DISPLAY_NAMES[platform] ?? (platform.charAt(0).toUpperCase() + platform.slice(1));
 }
