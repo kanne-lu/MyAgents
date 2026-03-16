@@ -1356,7 +1356,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     <div className="flex h-full flex-col overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)] md:flex-row">
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden border-b border-[var(--line-subtle)] md:border-r md:border-b-0 ${showWorkspace ? 'w-full md:w-3/4' : 'w-full'}`}>
         {/* Compact header - single row */}
-        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)]/60 after:to-transparent">
+        <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-transparent">
           <div className="flex items-center gap-2">
             {onBack && (
               <button
