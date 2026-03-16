@@ -1,4 +1,5 @@
 
+import { MoreHorizontal } from 'lucide-react';
 import { memo, useState } from 'react';
 import type { ContentBlock } from '@/types/chat';
 import ProcessRow from './ProcessRow';
@@ -78,8 +79,8 @@ const BlockGroup = memo(function BlockGroup({
                 className="group/fold flex w-full items-center gap-3 border-b border-[var(--line-subtle)] px-4 py-2 text-left transition-colors cursor-pointer hover:bg-[var(--hover-bg)]"
               >
                 <div className="size-1.5 shrink-0" />
-                <div className="flex size-4 shrink-0 items-center justify-center text-[var(--ink-muted)]/40">
-                  <span className="text-xs leading-none tracking-[0.2em]">···</span>
+                <div className="flex size-4 shrink-0 items-center justify-center text-[var(--ink-muted)]">
+                  <MoreHorizontal className="size-4" />
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-[var(--ink-muted)] group-hover/fold:text-[var(--ink-secondary)] transition-colors">
