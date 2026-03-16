@@ -6513,7 +6513,7 @@ description: >
             enqueueUserMessage, waitForSessionIdle, getMessages,
           } = await import('./agent-session');
 
-          // Inject heartbeat prompt as user message (wrapped in <HEARTBEAT> tags)
+          // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
           // System prompt is already permanently injected at IM session creation (/api/im/chat)
           await enqueueUserMessage(
             enrichedPrompt,

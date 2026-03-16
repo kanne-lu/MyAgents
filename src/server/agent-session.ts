@@ -1746,29 +1746,26 @@ function persistMessagesToStorage(
   });
   saveSessionMessages(sessionId, sessionMessages);
   // Compute lastMessagePreview from last real user message
-  // (skip system-injected messages like HEARTBEAT, MEMORY_UPDATE)
+  // (skip system-injected messages like HEARTBEAT, MEMORY_UPDATE).
+  // Also track whether we found a real user message to decide lastActiveAt update.
   let lastMessagePreview: string | undefined;
+  let foundRealUserMessage = false;
   for (let i = sessionMessages.length - 1; i >= 0; i--) {
     if (sessionMessages[i].role === 'user') {
       const content = sessionMessages[i].content;
       const text = typeof content === 'string' ? content : '';
-      // Skip system injections — these shouldn't appear as session previews
       if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>') || text.startsWith('<system-reminder>')) {
         continue;
       }
       lastMessagePreview = text.trim().slice(0, 60) || undefined;
+      foundRealUserMessage = true;
       break;
     }
   }
-  // Only update lastActiveAt if the latest user message is a real query (not system injection).
+  // Only update lastActiveAt if a real user message exists (not just system injections).
   // This prevents heartbeat/memory-update from making stale sessions appear "active".
-  const latestUserContent = sessionMessages.length > 0
-    ? (() => { const last = [...sessionMessages].reverse().find(m => m.role === 'user'); return typeof last?.content === 'string' ? last.content : ''; })()
-    : '';
-  const isSystemOnly = latestUserContent.includes('<HEARTBEAT>') || latestUserContent.includes('<MEMORY_UPDATE>') || latestUserContent.startsWith('<system-reminder>');
-
   updateSessionMetadata(sessionId, {
-    ...(isSystemOnly ? {} : { lastActiveAt: new Date().toISOString() }),
+    ...(foundRealUserMessage ? { lastActiveAt: new Date().toISOString() } : {}),
     lastMessagePreview,
   });
 }
