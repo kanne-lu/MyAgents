@@ -399,7 +399,8 @@ fn count_queries_since_last_update(myagents_dir: &Path, session_id: &str) -> u32
     let lines: Vec<&str> = content.lines().collect();
     let mut last_update_idx: Option<usize> = None;
 
-    // Find last <MEMORY_UPDATE> marker (scan from end)
+    // Find last memory update marker (scan from end)
+    // Matches both auto-update (<MEMORY_UPDATE> tag) and manual /UPDATE_MEMORY command
     for (i, line) in lines.iter().enumerate().rev() {
         if let Ok(msg) = serde_json::from_str::<MessageLine>(line) {
             if msg.role.as_deref() == Some("user") {
@@ -408,7 +409,7 @@ fn count_queries_since_last_update(myagents_dir: &Path, session_id: &str) -> u32
                         serde_json::Value::String(s) => s.as_str(),
                         _ => continue,
                     };
-                    if text.contains("<MEMORY_UPDATE>") {
+                    if text.contains("<MEMORY_UPDATE>") || text.contains("/UPDATE_MEMORY") {
                         last_update_idx = Some(i);
                         break;
                     }
