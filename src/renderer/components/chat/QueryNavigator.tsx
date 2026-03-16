@@ -1,6 +1,6 @@
 // Query Navigator — floating right-side panel for quick session query navigation
-// Collapsed: thin strip with dash indicators for each user query
-// Expanded (on hover): text panel with truncated query previews, click to jump
+// Unified row design: dashes are always visible in the same position.
+// On hover, text labels slide in from the right — dashes stay anchored.
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { Message } from '../../types/chat';
@@ -44,7 +44,7 @@ export default function QueryNavigator({
 }: QueryNavigatorProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeIndexRaw, setActiveIndex] = useState(-1);
-  const panelRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const activeItemRef = useRef<HTMLButtonElement>(null);
 
   // Extract real user queries (filter out system injections)
@@ -69,12 +69,9 @@ export default function QueryNavigator({
   const activeIndex = activeIndexRaw >= 0 && activeIndexRaw < queries.length ? activeIndexRaw : -1;
 
   // Track active query via IntersectionObserver
-  // Maintains a Set of all currently visible query indices (IO only reports changes,
-  // not all visible elements), then derives the topmost visible as active.
   const visibleIndicesRef = useRef(new Set<number>());
 
   useEffect(() => {
-    // Reset visible set on query list change (session switch, new messages)
     visibleIndicesRef.current.clear();
 
     if (queries.length < MIN_QUERIES) return;
@@ -84,7 +81,6 @@ export default function QueryNavigator({
     const userElements = container.querySelectorAll<HTMLElement>('[data-role="user"]');
     if (userElements.length === 0) return;
 
-    // Map message IDs to query indices for fast lookup
     const idToQueryIndex = new Map<string, number>();
     queries.forEach((q, i) => idToQueryIndex.set(q.id, i));
 
@@ -92,7 +88,6 @@ export default function QueryNavigator({
 
     const observer = new IntersectionObserver(
       (entries) => {
-        // Update the visible set based on intersection changes
         for (const entry of entries) {
           const el = entry.target as HTMLElement;
           const messageId = el.getAttribute('data-message-id');
@@ -107,24 +102,22 @@ export default function QueryNavigator({
           }
         }
 
-        // Active = smallest index in the visible set (topmost query)
         if (visibleSet.size > 0) {
           setActiveIndex(Math.min(...visibleSet));
         }
       },
       {
         root: container,
-        rootMargin: '0px 0px -60% 0px', // Top 40% of viewport triggers
+        rootMargin: '0px 0px -60% 0px',
         threshold: 0,
       },
     );
 
     userElements.forEach((el) => observer.observe(el));
-
     return () => observer.disconnect();
   }, [queries, scrollContainerRef]);
 
-  // Auto-scroll the expanded panel to keep active item visible
+  // Auto-scroll the panel to keep active item visible
   useEffect(() => {
     if (isExpanded && activeItemRef.current) {
       activeItemRef.current.scrollIntoView({
@@ -145,13 +138,12 @@ export default function QueryNavigator({
       );
       if (!target) return;
 
-      pauseAutoScroll(2000); // Pause auto-scroll for 2s to let user view
+      pauseAutoScroll(2000);
       target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     },
     [scrollContainerRef, pauseAutoScroll],
   );
 
-  // Don't render if fewer than MIN_QUERIES (after all hooks)
   if (queries.length < MIN_QUERIES) return null;
 
   return (
@@ -160,82 +152,77 @@ export default function QueryNavigator({
       onMouseEnter={() => setIsExpanded(true)}
       onMouseLeave={() => setIsExpanded(false)}
     >
-      {/* Collapsed: dash indicators */}
+      {/* Single unified container — dashes always anchored right, text slides in */}
       <div
-        className={`flex flex-col items-center justify-center gap-[5px] px-1.5 py-4 transition-opacity duration-200 ${
-          isExpanded ? 'opacity-0 pointer-events-none' : 'opacity-100'
-        }`}
-      >
-        {queries.map((q, i) => (
-          <div
-            key={q.id}
-            className={`rounded-full transition-all duration-150 ${
-              i === activeIndex
-                ? 'w-[10px] h-[3px] bg-[var(--accent)]'
-                : 'w-[8px] h-[2px] bg-[var(--ink-faint)]'
-            }`}
-          />
-        ))}
-      </div>
-
-      {/* Expanded: text panel */}
-      <div
-        ref={panelRef}
         aria-hidden={!isExpanded}
-        className={`absolute right-1 max-h-[60vh] w-52 overflow-hidden rounded-xl border border-[var(--line)] shadow-lg transition-[opacity,transform] duration-200 ${
+        className={`relative max-h-[60vh] overflow-hidden transition-[width,background-color,border-color,box-shadow] duration-200 ${
           isExpanded
-            ? 'opacity-100 pointer-events-auto'
-            : 'opacity-0 pointer-events-none'
+            ? 'w-56 rounded-xl border border-[var(--line)] shadow-lg'
+            : 'w-5 border border-transparent'
         }`}
-        style={{
-          top: '50%',
-          transform: `translateY(-50%) translateX(${isExpanded ? '0' : '8px'})`,
+        style={isExpanded ? {
           background: 'var(--paper-elevated)',
           backdropFilter: 'blur(12px)',
           WebkitBackdropFilter: 'blur(12px)',
-        }}
+        } : undefined}
       >
         {/* Top fade mask */}
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-6 bg-gradient-to-b from-[var(--paper-elevated)] to-transparent" />
+        <div
+          className={`pointer-events-none absolute inset-x-0 top-0 z-10 h-5 transition-opacity duration-200 ${
+            isExpanded ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{ background: 'linear-gradient(to bottom, var(--paper-elevated), transparent)' }}
+        />
 
-        {/* Scrollable query list */}
-        <div className="overflow-y-auto max-h-[60vh] py-5 px-1">
-          {queries.map((q, i) => (
-            <button
-              key={q.id}
-              ref={i === activeIndex ? activeItemRef : undefined}
-              type="button"
-              onClick={() => handleQueryClick(q.id)}
-              className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors ${
-                i === activeIndex
-                  ? 'bg-[var(--hover-bg)]'
-                  : 'hover:bg-[var(--hover-bg)]'
-              }`}
-            >
-              {/* Query text */}
-              <span
-                className={`flex-1 truncate text-xs ${
-                  i === activeIndex
-                    ? 'text-[var(--accent)] font-medium'
-                    : 'text-[var(--ink-muted)]'
+        {/* Scrollable list — each row: [text (conditional)] + [dash (always)] */}
+        <div
+          ref={listRef}
+          className="overflow-y-auto max-h-[60vh] py-3"
+        >
+          {queries.map((q, i) => {
+            const isActive = i === activeIndex;
+            return (
+              <button
+                key={q.id}
+                ref={isActive ? activeItemRef : undefined}
+                type="button"
+                tabIndex={isExpanded ? 0 : -1}
+                onClick={() => isExpanded && handleQueryClick(q.id)}
+                className={`flex w-full items-center gap-1.5 py-[3px] text-left transition-colors ${
+                  isExpanded
+                    ? `px-2 cursor-pointer rounded-lg ${isActive ? 'bg-[var(--hover-bg)]' : 'hover:bg-[var(--hover-bg)]'}`
+                    : 'px-0 cursor-default justify-end'
                 }`}
               >
-                {q.text}
-              </span>
-              {/* Dash indicator */}
-              <span
-                className={`flex-shrink-0 rounded-full ${
-                  i === activeIndex
-                    ? 'w-[10px] h-[3px] bg-[var(--accent)]'
-                    : 'w-[8px] h-[2px] bg-[var(--ink-faint)]'
-                }`}
-              />
-            </button>
-          ))}
+                {/* Query text — only visible when expanded */}
+                <span
+                  className={`flex-1 truncate text-xs leading-5 transition-opacity duration-200 ${
+                    isExpanded ? 'opacity-100' : 'opacity-0 w-0 overflow-hidden'
+                  } ${isActive ? 'text-[var(--accent)] font-medium' : 'text-[var(--ink-muted)]'}`}
+                >
+                  {q.text}
+                </span>
+
+                {/* Dash — always visible, same position */}
+                <span
+                  className={`flex-shrink-0 rounded-full transition-all duration-150 ${
+                    isActive
+                      ? 'w-[10px] h-[3px] bg-[var(--accent)]'
+                      : 'w-[8px] h-[2px] bg-[var(--ink-faint)]'
+                  } ${isExpanded ? 'mr-1' : 'mr-1.5'}`}
+                />
+              </button>
+            );
+          })}
         </div>
 
         {/* Bottom fade mask */}
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-6 bg-gradient-to-t from-[var(--paper-elevated)] to-transparent" />
+        <div
+          className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 h-5 transition-opacity duration-200 ${
+            isExpanded ? 'opacity-100' : 'opacity-0'
+          }`}
+          style={{ background: 'linear-gradient(to top, var(--paper-elevated), transparent)' }}
+        />
       </div>
     </div>
   );
