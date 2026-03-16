@@ -40,7 +40,7 @@ interface SimpleChatInputProps {
   // Provider/Model selection
   provider?: Provider | null; // Current provider for model selection
   providers?: Provider[]; // All available providers for switching
-  onProviderChange?: (providerId: string) => void; // Called when provider is changed
+  onProviderChange?: (providerId: string, targetModel?: string) => void; // Called when provider is changed (with optional model to set atomically)
   selectedModel?: string; // Current selected model ID
   onModelChange?: (modelId: string) => void; // Called when model is changed
   // Permission modes
@@ -1598,8 +1598,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    if (provider?.id !== p.id) onProviderChange?.(p.id);
-                                    onModelChange?.(model.model);
+                                    if (provider?.id !== p.id) {
+                                      // Atomic provider+model change to avoid useEffect race
+                                      onProviderChange?.(p.id, model.model);
+                                    } else {
+                                      onModelChange?.(model.model);
+                                    }
                                     setShowModelMenu(false);
                                   }}
                                   className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${

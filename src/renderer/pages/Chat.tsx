@@ -929,10 +929,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => window.removeEventListener(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, handleSkillCopied);
   }, []);
 
-  // Handle provider change with analytics tracking
-  const handleProviderChange = useCallback((providerId: string) => {
+  // Handle provider change with analytics tracking.
+  // targetModel: when provided, use this model instead of the provider's primaryModel
+  // (avoids useEffect race when user picks a specific model from a different provider).
+  const handleProviderChange = useCallback((providerId: string, targetModel?: string) => {
     // Skip if selecting the same provider (compare against local state, not shared project)
     if (selectedProviderId === providerId) {
+      // Provider unchanged but caller passed a specific model — treat as model change
+      if (targetModel) {
+        setSelectedModel(targetModel);
+        if (currentProject && !isAgentWorkspace) {
+          void patchProject(currentProject.id, { model: targetModel });
+        }
+      }
       return;
     }
 
@@ -944,13 +953,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // providerInitRef may be stale (re-armed by one-time sync) and suppress it.
     setSelectedProviderId(providerId);
     const newProvider = providers.find(p => p.id === providerId);
-    if (newProvider?.primaryModel) {
-      setSelectedModel(newProvider.primaryModel);
+    const model = targetModel ?? newProvider?.primaryModel;
+    if (model) {
+      setSelectedModel(model);
     }
+
+    // Suppress the deferred provider-change useEffect — we've already set the correct model
+    providerInitRef.current = true;
 
     // Write back to project (last-writer-wins for new tabs)
     if (currentProject && !isAgentWorkspace) {
-      void patchProject(currentProject.id, { providerId, model: newProvider?.primaryModel ?? null });
+      void patchProject(currentProject.id, { providerId, model: model ?? null });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps
   }, [selectedProviderId, currentProject?.id, patchProject, providers]);

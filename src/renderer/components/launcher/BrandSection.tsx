@@ -24,7 +24,7 @@ interface BrandSectionProps {
     provider?: Provider | null;
     providers?: Provider[];
     selectedModel?: string;
-    onProviderChange?: (id: string) => void;
+    onProviderChange?: (id: string, targetModel?: string) => void;
     onModelChange?: (id: string) => void;
     permissionMode?: PermissionMode;
     onPermissionModeChange?: (mode: PermissionMode) => void;

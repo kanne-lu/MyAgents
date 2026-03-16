@@ -70,7 +70,7 @@ interface DirectoryPanelProps {
   projectDisplayName?: string;
   provider?: Provider | null;
   providers?: Provider[];
-  onProviderChange?: (providerId: string) => void;
+  onProviderChange?: (providerId: string, targetModel?: string) => void;
   /** Called when user clicks collapse button (only in wide mode) */
   onCollapse?: () => void;
   /** Called when user clicks "项目设置" button */

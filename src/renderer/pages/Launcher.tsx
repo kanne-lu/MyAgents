@@ -230,13 +230,20 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes
     }, [selectedWorkspace?.id, patchProject]);
 
-    const handleLauncherProviderChange = useCallback((providerId: string | undefined) => {
+    const handleLauncherProviderChange = useCallback((providerId: string | undefined, targetModel?: string) => {
         setLauncherProviderId(providerId);
+        const newProvider = providerId ? providers.find(p => p.id === providerId) : undefined;
+        const model = targetModel ?? newProvider?.primaryModel;
+        if (model) {
+            setLauncherSelectedModel(model);
+        }
         if (selectedWorkspace) {
-            void patchProject(selectedWorkspace.id, { providerId: providerId ?? null });
+            const patch: Record<string, unknown> = { providerId: providerId ?? null };
+            if (model) patch.model = model;
+            void patchProject(selectedWorkspace.id, patch);
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-create when workspace ID changes
-    }, [selectedWorkspace?.id, patchProject]);
+    }, [selectedWorkspace?.id, patchProject, providers]);
 
     // Navigate to Settings > Providers page
     const handleGoToSettings = useCallback(() => {
