@@ -88,6 +88,9 @@ export default memo(function TaskCenterOverlay({
         })),
     ], [workspaceOptions]);
 
+    // Stable cutoff for "active" filter — refreshes when sessions data changes
+    const [activeCutoff] = useState(() => new Date(Date.now() - 48 * 3600000).toISOString());
+
     // Filter sessions
     const filteredSessions = useMemo(() => {
         return sessions.filter(session => {
@@ -95,6 +98,9 @@ export default memo(function TaskCenterOverlay({
             if (statusFilter === 'active') {
                 const tags = sessionTagsMap.get(session.id) ?? [];
                 if (tags.length === 0) return false;
+                // Also require recent activity (48h) — prevents stale IM sessions
+                // from permanently appearing as "active" just because they have a source tag
+                if (session.lastActiveAt && session.lastActiveAt < activeCutoff) return false;
             }
             if (statusFilter === 'desktop' && isImSource(session.source)) return false;
             if (statusFilter === 'bot' && !isImSource(session.source)) return false;
@@ -107,7 +113,7 @@ export default memo(function TaskCenterOverlay({
 
             return true;
         });
-    }, [sessions, sessionTagsMap, statusFilter, workspaceFilter, projects]);
+    }, [sessions, sessionTagsMap, statusFilter, workspaceFilter, projects, activeCutoff]);
 
     // Sort cron tasks: running first (by nextExecutionAt ASC), then stopped (by updatedAt DESC)
     const sortedCronTasks = useMemo(() => {
