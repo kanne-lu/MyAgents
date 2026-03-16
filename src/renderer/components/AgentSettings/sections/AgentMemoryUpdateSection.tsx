@@ -146,7 +146,7 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
               <button
                 type="button"
                 onClick={handleOpenFile}
-                className="text-[var(--accent)] hover:underline"
+                className="rounded bg-[var(--paper-inset)] px-1 py-0.5 text-[var(--accent)] hover:underline cursor-pointer"
               >
                 UPDATE_MEMORY.md
               </button>
