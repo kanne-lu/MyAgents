@@ -279,6 +279,44 @@ try {
     Write-Host ""
 
     # ========================================
+    # 初始化 MSVC 编译环境 (link.exe / cl.exe)
+    # ========================================
+    if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
+        Write-Host "[准备] 初始化 MSVC 编译环境..." -ForegroundColor Blue
+        $vcFound = $false
+
+        # Find vcvarsall.bat via vswhere
+        $programFilesX86 = [Environment]::GetFolderPath("ProgramFilesX86")
+        $vsWhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $vsWhere) {
+            $vsPath = & $vsWhere -latest -products * -property installationPath 2>$null
+            if ($vsPath) {
+                $vcvarsall = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+                if (Test-Path $vcvarsall) {
+                    Write-Host "  找到: $vcvarsall" -ForegroundColor Cyan
+                    # Import environment variables from vcvarsall into PowerShell
+                    $tempFile = [System.IO.Path]::GetTempFileName()
+                    cmd /c "`"$vcvarsall`" x64 > nul 2>&1 && set > `"$tempFile`""
+                    Get-Content $tempFile | ForEach-Object {
+                        if ($_ -match '^([^=]+)=(.*)$') {
+                            [System.Environment]::SetEnvironmentVariable($Matches[1], $Matches[2], 'Process')
+                        }
+                    }
+                    Remove-Item $tempFile -ErrorAction SilentlyContinue
+                    $vcFound = $true
+                    Write-Host "  OK - MSVC x64 环境已加载" -ForegroundColor Green
+                }
+            }
+        }
+
+        if (-not $vcFound) {
+            Write-Host "  未找到 vcvarsall.bat，Rust 编译可能失败" -ForegroundColor Yellow
+            Write-Host "  建议从 Developer PowerShell for VS 运行此脚本" -ForegroundColor Yellow
+        }
+        Write-Host ""
+    }
+
+    # ========================================
     # 清理旧构建（包括缓存的 resources）
     # ========================================
     Write-Host "[准备] 清理旧构建..." -ForegroundColor Blue
