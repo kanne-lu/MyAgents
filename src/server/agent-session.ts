@@ -852,12 +852,21 @@ function schedulePreWarm(): void {
 
   preWarmTimer = setTimeout(() => {
     preWarmTimer = null;
-    if (!isSessionActive() && agentDir) {
-      console.log('[agent] pre-warming SDK subprocess + MCP servers');
-      startStreamingSession(true).catch((error) => {
-        console.error('[agent] pre-warm failed:', error);
-      });
+    if (!agentDir) return;
+    if (isSessionActive()) {
+      // Session still cleaning up — RETRY instead of calling startStreamingSession().
+      // We must NOT call startStreamingSession() here because it would await
+      // sessionTerminationPromise and become a "stale awaiter" — waking up minutes later
+      // when the promise resolves for a completely different reason (rewind, provider change),
+      // starting an unwanted session with stale config and corrupting shared state.
+      // Retry ensures we only start when the session is truly idle.
+      schedulePreWarm();
+      return;
     }
+    console.log('[agent] pre-warming SDK subprocess + MCP servers');
+    startStreamingSession(true).catch((error) => {
+      console.error('[agent] pre-warm failed:', error);
+    });
   }, 500);
 }
 
@@ -3654,6 +3663,14 @@ export async function enqueueUserMessage(
     wakeGenerator(queueItem);
     console.log(`[agent] Message queued (mid-turn injection): queueId=${queueId} text="${trimmed.slice(0, 50)}"`);
     broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100) });
+
+    // Safety net: if message was queued because shouldAbortSession is true but no session
+    // or pre-warm timer exists to process it, schedule recovery. This prevents orphaned
+    // messages when a deferred config restart races with session cleanup.
+    if (shouldAbortSession && !preWarmTimer && !messageResolver) {
+      console.warn('[agent] Safety net: queued message during abort with no pending recovery, scheduling pre-warm');
+      schedulePreWarm();
+    }
     return { queued: true, queueId };
   }
 
@@ -3752,6 +3769,12 @@ export async function waitForSessionIdle(
 
 export async function interruptCurrentResponse(): Promise<boolean> {
   if (!isTurnInFlight()) {
+    // No active turn, but there might be orphaned queued messages.
+    // Drain them and notify the frontend so the UI can recover.
+    if (messageQueue.length > 0) {
+      console.warn(`[agent] No active turn but ${messageQueue.length} orphaned message(s) in queue, draining`);
+      drainQueueWithCancellation();
+    }
     return false;
   }
 

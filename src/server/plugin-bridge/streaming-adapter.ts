@@ -91,15 +91,11 @@ export function mergeStreamingText(
   if (next.includes(previous)) return next;
   if (previous.includes(next)) return previous;
 
-  // Merge partial overlaps, e.g. "这" + "这是" => "这是".
-  const maxOverlap = Math.min(previous.length, next.length);
-  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-    if (previous.slice(-overlap) === next.slice(0, overlap)) {
-      return `${previous}${next.slice(overlap)}`;
-    }
-  }
-  // Fallback: append as-is to avoid losing tokens.
-  return `${previous}${next}`;
+  // Fallback: use `next` (the newer cumulative text from Rust).
+  // The SDK's partial events carry the FULL accumulated text, so `next` is always
+  // the authoritative latest version. Appending would duplicate content when the AI
+  // reformats mid-stream (e.g., switches from **bold** markdown to plain text).
+  return next;
 }
 
 /** Streaming card session manager (standalone, no SDK dependency) */
@@ -111,7 +107,7 @@ export class FeishuStreamingSession {
   private log?: (msg: string) => void;
   private lastUpdateTime = 0;
   private pendingText: string | null = null;
-  private updateThrottleMs = 100; // Throttle updates to max 10/sec
+  private updateThrottleMs = 500; // Throttle updates — Feishu API latency ~300ms per call
 
   constructor(creds: Credentials, log?: (msg: string) => void) {
     this.creds = creds;

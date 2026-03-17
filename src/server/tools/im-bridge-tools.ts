@@ -10,6 +10,30 @@ type CallToolResult = {
   isError?: boolean;
 };
 
+// ===== Auto-auth helper =====
+
+/** Trigger the plugin's "feishu auth" command to send an OAuth card to the user. */
+async function triggerAutoAuth(ctx: ImBridgeToolsContext): Promise<CallToolResult> {
+  console.log('[im-bridge-tools] need_user_authorization detected, triggering auto-auth');
+  try {
+    await fetch(`http://127.0.0.1:${ctx.bridgePort}/execute-command`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        command: 'feishu auth',
+        args: '',
+        userId: ctx.senderId || '',
+        chatId: ctx.chatId || '',
+      }),
+    });
+  } catch (e) {
+    console.warn('[im-bridge-tools] Auto-auth failed:', e);
+  }
+  return {
+    content: [{ type: 'text', text: '该操作需要用户授权飞书权限。已自动发送授权卡片，请用户在飞书中点击"前往授权"完成授权后重试。' }],
+  };
+}
+
 // ===== Bridge Tools Context =====
 
 interface ImBridgeToolsContext {
@@ -18,6 +42,8 @@ interface ImBridgeToolsContext {
   pluginId: string;
   /** Feishu sender open_id for tool calls that need user context */
   senderId?: string;
+  /** Chat ID for sending messages (e.g., auth cards) back to the user */
+  chatId?: string;
   /** Whether the sender is in the allowed_users whitelist (owner) */
   isOwner?: boolean;
 }
@@ -98,6 +124,10 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
 
             const result = await callResp.json() as { ok: boolean; result?: unknown; error?: string };
             if (!result.ok) {
+              // Auto-trigger OAuth for need_user_authorization (may come as Bridge-level error)
+              if (result.error?.includes('need_user_authorization') && bridgeToolsContext?.chatId) {
+                return await triggerAutoAuth(bridgeToolsContext);
+              }
               return {
                 content: [{ type: 'text', text: `Tool error: ${result.error || 'unknown'}` }],
                 isError: true,
@@ -118,6 +148,12 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
             } else {
               resultText = 'OK (no data returned)';
             }
+
+            // Auto-trigger OAuth when Feishu returns need_user_authorization.
+            if (resultText.includes('need_user_authorization') && bridgeToolsContext?.chatId) {
+              return await triggerAutoAuth(bridgeToolsContext);
+            }
+
             return { content: [{ type: 'text', text: resultText }] };
           } catch (err) {
             return {

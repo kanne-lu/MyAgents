@@ -3738,6 +3738,11 @@ async function main() {
               const headers: Record<string, string> = {
                 // Streamable HTTP 规范要求同时声明两种格式；SSE 只需 event-stream
                 'Accept': server.type === 'sse' ? 'text/event-stream' : 'application/json, text/event-stream',
+                // Request uncompressed response to avoid ZlibError.
+                // Some servers (e.g., behind WAF/CDN like Huawei Cloud) return
+                // content-encoding: gzip with a non-compressed body, causing Bun's
+                // fetch() auto-decompression to crash. Validation doesn't need compression.
+                'Accept-Encoding': 'identity',
                 ...(server.headers || {}),
               };
 
@@ -3930,6 +3935,11 @@ async function main() {
                 message = '连接被重置，请检查网络或服务器状态';
               } else if (error.message.includes('certificate') || error.message.includes('SSL') || error.message.includes('TLS')) {
                 message = 'SSL/TLS 证书错误，请检查服务器证书配置';
+              } else if (error.message.includes('Zlib') || error.message.includes('Decompression')) {
+                // WAF/CDN may return content-encoding: gzip with non-compressed body.
+                // Bun's fetch auto-decompression crashes. Skip validation and let SDK handle it.
+                console.warn(`[api/mcp/enable] ZlibError during validation (WAF/CDN issue), allowing MCP: ${server.id}`);
+                return jsonResponse({ success: true });
               } else {
                 message = `连接失败: ${error.message}`;
               }
@@ -6252,6 +6262,7 @@ async function main() {
                 pluginId: payload.bridgePluginId,
                 enabledToolGroups: payload.bridgeEnabledToolGroups || [],
                 senderId: payload.senderId,
+                chatId: payload.sourceId,
                 isOwner: payload.senderIsOwner ?? false,
               });
             }
