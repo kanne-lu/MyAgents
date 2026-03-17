@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.43] - 2026-03-17
+
+### Added
+- **记忆自动更新**：Agent 在夜间窗口（默认 00:00-06:00）自动对工作区内所有达标 session 执行 UPDATE_MEMORY.md 中的记忆维护指令。支持配置更新间隔（24/48/72h）、触发阈值、时间窗口。搭载心跳周期检查，tokio::spawn 独立批次任务，同 Agent 内串行、不同 Agent 间并发
+- **Query Navigator**：Chat 页面右侧浮动导航器，快速跳转 session 内的用户 query。未 hover 时显示微弱横杠指示，hover 展开文字面板（backdrop-blur + 渐隐遮罩），点击平滑滚动到对应消息。IntersectionObserver 跟踪当前可视区 query
+- **工作区文件读写命令**：新增 `cmd_read_workspace_file` / `cmd_write_workspace_file` Rust 命令，绕过 Tauri fs plugin scope 限制，支持任意上下文（Tab/Launcher/Settings）读写工作区文件
+
+### Improved
+- **HEARTBEAT 机制对齐**：心跳 prompt 增加 `<system-reminder>` 外层包裹、YAML frontmatter 剥离、自动创建的 HEARTBEAT.md 带 description 说明
+- **夜间模式**：全量 CSS Token 化 + "暖夜"主题
+- **活跃中筛选**：增加 48h 时间门控，防止遗留 IM session 永久出现在活跃列表
+
+### Fixed
+- **系统注入消息隔离**：HEARTBEAT/MEMORY_UPDATE 等系统消息不再覆盖 session 的 lastMessagePreview 和 lastActiveAt
+- **OpenClaw 插件显示名**：session 列表标签优先使用 PLATFORM_DISPLAY_NAMES（"QQ"而非"QQ Bot"），与 Agent 设置保持一致
+- **MCP warmup 退出码**：非 0/1 退出码一律 warmup_failed；'not found' 关键词收紧为 'package not found'/'module not found'
+- **BugReportOverlay**：排除 invalid 状态的 provider
+- **BlockGroup hasTextAfter 死 prop 清理**
+- **Launcher patchProject 类型还原**：`Record<string, unknown>` 改回 `Partial<Omit<Project, 'id'>>`
+- **SimpleChatInput provider helpers**：从 render body 提取到 module-level 纯函数
+- **超长 session 加载不滚动到底部**
+- **Chat header 渐变阴影暗色模式适配**
+- **Agent 设置图标 dark mode 反色**
+- **WebView 心跳健康监测误判**：移除（macOS App Nap 导致误判自动重载）
+
+---
+
 ## [0.1.42] - 2026-03-16
 
 ### Added
