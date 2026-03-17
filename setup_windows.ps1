@@ -37,7 +37,8 @@ try {
         $cmd = "winget install --id $WingetId -e --accept-source-agreements --accept-package-agreements"
         if ($ExtraArgs) { $cmd += " $ExtraArgs" }
         Invoke-Expression $cmd
-        if ($LASTEXITCODE -ne 0) {
+        # winget exit codes: 0=success, -1978335189=already installed/no upgrade
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
             Write-Host "  $Name 安装失败，请手动安装: winget install $WingetId" -ForegroundColor Red
             return $false
         }
@@ -230,24 +231,54 @@ try {
     function Test-MSVC {
         Write-Host "  检查 MSVC Build Tools... " -NoNewline
 
+        # Method 1: cl.exe in PATH (Developer Command Prompt)
         $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
         if ($cl) {
             Write-Host "OK" -ForegroundColor Green
             return $true
         }
 
+        # Method 2: vswhere (standard VS installer location)
         $programFilesX86 = [Environment]::GetFolderPath("ProgramFilesX86")
         $vsWhere = Join-Path $programFilesX86 "Microsoft Visual Studio\Installer\vswhere.exe"
         if (Test-Path $vsWhere) {
-            $vsPath = & $vsWhere -latest -property installationPath 2>$null
+            $vsPath = & $vsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
             if ($vsPath) {
+                Write-Host "OK" -ForegroundColor Green
+                return $true
+            }
+            # Fallback: any VS/BuildTools installation
+            $vsPath = & $vsWhere -latest -products * -property installationPath 2>$null
+            if ($vsPath) {
+                Write-Host "OK (found VS installation)" -ForegroundColor Green
+                return $true
+            }
+        }
+
+        # Method 3: check common BuildTools paths directly
+        $btPaths = @(
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools",
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\BuildTools",
+            "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\Community",
+            "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community"
+        )
+        foreach ($p in $btPaths) {
+            if (Test-Path $p) {
                 Write-Host "OK" -ForegroundColor Green
                 return $true
             }
         }
 
+        # Method 4: winget list check
+        try {
+            $wingetList = winget list --id Microsoft.VisualStudio.2022.BuildTools 2>$null
+            if ($LASTEXITCODE -eq 0 -and $wingetList -match "BuildTools") {
+                Write-Host "OK (winget)" -ForegroundColor Green
+                return $true
+            }
+        } catch { }
+
         Write-Host "MISSING" -ForegroundColor Red
-        Write-Host "    请安装 Visual Studio Build Tools" -ForegroundColor Yellow
         return $false
     }
 
@@ -298,7 +329,7 @@ try {
         if ($HasWinget) {
             Write-Host "  自动安装 Visual Studio Build Tools (C++ 工作负载)..." -ForegroundColor Cyan
             winget install --id Microsoft.VisualStudio.2022.BuildTools -e --accept-source-agreements --accept-package-agreements --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
-            if ($LASTEXITCODE -ne 0) {
+            if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
                 Write-Host "  MSVC 安装失败，请手动安装 Visual Studio Build Tools" -ForegroundColor Red
             } else {
                 Write-Host "  MSVC Build Tools 安装完成" -ForegroundColor Green
