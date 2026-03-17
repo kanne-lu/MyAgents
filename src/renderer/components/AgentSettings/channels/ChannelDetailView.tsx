@@ -389,10 +389,11 @@ export default function ChannelDetailView({
 
     const modelOptions = useMemo(() => {
         if (!selectedProvider) return [];
-        return getProviderModels(selectedProvider).map(m => ({
-            value: m.model,
-            label: m.modelName,
-        }));
+        const options = [{ value: '', label: '默认 (继承 Agent)' }];
+        for (const m of getProviderModels(selectedProvider)) {
+            options.push({ value: m.model, label: m.modelName });
+        }
+        return options;
     }, [selectedProvider]);
 
     const _effectiveModel = useMemo(() => {
