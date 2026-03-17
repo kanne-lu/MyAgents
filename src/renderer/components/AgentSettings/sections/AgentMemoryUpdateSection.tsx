@@ -158,14 +158,14 @@ export default function AgentMemoryUpdateSection({ agent, onAgentChanged }: Agen
             role="switch"
             aria-checked={enabled}
             onClick={handleToggle}
-            className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full transition-colors ${
-              enabled ? 'bg-[var(--accent)]' : 'bg-[var(--ink-faint)]'
+            className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+              enabled ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
             }`}
           >
             <span
-              className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-[var(--paper)] shadow transform transition-transform ${
-                enabled ? 'translate-x-4' : 'translate-x-0.5'
-              } mt-0.5`}
+              className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
+                enabled ? 'translate-x-5' : 'translate-x-0'
+              }`}
             />
           </button>
         </div>
