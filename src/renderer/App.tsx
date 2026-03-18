@@ -72,6 +72,7 @@ interface TabContentProps {
   onUpdateTitle: (tabId: string, title: string) => void;
   onUpdateUnread: (tabId: string, hasUnread: boolean) => void;
   onRenameSession: (tabId: string, newTitle: string) => void;
+  onForkSession: (tabId: string, newSessionId: string, agentDir: string, title: string) => void;
   onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
   onClearInitialMessage: (tabId: string) => void;
   onClearJoinedExistingSidecar: (tabId: string) => void;
@@ -88,7 +89,7 @@ interface TabContentProps {
 const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error,
   onLaunchProject, onBack, onSwitchSession, onNewSession,
-  onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onUpdateSessionId, onClearInitialMessage,
+  onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   onClearJoinedExistingSidecar,
   settingsInitialSection, settingsInitialMcpId, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading,
@@ -140,6 +141,7 @@ const MemoizedTabContent = memo(function TabContent({
             onJoinedExistingSidecarHandled={() => onClearJoinedExistingSidecar(tab.id)}
             sessionTitle={tab.title}
             onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
+            onForkSession={(newSessionId: string, agentDir: string, title: string) => onForkSession(tab.id, newSessionId, agentDir, title)}
           />
         </TabProvider>
       )}
@@ -952,6 +954,41 @@ export default function App() {
   }, [updateTabTitle]);
 
   /**
+   * Handle fork session: create a new tab for the forked session.
+   * Called from Chat after the backend has created the forked session metadata + messages.
+   */
+  const handleForkSession = useCallback(async (_tabId: string, newSessionId: string, forkAgentDir: string, title: string) => {
+    // Check tab limit
+    if (tabsRef.current.length >= MAX_TABS) {
+      toastRef.current.error('标签页已达上限，请关闭一个后重试');
+      return;
+    }
+
+    const newTab: Tab = {
+      id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      agentDir: forkAgentDir,
+      sessionId: newSessionId,
+      view: 'chat',
+      title,
+    };
+
+    setTabs(prev => [...prev, newTab]);
+    setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
+
+    try {
+      const result = await ensureSessionSidecar(newSessionId, forkAgentDir, 'tab', newTab.id);
+      console.log(`[App] Fork tab ${newTab.id} sidecar ensured: port=${result.port}`);
+      await activateSession(newSessionId, newTab.id, null, result.port, forkAgentDir, false);
+      setActiveTabId(newTab.id);
+    } catch (error) {
+      console.error('[App] Failed to start sidecar for forked session:', error);
+      setTabs(prev => prev.filter(t => t.id !== newTab.id));
+    } finally {
+      setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
+    }
+  }, []);
+
+  /**
    * Handle session switch from within Chat (history dropdown)
    * Implements Session singleton with all 4 scenarios
    */
@@ -1581,6 +1618,7 @@ export default function App() {
             onUpdateTitle={updateTabTitle}
             onUpdateUnread={updateTabUnread}
             onRenameSession={handleRenameSession}
+            onForkSession={handleForkSession}
             onUpdateSessionId={updateTabSessionId}
             onClearInitialMessage={clearInitialMessage}
             onClearJoinedExistingSidecar={clearJoinedExistingSidecar}

@@ -101,9 +101,11 @@ interface ChatProps {
   sessionTitle?: string;
   /** Called when user renames the session */
   onRenameSession?: (newTitle: string) => void;
+  /** Called when user forks session at a specific assistant message — App creates new tab */
+  onForkSession?: (newSessionId: string, agentDir: string, title: string) => void;
 }
 
-export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
@@ -206,6 +208,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     attachments?: import('@/types/chat').MessageAttachment[];
   } | null>(null);
   const [rewindStatus, setRewindStatus] = useState<string | null>(null);
+
+  // Fork state
+  const [forkTarget, setForkTarget] = useState<string | null>(null); // assistant message ID
+
   const messagesRef = useRef(messages);
   messagesRef.current = messages;
 
@@ -1331,6 +1337,32 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       });
   }, [apiPost, setMessages, setIsLoading, pauseAutoScroll]); // all stable — refs handle the rest
 
+  // Fork = create a new independent session branch at a specific assistant message
+  const handleFork = useCallback((assistantMessageId: string) => {
+    setForkTarget(assistantMessageId);
+  }, []);
+
+  const handleForkConfirm = useCallback(() => {
+    if (!forkTarget) return;
+    const messageId = forkTarget;
+    setForkTarget(null);
+
+    track('session_fork', {});
+    apiPost('/sessions/fork', { messageId })
+      .then(res => {
+        const r = res as { success?: boolean; newSessionId?: string; agentDir?: string; title?: string; error?: string } | undefined;
+        if (r?.success && r.newSessionId && r.agentDir) {
+          onForkSession?.(r.newSessionId, r.agentDir, r.title || 'Fork');
+        } else {
+          toastRef.current.error('创建分支失败：' + (r?.error || '未知错误'));
+        }
+      })
+      .catch(err => {
+        console.error('[Chat] Fork failed:', err);
+        toastRef.current.error('创建分支失败');
+      });
+  }, [forkTarget, apiPost, onForkSession]);
+
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string) => {
     track('session_switch');
@@ -1572,6 +1604,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               isStreaming={isLoading || sessionState === 'running'}
               onRewind={handleRewind}
               onRetry={handleRetry}
+              onFork={handleFork}
             />
 
             {/* Inline cron task card — shown in message flow after creating a "新开对话" task */}
@@ -1685,6 +1718,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           confirmVariant="danger"
           onConfirm={handleRewindConfirm}
           onCancel={() => setRewindTarget(null)}
+        />
+      )}
+
+      {/* Fork Session Confirm Dialog */}
+      {forkTarget && (
+        <ConfirmDialog
+          title="创建分支"
+          message="将从此处创建一个新的会话分支，在新标签页中打开。原会话不受影响。"
+          confirmText="创建分支"
+          cancelText="取消"
+          confirmVariant="primary"
+          onConfirm={handleForkConfirm}
+          onCancel={() => setForkTarget(null)}
         />
       )}
 

@@ -3987,6 +3987,74 @@ export async function rewindSession(userMessageId: string): Promise<{
   }
 }
 
+/**
+ * Fork session: create a new independent session branching from a specific assistant message.
+ * Non-destructive — the current session remains untouched.
+ * The new session uses SDK's forkSession option on first startup.
+ */
+export function forkSession(assistantMessageId: string): {
+  success: boolean;
+  newSessionId?: string;
+  agentDir?: string;
+  title?: string;
+  error?: string;
+} {
+  // 1. Find target assistant message
+  const targetIndex = messages.findIndex(m => m.id === assistantMessageId && m.role === 'assistant');
+  if (targetIndex < 0) return { success: false, error: 'Assistant message not found' };
+  const targetMsg = messages[targetIndex];
+  if (!targetMsg.sdkUuid) return { success: false, error: 'Message has no SDK UUID (cannot fork)' };
+
+  // 2. Get current session info for the fork source
+  const sourceSessionId = sessionId; // unifiedSession: id === SDK session ID
+  const currentAgentDir = agentDir;
+  const sourceMeta = getSessionMetadata(sourceSessionId);
+  const sourceTitle = sourceMeta?.title || 'Chat';
+
+  try {
+    // 3. Create new session metadata with forkFrom
+    const newSession = createSessionMetadata(currentAgentDir);
+    newSession.title = `🌿 ${sourceTitle}`;
+    newSession.titleSource = 'auto';
+    newSession.forkFrom = {
+      sourceSessionId,
+      messageUuid: targetMsg.sdkUuid,
+    };
+
+    // 4. Copy messages up to and including the fork point (same mapping as persistMessagesToStorage)
+    const forkedMessages: SessionMessage[] = messages.slice(0, targetIndex + 1).map(m => ({
+      id: m.id,
+      role: m.role,
+      content: typeof m.content === 'string' ? m.content : JSON.stringify(stripPlaywrightResults(m.content)),
+      timestamp: m.timestamp,
+      sdkUuid: m.sdkUuid,
+      attachments: m.attachments?.map(att => ({
+        id: att.id,
+        name: att.name,
+        mimeType: att.mimeType,
+        path: att.relativePath ?? '',
+      })),
+      metadata: m.metadata,
+    }));
+
+    // 5. Persist new session
+    saveSessionMetadata(newSession);
+    saveSessionMessages(newSession.id, forkedMessages);
+
+    console.log(`[agent] forked session ${sourceSessionId} → ${newSession.id} at message ${assistantMessageId} (sdkUuid: ${targetMsg.sdkUuid}), ${forkedMessages.length} messages copied`);
+
+    return {
+      success: true,
+      newSessionId: newSession.id,
+      agentDir: currentAgentDir,
+      title: newSession.title,
+    };
+  } catch (err) {
+    console.error('[agent] forkSession failed:', err);
+    return { success: false, error: err instanceof Error ? err.message : 'Fork failed' };
+  }
+}
+
 async function startStreamingSession(preWarm = false): Promise<void> {
   if (sessionTerminationPromise) {
     await sessionTerminationPromise;
@@ -4065,8 +4133,26 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const rewindResumeAt = pendingResumeSessionAt;
     if (rewindResumeAt) pendingResumeSessionAt = undefined;
 
+    // Fork detection: if this session was created via fork, override resume/sessionId
+    // to use SDK's forkSession option (load source history + branch to new session).
+    // Consumed once — forkFrom is cleared from metadata after use.
+    let forkMode = false;
+    let forkResumeAt: string | undefined;
+    const forkMeta = getSessionMetadata(sessionId);
+    if (forkMeta?.forkFrom) {
+      const { sourceSessionId, messageUuid } = forkMeta.forkFrom;
+      console.log(`[agent] fork mode: resuming from ${sourceSessionId}, fork at ${messageUuid}, new session ${sessionId}`);
+      resumeFrom = sourceSessionId;
+      effectiveSdkSessionId = sessionId;
+      forkMode = true;
+      forkResumeAt = messageUuid;
+      // Clear forkFrom so subsequent restarts resume normally
+      delete forkMeta.forkFrom;
+      saveSessionMetadata(forkMeta);
+    }
+
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
-    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}`);
+    console.log(`[agent] starting query with model: ${currentModel ?? 'default'}, permissionMode: ${currentPermissionMode} -> SDK: ${sdkPermissionMode}, MCP: ${mcpStatus}, ${resumeFrom ? `resume: ${resumeFrom}` : `sessionId: ${effectiveSdkSessionId}`}${rewindResumeAt ? `, resumeSessionAt: ${rewindResumeAt}` : ''}${forkMode ? `, FORK mode (resumeAt: ${forkResumeAt})` : ''}`);
 
     const promptGen = messageGenerator();
 
@@ -4268,9 +4354,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // sessionId 和 resume 互斥（SDK 约束）
     // 新 session：传 effectiveSdkSessionId 让 SDK 使用有效 UUID
     // Resume：传 resume 恢复对话上下文
-    const sessionOption = resumeFrom
-      ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
-      : { sessionId: effectiveSdkSessionId };
+    // Fork：resume + forkSession + sessionId + resumeSessionAt（三者组合）
+    const sessionOption = forkMode
+      ? { resume: resumeFrom!, forkSession: true, sessionId: effectiveSdkSessionId, ...(forkResumeAt ? { resumeSessionAt: forkResumeAt } : {}) }
+      : resumeFrom
+        ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
+        : { sessionId: effectiveSdkSessionId };
 
     try {
       querySession = query({

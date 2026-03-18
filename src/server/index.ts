@@ -110,6 +110,7 @@ import {
   setInteractionScenario,
   resetInteractionScenario,
   rewindSession,
+  forkSession,
   getPendingInteractiveRequests,
   stripPlaywrightResults,
   setSidecarPort,
@@ -1322,6 +1323,17 @@ async function main() {
           return jsonResponse({ success: false, error: 'Missing userMessageId' }, 400);
         }
         const result = await rewindSession(userMessageId);
+        return jsonResponse(result);
+      }
+
+      // Fork session at a specific assistant message (create branch)
+      if (pathname === '/sessions/fork' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const messageId = typeof body.messageId === 'string' ? body.messageId : '';
+        if (!messageId) {
+          return jsonResponse({ success: false, error: 'Missing messageId' }, 400);
+        }
+        const result = forkSession(messageId);
         return jsonResponse(result);
       }
 

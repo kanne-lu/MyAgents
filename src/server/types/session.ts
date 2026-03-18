@@ -34,6 +34,11 @@ export interface SessionMetadata {
     lastMessagePreview?: string;
     /** How the title was set: default (first message truncation), auto (AI-generated), user (manually renamed) */
     titleSource?: 'default' | 'auto' | 'user';
+    /** Fork source info — consumed on first session startup, then cleared */
+    forkFrom?: {
+        sourceSessionId: string;  // Source session's SDK session ID (for resume)
+        messageUuid: string;      // Fork point: assistant message's sdkUuid (for resumeSessionAt)
+    };
 }
 
 /**

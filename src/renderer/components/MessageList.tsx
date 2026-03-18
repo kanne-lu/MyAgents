@@ -51,6 +51,7 @@ interface MessageListProps {
   isStreaming?: boolean;
   onRewind?: (messageId: string) => void;
   onRetry?: (assistantMessageId: string) => void;
+  onFork?: (assistantMessageId: string) => void;
 }
 
 // Fun streaming status messages
@@ -193,6 +194,7 @@ const MessageList = memo(function MessageList({
   isStreaming,
   onRewind,
   onRetry,
+  onFork,
 }: MessageListProps) {
   // ── Merged message array for Virtuoso ──
   const allMessages = useMemo(() =>
@@ -295,12 +297,13 @@ const MessageList = memo(function MessageList({
             isLoading={isStreamingMsg && isLoadingRef.current}
             onRewind={onRewind}
             onRetry={onRetry}
+            onFork={onFork}
             exitPlanModeSlot={message.id === exitPlanModeAnchorIdRef.current ? exitPlanModeSlotRef.current : undefined}
           />
         </div>
       );
     },
-    [onRewind, onRetry]  // Only truly stable deps — refs handle the rest
+    [onRewind, onRetry, onFork]  // Only truly stable deps — refs handle the rest
   );
 
   // ── Stable computeItemKey — use message ID instead of index ──
