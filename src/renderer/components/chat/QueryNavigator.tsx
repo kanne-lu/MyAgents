@@ -13,6 +13,8 @@ interface QueryNavigatorProps {
   streamingMessage: Message | null;
   scrollContainerRef: React.RefObject<HTMLDivElement | null>;
   pauseAutoScroll: (duration?: number) => void;
+  /** Virtuoso-aware navigation: scrolls to message by ID even if virtualized (not in DOM) */
+  onNavigateToQuery?: (messageId: string) => void;
 }
 
 /** Extract plain text preview from message content */
@@ -41,6 +43,7 @@ export default function QueryNavigator({
   streamingMessage,
   scrollContainerRef,
   pauseAutoScroll,
+  onNavigateToQuery,
 }: QueryNavigatorProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeIndexRaw, setActiveIndex] = useState(-1);
@@ -68,7 +71,9 @@ export default function QueryNavigator({
   // Clamp activeIndex to valid range (handles session switch, query list shrink)
   const activeIndex = activeIndexRaw >= 0 && activeIndexRaw < queries.length ? activeIndexRaw : -1;
 
-  // Track active query via IntersectionObserver
+  // Track active query via IntersectionObserver.
+  // With virtualization, elements mount/unmount as the user scrolls. A MutationObserver
+  // watches for child changes in the container and re-observes any new user message elements.
   const visibleIndicesRef = useRef(new Set<number>());
 
   useEffect(() => {
@@ -78,15 +83,13 @@ export default function QueryNavigator({
     const container = scrollContainerRef.current;
     if (!container) return;
 
-    const userElements = container.querySelectorAll<HTMLElement>('[data-role="user"]');
-    if (userElements.length === 0) return;
-
     const idToQueryIndex = new Map<string, number>();
     queries.forEach((q, i) => idToQueryIndex.set(q.id, i));
 
+    const observedElements = new WeakSet<Element>();
     const visibleSet = visibleIndicesRef.current;
 
-    const observer = new IntersectionObserver(
+    const intersectionObserver = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
           const el = entry.target as HTMLElement;
@@ -113,8 +116,29 @@ export default function QueryNavigator({
       },
     );
 
-    userElements.forEach((el) => observer.observe(el));
-    return () => observer.disconnect();
+    // Observe all currently-visible user elements
+    const observeUserElements = () => {
+      const userElements = container.querySelectorAll<HTMLElement>('[data-role="user"]');
+      userElements.forEach((el) => {
+        if (!observedElements.has(el)) {
+          observedElements.add(el);
+          intersectionObserver.observe(el);
+        }
+      });
+    };
+
+    observeUserElements();
+
+    // Re-observe when virtuoso mounts/unmounts elements (DOM subtree changes)
+    const mutationObserver = new MutationObserver(() => {
+      observeUserElements();
+    });
+    mutationObserver.observe(container, { childList: true, subtree: true });
+
+    return () => {
+      intersectionObserver.disconnect();
+      mutationObserver.disconnect();
+    };
   }, [queries, scrollContainerRef]);
 
   // Auto-scroll the panel to keep active item visible
@@ -127,9 +151,16 @@ export default function QueryNavigator({
     }
   }, [isExpanded, activeIndex]);
 
-  // Navigate to a query
+  // Navigate to a query — prefer virtuoso-aware navigation (handles virtualized messages)
   const handleQueryClick = useCallback(
     (queryId: string) => {
+      // Virtuoso path: scroll by index even if the message is not in the DOM
+      if (onNavigateToQuery) {
+        onNavigateToQuery(queryId);
+        return;
+      }
+
+      // Fallback: direct DOM scroll (for non-virtualized contexts)
       const container = scrollContainerRef.current;
       if (!container) return;
 
@@ -141,7 +172,7 @@ export default function QueryNavigator({
       pauseAutoScroll(2000);
       target.scrollIntoView({ behavior: 'smooth', block: 'start' });
     },
-    [scrollContainerRef, pauseAutoScroll],
+    [scrollContainerRef, pauseAutoScroll, onNavigateToQuery],
   );
 
   if (queries.length < MIN_QUERIES) return null;

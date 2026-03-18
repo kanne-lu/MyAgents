@@ -16,7 +16,7 @@ import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
 import { useTabState, useTabActive } from '@/context/TabContext';
-import { useAutoScroll } from '@/hooks/useAutoScroll';
+import { useVirtuosoScroll } from '@/hooks/useVirtuosoScroll';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
@@ -836,7 +836,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
   }, [joinedExistingSidecar]);
 
-  const { containerRef: messagesContainerRef, spacerRef, scrollToBottom, pauseAutoScroll } = useAutoScroll(isLoading, messages.length, sessionId);
+  const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll } = useVirtuosoScroll(isLoading, messages.length, sessionId);
+
+  // Capture virtuoso's internal scroller element for QueryNavigator
+  const handleScrollerRef = useCallback((el: HTMLElement | Window | null) => {
+    scrollerRef.current = el instanceof HTMLElement ? el : null;
+  }, [scrollerRef]);
 
   // Auto-focus input when Tab becomes active
   useEffect(() => {
@@ -1154,6 +1159,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     (queueId: string) => { void handleForceExecuteQueued(queueId); },
     [handleForceExecuteQueued]
   );
+
+  // Navigate to a specific query message (used by QueryNavigator with virtuoso)
+  // Uses messagesRef to avoid invalidating the callback on every streaming token update
+  const handleNavigateToQuery = useCallback((messageId: string) => {
+    const index = messagesRef.current.findIndex(m => m.id === messageId);
+    if (index >= 0) {
+      pauseAutoScroll(2000);
+      virtuosoRef.current?.scrollToIndex({ index, behavior: 'smooth', align: 'start' });
+    }
+  }, [pauseAutoScroll, virtuosoRef]);
 
   // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
   const handlePermissionDecision = useCallback((decision: 'deny' | 'allow_once' | 'always_allow') => {
@@ -1526,8 +1541,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           <QueryNavigator
             historyMessages={historyMessages}
             streamingMessage={streamingMessage}
-            scrollContainerRef={messagesContainerRef}
+            scrollContainerRef={scrollerRef as React.RefObject<HTMLDivElement | null>}
             pauseAutoScroll={pauseAutoScroll}
+            onNavigateToQuery={handleNavigateToQuery}
           />
 
           {/* Message list with max-width */}
@@ -1540,8 +1556,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               streamingMessage={streamingMessage}
               isLoading={isLoading}
               isSessionLoading={isSessionLoading}
-              containerRef={messagesContainerRef}
-              spacerRef={spacerRef}
+              virtuosoRef={virtuosoRef}
+              onScrollerRef={handleScrollerRef}
+              followEnabledRef={followEnabledRef}
               bottomPadding={140}
               pendingPermission={pendingPermission}
               onPermissionDecision={handlePermissionDecision}
