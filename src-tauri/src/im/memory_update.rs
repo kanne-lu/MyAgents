@@ -50,7 +50,6 @@ pub async fn check_and_spawn<R: Runtime>(
     workspace_path: &str,
     config: &Arc<RwLock<Option<MemoryAutoUpdateConfig>>>,
     is_running: &Arc<AtomicBool>,
-    permission_mode: &Arc<RwLock<String>>,
     sidecar_manager: &ManagedSidecarManager,
     app_handle: &AppHandle<R>,
     // Hot-reloadable AI config for syncing to temp sidecars
@@ -76,14 +75,10 @@ pub async fn check_and_spawn<R: Runtime>(
         }
     };
 
-    // Gate 2: Permission mode allows file editing
-    {
-        let pm = permission_mode.read().await;
-        if *pm != "auto" && *pm != "fullAgency" {
-            ulog_debug!("[memory-update] Skipped: permissionMode={} (need auto/fullAgency)", *pm);
-            return;
-        }
-    }
+    // Gate 2: (removed) — Memory update is an autonomous operation. The Bun endpoint
+    // now forces bypassPermissions, so the agent's configured permission mode no longer
+    // matters for tool execution. Previously this gate blocked updates when the agent was
+    // in 'plan' or 'acceptEdits' mode, but that was overly restrictive.
 
     // Gate 3: Current time in update window
     if !is_in_update_window(&mau_config) {

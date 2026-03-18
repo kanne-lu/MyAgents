@@ -96,7 +96,6 @@ impl HeartbeatRunner {
         peer_locks: PeerLocks,
         agent_id: String,
         workspace_path: String,
-        permission_mode: Arc<RwLock<String>>,
     ) {
         let initial_interval = {
             let cfg = self.config.read().await;
@@ -144,7 +143,6 @@ impl HeartbeatRunner {
                         &peer_locks,
                         &agent_id,
                         &workspace_path,
-                        &permission_mode,
                     ).await;
                 }
                 Some(reason) = wake_rx.recv() => {
@@ -169,7 +167,6 @@ impl HeartbeatRunner {
                         &peer_locks,
                         &agent_id,
                         &workspace_path,
-                        &permission_mode,
                     ).await;
 
                     // Reset interval timer after wake to avoid rapid fire
@@ -199,7 +196,6 @@ impl HeartbeatRunner {
         peer_locks: &PeerLocks,
         agent_id: &str,
         workspace_path: &str,
-        permission_mode: &Arc<RwLock<String>>,
     ) {
         let config = self.config.read().await.clone();
         let is_high_priority = reason.is_high_priority();
@@ -412,7 +408,6 @@ impl HeartbeatRunner {
             workspace_path,
             &self.memory_update_config,
             &self.memory_update_running,
-            permission_mode,
             sidecar_manager,
             app_handle,
             &self.current_model,

@@ -2281,8 +2281,6 @@ async fn create_bot_instance<R: Runtime>(
         let hb_peer_locks = Arc::clone(&peer_locks);
         let hb_agent_id = agent_id.clone().unwrap_or_else(|| bot_id.to_string());
         let hb_workspace = default_workspace_str.clone();
-        let hb_permission_mode = Arc::clone(&permission_mode);
-
         let handle = tokio::spawn(async move {
             runner.run_loop(
                 hb_shutdown_rx,
@@ -2294,7 +2292,6 @@ async fn create_bot_instance<R: Runtime>(
                 hb_peer_locks,
                 hb_agent_id,
                 hb_workspace,
-                hb_permission_mode,
             ).await;
         });
 
@@ -3676,13 +3673,12 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                 let mau_sidecar_mgr = Arc::clone(&*sidecar_manager);
                 let mau_app_handle = app_handle.clone();
                 // Clone agent-level AI config Arcs from AgentInstance
-                let (mau_model, mau_provider_env, mau_permission_mode, mau_mcp_json) = {
+                let (mau_model, mau_provider_env, mau_mcp_json) = {
                     let agents_guard = agent_state.lock().await;
                     if let Some(inst) = agents_guard.get(&agent_config.id) {
                         (
                             Arc::clone(&inst.current_model),
                             Arc::clone(&inst.current_provider_env),
-                            Arc::clone(&inst.permission_mode),
                             Arc::clone(&inst.mcp_servers_json),
                         )
                     } else {
@@ -3690,7 +3686,6 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                         (
                             Arc::new(RwLock::new(agent_config.model.clone())),
                             Arc::new(RwLock::new(None)),
-                            Arc::new(RwLock::new(agent_config.permission_mode.clone())),
                             Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
                         )
                     }
@@ -3756,7 +3751,6 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                 &mau_workspace,
                                 &mau_config_for_loop,
                                 &mau_running_for_loop,
-                                &mau_permission_mode,
                                 &mau_sidecar_mgr,
                                 &mau_app_handle,
                                 &mau_model,

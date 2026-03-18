@@ -1559,7 +1559,7 @@ async function main() {
         try {
           console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} interval=${intervalMinutes}min exec#=${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
           // Send the user's original prompt (clean, without wrapper templates)
-          // Cron tasks are unattended — force fullAgency so tool permission requests
+          // Cron tasks are unattended — bypass all permissions so tool requests
           // don't block indefinitely waiting for a user who isn't present.
           await enqueueUserMessage(prompt, [], 'fullAgency', model, providerEnv);
           // Reset scenario after enqueue — already consumed by startStreamingSession()
@@ -1667,7 +1667,7 @@ async function main() {
           // Enqueue the message (this starts the async execution)
           // Send the user's original prompt (clean, without wrapper templates)
           console.log('[cron] execute-sync: about to enqueue user message');
-          // Cron tasks are unattended — force fullAgency so tool permission requests
+          // Cron tasks are unattended — bypass all permissions so tool requests
           // (e.g. Bash) don't block forever waiting for human approval.
           const enqueueResult = await enqueueUserMessage(prompt, [], 'fullAgency', model, providerEnv);
           console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
@@ -6556,10 +6556,11 @@ description: >
 
           // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
           // System prompt is already permanently injected at IM session creation (/api/im/chat)
+          // Heartbeat is unattended — bypass all permissions so tool use doesn't block.
           await enqueueUserMessage(
             enrichedPrompt,
             [],
-            'auto',
+            'fullAgency',
             undefined,
             undefined,
             {
@@ -6648,8 +6649,9 @@ description: >
 
           const { enqueueUserMessage, waitForSessionIdle } = await import('./agent-session');
 
-          // Inject as user message
-          await enqueueUserMessage(prompt);
+          // Inject as user message — memory update is unattended, bypass all permissions
+          // so Bash/file tools (git commit, file writes) don't block waiting for approval.
+          await enqueueUserMessage(prompt, [], 'fullAgency');
 
           // Wait synchronously for AI completion (60 min timeout — same as background tasks).
           // Memory update can be slow for large sessions: loading 100K+ token context,
