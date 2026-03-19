@@ -66,6 +66,9 @@ function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
   // Metadata change -> must re-render
   if (prevMsg.metadata?.source !== nextMsg.metadata?.source) return false;
 
+  // sdkUuid change -> must re-render (fork button depends on sdkUuid presence)
+  if (prevMsg.sdkUuid !== nextMsg.sdkUuid) return false;
+
   // For streaming messages, check content changes
   if (typeof prevMsg.content === 'string' && typeof nextMsg.content === 'string') {
     return prevMsg.content === nextMsg.content;
