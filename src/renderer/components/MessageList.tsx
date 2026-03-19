@@ -215,10 +215,11 @@ const MessageList = memo(function MessageList({
   useEffect(() => {
     if (allMessages.length > 0 && sessionId && sessionId !== lastScrolledSessionRef.current) {
       lastScrolledSessionRef.current = sessionId;
-      // Delay ensures Virtuoso has rendered initial items and measured their heights
+      // 200ms delay: gives Virtuoso time to render and measure items from the top.
+      // The fadeIn animation (600ms opacity:0→1) hides this initial positioning.
       const timer = setTimeout(() => {
         virtuosoRef.current?.scrollToIndex({ index: 'LAST' });
-      }, 50);
+      }, 200);
       return () => clearTimeout(timer);
     }
   }, [allMessages.length, sessionId, virtuosoRef]);
@@ -391,7 +392,6 @@ const MessageList = memo(function MessageList({
         scrollerRef={onScrollerRef}
         data={allMessages}
         computeItemKey={computeItemKey}
-        initialTopMostItemIndex={allMessages.length > 0 ? allMessages.length - 1 : 0}
         followOutput={handleFollowOutput}
         atBottomThreshold={50}
         defaultItemHeight={300}
@@ -399,9 +399,6 @@ const MessageList = memo(function MessageList({
         className="h-full"
         components={components}
         itemContent={renderItem}
-        rangeChanged={(range) => {
-          console.debug(`[Virtuoso] visible range: ${range.startIndex}-${range.endIndex} (${range.endIndex - range.startIndex + 1} items)`);
-        }}
       />
     </div>
   );
