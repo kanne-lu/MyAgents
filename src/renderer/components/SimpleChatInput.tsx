@@ -242,10 +242,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
 
-  // Derive current model ID from prop or provider default
-  const currentModelId = selectedModel ?? provider?.primaryModel ?? 'claude-sonnet-4-6';
+  // Derive current model ID from prop or provider default — no hardcoded fallback
+  const currentModelId = selectedModel ?? provider?.primaryModel;
   // Get display name for current model
-  const currentModelName = provider ? getModelDisplayName(provider, currentModelId) : currentModelId;
+  const currentModelName = currentModelId
+    ? (provider ? getModelDisplayName(provider, currentModelId) : currentModelId)
+    : '选择模型';
 
   // @file search
   const [showFileSearch, setShowFileSearch] = useState(false);
