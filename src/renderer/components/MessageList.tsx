@@ -192,7 +192,15 @@ const MessageList = memo(function MessageList({
       lastScrolledSessionRef.current = sessionId;
       followEnabledRef.current = 'force';
       const timer = setTimeout(() => {
-        virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end' });
+        const ref = virtuosoRef.current;
+        if (!ref) return;
+        ref.scrollToIndex({ index: 'LAST', align: 'end' });
+        // Virtuoso may not render items at the new scroll position after programmatic
+        // scrollToIndex — it relies on scroll events to trigger visible-range recalculation.
+        // A second call in the next frame forces it to detect the position and render items.
+        requestAnimationFrame(() => {
+          ref.scrollToIndex({ index: 'LAST', align: 'end' });
+        });
       }, 300);
       return () => clearTimeout(timer);
     }
