@@ -311,9 +311,21 @@ const MessageList = memo(function MessageList({
   // ── Stable itemContent — reads streaming state from refs, never invalidates during streaming ──
   // Not a React component — it's Virtuoso's itemContent render function (returns JSX but is not a component).
   // Refs intentionally used to keep the callback stable during streaming (no dep on streamingMessage).
+  const allMessagesRef = useRef(allMessages);
+  allMessagesRef.current = allMessages;
+
   const renderItem = useMemo(
     // eslint-disable-next-line react/display-name
     () => (index: number, message: MessageType) => {
+      // ── Diagnostic: verify Virtuoso passes the correct message for this index ──
+      const expected = allMessagesRef.current[index];
+      if (expected && message !== expected) {
+        console.error(
+          `[Virtuoso] DATA MISMATCH at index ${index}: ` +
+          `received id=${message.id} but data[${index}].id=${expected.id}`
+        );
+      }
+
       const sm = streamingMessageRef.current;
       const isStreamingMsg = !!sm && message === sm;
       return (
@@ -395,6 +407,9 @@ const MessageList = memo(function MessageList({
         className="h-full"
         components={components}
         itemContent={renderItem}
+        rangeChanged={(range) => {
+          console.debug(`[Virtuoso] visible range: ${range.startIndex}-${range.endIndex} (${range.endIndex - range.startIndex + 1} items)`);
+        }}
       />
     </div>
   );
