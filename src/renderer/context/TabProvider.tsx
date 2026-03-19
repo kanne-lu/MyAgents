@@ -1034,6 +1034,8 @@ export default function TabProvider({
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status when user stops response
                 });
+                // Discard incomplete round from title tracking — stopped response is not a valid QA pair
+                pendingUserMessagesRef.current.shift();
                 // Clear stop timeout since we received confirmation
                 if (stopTimeoutRef.current) {
                     clearTimeout(stopTimeoutRef.current);
@@ -1055,6 +1057,8 @@ export default function TabProvider({
                     setSessionState('idle');  // Reset session state to idle on error
                     setSystemStatus(null);  // Clear system status on error
                 });
+                // Discard incomplete round from title tracking — errored response is not a valid QA pair
+                pendingUserMessagesRef.current.shift();
                 // Clear stop timeout on error too
                 if (stopTimeoutRef.current) {
                     clearTimeout(stopTimeoutRef.current);
