@@ -13,6 +13,7 @@
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { writeFile, mkdir } from 'fs/promises';
+import { registerPendingDispatch, type PendingDispatchCallbacks } from './pending-dispatch';
 
 // ===== Text chunking utilities =====
 // Simple implementations matching OpenClaw's text.* API surface.
@@ -158,39 +159,158 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
         },
 
         /**
-         * Feishu plugin calls dispatchReplyFromConfig() which is a higher-level
-         * API than dispatchReplyWithBufferedBlockDispatcher(). Route it through
-         * the same interception point so messages reach Rust.
+         * OpenClaw protocol: dispatchReplyFromConfig receives dispatcher + replyOptions
+         * from the plugin. If the plugin provides protocol callbacks (onPartialReply,
+         * sendFinalReply, etc.), we register a pending dispatch and BLOCK until AI
+         * completes. The Bridge HTTP endpoints will route streaming events through
+         * these callbacks, letting the plugin handle its own rendering (e.g., Feishu
+         * StreamingCardController, QQ Bot's delivery, etc.).
+         *
+         * If no protocol callbacks are provided, falls back to the old bypass path.
          */
         async dispatchReplyFromConfig(params: Record<string, unknown>) {
           const t0 = Date.now();
           console.log(`[compat-timing] dispatchReplyFromConfig ENTER`);
           const ctx = (params.ctx || params) as Record<string, unknown>;
-          const result = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg: params.cfg as Record<string, unknown> });
-          console.log(`[compat-timing] dispatchReplyFromConfig EXIT (+${Date.now() - t0}ms)`);
-          return result;
+
+          // Check if plugin provides standard OpenClaw protocol callbacks
+          const dispatcher = params.dispatcher as Record<string, (...args: unknown[]) => unknown> | undefined;
+          const replyOptions = params.replyOptions as Record<string, (...args: unknown[]) => unknown> | undefined;
+          const hasProtocolCallbacks = dispatcher
+            && typeof dispatcher.sendFinalReply === 'function'
+            && typeof dispatcher.markComplete === 'function';
+
+          if (!hasProtocolCallbacks) {
+            // Fallback: no protocol callbacks, use old bypass path
+            const result = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg: params.cfg as Record<string, unknown> });
+            console.log(`[compat-timing] dispatchReplyFromConfig EXIT (fallback) (+${Date.now() - t0}ms)`);
+            return result;
+          }
+
+          // --- Protocol-standard path ---
+
+          // Extract chatId (same logic as dispatchReplyWithBufferedBlockDispatcher)
+          let chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
+          if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
+
+          if (!chatId) {
+            console.warn('[compat-runtime] dispatchReplyFromConfig: no chatId, falling back');
+            const result = await runtime.channel.reply.dispatchReplyWithBufferedBlockDispatcher({ ctx, cfg: params.cfg as Record<string, unknown> });
+            return result;
+          }
+
+          // Extract fields BEFORE registering pending dispatch (to avoid leak on empty text)
+          const text = String(ctx.BodyForAgent || ctx.Body || ctx.body || ctx.RawBody || '');
+          if (!text.trim()) {
+            console.log('[compat-runtime] Empty message in protocol path, skipping');
+            return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
+          }
+
+          const senderId = String(ctx.SenderId || ctx.senderId || '');
+          const senderName = String(ctx.SenderName || ctx.senderName || '');
+          const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
+          const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
+          const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
+          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention ?? (chatType !== 'group');
+          const groupName = String(ctx.GroupSubject || ctx.GroupName || ctx.groupName || '') || undefined;
+          const threadId = String(ctx.MessageThreadId || ctx.threadId || '') || undefined;
+          const replyToBody = String(ctx.ReplyToBody || ctx.replyToBody || '') || undefined;
+          const groupSystemPrompt = String(ctx.GroupSystemPrompt || ctx.groupSystemPrompt || '') || undefined;
+
+          // Build protocol callbacks from the plugin's dispatcher and replyOptions
+          const callbacks: PendingDispatchCallbacks = {
+            onPartialReply: typeof replyOptions?.onPartialReply === 'function'
+              ? replyOptions.onPartialReply.bind(replyOptions) as PendingDispatchCallbacks['onPartialReply']
+              : undefined,
+            onReasoningStream: typeof replyOptions?.onReasoningStream === 'function'
+              ? replyOptions.onReasoningStream.bind(replyOptions) as PendingDispatchCallbacks['onReasoningStream']
+              : undefined,
+            sendBlockReply: typeof dispatcher.sendBlockReply === 'function'
+              ? dispatcher.sendBlockReply.bind(dispatcher) as PendingDispatchCallbacks['sendBlockReply']
+              : undefined,
+            sendFinalReply: dispatcher.sendFinalReply.bind(dispatcher) as PendingDispatchCallbacks['sendFinalReply'],
+          };
+
+          console.log(`[compat-timing] dispatchReplyFromConfig PROTOCOL path: chatId=${chatId} len=${text.length}`);
+
+          // POST the inbound message to Rust BEFORE registering pending dispatch,
+          // so that if the POST fails we don't leave an orphaned pending dispatch
+          try {
+            const resp = await fetch(`${rustBaseUrl}/api/im-bridge/message`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                botId,
+                pluginId: currentPluginId,
+                senderId,
+                senderName: senderName || undefined,
+                text,
+                chatType: chatType === 'group' ? 'group' : 'direct',
+                chatId,
+                messageId: messageId || undefined,
+                groupId: groupId || undefined,
+                isMention,
+                groupName: groupName || undefined,
+                threadId: threadId || undefined,
+                replyToBody: replyToBody || undefined,
+                groupSystemPrompt: groupSystemPrompt || undefined,
+              }),
+            });
+            if (!resp.ok) {
+              const body = await resp.text();
+              throw new Error(`Rust returned ${resp.status}: ${body}`);
+            }
+          } catch (err) {
+            console.error(`[compat-timing] Rust POST FAILED in protocol path (+${Date.now() - t0}ms):`, err);
+            throw err;
+          }
+
+          // Register pending dispatch AFTER successful POST (no leak on failure)
+          const completionPromise = registerPendingDispatch(chatId, callbacks);
+
+          // Block until AI response completes (resolved by /finalize-stream or /abort-stream)
+          try {
+            const result = await completionPromise;
+            console.log(`[compat-timing] dispatchReplyFromConfig EXIT (protocol) (+${Date.now() - t0}ms)`);
+            return result;
+          } catch (err) {
+            console.error(`[compat-timing] dispatchReplyFromConfig PROTOCOL error (+${Date.now() - t0}ms):`, err);
+            throw err;
+          }
         },
 
         /**
-         * Feishu plugin wraps dispatch calls in withReplyDispatcher({ run }).
-         * Execute the run function which will call dispatchReplyFromConfig,
-         * which now correctly routes to our interception point.
+         * OpenClaw protocol lifecycle wrapper. Ensures proper cleanup:
+         * 1. Calls run() (which triggers dispatchReplyFromConfig → AI processing)
+         * 2. In finally: dispatcher.markComplete() → waitForIdle() → onSettled()
+         *
+         * This matches the real OpenClaw withReplyDispatcher implementation.
          */
         async withReplyDispatcher(params: Record<string, unknown>) {
           const t0 = Date.now();
           console.log(`[compat-timing] withReplyDispatcher ENTER`);
+          const dispatcher = params.dispatcher as { markComplete?: () => void; waitForIdle?: () => Promise<void> } | undefined;
           const run = params.run as (() => Promise<unknown>) | undefined;
-          if (typeof run === 'function') {
-            try {
-              await run();
+          const onSettled = params.onSettled as (() => void | Promise<void>) | undefined;
+
+          let result: unknown;
+          try {
+            if (typeof run === 'function') {
+              result = await run();
               console.log(`[compat-timing] withReplyDispatcher run() OK (+${Date.now() - t0}ms)`);
+            }
+          } finally {
+            // Protocol lifecycle: signal completion, wait for delivery queue drain, cleanup
+            try {
+              dispatcher?.markComplete?.();
+              await dispatcher?.waitForIdle?.();
             } catch (err) {
-              console.error(`[compat-timing] withReplyDispatcher run() THREW (+${Date.now() - t0}ms):`, err);
+              console.error(`[compat-timing] withReplyDispatcher lifecycle error:`, err);
+            } finally {
+              try { await onSettled?.(); } catch { /* best-effort */ }
             }
           }
-          // Plugin destructures { queuedFinal, counts, dispatcher } from the return value.
-          // Feishu plugin calls dispatcher.waitForIdle() after dispatch — provide a no-op mock.
-          return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
+          return result ?? { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
         },
 
         /**
