@@ -224,6 +224,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           // Quoted reply content (for threaded replies)
           const replyToBody = String(ctx.ReplyToBody || ctx.replyToBody || '') || undefined;
+          // Group system prompt (plugin-level custom instruction for group chats)
+          const groupSystemPrompt = String(ctx.GroupSystemPrompt || '') || undefined;
 
           if (!text.trim()) {
             console.log('[compat-runtime] Empty message, skipping');
@@ -251,6 +253,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
                 groupName: groupName || undefined,
                 threadId: threadId || undefined,
                 replyToBody: replyToBody || undefined,
+                groupSystemPrompt: groupSystemPrompt || undefined,
               }),
             });
 

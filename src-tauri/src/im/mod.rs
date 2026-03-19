@@ -2557,6 +2557,18 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
             body["groupToolsDeny"] = json!(gc.tools_deny);
         }
     }
+    // Quoted reply body (from Bridge plugins, e.g. threaded reply in Feishu)
+    if let Some(ref rtb) = msg.reply_to_body {
+        if !rtb.is_empty() {
+            body["replyToBody"] = json!(rtb);
+        }
+    }
+    // Group system prompt from Bridge plugin config
+    if let Some(ref gsp) = msg.group_system_prompt {
+        if !gsp.is_empty() {
+            body["groupSystemPrompt"] = json!(gsp);
+        }
+    }
     // Bridge plugin context — pass bridge port + tool groups to sidecar
     if let Some((bridge_port, bridge_plugin_id, tool_groups)) = adapter.bridge_context() {
         body["bridgePort"] = json!(bridge_port);

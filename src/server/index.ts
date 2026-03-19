@@ -6228,6 +6228,8 @@ async function main() {
             isFirstGroupTurn?: boolean;
             pendingHistory?: string;
             groupToolsDeny?: string[];
+            replyToBody?: string;
+            groupSystemPrompt?: string;
             // Bridge plugin tools context (v0.1.42)
             bridgePort?: number;
             bridgePluginId?: string;
@@ -6303,11 +6305,18 @@ async function main() {
               if (payload.groupActivation === 'always') {
                 groupInfo += '\n你会收到群里的所有消息。如果你认为不需要回复当前消息，请只回复 <NO_REPLY>，不要添加任何其他内容。';
               }
+              if (payload.groupSystemPrompt) {
+                groupInfo += `\n\n[群聊指令]\n${payload.groupSystemPrompt}`;
+              }
               parts.push(groupInfo);
             }
             // Pending history (accumulated non-triggered messages)
             if (payload.pendingHistory) {
               parts.push(payload.pendingHistory);
+            }
+            // Add quoted reply context (threaded reply from Bridge plugins)
+            if (payload.replyToBody) {
+              parts.push(`[引用回复]\n> ${payload.replyToBody.split('\n').join('\n> ')}`);
             }
             // Add sender identity tag + original message
             const senderTag = payload.senderName ? `[from: ${payload.senderName}]\n` : '';

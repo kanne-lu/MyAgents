@@ -51,6 +51,7 @@ struct PendingBatch {
     reply_to_bot: bool,
     hint_group_name: Option<String>,
     reply_to_body: Option<String>,
+    group_system_prompt: Option<String>,
 }
 
 /// Merges fragmented messages (Telegram splits >4096 char pastes)
@@ -141,6 +142,7 @@ impl MessageCoalescer {
                     reply_to_bot: msg.reply_to_bot,
                     hint_group_name: msg.hint_group_name.clone(),
                     reply_to_body: msg.reply_to_body.clone(),
+                    group_system_prompt: msg.group_system_prompt.clone(),
                 },
             );
         } else {
@@ -191,6 +193,7 @@ impl MessageCoalescer {
             reply_to_bot: batch.reply_to_bot,
             hint_group_name: batch.hint_group_name,
             reply_to_body: batch.reply_to_body,
+            group_system_prompt: batch.group_system_prompt,
         })
     }
 }
@@ -1299,6 +1302,7 @@ impl TelegramAdapter {
             reply_to_bot,
             hint_group_name: None,
             reply_to_body: None,
+            group_system_prompt: None,
         })
     }
 
@@ -1696,6 +1700,7 @@ mod tests {
             reply_to_bot: false,
             hint_group_name: None,
             reply_to_body: None,
+            group_system_prompt: None,
         }
     }
 

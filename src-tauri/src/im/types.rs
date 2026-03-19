@@ -235,6 +235,8 @@ pub struct ImMessage {
     pub hint_group_name: Option<String>,
     /// Quoted reply body (for threaded replies from Bridge plugins)
     pub reply_to_body: Option<String>,
+    /// Group-level custom system prompt (from Bridge plugin config)
+    pub group_system_prompt: Option<String>,
 }
 
 impl ImMessage {
@@ -446,6 +448,9 @@ pub struct BufferedMessage {
     /// Quoted reply body (for threaded replies from Bridge plugins)
     #[serde(default)]
     pub reply_to_body: Option<String>,
+    /// Group-level custom system prompt (from Bridge plugin config)
+    #[serde(default)]
+    pub group_system_prompt: Option<String>,
 }
 
 impl BufferedMessage {
@@ -465,6 +470,7 @@ impl BufferedMessage {
             reply_to_bot: msg.reply_to_bot,
             hint_group_name: msg.hint_group_name.clone(),
             reply_to_body: msg.reply_to_body.clone(),
+            group_system_prompt: msg.group_system_prompt.clone(),
         }
     }
 
@@ -488,6 +494,7 @@ impl BufferedMessage {
             reply_to_bot: self.reply_to_bot,
             hint_group_name: self.hint_group_name.clone(),
             reply_to_body: self.reply_to_body.clone(),
+            group_system_prompt: self.group_system_prompt.clone(),
         }
     }
 }

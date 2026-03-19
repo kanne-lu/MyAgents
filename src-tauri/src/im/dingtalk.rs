@@ -1081,6 +1081,7 @@ impl DingtalkAdapter {
             reply_to_bot: false,
             hint_group_name: None,
             reply_to_body: None,
+            group_system_prompt: None,
         };
 
         let text_preview: String = msg.text.chars().take(100).collect();

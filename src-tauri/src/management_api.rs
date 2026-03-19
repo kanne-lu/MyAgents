@@ -617,6 +617,9 @@ struct BridgeMessagePayload {
     /// Quoted reply text content (ReplyToBody in OpenClaw)
     #[serde(default)]
     reply_to_body: Option<String>,
+    /// Group-level custom system prompt from plugin config
+    #[serde(default)]
+    group_system_prompt: Option<String>,
 }
 
 async fn handle_bridge_message(
@@ -680,6 +683,7 @@ async fn handle_bridge_message(
         reply_to_bot: false,
         hint_group_name: payload.group_name,
         reply_to_body: payload.reply_to_body,
+        group_system_prompt: payload.group_system_prompt,
     };
 
     match sender.send(msg).await {
