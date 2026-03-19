@@ -9,6 +9,11 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
 import { SOURCE_LABELS, type MessageSource } from '../../shared/types/im';
 
+/** Content size threshold for truncation (100KB). Messages larger than this
+ *  would generate hundreds of thousands of DOM nodes, destroying scroll
+ *  performance even with virtualization. */
+const TEXT_BLOCK_TRUNCATE_THRESHOLD = 100_000;
+
 /** Lightweight CSS-only tooltip — appears instantly on hover, no JS timers. */
 function Tip({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -392,13 +397,19 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               // Single text block
               if (!Array.isArray(item)) {
                 if (item.type === 'text' && item.text) {
+                  // Guard: truncate extremely large text blocks (e.g., 24MB generated HTML PPTs)
+                  // to prevent millions of DOM nodes that destroy scroll + virtualization performance.
+                  const isTruncated = item.text.length > TEXT_BLOCK_TRUNCATE_THRESHOLD;
+                  const displayText = isTruncated
+                    ? item.text.slice(0, TEXT_BLOCK_TRUNCATE_THRESHOLD) + '\n\n---\n\n*[内容过长，已截断显示前 100KB]*'
+                    : item.text;
                   return (
                     <div
                       key={index}
                       className="flex justify-start w-full px-1 py-1 select-none"
                     >
                       <div className="w-full max-w-none text-[var(--ink)] select-text">
-                        <Markdown>{item.text}</Markdown>
+                        <Markdown>{displayText}</Markdown>
                       </div>
                     </div>
                   );

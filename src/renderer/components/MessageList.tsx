@@ -366,6 +366,7 @@ const MessageList = memo(function MessageList({
         initialTopMostItemIndex={allMessages.length > 0 ? allMessages.length - 1 : 0}
         followOutput={handleFollowOutput}
         atBottomThreshold={50}
+        defaultItemHeight={400}
         increaseViewportBy={{ top: 600, bottom: 400 }}
         className="h-full"
         components={components}
