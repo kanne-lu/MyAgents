@@ -3,6 +3,9 @@
  *
  * Uses the same SDK query() path as normal chat, routed through Global Sidecar.
  * Single-turn, non-persistent session — lightweight and fully verified.
+ *
+ * Timing: triggered after 3+ QA rounds to ensure enough context for a good title.
+ * For 1-2 rounds, the frontend shows a truncated first user message instead.
  */
 
 import { randomUUID } from 'crypto';
@@ -14,18 +17,31 @@ import { resolveClaudeCodeCli, buildClaudeSessionEnv, type ProviderEnv } from '.
 
 const TITLE_MAX_LENGTH = 30;
 const TIMEOUT_MS = 15_000;
+/** Max chars per user/assistant message when building context */
+const PER_MESSAGE_LIMIT = 200;
 
-const SYSTEM_PROMPT = `You are a conversation title generator. Your ONLY job is to output a short title.
+const SYSTEM_PROMPT = `You are a conversation title generator. Output ONLY the title — nothing else.
 
 Rules:
-- Output ONLY the title text, nothing else — no quotes, no punctuation wrapper, no explanation
-- Maximum 30 characters (CJK counts as 1 each)
-- The title language MUST match the primary language of the conversation (e.g. Chinese conversation → Chinese title, English → English, mixed → follow the user's language)
-- Capture the core topic or intent, not surface keywords
-- Prefer nouns/verbs over vague words like "help", "question", "discussion"`;
+- Maximum 30 characters (CJK counts as 1)
+- Language MUST match the user's language (Chinese → Chinese title, English → English)
+- Identify the MAIN TOPIC or GOAL across all rounds, not just the first message
+- Use specific nouns/verbs — e.g. "Redis 缓存优化" not "技术讨论"
+- NEVER copy a sentence or phrase directly from the conversation
+- NEVER use generic words: help, question, discussion, issue, request, 帮助, 问题, 讨论, 请求`;
 
-function buildUserPrompt(userMessage: string, assistantReply: string): string {
-  return `<user_message>\n${userMessage.slice(0, 500)}\n</user_message>\n\n<assistant_reply>\n${assistantReply.slice(0, 500)}\n</assistant_reply>`;
+export interface TitleRound {
+  user: string;
+  assistant: string;
+}
+
+function buildUserPrompt(rounds: TitleRound[]): string {
+  const parts = rounds.map((r, i) => {
+    const user = r.user.slice(0, PER_MESSAGE_LIMIT);
+    const assistant = r.assistant.slice(0, PER_MESSAGE_LIMIT);
+    return `[Round ${i + 1}]\nUser: ${user}\nAssistant: ${assistant}`;
+  });
+  return `<conversation>\n${parts.join('\n\n')}\n</conversation>`;
 }
 
 /**
@@ -49,12 +65,12 @@ function cleanTitle(raw: string): string {
 
 /**
  * Generate a short session title using the SDK query() path.
+ * Accepts multiple QA rounds (typically 3) for richer context.
  * Uses the user's current model and provider — single-turn, non-persistent.
  * Returns cleaned title string on success, null on any failure (silent).
  */
 export async function generateTitle(
-  userMessage: string,
-  assistantReply: string,
+  rounds: TitleRound[],
   model: string,
   providerEnv?: ProviderEnv,
 ): Promise<string | null> {
@@ -67,7 +83,7 @@ export async function generateTitle(
     mkdirSync(cwd, { recursive: true });
 
     const env = buildClaudeSessionEnv(providerEnv);
-    const prompt = buildUserPrompt(userMessage, assistantReply);
+    const prompt = buildUserPrompt(rounds);
 
     async function* titlePrompt() {
       yield {
@@ -138,7 +154,7 @@ export async function generateTitle(
     }
 
     const cleaned = cleanTitle(titleText);
-    console.log(`[title-generator] Generated title: "${cleaned}" (${Date.now() - startTime}ms)`);
+    console.log(`[title-generator] Generated title: "${cleaned}" (${Date.now() - startTime}ms, ${rounds.length} rounds)`);
     return cleaned.length > 0 ? cleaned : null;
   } catch (err) {
     console.warn('[title-generator] SDK query failed:', err);

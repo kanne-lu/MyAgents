@@ -39,6 +39,9 @@ import {
 } from '@/services/notificationService';
 import { setBackgroundTaskStatus, clearAllBackgroundTaskStatuses } from '@/utils/backgroundTaskStatus';
 
+/** Minimum QA rounds before triggering AI title generation */
+const AUTO_TITLE_MIN_ROUNDS = 3;
+
 // File-modifying tools that should trigger workspace refresh
 // These tools can create, modify, or delete files in the workspace
 const FILE_MODIFYING_TOOLS = new Set([
@@ -306,8 +309,13 @@ export default function TabProvider({
     isActiveRef.current = isActive;
 
     // Auto-title generation refs
+    // Collect QA rounds; trigger AI title after 3+ rounds for sufficient context.
+    // For 1-2 rounds, the default truncated user query is shown instead.
     const autoTitleAttemptedRef = useRef(false);
-    const firstUserMessageRef = useRef<string | null>(null);
+    const titleRoundsRef = useRef<Array<{ user: string; assistant: string }>>([]);
+    // FIFO queue: supports queued sends where user sends B before A completes.
+    // Each send pushes to the queue; each message-complete shifts from it.
+    const pendingUserMessagesRef = useRef<string[]>([]);
     const lastCompletedTextRef = useRef('');
     const lastProviderEnvRef = useRef<{ baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' } | undefined>(undefined);
     const lastModelRef = useRef<string | undefined>(undefined);
@@ -380,7 +388,8 @@ export default function TabProvider({
         clearInteractiveState();
         // Reset auto-title state for new conversation
         autoTitleAttemptedRef.current = false;
-        firstUserMessageRef.current = null;
+        titleRoundsRef.current = [];
+        pendingUserMessagesRef.current = [];
         lastCompletedTextRef.current = '';
         lastProviderEnvRef.current = undefined;
         lastModelRef.current = undefined;
@@ -982,24 +991,34 @@ export default function TabProvider({
                     duration_ms: completePayload?.duration_ms ?? 0,
                 });
 
-                // Auto-title: fire once after first successful QA exchange
-                if (!autoTitleAttemptedRef.current && currentSessionIdRef.current && firstUserMessageRef.current) {
-                    autoTitleAttemptedRef.current = true;
-                    const sid = currentSessionIdRef.current;
-                    const userText = firstUserMessageRef.current;
-                    const assistantText = lastCompletedTextRef.current.slice(0, 300);
-                    const model = completePayload?.model || lastModelRef.current || '';
-                    const pEnv = lastProviderEnvRef.current;
-                    // Fire-and-forget — guard against session switch during async call
-                    generateSessionTitle(postJson, sid, userText, assistantText, model, pEnv)
-                        .then(r => {
-                            if (r?.success && r.title && currentSessionIdRef.current === sid) {
-                                onTitleChangeRef.current?.(r.title);
-                                // Backend already persisted — notify history/task center to refetch
-                                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
-                            }
-                        })
-                        .catch(() => {});
+                // Auto-title: collect QA round, fire after 3+ rounds
+                // Shift from FIFO queue to correctly pair sends with completions (handles queued sends)
+                const completedUserText = pendingUserMessagesRef.current.shift();
+                if (!autoTitleAttemptedRef.current && currentSessionIdRef.current && completedUserText) {
+                    // Record this completed QA round (truncate both sides to 200 chars)
+                    titleRoundsRef.current.push({
+                        user: completedUserText.slice(0, 200),
+                        assistant: lastCompletedTextRef.current.slice(0, 200),
+                    });
+
+                    // Trigger AI title generation once we have enough rounds
+                    if (titleRoundsRef.current.length >= AUTO_TITLE_MIN_ROUNDS) {
+                        autoTitleAttemptedRef.current = true;
+                        const sid = currentSessionIdRef.current;
+                        const rounds = [...titleRoundsRef.current];
+                        const model = completePayload?.model || lastModelRef.current || '';
+                        const pEnv = lastProviderEnvRef.current;
+                        // Fire-and-forget — guard against session switch during async call
+                        generateSessionTitle(postJson, sid, rounds, model, pEnv)
+                            .then(r => {
+                                if (r?.success && r.title && currentSessionIdRef.current === sid) {
+                                    onTitleChangeRef.current?.(r.title);
+                                    // Backend already persisted — notify history/task center to refetch
+                                    window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
+                                }
+                            })
+                            .catch(() => {});
+                    }
                 }
 
                 break;
@@ -1514,9 +1533,9 @@ export default function TabProvider({
         // Reset new session flag BEFORE sending - allow message replay to show user's message
         isNewSessionRef.current = false;
 
-        // Capture first user message and provider info for auto-title generation
-        if (!firstUserMessageRef.current) {
-            firstUserMessageRef.current = trimmed;
+        // Capture user message for auto-title generation (FIFO queue for queued sends)
+        if (!autoTitleAttemptedRef.current) {
+            pendingUserMessagesRef.current.push(trimmed);
         }
         lastModelRef.current = model;
         lastProviderEnvRef.current = providerEnv ? { baseUrl: providerEnv.baseUrl, apiKey: providerEnv.apiKey, authType: providerEnv.authType, apiProtocol: providerEnv.apiProtocol, maxOutputTokens: providerEnv.maxOutputTokens, upstreamFormat: providerEnv.upstreamFormat } : undefined;
@@ -1775,14 +1794,54 @@ export default function TabProvider({
             });
 
             // Reset auto-title state when switching sessions
-            // Skip auto-title if session already has messages OR already has an AI/user title
-            autoTitleAttemptedRef.current = loadedMessages.length > 0
-                || response.session.titleSource === 'auto'
+            // Skip auto-title only if already has an AI-generated or user-renamed title
+            autoTitleAttemptedRef.current = response.session.titleSource === 'auto'
                 || response.session.titleSource === 'user';
-            firstUserMessageRef.current = null;
+            pendingUserMessagesRef.current = [];
             lastCompletedTextRef.current = '';
             lastProviderEnvRef.current = undefined;
             lastModelRef.current = undefined;
+
+            // Reconstruct completed QA rounds from loaded history so new messages
+            // continue the count. A session with 2 loaded rounds + 1 new round = 3 → triggers title.
+            if (!autoTitleAttemptedRef.current) {
+                const rounds: Array<{ user: string; assistant: string }> = [];
+                for (let i = 0; i < loadedMessages.length - 1; i++) {
+                    const msg = loadedMessages[i];
+                    const next = loadedMessages[i + 1];
+                    if (msg.role === 'user' && next.role === 'assistant') {
+                        const userText = typeof msg.content === 'string' ? msg.content
+                            : msg.content.filter(b => b.type === 'text').map(b => (b as { text?: string }).text || '').join('');
+                        // Skip system-injected messages
+                        if (userText.includes('<HEARTBEAT>') || userText.includes('<MEMORY_UPDATE>') || userText.startsWith('<system-reminder>')) {
+                            i++;
+                            continue;
+                        }
+                        const assistantText = typeof next.content === 'string' ? next.content
+                            : next.content.filter(b => b.type === 'text').map(b => (b as { text?: string }).text || '').join('');
+                        rounds.push({ user: userText.slice(0, 200), assistant: assistantText.slice(0, 200) });
+                        i++; // skip the assistant message
+                    }
+                }
+                titleRoundsRef.current = rounds;
+                // If loaded history already has enough rounds, trigger immediately
+                if (rounds.length >= AUTO_TITLE_MIN_ROUNDS) {
+                    autoTitleAttemptedRef.current = true;
+                    const sid = targetSessionId;
+                    const model = lastModelRef.current || '';
+                    const pEnv = lastProviderEnvRef.current;
+                    generateSessionTitle(postJson, sid, [...rounds], model, pEnv)
+                        .then(r => {
+                            if (r?.success && r.title && currentSessionIdRef.current === sid) {
+                                onTitleChangeRef.current?.(r.title);
+                                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
+                            }
+                        })
+                        .catch(() => {});
+                }
+            } else {
+                titleRoundsRef.current = [];
+            }
 
             // Clear current state and load new messages
             seenIdsRef.current.clear();

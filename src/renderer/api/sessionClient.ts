@@ -154,23 +154,28 @@ export async function getSessionStats(sessionId: string): Promise<SessionDetaile
     }
 }
 
+export interface TitleRound {
+    user: string;
+    assistant: string;
+}
+
 /**
- * Generate a short AI-powered session title from the first QA exchange.
+ * Generate a short AI-powered session title from multiple QA rounds.
+ * Triggered after 3+ rounds to ensure enough context for an accurate title.
  * MUST use tab-scoped API (postJson) since session metadata lives on the Tab Sidecar.
  * Using global apiPostJson would send the request to the Global Sidecar which returns 404.
  */
 export async function generateSessionTitle(
     postJson: <T>(path: string, body?: unknown) => Promise<T>,
     sessionId: string,
-    userMessage: string,
-    assistantReply: string,
+    rounds: TitleRound[],
     model: string,
     providerEnv?: { baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' },
 ): Promise<{ success: boolean; title?: string }> {
     try {
         return await postJson<{ success: boolean; title?: string }>(
             '/api/generate-session-title',
-            { sessionId, userMessage, assistantReply, model, providerEnv },
+            { sessionId, rounds, model, providerEnv },
         );
     } catch {
         return { success: false };

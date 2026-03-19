@@ -117,6 +117,7 @@ import {
   getOpenAiBridgeConfig,
   syncProjectUserConfig,
   setProxyConfig,
+  initSocksBridgeFromEnv,
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull, isSkillBlockedOnPlatform } from './utils/platform';
@@ -1115,6 +1116,10 @@ async function main() {
   } else {
     console.log('[startup] Skipping agent-browser on this platform (blocked)');
   }
+
+  // Initialize SOCKS5→HTTP bridge if Rust injected socks5:// proxy env vars.
+  // Must run BEFORE initializeAgent() which triggers pre-warm → SDK subprocess spawn.
+  await initSocksBridgeFromEnv();
 
   await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
   console.log('[startup] initializeAgent done');
@@ -2177,21 +2182,51 @@ async function main() {
       }
 
       // POST /api/generate-session-title - AI-generate a short session title
+      // Accepts `rounds` array (3+ QA rounds) for rich context.
+      // Also accepts legacy `userMessage`/`assistantReply` for backward compatibility.
       if (pathname === '/api/generate-session-title' && request.method === 'POST') {
-        let payload: { sessionId: string; userMessage: string; assistantReply: string; model: string; providerEnv?: ProviderEnv };
+        let payload: {
+          sessionId: string;
+          rounds?: Array<{ user: string; assistant: string }>;
+          // Legacy fields (single-round fallback)
+          userMessage?: string;
+          assistantReply?: string;
+          model: string;
+          providerEnv?: ProviderEnv;
+        };
         try {
           payload = (await request.json()) as typeof payload;
         } catch {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
-        if (!payload.sessionId || !payload.userMessage) {
-          return jsonResponse({ success: false, error: 'sessionId and userMessage are required.' }, 400);
+        if (!payload.sessionId) {
+          return jsonResponse({ success: false, error: 'sessionId is required.' }, 400);
         }
 
-        // Server-side input length caps to prevent abuse
-        payload.userMessage = payload.userMessage.slice(0, 1000);
-        payload.assistantReply = (payload.assistantReply || '').slice(0, 1000);
+        // Build rounds from payload — prefer `rounds` array, fall back to legacy fields
+        let rounds: Array<{ user: string; assistant: string }>;
+        if (payload.rounds && Array.isArray(payload.rounds) && payload.rounds.length > 0) {
+          // Cap to 10 rounds max, validate shape, enforce length limits
+          rounds = payload.rounds.slice(0, 10)
+            .filter((r: unknown): r is Record<string, unknown> => r !== null && typeof r === 'object')
+            .map(r => ({
+              user: (typeof r.user === 'string' ? r.user : '').slice(0, 500),
+              assistant: (typeof r.assistant === 'string' ? r.assistant : '').slice(0, 500),
+            }));
+          if (rounds.length === 0) {
+            return jsonResponse({ success: false, error: 'rounds must contain valid entries.' }, 400);
+          }
+        } else if (payload.userMessage) {
+          // Legacy single-round format
+          rounds = [{
+            user: payload.userMessage.slice(0, 1000),
+            assistant: (payload.assistantReply || '').slice(0, 1000),
+          }];
+        } else {
+          return jsonResponse({ success: false, error: 'rounds or userMessage is required.' }, 400);
+        }
+
         payload.model = (payload.model || '').slice(0, 200);
 
         // Skip if session not found or user has manually renamed
@@ -2204,8 +2239,7 @@ async function main() {
         }
 
         const title = await generateTitle(
-          payload.userMessage,
-          payload.assistantReply || '',
+          rounds,
           payload.model || '',
           payload.providerEnv,
         );
@@ -4202,6 +4236,105 @@ async function main() {
           return jsonResponse({ success: false, error: String(error) }, 500);
         }
       }
+
+      // ============= MCP OAuth API =============
+
+      // POST /api/mcp/oauth/start - Start OAuth flow for an MCP server
+      if (pathname === '/api/mcp/oauth/start' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as {
+            serverId: string;
+            serverUrl: string;
+            clientId: string;
+            clientSecret?: string;
+            scopes?: string[];
+            authorizationUrl?: string;
+            tokenUrl?: string;
+          };
+
+          if (!payload.serverId || !payload.serverUrl || !payload.clientId) {
+            return jsonResponse({ success: false, error: 'Missing serverId, serverUrl, or clientId' }, 400);
+          }
+
+          const { startOAuthFlow } = await import('./mcp-oauth');
+          const manualMetadata = (payload.authorizationUrl && payload.tokenUrl)
+            ? { authorizationUrl: payload.authorizationUrl, tokenUrl: payload.tokenUrl }
+            : undefined;
+
+          const { authUrl, waitForToken } = await startOAuthFlow(
+            payload.serverId,
+            payload.serverUrl,
+            { clientId: payload.clientId, clientSecret: payload.clientSecret, scopes: payload.scopes },
+            manualMetadata,
+          );
+
+          // Don't await the token — return the auth URL immediately
+          // The token will be stored when the callback is received
+          waitForToken.then((token) => {
+            if (token) {
+              console.log(`[api/mcp/oauth] Token obtained for ${payload.serverId}`);
+            } else {
+              console.warn(`[api/mcp/oauth] OAuth flow failed or was cancelled for ${payload.serverId}`);
+            }
+          });
+
+          return jsonResponse({ success: true, authUrl });
+        } catch (error) {
+          console.error('[api/mcp/oauth/start] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to start OAuth flow' },
+            500
+          );
+        }
+      }
+
+      // GET /api/mcp/oauth/status - Get OAuth status for an MCP server
+      if (pathname.startsWith('/api/mcp/oauth/status/') && request.method === 'GET') {
+        try {
+          const serverId = decodeURIComponent(pathname.slice('/api/mcp/oauth/status/'.length));
+          const { getOAuthStatus, getOAuthToken } = await import('./mcp-oauth');
+          const status = getOAuthStatus(serverId);
+          const token = getOAuthToken(serverId);
+          return jsonResponse({
+            success: true,
+            status,
+            hasToken: !!token,
+            expiresAt: token?.expiresAt,
+            scope: token?.scope,
+          });
+        } catch (error) {
+          console.error('[api/mcp/oauth/status] Error:', error);
+          return jsonResponse({ success: false, error: String(error) }, 500);
+        }
+      }
+
+      // POST /api/mcp/oauth/refresh - Refresh OAuth token for an MCP server
+      if (pathname === '/api/mcp/oauth/refresh' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { serverId: string };
+          const { refreshOAuthToken } = await import('./mcp-oauth');
+          const token = await refreshOAuthToken(payload.serverId);
+          return jsonResponse({ success: !!token, refreshed: !!token });
+        } catch (error) {
+          console.error('[api/mcp/oauth/refresh] Error:', error);
+          return jsonResponse({ success: false, error: String(error) }, 500);
+        }
+      }
+
+      // DELETE /api/mcp/oauth/token - Revoke/delete OAuth token for an MCP server
+      if (pathname === '/api/mcp/oauth/token' && request.method === 'DELETE') {
+        try {
+          const payload = await request.json() as { serverId: string };
+          const { revokeOAuthToken } = await import('./mcp-oauth');
+          revokeOAuthToken(payload.serverId);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/mcp/oauth/token] Error:', error);
+          return jsonResponse({ success: false, error: String(error) }, 500);
+        }
+      }
+
+      // ============= END MCP OAuth API =============
 
       // ============= END MCP API =============
 
