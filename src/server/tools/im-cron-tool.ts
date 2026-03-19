@@ -185,6 +185,25 @@ async function imCronToolHandler(args: {
           };
         }
 
+        // Validate: "at" schedule must be in the future
+        if (args.job.schedule.kind === 'at') {
+          const atTime = new Date(args.job.schedule.at).getTime();
+          const now = Date.now();
+          if (isNaN(atTime)) {
+            return {
+              content: [{ type: 'text', text: `Error: Invalid datetime "${args.job.schedule.at}". Use ISO-8601 format, e.g. "2024-12-01T14:30:00+08:00". Tip: run \`date\` to check the current system time.` }],
+              isError: true,
+            };
+          }
+          if (atTime < now - 60_000) { // 1-minute tolerance for clock skew
+            const nowIso = new Date().toISOString();
+            return {
+              content: [{ type: 'text', text: `Error: Scheduled time "${args.job.schedule.at}" is in the past (current time: ${nowIso}). Please run \`date\` to verify the current time and provide a future datetime.` }],
+              isError: true,
+            };
+          }
+        }
+
         // Build create payload — IM sessions include delivery info, regular sessions do not
         const createPayload: Record<string, unknown> = {
           name: args.job.name,
@@ -282,6 +301,26 @@ async function imCronToolHandler(args: {
         // Verify task belongs to current workspace
         const updateOwnershipError = await verifyTaskOwnership(args.taskId, 'update');
         if (updateOwnershipError) return updateOwnershipError;
+
+        // Validate: if updating schedule to an "at" time, it must be in the future
+        const patchSchedule = args.patch.schedule as { kind: string; at?: string } | undefined;
+        if (patchSchedule?.kind === 'at' && patchSchedule.at) {
+          const atTime = new Date(patchSchedule.at).getTime();
+          const now = Date.now();
+          if (isNaN(atTime)) {
+            return {
+              content: [{ type: 'text', text: `Error: Invalid datetime "${patchSchedule.at}". Use ISO-8601 format, e.g. "2024-12-01T14:30:00+08:00". Tip: run \`date\` to check the current system time.` }],
+              isError: true,
+            };
+          }
+          if (atTime < now - 60_000) {
+            const nowIso = new Date().toISOString();
+            return {
+              content: [{ type: 'text', text: `Error: Scheduled time "${patchSchedule.at}" is in the past (current time: ${nowIso}). Please run \`date\` to verify the current time and provide a future datetime.` }],
+              isError: true,
+            };
+          }
+        }
 
         // Normalize patch: map "message" → "prompt" (tool schema uses "message", backend uses "prompt")
         // Also defensively handle AI nesting fields inside "job" (matching "add" schema structure)
@@ -470,8 +509,11 @@ Use this tool when the user wants to:
 - Check overall task statistics ("status")
 - Manually trigger a heartbeat check ("wake")
 
+**IMPORTANT — Time awareness check:**
+Before creating any scheduled task (especially "at" one-shot schedules), you MUST first run \`date\` via the Bash tool to confirm the current local time and timezone. Do NOT assume or infer the current time from conversation context — your perception of time may be inaccurate. Use the actual system clock output to calculate the correct ISO-8601 datetime.
+
 Schedules can be:
-- "at": One-shot at a specific ISO-8601 datetime
+- "at": One-shot at a specific ISO-8601 datetime (MUST be in the future — verify with system clock first)
 - "every": Recurring at fixed intervals (minimum 5 minutes)
 - "cron": Standard cron expression with optional timezone
 

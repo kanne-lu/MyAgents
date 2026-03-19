@@ -354,7 +354,11 @@ const server = Bun.serve({
 
       try {
         const result = await capturedPlugin.sendText(chatId, text);
-        return Response.json({ ok: true, messageId: result?.messageId });
+        const messageId = result?.messageId;
+        if (!messageId) {
+          console.warn(`[plugin-bridge] sendText returned empty messageId for chatId=${chatId} — the platform API may have rejected the request. result:`, JSON.stringify(result));
+        }
+        return Response.json({ ok: true, messageId: messageId || undefined });
       } catch (err) {
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
       }

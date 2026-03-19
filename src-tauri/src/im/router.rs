@@ -628,23 +628,34 @@ fn session_key_to_source_str(session_key: &str) -> String {
 /// Supports both legacy and new format:
 ///   Legacy: im:{platform}:{private|group}:{id}
 ///   New:    agent:{agentId}:{channelType}:{private|group}:{id}
+///
+/// NOTE: Both channelType AND source_id may contain colons:
+///   - channelType: "openclaw:feishu" (OpenClaw plugin names)
+///   - source_id:   "group:abc123"    (DingTalk group chat IDs)
+/// We search FORWARD from the platform start position for the FIRST
+/// "private"/"group" token, since platform names never contain these words
+/// while source_id may (e.g. DingTalk "group:{openConversationId}").
 pub fn parse_session_key(session_key: &str) -> (ImSourceType, String) {
     let parts: Vec<&str> = session_key.split(':').collect();
-    if parts.len() >= 5 && parts[0] == "agent" {
-        // New format: agent:{agentId}:{channelType}:{private|group}:{id}
-        let source_type = match parts[3] {
-            "group" => ImSourceType::Group,
-            _ => ImSourceType::Private,
-        };
-        let source_id = parts[4..].join(":");
-        (source_type, source_id)
+
+    // Determine where to start searching (skip fixed prefix fields)
+    let search_start = if parts.len() >= 5 && parts[0] == "agent" {
+        2 // agent:{agentId}: — platform starts at index 2
     } else if parts.len() >= 4 {
-        // Legacy format: im:{platform}:{private|group}:{id}
-        let source_type = match parts[2] {
+        1 // im: — platform starts at index 1
+    } else {
+        return (ImSourceType::Private, session_key.to_string());
+    };
+
+    // Find the FIRST "private" or "group" after the prefix — this is the source_type marker.
+    // Platform names (telegram, feishu, dingtalk, openclaw:xxx) don't contain these words.
+    if let Some(rel_pos) = parts[search_start..].iter().position(|p| *p == "private" || *p == "group") {
+        let abs_pos = search_start + rel_pos;
+        let source_type = match parts[abs_pos] {
             "group" => ImSourceType::Group,
             _ => ImSourceType::Private,
         };
-        let source_id = parts[3..].join(":");
+        let source_id = parts[abs_pos + 1..].join(":");
         (source_type, source_id)
     } else {
         (ImSourceType::Private, session_key.to_string())

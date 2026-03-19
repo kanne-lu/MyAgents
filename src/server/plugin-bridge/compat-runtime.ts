@@ -188,8 +188,9 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
               console.error(`[compat-timing] withReplyDispatcher run() THREW (+${Date.now() - t0}ms):`, err);
             }
           }
-          // Plugin destructures { queuedFinal, counts } from the return value
-          return { queuedFinal: 0, counts: {} };
+          // Plugin destructures { queuedFinal, counts, dispatcher } from the return value.
+          // Feishu plugin calls dispatcher.waitForIdle() after dispatch — provide a no-op mock.
+          return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
         },
 
         /**
@@ -229,7 +230,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           if (!text.trim()) {
             console.log('[compat-runtime] Empty message, skipping');
-            return { queuedFinal: 0, counts: {} };
+            return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
           }
 
           const t0 = Date.now();
@@ -267,7 +268,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           }
 
           // Do NOT call the deliver callback — AI reply comes back via /send-text
-          return { queuedFinal: 0, counts: {} };
+          return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
         },
       },
 
