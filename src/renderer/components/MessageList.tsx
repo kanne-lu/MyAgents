@@ -1,7 +1,7 @@
 import { Loader2 } from 'lucide-react';
 import React, { memo, useMemo, useState, useEffect, useRef } from 'react';
 import { Virtuoso } from 'react-virtuoso';
-import type { VirtuosoHandle } from 'react-virtuoso';
+import type { VirtuosoHandle, StateSnapshot } from 'react-virtuoso';
 
 import Message from '@/components/Message';
 import { PermissionPrompt, type PermissionRequest } from '@/components/PermissionPrompt';
@@ -107,6 +107,11 @@ function hasExitPlanModeTool(message: MessageType): boolean {
   );
 }
 
+// ── Virtuoso state snapshot cache — module-level so it persists across component remounts ──
+// Stores measured item heights + scroll position per sessionId. When the user revisits a
+// session, restoreStateFrom provides real heights → zero scroll jumping.
+const stateSnapshotCache = new Map<string, StateSnapshot>();
+
 // ── Stable custom Virtuoso sub-components (defined outside to prevent re-creation) ──
 
 /** Scroller: the actual overflow:auto element */
@@ -207,33 +212,23 @@ const MessageList = memo(function MessageList({
     [historyMessages, streamingMessage]
   );
 
-  // ── Dynamic defaultItemHeight — estimate average rendered height from content structure ──
-  // Critical for scroll stability: if the estimate is too high, upward scrolling causes items
-  // to measure SHORTER → total height shrinks → viewport snaps back to bottom (items "follow you").
-  // If too low, items measure TALLER → gaps appear. Closer to reality = less jumping.
-  const estimatedItemHeight = useMemo(() => {
-    if (historyMessages.length === 0) return 300;
-    let totalEstimate = 0;
-    for (const msg of historyMessages) {
-      if (msg.role === 'user') {
-        const textLen = typeof msg.content === 'string' ? msg.content.length : 0;
-        totalEstimate += Math.max(60, Math.min(300, 60 + textLen * 0.3));
-      } else if (Array.isArray(msg.content)) {
-        let h = 20; // padding
-        for (const block of msg.content) {
-          if (block.type === 'text') {
-            h += Math.max(40, Math.min(2000, (block.text?.length || 0) * 0.015));
-          } else {
-            h += 45; // collapsed tool/thinking header
-          }
-        }
-        totalEstimate += Math.max(100, Math.min(5000, h));
-      } else {
-        totalEstimate += 200;
+  // ── Virtuoso state snapshot cache — persist measured item heights across session switches ──
+  // Without this, every session switch (key={sessionId} → Virtuoso remount) loses all measured
+  // heights, forcing Virtuoso to re-estimate with defaultItemHeight. With the cache, the second
+  // visit to a session restores real heights instantly — zero jumping.
+  const savedStateRef = useRef(stateSnapshotCache.get(sessionId || ''));
+  // Save state before Virtuoso unmounts (session switch / tab close)
+  useEffect(() => {
+    const sid = sessionId;
+    const ref = virtuosoRef.current;
+    return () => {
+      if (sid && ref) {
+        ref.getState((snapshot) => {
+          stateSnapshotCache.set(sid, snapshot);
+        });
       }
-    }
-    return Math.max(100, Math.round(totalEstimate / historyMessages.length));
-  }, [historyMessages]);
+    };
+  }, [sessionId, virtuosoRef]);
 
   // ── Streaming status ──
   const streamingStatusMessage = useMemo(
@@ -392,9 +387,10 @@ const MessageList = memo(function MessageList({
         data={allMessages}
         computeItemKey={computeItemKey}
         initialTopMostItemIndex={allMessages.length > 0 ? allMessages.length - 1 : 0}
+        restoreStateFrom={savedStateRef.current}
         followOutput={handleFollowOutput}
         atBottomThreshold={50}
-        defaultItemHeight={estimatedItemHeight}
+        defaultItemHeight={300}
         increaseViewportBy={{ top: 600, bottom: 400 }}
         className="h-full"
         components={components}
