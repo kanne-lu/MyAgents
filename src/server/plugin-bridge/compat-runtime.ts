@@ -213,7 +213,11 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
-          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention ?? true;
+          // Default isMention by chatType: private=true (always directed at bot),
+          // group=false (conservative — only if plugin explicitly flags it as mention).
+          // This matches native Feishu adapter behavior where is_mention defaults to false
+          // and is only true when bot's open_id appears in the mentions array.
+          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention ?? (chatType !== 'group');
 
           // Extract attachment-related fields (for Feishu file/image forwarding, threaded replies, etc.)
           const attachments = (ctx.Attachments || ctx.attachments || undefined) as Record<string, unknown>[] | undefined;

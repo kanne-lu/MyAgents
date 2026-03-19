@@ -652,6 +652,8 @@ async fn handle_bridge_message(
     } else {
         ImSourceType::Private
     };
+    // Default: private=true (directed at bot), group=false (only if explicitly flagged)
+    let is_mention = payload.is_mention.unwrap_or(source_type == ImSourceType::Private);
 
     let msg = ImMessage {
         chat_id: payload.chat_id,
@@ -664,7 +666,7 @@ async fn handle_bridge_message(
         timestamp: chrono::Utc::now(),
         attachments: Vec::new(),
         media_group_id: None,
-        is_mention: payload.is_mention.unwrap_or(true),
+        is_mention,
         reply_to_bot: false,
     };
 
