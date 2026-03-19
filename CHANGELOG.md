@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.45] - 2026-03-20
+
+### Added
+- **Session Fork（会话分支）**：从任意助手消息创建会话分支，类似 git branch，在已有对话的任意节点分叉出新方向，原对话不受影响
+- **消息列表虚拟化**：使用 react-virtuoso 替代平铺渲染，支持上百轮长对话不卡顿，自动跟踪滚动 + 用户滚离底部自动停止跟踪
+- **SOCKS5 代理支持**：自动检测 socks5:// 代理并启动 HTTP-to-SOCKS5 bridge，解决 Bun/Node.js 不原生支持 SOCKS5 的问题
+- **MCP OAuth 2.0 授权**：支持需要 OAuth 授权的 MCP Server，自动发现、授权码流程（含 PKCE）、Token 持久化与自动刷新
+- **Bridge 群聊完整支持**：飞书插件群聊元数据透传、群名显示、引用回复、群系统提示注入，群聊体验与私聊对齐
+- **Tool Result 展示优化**：Bash 输出终端风格渲染、JSON 自动解析高亮、Read/Grep/Glob 结果结构化展示、超长内容限高可展开
+
+### Improved
+- **智能起名准确度**：从 1 轮对话就起名改为 3 轮对话后触发，基于多轮上下文提炼主题，禁止摘抄原文，标题更准确。1-2 轮对话显示用户消息截取
+- **预设供应商模型显示**：模型标签显示真实模型 ID（如 `kimi-k2.5`）而非友好名（Kimi K2.5），避免用户填错模型名
+- **超长图片处理**：统一 1568px 阈值，超长图按 1:2 比例切片上传，图片处理失败时通知用户而非静默丢弃
+
+### Fixed
+- **自主操作权限**：Heartbeat、定时任务、记忆更新统一使用 fullAgency 权限，不再因无人审批导致 Bash 等工具 10 分钟超时后被拒绝
+- **记忆更新打断用户对话**：记忆更新前检查 session 最近 15 分钟是否有用户活动，活跃的 session 推迟 15 分钟后重试
+- **飞书 Bot 消息分发崩溃**：dispatch 函数缺少返回值导致解构 null 报错
+- **飞书群聊 isMention 误判**：默认值从全局 true 改为按 chatType 区分（私聊 true、群聊 false）
+- **群聊权限命令失败**：群内 /allow、/block 等权限命令未查询 ManagedAgents，显示 "Bot not running"
+- **未配置供应商时误导**：移除默认 fallback 到 Anthropic 订阅的逻辑，避免未登录用户看到 "need to log in" 错误
+- **IM 定时任务立即执行失败**：cron 工具 `run_now` 未正确路由到执行端点
+- **飞书消息投递失败**：Plugin Bridge 消息发送路径修复
+
+---
+
 ## [0.1.44] - 2026-03-18
 
 ### Added
