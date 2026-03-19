@@ -69,7 +69,7 @@ export default function AttachmentPreviewList({
             {showImagePreview ?
               <div
                 className={`relative overflow-hidden ${compact ? 'rounded-lg' : 'rounded-2xl'} ${imageDimensions} cursor-pointer`}
-                onDoubleClick={() => onPreview?.(attachment.previewUrl!, attachment.name)}
+                onClick={() => onPreview?.(attachment.previewUrl!, attachment.name)}
               >
                 <img
                   src={attachment.previewUrl}
