@@ -1469,6 +1469,8 @@ impl FeishuAdapter {
             media_group_id: None,
             is_mention,
             reply_to_bot,
+            hint_group_name: None,
+            reply_to_body: None,
         })
     }
 

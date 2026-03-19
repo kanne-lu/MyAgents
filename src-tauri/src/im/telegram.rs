@@ -49,6 +49,8 @@ struct PendingBatch {
     // OR'd across all fragments — true if ANY fragment had mention/reply-to-bot
     is_mention: bool,
     reply_to_bot: bool,
+    hint_group_name: Option<String>,
+    reply_to_body: Option<String>,
 }
 
 /// Merges fragmented messages (Telegram splits >4096 char pastes)
@@ -105,6 +107,12 @@ impl MessageCoalescer {
                 // OR mention flags: if any fragment has mention, the merged msg does too
                 batch.is_mention = batch.is_mention || msg.is_mention;
                 batch.reply_to_bot = batch.reply_to_bot || msg.reply_to_bot;
+                if batch.hint_group_name.is_none() {
+                    batch.hint_group_name = msg.hint_group_name.clone();
+                }
+                if batch.reply_to_body.is_none() {
+                    batch.reply_to_body = msg.reply_to_body.clone();
+                }
                 return ready; // Still waiting for more fragments
             }
 
@@ -131,6 +139,8 @@ impl MessageCoalescer {
                     platform: msg.platform.clone(),
                     is_mention: msg.is_mention,
                     reply_to_bot: msg.reply_to_bot,
+                    hint_group_name: msg.hint_group_name.clone(),
+                    reply_to_body: msg.reply_to_body.clone(),
                 },
             );
         } else {
@@ -179,6 +189,8 @@ impl MessageCoalescer {
             media_group_id: None,
             is_mention: batch.is_mention,
             reply_to_bot: batch.reply_to_bot,
+            hint_group_name: batch.hint_group_name,
+            reply_to_body: batch.reply_to_body,
         })
     }
 }
@@ -1285,6 +1297,8 @@ impl TelegramAdapter {
             media_group_id,
             is_mention,
             reply_to_bot,
+            hint_group_name: None,
+            reply_to_body: None,
         })
     }
 
@@ -1680,6 +1694,8 @@ mod tests {
             media_group_id: None,
             is_mention: false,
             reply_to_bot: false,
+            hint_group_name: None,
+            reply_to_body: None,
         }
     }
 

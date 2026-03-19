@@ -215,13 +215,15 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
           // Default isMention by chatType: private=true (always directed at bot),
           // group=false (conservative — only if plugin explicitly flags it as mention).
-          // This matches native Feishu adapter behavior where is_mention defaults to false
-          // and is only true when bot's open_id appears in the mentions array.
+          // OpenClaw Feishu plugin sets WasMentioned via mentionedBot(ctx.mentions).
           const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention ?? (chatType !== 'group');
 
-          // Extract attachment-related fields (for Feishu file/image forwarding, threaded replies, etc.)
-          const attachments = (ctx.Attachments || ctx.attachments || undefined) as Record<string, unknown>[] | undefined;
-          const replyToMessageId = String(ctx.ReplyToMessageId || ctx.replyToMessageId || '') || undefined;
+          // Group metadata from OpenClaw plugin dispatch context
+          const groupName = String(ctx.GroupSubject || ctx.GroupName || ctx.groupName || '') || undefined;
+          const threadId = String(ctx.MessageThreadId || ctx.threadId || '') || undefined;
+
+          // Quoted reply content (for threaded replies)
+          const replyToBody = String(ctx.ReplyToBody || ctx.replyToBody || '') || undefined;
 
           if (!text.trim()) {
             console.log('[compat-runtime] Empty message, skipping');
@@ -246,8 +248,9 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
                 messageId: messageId || undefined,
                 groupId: groupId || undefined,
                 isMention,
-                attachments: attachments || undefined,
-                replyToMessageId: replyToMessageId || undefined,
+                groupName: groupName || undefined,
+                threadId: threadId || undefined,
+                replyToBody: replyToBody || undefined,
               }),
             });
 

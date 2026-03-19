@@ -607,6 +607,16 @@ struct BridgeMessagePayload {
     #[allow(dead_code)]
     group_id: Option<String>,
     is_mention: Option<bool>,
+    /// Human-readable group name from plugin (e.g. GroupSubject in OpenClaw Feishu)
+    #[serde(default)]
+    group_name: Option<String>,
+    /// Thread ID for threaded replies (MessageThreadId in OpenClaw)
+    #[serde(default)]
+    #[allow(dead_code)]
+    thread_id: Option<String>,
+    /// Quoted reply text content (ReplyToBody in OpenClaw)
+    #[serde(default)]
+    reply_to_body: Option<String>,
 }
 
 async fn handle_bridge_message(
@@ -668,6 +678,8 @@ async fn handle_bridge_message(
         media_group_id: None,
         is_mention,
         reply_to_bot: false,
+        hint_group_name: payload.group_name,
+        reply_to_body: payload.reply_to_body,
     };
 
     match sender.send(msg).await {

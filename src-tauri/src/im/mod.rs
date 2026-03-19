@@ -1817,12 +1817,13 @@ async fn create_bot_instance<R: Runtime>(
                             };
                             let activation = task_group_activation.read().await.clone();
                             let tools_deny = task_group_tools_deny.read().await.clone();
-                            // Get group name from group_permissions config
+                            // Get group name: 1) group_permissions config, 2) Bridge hint, 3) chat_id fallback
                             let group_name = {
                                 let perms = task_group_permissions.read().await;
                                 perms.iter()
                                     .find(|g| g.group_id == msg.chat_id)
                                     .map(|g| g.group_name.clone())
+                                    .or_else(|| msg.hint_group_name.clone())
                                     .unwrap_or_else(|| msg.chat_id.clone())
                             };
                             Some(GroupStreamContext {
