@@ -2,7 +2,7 @@
   "name": "myagents",
   "description": "MyAgents - Desktop Claude Code for everyone. AI-powered productivity, not just for developers.",
   "type": "module",
-  "version": "0.1.44",
+  "version": "0.1.45",
   "license": "Apache-2.0",
   "packageManager": "bun@1.3.2",
   "author": {
@@ -78,7 +78,8 @@
     "rehype-katex": "^7.0.1",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
-    "remark-math": "^6.0.0"
+    "remark-math": "^6.0.0",
+    "socks": "^2.8.7"
   },
   "devDependencies": {
     "@eslint/compat": "^2.0.0",

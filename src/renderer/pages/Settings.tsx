@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Download, FolderOpen, KeyRound, Loader2, Plus, RefreshCw, Square, Trash2, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
+import { Check, ChevronDown, Download, FolderOpen, KeyRound, Link, Loader2, Plus, RefreshCw, Square, Trash2, Unlink, X, AlertCircle, Globe, ExternalLink as ExternalLinkIcon, Settings2 } from 'lucide-react';
 import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { homeDir, join } from '@tauri-apps/api/path';
 
 import { track } from '@/analytics';
-import { apiGetJson, apiPostJson } from '@/api/apiFetch';
+import { apiFetch, apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import CustomSelect from '@/components/CustomSelect';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
@@ -207,7 +207,7 @@ const ModelTagList = React.memo(function ModelTagList({
                                 : 'bg-[var(--paper-inset)]'
                         }`}
                     >
-                        <span>{model.modelName}</span>
+                        <span>{model.model}</span>
                         {isPresetModel ? (
                             <span className="text-[10px] text-[var(--ink-muted)]">预设</span>
                         ) : (
@@ -603,6 +603,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const [mcpJsonInput, setMcpJsonInput] = useState('');
     const [mcpJsonError, setMcpJsonError] = useState('');
 
+    // OAuth state for MCP servers
+    const [mcpOAuthStatus, setMcpOAuthStatus] = useState<Record<string, 'disconnected' | 'connecting' | 'connected' | 'expired' | 'error'>>({});
+    const [mcpOAuthConnecting, setMcpOAuthConnecting] = useState<string | null>(null);
+
     const [mcpForm, setMcpForm] = useState<{
         id: string;
         name: string;
@@ -615,6 +619,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         newEnvKey: string;
         headers: Record<string, string>;
         newHeaderKey: string;
+        // OAuth fields
+        oauthClientId: string;
+        oauthClientSecret: string;
+        oauthScopes: string;
+        oauthAuthUrl: string;
+        oauthTokenUrl: string;
     }>({
         id: '',
         name: '',
@@ -627,6 +637,11 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         newEnvKey: '',
         headers: {},
         newHeaderKey: '',
+        oauthClientId: '',
+        oauthClientSecret: '',
+        oauthScopes: '',
+        oauthAuthUrl: '',
+        oauthTokenUrl: '',
     });
 
     // Check which MCP servers need configuration (missing required fields)
@@ -765,7 +780,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         setMcpJsonError('');
         setMcpForm({
             id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-            env: {}, newEnvKey: '', headers: {}, newHeaderKey: ''
+            env: {}, newEnvKey: '', headers: {}, newHeaderKey: '',
+            oauthClientId: '', oauthClientSecret: '', oauthScopes: '', oauthAuthUrl: '', oauthTokenUrl: '',
         });
     };
 
@@ -1050,6 +1066,84 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         }
     };
 
+    // OAuth: start OAuth flow for an MCP server
+    const handleMcpOAuthConnect = async (serverId: string, serverUrl: string) => {
+        if (!mcpForm.oauthClientId) {
+            toast.error('请填写 Client ID');
+            return;
+        }
+        setMcpOAuthConnecting(serverId);
+        try {
+            const result = await apiPostJson<{ success: boolean; authUrl?: string; error?: string }>('/api/mcp/oauth/start', {
+                serverId,
+                serverUrl: serverUrl || mcpForm.url,
+                clientId: mcpForm.oauthClientId,
+                clientSecret: mcpForm.oauthClientSecret || undefined,
+                scopes: mcpForm.oauthScopes ? mcpForm.oauthScopes.split(/[\s,]+/).filter(Boolean) : undefined,
+                authorizationUrl: mcpForm.oauthAuthUrl || undefined,
+                tokenUrl: mcpForm.oauthTokenUrl || undefined,
+            });
+            if (result.success && result.authUrl) {
+                // Open browser for authorization
+                const { openExternal } = await import('@/utils/openExternal');
+                await openExternal(result.authUrl);
+                toast.success('已在浏览器中打开授权页面，请完成授权');
+                setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connecting' }));
+                // Poll for token status — use functional state update to avoid stale closure
+                const pollInterval = setInterval(async () => {
+                    try {
+                        const status = await apiGetJson<{ success: boolean; status: string }>(`/api/mcp/oauth/status/${encodeURIComponent(serverId)}`);
+                        if (status.success && status.status === 'connected') {
+                            clearInterval(pollInterval);
+                            setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connected' }));
+                            setMcpOAuthConnecting(null);
+                            toast.success('OAuth 授权成功');
+                        } else if (status.success && status.status === 'disconnected') {
+                            // Flow was cancelled or failed — check via functional update
+                            setMcpOAuthConnecting(prev => {
+                                if (prev === serverId) {
+                                    clearInterval(pollInterval);
+                                    setMcpOAuthStatus(p => ({ ...p, [serverId]: 'disconnected' }));
+                                    return null;
+                                }
+                                return prev;
+                            });
+                        }
+                    } catch { /* ignore poll errors */ }
+                }, 2000);
+                // Stop polling after 5 minutes
+                setTimeout(() => {
+                    clearInterval(pollInterval);
+                    setMcpOAuthConnecting(null);
+                }, 5 * 60 * 1000);
+            } else {
+                toast.error(result.error || 'OAuth 启动失败');
+                setMcpOAuthConnecting(null);
+            }
+        } catch (err) {
+            toast.error(`OAuth 错误: ${err instanceof Error ? err.message : String(err)}`);
+            setMcpOAuthConnecting(null);
+        }
+    };
+
+    // OAuth: disconnect (revoke token)
+    const handleMcpOAuthDisconnect = async (serverId: string) => {
+        try {
+            const response = await apiFetch('/api/mcp/oauth/token', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ serverId }),
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'disconnected' }));
+            toast.success('OAuth 连接已断开');
+        } catch {
+            toast.error('断开 OAuth 失败');
+        }
+    };
+
     // Edit custom MCP server - populate form and open modal
     const handleEditMcp = (server: McpServerDefinition) => {
         setMcpForm({
@@ -1064,7 +1158,21 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             newEnvKey: '',
             headers: server.headers ? { ...server.headers } : {},
             newHeaderKey: '',
+            oauthClientId: '',
+            oauthClientSecret: '',
+            oauthScopes: '',
+            oauthAuthUrl: '',
+            oauthTokenUrl: '',
         });
+        // Fetch OAuth status for this server
+        if (server.type === 'sse' || server.type === 'http') {
+            apiGetJson<{ success: boolean; status: string }>(`/api/mcp/oauth/status/${encodeURIComponent(server.id)}`)
+                .then(res => {
+                    if (res.success) {
+                        setMcpOAuthStatus(prev => ({ ...prev, [server.id]: res.status as 'connected' | 'disconnected' | 'expired' }));
+                    }
+                }).catch(() => { /* ignore */ });
+        }
         setEditingMcpId(server.id);
         setShowMcpForm(true);
     };
@@ -4055,6 +4163,91 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 </button>
                                             </div>
                                             <p className="mt-2 text-xs text-[var(--ink-muted)]">用于认证的 HTTP 请求头，如 Bearer Token</p>
+                                        </div>
+
+                                        {/* OAuth 2.0 Section */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-inset)] p-4">
+                                            <label className="mb-3 flex items-center justify-between text-sm font-medium text-[var(--ink)]">
+                                                <span className="flex items-center gap-2">
+                                                    <Link className="h-4 w-4" /> OAuth 2.0 授权（可选）
+                                                </span>
+                                                {mcpOAuthStatus[mcpForm.id] === 'connected' && (
+                                                    <span className="flex items-center gap-1 rounded-full bg-[var(--success)]/10 px-2 py-0.5 text-xs text-[var(--success)]">
+                                                        <Check className="h-3 w-3" /> 已连接
+                                                    </span>
+                                                )}
+                                                {mcpOAuthStatus[mcpForm.id] === 'expired' && (
+                                                    <span className="flex items-center gap-1 rounded-full bg-[var(--warning)]/10 px-2 py-0.5 text-xs text-[var(--warning)]">
+                                                        <AlertCircle className="h-3 w-3" /> 已过期
+                                                    </span>
+                                                )}
+                                            </label>
+                                            <p className="mb-3 text-xs text-[var(--ink-muted)]">
+                                                部分 MCP 服务器需要 OAuth 2.0 授权（如 Google、GitHub 等）。填写 Client ID 后点击连接即可自动完成授权流程。
+                                            </p>
+
+                                            <div className="space-y-2">
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.oauthClientId}
+                                                    onChange={(e) => setMcpForm(p => ({ ...p, oauthClientId: e.target.value }))}
+                                                    placeholder="Client ID *"
+                                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                />
+                                                <input
+                                                    type="password"
+                                                    value={mcpForm.oauthClientSecret}
+                                                    onChange={(e) => setMcpForm(p => ({ ...p, oauthClientSecret: e.target.value }))}
+                                                    placeholder="Client Secret（可选）"
+                                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                />
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.oauthScopes}
+                                                    onChange={(e) => setMcpForm(p => ({ ...p, oauthScopes: e.target.value }))}
+                                                    placeholder="Scopes（空格分隔，如 read write）"
+                                                    className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                />
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    <input
+                                                        type="url"
+                                                        value={mcpForm.oauthAuthUrl}
+                                                        onChange={(e) => setMcpForm(p => ({ ...p, oauthAuthUrl: e.target.value }))}
+                                                        placeholder="Authorization URL（留空自动发现）"
+                                                        className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                    />
+                                                    <input
+                                                        type="url"
+                                                        value={mcpForm.oauthTokenUrl}
+                                                        onChange={(e) => setMcpForm(p => ({ ...p, oauthTokenUrl: e.target.value }))}
+                                                        placeholder="Token URL（留空自动发现）"
+                                                        className="rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <div className="mt-3 flex items-center gap-2">
+                                                {mcpOAuthStatus[mcpForm.id] === 'connected' ? (
+                                                    <button
+                                                        onClick={() => handleMcpOAuthDisconnect(mcpForm.id)}
+                                                        className="flex items-center gap-1.5 rounded-lg border border-[var(--error)] px-3 py-2 text-sm font-medium text-[var(--error)] transition-colors hover:bg-[var(--error-bg)]"
+                                                    >
+                                                        <Unlink className="h-4 w-4" /> 断开连接
+                                                    </button>
+                                                ) : (
+                                                    <button
+                                                        onClick={() => handleMcpOAuthConnect(mcpForm.id, mcpForm.url)}
+                                                        disabled={!mcpForm.oauthClientId || mcpOAuthConnecting === mcpForm.id}
+                                                        className="flex items-center gap-1.5 rounded-lg border border-[var(--accent)] px-3 py-2 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent)]/10 disabled:opacity-50"
+                                                    >
+                                                        {mcpOAuthConnecting === mcpForm.id ? (
+                                                            <><Loader2 className="h-4 w-4 animate-spin" /> 等待授权...</>
+                                                        ) : (
+                                                            <><Link className="h-4 w-4" /> 连接</>
+                                                        )}
+                                                    </button>
+                                                )}
+                                            </div>
                                         </div>
                                     </>
                                 )}

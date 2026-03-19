@@ -11,6 +11,8 @@ import { imCronToolServer, getImCronContext, setSessionCronContext, clearSession
 import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
 import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
+import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils/socks-bridge';
+import { getOAuthToken } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
 import './tools/edge-tts-tool';
@@ -28,6 +30,9 @@ import { trackServer } from './analytics';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
+
+// Shared NO_PROXY value — comprehensive list of localhost addresses to bypass proxy
+const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
 
 // Max length for individual string values in SDK message logs.
 // Base64 images can be several MB; truncate to keep logs readable.
@@ -635,7 +640,13 @@ let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
  * Mutates process.env so that subsequent SDK subprocess spawns inherit the new proxy.
  * Triggers session restart (abort + resume + pre-warm) identical to MCP config changes,
  * but only when the effective proxy URL actually changed.
+ *
+ * SOCKS5 handling: Bun/Node.js `fetch()` doesn't support `socks5://` in HTTP_PROXY env vars.
+ * When SOCKS5 is configured, we start a local HTTP-to-SOCKS5 bridge and set HTTP_PROXY to
+ * the bridge's HTTP URL. The bridge transparently tunnels traffic through SOCKS5.
  */
+let proxyConfigGeneration = 0; // Guards against stale async SOCKS5 callbacks
+
 export function setProxyConfig(proxySettings: {
   enabled: boolean;
   protocol?: string;
@@ -643,36 +654,84 @@ export function setProxyConfig(proxySettings: {
   port?: number;
 } | null): void {
   const PROXY_VARS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'];
-  const NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
+
+  // Bump generation to invalidate in-flight SOCKS5 bridge callbacks
+  const generation = ++proxyConfigGeneration;
 
   // Compute the new effective proxy URL for change detection
   const oldProxyUrl = process.env.HTTP_PROXY || '';
-  const newProxyUrl = proxySettings?.enabled
+  const rawProxyUrl = proxySettings?.enabled
     ? `${proxySettings.protocol || 'http'}://${proxySettings.host || '127.0.0.1'}:${proxySettings.port || 7890}`
     : '';
-  const proxyChanged = oldProxyUrl !== newProxyUrl;
+  const isSocks5 = proxySettings?.protocol === 'socks5';
 
   if (proxySettings?.enabled) {
-    process.env.HTTP_PROXY = newProxyUrl;
-    process.env.HTTPS_PROXY = newProxyUrl;
-    process.env.http_proxy = newProxyUrl;
-    process.env.https_proxy = newProxyUrl;
-    process.env.NO_PROXY = NO_PROXY_VAL;
-    process.env.no_proxy = NO_PROXY_VAL;
-    delete process.env.ALL_PROXY;
-    delete process.env.all_proxy;
-    console.log(`[agent] Proxy hot-reloaded: ${newProxyUrl}`);
+    if (isSocks5) {
+      // SOCKS5: start bridge asynchronously, set env vars after bridge is ready
+      const host = proxySettings.host || '127.0.0.1';
+      const port = proxySettings.port || 7890;
+      startSocksBridge(host, port).then((bridgePort) => {
+        // Discard if a newer config change has occurred while bridge was starting
+        if (generation !== proxyConfigGeneration) {
+          console.log('[agent] SOCKS5 bridge callback discarded (superseded by newer config)');
+          return;
+        }
+        const bridgeUrl = `http://127.0.0.1:${bridgePort}`;
+        if (oldProxyUrl === bridgeUrl) {
+          console.log('[agent] SOCKS5 bridge URL unchanged, skipping restart');
+          return;
+        }
+        applyProxyEnvVars(bridgeUrl, PROXY_NO_PROXY_VAL);
+        console.log(`[agent] SOCKS5 proxy hot-reloaded: ${rawProxyUrl} → bridge ${bridgeUrl}`);
+        triggerProxyRestart();
+      }).catch((err) => {
+        if (generation !== proxyConfigGeneration) return;
+        console.error(`[agent] Failed to start SOCKS5 bridge: ${err.message}. Falling back to direct socks5:// URL.`);
+        applyProxyEnvVars(rawProxyUrl, PROXY_NO_PROXY_VAL);
+        triggerProxyRestart();
+      });
+      // Return early — env vars will be set when bridge is ready
+      return;
+    }
+
+    // HTTP/HTTPS: stop bridge if running, set env vars directly
+    if (isSocksBridgeRunning()) {
+      stopSocksBridge().catch(() => { /* ignore */ });
+    }
+    applyProxyEnvVars(rawProxyUrl, PROXY_NO_PROXY_VAL);
+    console.log(`[agent] Proxy hot-reloaded: ${rawProxyUrl}`);
   } else {
+    // Disabled: stop bridge, clear env vars
+    if (isSocksBridgeRunning()) {
+      stopSocksBridge().catch(() => { /* ignore */ });
+    }
     for (const v of PROXY_VARS) delete process.env[v];
     console.log('[agent] Proxy cleared (direct connection)');
   }
 
-  if (!proxyChanged) {
+  const newProxyUrl = process.env.HTTP_PROXY || '';
+  if (oldProxyUrl === newProxyUrl) {
     if (isDebugMode) console.log('[agent] Proxy config unchanged, skipping session restart');
     return;
   }
 
-  // Same pattern as setMcpServers: abort+resume running session, then pre-warm
+  triggerProxyRestart();
+}
+
+/** Apply proxy env vars to process.env */
+function applyProxyEnvVars(proxyUrl: string, noProxyVal: string): void {
+  process.env.HTTP_PROXY = proxyUrl;
+  process.env.HTTPS_PROXY = proxyUrl;
+  process.env.http_proxy = proxyUrl;
+  process.env.https_proxy = proxyUrl;
+  process.env.NO_PROXY = noProxyVal;
+  process.env.no_proxy = noProxyVal;
+  delete process.env.ALL_PROXY;
+  delete process.env.all_proxy;
+}
+
+/** Restart session after proxy change (same pattern as MCP config changes) */
+function triggerProxyRestart(): void {
   if (querySession) {
     if (isProcessing && !isPreWarming) {
       console.log('[agent] Proxy changed, deferring restart (active turn)');
@@ -685,6 +744,29 @@ export function setProxyConfig(proxySettings: {
   preWarmFailCount = 0;
   if (!isProcessing || isPreWarming) {
     schedulePreWarm();
+  }
+}
+
+/**
+ * Initialize SOCKS5 bridge from inherited environment variables at Sidecar startup.
+ * Rust may have set HTTP_PROXY=socks5://... — detect and bridge it before first pre-warm.
+ */
+export async function initSocksBridgeFromEnv(): Promise<void> {
+  const proxyUrl = process.env.HTTP_PROXY || process.env.HTTPS_PROXY || '';
+  if (!proxyUrl.startsWith('socks5://')) return;
+
+  try {
+    const url = new URL(proxyUrl);
+    const host = url.hostname || '127.0.0.1';
+    const port = parseInt(url.port) || 1080;
+
+    const bridgePort = await startSocksBridge(host, port);
+    const bridgeUrl = `http://127.0.0.1:${bridgePort}`;
+    applyProxyEnvVars(bridgeUrl, PROXY_NO_PROXY_VAL);
+    console.log(`[agent] SOCKS5 bridge initialized at startup: ${proxyUrl} → ${bridgeUrl}`);
+  } catch (err) {
+    console.error(`[agent] Failed to initialize SOCKS5 bridge from env: ${err instanceof Error ? err.message : err}`);
+    // Leave the original socks5:// URL in place — it will fail but at least error messages are clear
   }
 }
 
@@ -1155,10 +1237,25 @@ function buildSdkMcpServers(): Record<string, SdkMcpServerConfig | typeof cronTo
       if (server.env) {
         resolvedUrl = resolvedUrl.replace(/\{\{(\w+)\}\}/g, (_, key) => server.env?.[key] ?? '');
       }
+
+      // Inject OAuth token as Authorization header if available and not expired
+      const headers = { ...server.headers };
+      const oauthToken = getOAuthToken(server.id);
+      if (oauthToken && !headers['Authorization'] && !headers['authorization']) {
+        // Check expiry with 60s buffer — skip injection if token is expired
+        const isExpired = oauthToken.expiresAt && oauthToken.expiresAt < Date.now() + 60000;
+        if (!isExpired) {
+          headers['Authorization'] = `${oauthToken.tokenType || 'Bearer'} ${oauthToken.accessToken}`;
+          console.log(`[agent] MCP ${server.id}: Injecting OAuth token (expires: ${oauthToken.expiresAt ? new Date(oauthToken.expiresAt).toISOString() : 'never'})`);
+        } else {
+          console.warn(`[agent] MCP ${server.id}: OAuth token expired, skipping injection`);
+        }
+      }
+
       result[server.id] = {
         type: server.type,
         url: resolvedUrl,
-        headers: server.headers,
+        headers,
       };
       // Log URL with API key masked for security
       const maskedUrl = resolvedUrl.replace(/([?&]\w*[Kk]ey=)[^&]+/g, '$1***');
