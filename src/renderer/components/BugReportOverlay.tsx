@@ -7,6 +7,7 @@ import type { Provider, ProviderVerifyStatus } from '@/config/types';
 import type { ImageAttachment } from './SimpleChatInput';
 import { ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import { useImagePreview } from '@/context/ImagePreviewContext';
+import { isProviderAvailable } from '@/config/configService';
 
 const MAX_IMAGES = 5;
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
@@ -18,24 +19,6 @@ interface BugReportOverlayProps {
     providers: Provider[];
     apiKeys: Record<string, string>;
     providerVerifyStatus: Record<string, ProviderVerifyStatus>;
-}
-
-/** Check if a provider is usable for bug report */
-function isProviderAvailable(
-    provider: Provider,
-    apiKeys: Record<string, string>,
-    verifyStatus: Record<string, ProviderVerifyStatus>,
-): boolean {
-    if (provider.type === 'subscription') {
-        const status = verifyStatus[provider.id];
-        return status?.status === 'valid' && !!status.accountEmail;
-    }
-    // Must have an API key AND not be explicitly invalid
-    const key = apiKeys[provider.id];
-    if (!key) return false;
-    const status = verifyStatus[provider.id];
-    if (status?.status === 'invalid') return false;
-    return true;
 }
 
 export default function BugReportOverlay({

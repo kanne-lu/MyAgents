@@ -34,7 +34,6 @@ import {
     PROXY_DEFAULTS,
     isValidProxyHost,
     getPresetMcpServer,
-    type ProviderVerifyStatus,
 } from '@/config/types';
 import {
     getAllMcpServers,
@@ -46,6 +45,7 @@ import {
     getMcpServerArgs,
     getMcpServerEnv,
     atomicModifyConfig,
+    isProviderAvailable,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
 import { useAutostart } from '@/hooks/useAutostart';
@@ -94,19 +94,7 @@ interface CustomProviderForm {
     upstreamFormat: 'chat_completions' | 'responses';  // 上游 API 格式
 }
 
-/** Check if a provider is usable (duplicated from BugReportOverlay — only 2 call sites) */
-function isProviderAvailable(
-    provider: Provider,
-    apiKeys: Record<string, string>,
-    verifyStatus: Record<string, ProviderVerifyStatus>,
-): boolean {
-    if (provider.type === 'subscription') {
-        const status = verifyStatus[provider.id];
-        return status?.status === 'valid' && !!status.accountEmail;
-    }
-    // Validation status is informational, not gatekeeping — having a key is enough
-    return !!apiKeys[provider.id];
-}
+// isProviderAvailable imported from configService (shared across Chat, Launcher, Settings, SimpleChatInput)
 
 const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     name: '',

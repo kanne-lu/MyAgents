@@ -33,6 +33,7 @@ import { type PermissionMode, type McpServerDefinition } from '@/config/types';
 import {
   getAllMcpServers,
   getEnabledMcpServerIds,
+  resolveProvider,
 } from '@/config/configService';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { InitialMessage } from '@/types/tab';
@@ -162,9 +163,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(
     currentProject?.providerId ?? config.defaultProviderId ?? undefined
   );
-  const currentProvider = selectedProviderId
-    ? providers.find((p) => p.id === selectedProviderId)
-    : providers[0]; // Default to first provider
+  const currentProvider = resolveProvider(selectedProviderId, providers, apiKeys, providerVerifyStatus);
 
   // PERFORMANCE: Ref-stabilize object deps used in handleSendMessage
   // Prevents useCallback from creating new references when these objects change,

@@ -1,4 +1,4 @@
-// Provider management — custom providers, API keys, verify status, mergePresetCustomModels
+// Provider management — custom providers, API keys, verify status, provider availability
 import { exists, readDir, readTextFile, remove } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 
@@ -222,4 +222,52 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
     } catch (err) {
         console.warn('[configService] Failed to rebuild availableProvidersJson:', err);
     }
+}
+
+// ===== Provider Availability (shared logic — used by Chat, Launcher, SimpleChatInput, etc.) =====
+
+/**
+ * Check if a provider has valid credentials (subscription verified or API key present).
+ * Subscription providers need verifyStatus.status === 'valid' AND accountEmail.
+ * API providers just need a non-empty API key.
+ */
+export function isProviderAvailable(
+    provider: Provider,
+    apiKeys: Record<string, string>,
+    verifyStatus: Record<string, ProviderVerifyStatus>,
+): boolean {
+    if (provider.type === 'subscription') {
+        const result = verifyStatus[provider.id];
+        return result?.status === 'valid' && !!result?.accountEmail;
+    }
+    return !!apiKeys[provider.id];
+}
+
+/**
+ * Find the first available provider from the list (one with valid credentials).
+ * Returns undefined if no providers are available — caller should show empty state.
+ */
+export function getFirstAvailableProvider(
+    providers: Provider[],
+    apiKeys: Record<string, string>,
+    verifyStatus: Record<string, ProviderVerifyStatus>,
+): Provider | undefined {
+    return providers.find(p => isProviderAvailable(p, apiKeys, verifyStatus));
+}
+
+/**
+ * Resolve provider by ID, with fallback to first available.
+ * Returns undefined if requested provider not found AND no available provider exists.
+ */
+export function resolveProvider(
+    providerId: string | undefined,
+    providers: Provider[],
+    apiKeys: Record<string, string>,
+    verifyStatus: Record<string, ProviderVerifyStatus>,
+): Provider | undefined {
+    if (providerId) {
+        const exact = providers.find(p => p.id === providerId);
+        if (exact && isProviderAvailable(exact, apiKeys, verifyStatus)) return exact;
+    }
+    return getFirstAvailableProvider(providers, apiKeys, verifyStatus);
 }

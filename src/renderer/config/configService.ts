@@ -27,6 +27,9 @@ export {
     loadProviderVerifyStatus,
     deleteProviderVerifyStatus,
     rebuildAndPersistAvailableProviders,
+    isProviderAvailable,
+    getFirstAvailableProvider,
+    resolveProvider,
 } from './services/providerService';
 
 // mcpService

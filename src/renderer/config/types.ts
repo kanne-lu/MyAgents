@@ -278,7 +278,7 @@ export interface ProxySettings {
  */
 export interface AppConfig {
   // Default settings for new projects
-  defaultProviderId: string;
+  defaultProviderId?: string;
   defaultPermissionMode: PermissionMode;
   // UI preferences
   theme: 'light' | 'dark' | 'system';
@@ -838,7 +838,7 @@ export function getEffectiveModelAliases(
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
-  defaultProviderId: 'anthropic-sub',
+  defaultProviderId: undefined, // No default — resolved at runtime from first available provider
   defaultPermissionMode: 'auto',
   theme: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
