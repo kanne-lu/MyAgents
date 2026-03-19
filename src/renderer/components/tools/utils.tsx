@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement } from 'react';
+import { cloneElement, isValidElement, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import type { ToolUseSimple } from '@/types/chat';
@@ -117,6 +117,51 @@ export function InlineCode({ children }: { children: ReactNode }) {
     <MonoText className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5">
       {children}
     </MonoText>
+  );
+}
+
+/**
+ * Expandable result container with max-h-96 + gradient fade + "展开全部" button.
+ * Used by tool components to wrap long <pre> output.
+ */
+interface ExpandableResultProps {
+  content: string;
+  className?: string;
+  /** Additional wrapper className (e.g. for terminal-style bg) */
+  wrapperClassName?: string;
+}
+
+export function ExpandableResult({ content, className = '', wrapperClassName = '' }: ExpandableResultProps) {
+  const [isResultExpanded, setIsResultExpanded] = useState(false);
+  const resultRef = useRef<HTMLPreElement>(null);
+  const [isOverflowing, setIsOverflowing] = useState(false);
+
+  useEffect(() => {
+    if (resultRef.current) {
+      setIsOverflowing(resultRef.current.scrollHeight > resultRef.current.clientHeight);
+    }
+  }, [content]);
+
+  return (
+    <div className={`relative ${wrapperClassName}`}>
+      <pre
+        ref={resultRef}
+        className={`overflow-x-auto font-mono text-sm whitespace-pre-wrap select-text ${isResultExpanded ? '' : 'max-h-96'} overflow-hidden ${className}`}
+      >
+        {content}
+      </pre>
+      {isOverflowing && !isResultExpanded && (
+        <div className="absolute bottom-0 left-0 right-0 flex justify-center bg-gradient-to-t from-[var(--paper-inset)] to-transparent pb-2 pt-8">
+          <button
+            type="button"
+            onClick={() => setIsResultExpanded(true)}
+            className="rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-xs text-[var(--ink-muted)] shadow-sm hover:text-[var(--ink-secondary)] transition-colors"
+          >
+            展开全部
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
 

@@ -1,7 +1,7 @@
 import type { ToolUseSimple } from '@/types/chat';
 
 import { CollapsibleTool } from './CollapsibleTool';
-import { ToolHeader } from './utils';
+import { ExpandableResult, ToolHeader } from './utils';
 
 interface KillShellToolProps {
   tool: ToolUseSimple;
@@ -12,9 +12,10 @@ export default function KillShellTool({ tool }: KillShellToolProps) {
 
   const expandedContent =
     tool.result ?
-      <pre className="overflow-x-auto rounded bg-[var(--paper-inset)]/50 px-2 py-1 font-mono text-sm break-words whitespace-pre-wrap text-[var(--ink-secondary)]">
-        {tool.result}
-      </pre>
+      <ExpandableResult
+        content={tool.result}
+        className="rounded bg-[var(--paper-inset)]/50 px-2 py-1 break-words text-[var(--ink-secondary)]"
+      />
     : null;
 
   return <CollapsibleTool collapsedContent={collapsedContent} expandedContent={expandedContent} />;
