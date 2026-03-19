@@ -210,6 +210,8 @@ const MessageList = memo(function MessageList({
         data={allMessages}
         computeItemKey={(_i, m) => m.id}
         followOutput={handleFollowOutput}
+        skipAnimationFrameInResizeObserver
+        increaseViewportBy={{ top: 1200, bottom: 800 }}
         atBottomThreshold={50}
         defaultItemHeight={200}
         className="h-full"
@@ -229,12 +231,6 @@ const MessageList = memo(function MessageList({
               />
             </div>
           );
-        }}
-        totalListHeightChanged={(height) => {
-          console.warn(`[V:diag] totalH=${Math.round(height)} data=${allMessages.length}`);
-        }}
-        rangeChanged={(range) => {
-          console.debug(`[V:diag] range=${range.startIndex}-${range.endIndex} (${range.endIndex - range.startIndex + 1}) data=${allMessages.length}`);
         }}
       />
 
