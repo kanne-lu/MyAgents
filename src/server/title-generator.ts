@@ -28,7 +28,9 @@ Rules:
 - Identify the MAIN TOPIC or GOAL across all rounds, not just the first message
 - Use specific nouns/verbs — e.g. "Redis 缓存优化" not "技术讨论"
 - NEVER copy a sentence or phrase directly from the conversation
-- NEVER use generic words: help, question, discussion, issue, request, 帮助, 问题, 讨论, 请求`;
+- NEVER use generic words: help, question, discussion, issue, request, 帮助, 问题, 讨论, 请求
+- NEVER output meta-text about the title itself (e.g. "对话标题应该是…", "The title should be…")
+- Just output the title directly, like: SSE 流式调试`;
 
 export interface TitleRound {
   user: string;
@@ -41,13 +43,23 @@ function buildUserPrompt(rounds: TitleRound[]): string {
     const assistant = r.assistant.slice(0, PER_MESSAGE_LIMIT);
     return `[Round ${i + 1}]\nUser: ${user}\nAssistant: ${assistant}`;
   });
-  return `<conversation>\n${parts.join('\n\n')}\n</conversation>`;
+  return `<conversation>\n${parts.join('\n\n')}\n</conversation>\n\nFollow the System Instruction to generate a short title for the conversation above.`;
 }
 
 /**
  * Clean up the generated title: remove surrounding quotes, punctuation, whitespace,
  * and truncate to TITLE_MAX_LENGTH characters.
  */
+/** Detect model outputs that are meta-instructions about generating a title, not actual titles */
+const META_INSTRUCTION_PATTERNS = [
+  /标题.{0,4}(应该|是什么|是|为)/,           // "标题应该是…" "标题是什么"
+  /对话.{0,4}(标题|主题).{0,4}(是|应该|为)/, // "对话标题是…"
+  /(请|只).{0,4}(输出|生成|给出).{0,4}标题/, // "请只输出标题"
+  /^the title (should|is|could)/i,            // "The title should be…"
+  /^title:/i,                                 // "Title: xxx" (caught by cleanTitle too)
+  /不要.{0,4}(其他|多余|额外)/,              // "不要有其他内容"
+];
+
 function cleanTitle(raw: string): string {
   let cleaned = raw.trim();
   // Remove surrounding quotes (single, double, Chinese quotes)
@@ -57,6 +69,11 @@ function cleanTitle(raw: string): string {
   // Remove common AI preamble patterns
   cleaned = cleaned.replace(/^(标题[：:]|Title[：:])\s*/i, '');
   cleaned = cleaned.trim();
+  // Reject meta-instructions about title generation (model confused itself)
+  if (META_INSTRUCTION_PATTERNS.some(p => p.test(cleaned))) {
+    console.warn(`[title-generator] Rejected meta-instruction output: "${cleaned}"`);
+    return '';
+  }
   if (cleaned.length > TITLE_MAX_LENGTH) {
     cleaned = cleaned.slice(0, TITLE_MAX_LENGTH);
   }
