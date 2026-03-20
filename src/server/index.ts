@@ -1,6 +1,6 @@
 import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
 import { mkdir, rename, rm, stat } from 'fs/promises';
-import { basename, dirname, join, relative, resolve, extname, sep } from 'path';
+import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import AdmZip from 'adm-zip';
 import {
@@ -714,50 +714,51 @@ function isValidAgentDir(dir: string): { valid: boolean; reason?: string } {
   const resolved = resolve(expanded);
   const homeDir = getHomeDirOrNull() || '';
 
-  // Must be an absolute path
-  if (!resolved.startsWith('/') && !resolved.match(/^[A-Z]:\\/i)) {
+  // Must be an absolute path (use isAbsolute for cross-platform correctness)
+  if (!isAbsolute(resolved)) {
     return { valid: false, reason: 'Path must be absolute' };
   }
 
-  // Forbidden system directories
+  // Forbidden system directories (deny-list approach)
   const forbiddenPaths = [
-    '/etc',
-    '/var',
-    '/usr',
-    '/bin',
-    '/sbin',
-    '/boot',
-    '/root',
-    '/sys',
-    '/proc',
-    '/dev',
+    // Unix system directories
+    '/etc', '/var', '/usr', '/bin', '/sbin', '/boot', '/root', '/sys', '/proc', '/dev',
+    // User sensitive directories
     join(homeDir, '.ssh'),
     join(homeDir, '.gnupg'),
     join(homeDir, '.config/op'),  // 1Password
     join(homeDir, 'Library/Keychains'),
+    // Windows system directories
+    'C:\\Windows',
+    'C:\\Program Files',
+    'C:\\Program Files (x86)',
   ];
 
+  const normalizedResolved = resolved.replace(/\\/g, '/').toLowerCase();
   for (const forbidden of forbiddenPaths) {
-    if (resolved === forbidden || resolved.startsWith(forbidden + sep)) {
+    const normalizedForbidden = forbidden.replace(/\\/g, '/').toLowerCase();
+    if (normalizedResolved === normalizedForbidden || normalizedResolved.startsWith(normalizedForbidden + '/')) {
       return { valid: false, reason: `Access to ${forbidden} is not allowed` };
     }
   }
 
-  // Must be under a reasonable parent (home, documents, or common dev paths)
-  const allowedParents = [
-    homeDir,
-    '/tmp',
-    '/Users',
-    '/home',
-    'C:\\Users',
-  ];
-
-  const isUnderAllowed = allowedParents.some(
-    parent => parent && (resolved === parent || resolved.startsWith(parent + sep))
-  );
-
-  if (!isUnderAllowed) {
-    return { valid: false, reason: 'Path must be under user directory' };
+  // On Windows, any drive letter path is valid (users commonly put projects on D:, E:, G:, etc.)
+  // On Unix, must be under a reasonable parent (not bare root /)
+  if (process.platform === 'win32') {
+    // Windows: allow any drive letter path that's not a forbidden system dir (already checked above)
+    // Just reject bare drive roots like "C:\" or "D:\" (too broad)
+    if (resolved.match(/^[A-Z]:\\?$/i)) {
+      return { valid: false, reason: 'Cannot use drive root as workspace' };
+    }
+  } else {
+    // Unix: must be under home, /tmp, /Users, or /home
+    const allowedParents = [homeDir, '/tmp', '/Users', '/home'];
+    const isUnderAllowed = allowedParents.some(
+      parent => parent && (resolved === parent || resolved.startsWith(parent + sep))
+    );
+    if (!isUnderAllowed) {
+      return { valid: false, reason: 'Path must be under user directory' };
+    }
   }
 
   return { valid: true };
