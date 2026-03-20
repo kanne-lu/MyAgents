@@ -17,7 +17,7 @@ set -e
 # ========================================
 # Configuration
 # ========================================
-NODE_VERSION="22.16.0"  # LTS, pin to specific patch
+NODE_VERSION="24.14.0"  # LTS, pin to specific patch
 NODE_BASE_URL="https://nodejs.org/dist/v${NODE_VERSION}"
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

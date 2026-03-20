@@ -4,11 +4,10 @@
 // The Bridge is an independent Bun process that loads the plugin and communicates
 // with Rust via HTTP endpoints.
 
-#[cfg(not(debug_assertions))]
 use tauri::Manager;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -744,38 +743,8 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         // Pass config via env var to avoid leaking secrets in `ps` process listing
         .env("BRIDGE_PLUGIN_CONFIG", &config_json);
 
-    // Inject proxy env vars (same logic as sidecar.rs) so plugin HTTP calls
-    // (e.g. Feishu API via axios/fetch) use MyAgents' configured proxy
-    if let Some(proxy_settings) = crate::proxy_config::read_proxy_settings() {
-        match crate::proxy_config::get_proxy_url(&proxy_settings) {
-            Ok(proxy_url) => {
-                ulog_info!("[bridge] Injecting proxy for plugin: {}", proxy_url);
-                cmd.env("HTTP_PROXY", &proxy_url);
-                cmd.env("HTTPS_PROXY", &proxy_url);
-                cmd.env("http_proxy", &proxy_url);
-                cmd.env("https_proxy", &proxy_url);
-                cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-                cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-            }
-            Err(e) => {
-                ulog_warn!("[bridge] Invalid proxy config ({}), stripping proxy env vars", e);
-                for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                             "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"] {
-                    cmd.env_remove(var);
-                }
-            }
-        }
-    } else {
-        // No MyAgents proxy configured: strip inherited system proxy env vars
-        // so the Bridge doesn't accidentally use Clash/V2Ray system proxy
-        ulog_debug!("[bridge] No proxy configured, stripping inherited proxy env vars");
-        for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                     "ALL_PROXY", "all_proxy"] {
-            cmd.env_remove(var);
-        }
-        cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-        cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-    }
+    // Inject proxy env vars — reuse shared helper (pit-of-success: single source of truth)
+    apply_proxy_env(&mut cmd);
 
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
@@ -837,16 +806,107 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     Ok(BridgeProcess { child, port })
 }
 
-/// Install an OpenClaw plugin from npm
+/// Apply MyAgents proxy policy to a child `Command`.
+/// Reusable across spawn_plugin_bridge, npm install, etc.
+fn apply_proxy_env(cmd: &mut std::process::Command) {
+    if let Some(proxy_settings) = crate::proxy_config::read_proxy_settings() {
+        match crate::proxy_config::get_proxy_url(&proxy_settings) {
+            Ok(proxy_url) => {
+                ulog_info!("[bridge] Injecting proxy: {}", proxy_url);
+                cmd.env("HTTP_PROXY", &proxy_url);
+                cmd.env("HTTPS_PROXY", &proxy_url);
+                cmd.env("http_proxy", &proxy_url);
+                cmd.env("https_proxy", &proxy_url);
+                cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+                cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+            }
+            Err(e) => {
+                ulog_warn!("[bridge] Invalid proxy config ({}), stripping proxy env vars", e);
+                for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                             "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"] {
+                    cmd.env_remove(var);
+                }
+            }
+        }
+    } else {
+        ulog_debug!("[bridge] No proxy configured, stripping inherited proxy env vars");
+        for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                     "ALL_PROXY", "all_proxy"] {
+            cmd.env_remove(var);
+        }
+        cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+        cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
+    }
+}
+
+/// Locate bundled Node.js binary and npm-cli.js for plugin installation.
+/// Dual-runtime principle: social ecosystem packages use Node.js (not Bun) to avoid
+/// Bun's npm compatibility issues on Windows.
+///
+/// Layout:
+/// - macOS prod:  Contents/Resources/nodejs/bin/node + ../lib/node_modules/npm/bin/npm-cli.js
+/// - macOS dev:   src-tauri/resources/nodejs/bin/node + ../lib/node_modules/npm/bin/npm-cli.js
+/// - Windows prod: <install_dir>/nodejs/node.exe + node_modules/npm/bin/npm-cli.js
+/// - Windows dev:  src-tauri/resources/nodejs/node.exe + node_modules/npm/bin/npm-cli.js
+fn find_bundled_node_npm<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<(PathBuf, PathBuf)> {
+    let check = |nodejs_dir: &Path| -> Option<(PathBuf, PathBuf)> {
+        #[cfg(target_os = "windows")]
+        let node_bin = nodejs_dir.join("node.exe");
+        #[cfg(not(target_os = "windows"))]
+        let node_bin = nodejs_dir.join("bin").join("node");
+
+        // Windows npm layout: nodejs/node_modules/npm/... (flat, no lib/)
+        // macOS/Linux npm layout: nodejs/lib/node_modules/npm/... (standard Unix)
+        #[cfg(target_os = "windows")]
+        let npm_cli = nodejs_dir.join("node_modules").join("npm").join("bin").join("npm-cli.js");
+        #[cfg(not(target_os = "windows"))]
+        let npm_cli = nodejs_dir.join("lib").join("node_modules").join("npm").join("bin").join("npm-cli.js");
+
+        if node_bin.exists() && npm_cli.exists() {
+            ulog_info!("[bridge] Bundled Node.js found: node={:?}, npm-cli={:?}", node_bin, npm_cli);
+            Some((node_bin, npm_cli))
+        } else {
+            None
+        }
+    };
+
+    // Production: nodejs/ inside resource_dir
+    if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        let resource_dir: PathBuf = resource_dir;
+        let prod_dir = resource_dir.join("nodejs");
+        if let Some(result) = check(&prod_dir) {
+            return Some(result);
+        }
+        // Windows: resource_dir parent might be the install dir
+        #[cfg(target_os = "windows")]
+        if let Some(parent) = resource_dir.parent() {
+            let parent_dir = parent.join("nodejs");
+            if let Some(result) = check(&parent_dir) {
+                return Some(result);
+            }
+        }
+    }
+
+    // Development: walk up to find src-tauri/resources/nodejs/
+    if cfg!(debug_assertions) {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dev_dir = manifest_dir.join("resources").join("nodejs");
+        if let Some(result) = check(&dev_dir) {
+            return Some(result);
+        }
+    }
+
+    ulog_warn!("[bridge] Bundled Node.js not found, falling back to Bun for plugin install");
+    None
+}
+
+/// Install an OpenClaw plugin from npm.
+/// Uses bundled Node.js (npm install) instead of Bun to avoid Bun's npm compatibility
+/// issues — especially on Windows where certain packages fail with Bun but work with npm.
 pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     npm_spec: &str,
 ) -> Result<serde_json::Value, String> {
-    use crate::sidecar::find_bun_executable_pub;
-
-    let bun_path = find_bun_executable_pub(app_handle)
-        .ok_or_else(|| "Bun executable not found".to_string())?;
-
     // Validate npm_spec: must look like an npm package name (with optional scope/version).
     // Reject file:, git:, http:, and path traversal attempts.
     let trimmed = npm_spec.trim();
@@ -893,42 +953,117 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         .await
         .map_err(|e| format!("Failed to create plugin dir: {}", e))?;
 
-    // Run bun init + bun add (blocking I/O → spawn_blocking)
     ulog_info!("[bridge] Installing plugin {} into {:?}", npm_spec, base_dir);
 
-    let bun_for_init = bun_path.clone();
-    let base_for_init = base_dir.clone();
-    let init_output = tokio::task::spawn_blocking(move || {
-        crate::process_cmd::new(&bun_for_init)
-            .args(["init", "-y"])
-            .current_dir(&base_for_init)
-            .output()
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {}", e))?
-    .map_err(|e| format!("bun init failed: {}", e))?;
+    // Prefer bundled Node.js (npm) over Bun for ecosystem compatibility.
+    // Bun has known issues with certain npm packages on Windows.
+    if let Some((node_bin, npm_cli)) = find_bundled_node_npm(app_handle) {
+        // Convert npm_cli path to String before closures to avoid OsStr issues
+        let npm_cli_str = npm_cli.to_str()
+            .ok_or_else(|| format!("npm-cli.js path contains invalid UTF-8: {:?}", npm_cli))?
+            .to_string();
 
-    if !init_output.status.success() {
-        let stderr = String::from_utf8_lossy(&init_output.stderr);
-        return Err(format!("bun init failed: {}", stderr));
-    }
+        // Prepend node binary's directory to PATH so postinstall scripts can find `node`.
+        // Without this, `sh -c node scripts/postinstall` fails with "node: command not found".
+        let node_dir_for_path = node_bin.parent()
+            .map(|d| d.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let augmented_path = {
+            let system_path = std::env::var("PATH").unwrap_or_default();
+            #[cfg(target_os = "windows")]
+            { format!("{};{}", node_dir_for_path, system_path) }
+            #[cfg(not(target_os = "windows"))]
+            { format!("{}:{}", node_dir_for_path, system_path) }
+        };
 
-    let bun_for_add = bun_path.clone();
-    let base_for_add = base_dir.clone();
-    let npm_spec_owned = npm_spec.to_string();
-    let add_output = tokio::task::spawn_blocking(move || {
-        crate::process_cmd::new(&bun_for_add)
-            .args(["add", &npm_spec_owned])
-            .current_dir(&base_for_add)
-            .output()
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking: {}", e))?
-    .map_err(|e| format!("bun add failed: {}", e))?;
+        // npm init -y
+        let node_for_init = node_bin.clone();
+        let cli_str_init = npm_cli_str.clone();
+        let base_for_init = base_dir.clone();
+        let path_for_init = augmented_path.clone();
+        let init_output = tokio::task::spawn_blocking(move || {
+            let mut cmd = crate::process_cmd::new(&node_for_init);
+            cmd.args([cli_str_init.as_str(), "init", "-y"])
+                .current_dir(&base_for_init)
+                .env("PATH", &path_for_init);
+            apply_proxy_env(&mut cmd);
+            cmd.output()
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking: {}", e))?
+        .map_err(|e| format!("npm init failed: {}", e))?;
 
-    if !add_output.status.success() {
-        let stderr = String::from_utf8_lossy(&add_output.stderr);
-        return Err(format!("bun add {} failed: {}", npm_spec, stderr));
+        if !init_output.status.success() {
+            let stderr = String::from_utf8_lossy(&init_output.stderr);
+            return Err(format!("npm init failed: {}", stderr));
+        }
+
+        // npm install <package>
+        let node_for_add = node_bin;
+        let cli_str_add = npm_cli_str;
+        let base_for_add = base_dir.clone();
+        let npm_spec_owned = npm_spec.to_string();
+        let path_for_add = augmented_path;
+        let add_output = tokio::task::spawn_blocking(move || {
+            let mut cmd = crate::process_cmd::new(&node_for_add);
+            cmd.args([cli_str_add.as_str(), "install", npm_spec_owned.as_str()])
+                .current_dir(&base_for_add)
+                .env("PATH", &path_for_add);
+            apply_proxy_env(&mut cmd);
+            cmd.output()
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking: {}", e))?
+        .map_err(|e| format!("npm install failed: {}", e))?;
+
+        if !add_output.status.success() {
+            let stderr = String::from_utf8_lossy(&add_output.stderr);
+            return Err(format!("npm install {} failed: {}", npm_spec, stderr));
+        }
+    } else {
+        // Fallback: use Bun if bundled Node.js is not available (pre-v0.1.44 builds)
+        use crate::sidecar::find_bun_executable_pub;
+        let bun_path = find_bun_executable_pub(app_handle)
+            .ok_or_else(|| "Neither bundled Node.js nor Bun found".to_string())?;
+
+        ulog_warn!("[bridge] Using Bun fallback for plugin install (Node.js not bundled)");
+
+        let bun_for_init = bun_path.clone();
+        let base_for_init = base_dir.clone();
+        let init_output = tokio::task::spawn_blocking(move || {
+            let mut cmd = crate::process_cmd::new(&bun_for_init);
+            cmd.args(["init", "-y"])
+                .current_dir(&base_for_init);
+            apply_proxy_env(&mut cmd);
+            cmd.output()
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking: {}", e))?
+        .map_err(|e| format!("bun init failed: {}", e))?;
+
+        if !init_output.status.success() {
+            let stderr = String::from_utf8_lossy(&init_output.stderr);
+            return Err(format!("bun init failed: {}", stderr));
+        }
+
+        let bun_for_add = bun_path;
+        let base_for_add = base_dir.clone();
+        let npm_spec_owned = npm_spec.to_string();
+        let add_output = tokio::task::spawn_blocking(move || {
+            let mut cmd = crate::process_cmd::new(&bun_for_add);
+            cmd.args(["add", npm_spec_owned.as_str()])
+                .current_dir(&base_for_add);
+            apply_proxy_env(&mut cmd);
+            cmd.output()
+        })
+        .await
+        .map_err(|e| format!("spawn_blocking: {}", e))?
+        .map_err(|e| format!("bun add failed: {}", e))?;
+
+        if !add_output.status.success() {
+            let stderr = String::from_utf8_lossy(&add_output.stderr);
+            return Err(format!("bun add {} failed: {}", npm_spec, stderr));
+        }
     }
 
     // Install plugin-sdk shim (copies from bundled resource files)

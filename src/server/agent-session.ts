@@ -4987,6 +4987,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // （thinking → text），resumeSessionAt 需要最后一条的 UUID 才能保留完整回答
         if (sdkMessage.uuid) {
           currentAssistant.sdkUuid = sdkMessage.uuid;
+          // Broadcast to frontend so fork button appears during streaming
+          // (user messages already broadcast this; assistant messages were missing it)
+          broadcast('chat:message-sdk-uuid', { messageId: currentAssistant.id, sdkUuid: sdkMessage.uuid });
         }
         const assistantMessage = sdkMessage.message;
         // Main turn token usage is extracted from result message (more reliable across providers)
@@ -5296,8 +5299,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Calculate duration for analytics
         const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : 0;
 
+        // Find the last assistant message's sdkUuid to piggyback on message-complete.
+        // This avoids the ID mismatch problem: frontend streaming messages use Date.now()
+        // IDs while backend uses messageSequence IDs, so the separate chat:message-sdk-uuid
+        // event can't match. Piggybacking on message-complete lets the frontend set sdkUuid
+        // on the just-moved history message without needing ID matching.
+        const lastAssistant = messages.length > 0 && messages[messages.length - 1].role === 'assistant'
+          ? messages[messages.length - 1] : null;
+
         console.log('[agent][sdk] Broadcasting chat:message-complete');
-        // Include usage data for frontend analytics tracking
+        // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
         broadcast('chat:message-complete', {
           model: currentTurnUsage.model,
           input_tokens: currentTurnUsage.inputTokens,
@@ -5306,6 +5317,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
           tool_count: currentTurnToolCount,
           duration_ms: durationMs,
+          // Piggyback sdkUuid so fork button appears immediately after streaming
+          assistant_sdk_uuid: lastAssistant?.sdkUuid,
         });
 
         // Server-side unified analytics: covers all sources (desktop/cron/im)

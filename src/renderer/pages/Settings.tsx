@@ -2088,8 +2088,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 </nav>
             </div>
 
-            {/* Right content area */}
-            <div className="flex-1 overflow-y-auto overscroll-contain">
+            {/* Right content area — h-full ensures height is explicit for WebKit scroll */}
+            <div className="h-full flex-1 overflow-y-auto overscroll-contain">
                 {/* Skills + Sub-Agents section uses wider layout */}
                 {(activeSection === 'skills' || activeSection === 'sub-agents') && (
                     <div className="mx-auto max-w-4xl px-8 py-8 space-y-10">

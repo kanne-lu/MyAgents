@@ -28,7 +28,9 @@ Rules:
 - Identify the MAIN TOPIC or GOAL across all rounds, not just the first message
 - Use specific nouns/verbs — e.g. "Redis 缓存优化" not "技术讨论"
 - NEVER copy a sentence or phrase directly from the conversation
-- NEVER use generic words: help, question, discussion, issue, request, 帮助, 问题, 讨论, 请求`;
+- NEVER use generic words: help, question, discussion, issue, request, 帮助, 问题, 讨论, 请求
+- NEVER output meta-text about the title itself (e.g. "对话标题应该是…", "The title should be…")
+- Just output the title directly, like: SSE 流式调试`;
 
 export interface TitleRound {
   user: string;
@@ -41,7 +43,7 @@ function buildUserPrompt(rounds: TitleRound[]): string {
     const assistant = r.assistant.slice(0, PER_MESSAGE_LIMIT);
     return `[Round ${i + 1}]\nUser: ${user}\nAssistant: ${assistant}`;
   });
-  return `<conversation>\n${parts.join('\n\n')}\n</conversation>`;
+  return `<conversation>\n${parts.join('\n\n')}\n</conversation>\n\nFollow the System Instruction to generate a short title for the conversation above.`;
 }
 
 /**

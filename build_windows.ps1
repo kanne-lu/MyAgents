@@ -158,7 +158,7 @@ try {
         Write-Host "MISSING - downloading..." -ForegroundColor Yellow
         # Auto-download Node.js if setup_windows.ps1 was not run
         try {
-            $NodeVersion = "22.16.0"
+            $NodeVersion = "24.14.0"
             $NodeDir = "src-tauri\resources\nodejs"
             $ZipName = "node-v$NodeVersion-win-x64.zip"
             $TempZip = Join-Path $env:TEMP "node-windows.zip"
