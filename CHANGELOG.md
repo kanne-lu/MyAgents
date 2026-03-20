@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.46] - 2026-03-20
+
+### Improved
+- **插件安装兼容性**：OpenClaw 插件安装从 Bun 切换到内置 Node.js (npm)，解决 Windows 上部分 npm 包安装失败的问题。Bun 保留为 fallback
+- **内置 Node.js 升级**：v22.16.0 → v24.14.0 (最新 LTS)，支持要求 node >=24 的 npm 包
+- **智能起名 prompt**：增加显式生成指令，防止模型输出元指令（如"对话标题应该是什么"）作为标题
+
+### Fixed
+- **Fork 按钮流式不可见**：assistant 消息的 sdkUuid 未通过 SSE 广播到前端，且 `chat:message-sdk-uuid` 事件未注册 SSE 白名单导致前端静默丢弃。通过 message-complete 事件捎带 sdkUuid 绕过前后端消息 ID 不匹配
+- **npm postinstall 失败**：插件安装时 npm 子进程的 PATH 未包含内置 Node.js 目录，导致 postinstall 脚本 `node: command not found`
+- **Settings 页面 macOS 无法滚动**：flex 行布局中右侧内容区缺少显式高度声明，WebKit 不触发 overflow 滚动
+- **proxy 注入逻辑重复**：提取 `apply_proxy_env()` 共享函数，bridge spawn 和 npm install 统一使用
+
+---
+
 ## [0.1.45] - 2026-03-20
 
 ### Added
