@@ -54,6 +54,7 @@ const JSON_EVENTS = new Set([
     'queue:added',     // Message queued (confirmation)
     'queue:started',   // Queued message started executing
     'queue:cancelled', // Queued message cancelled
+    'chat:message-sdk-uuid', // SDK UUID assignment for user/assistant messages (fork button, rewind)
 ]);
 
 // Event types that can be JSON or plain string

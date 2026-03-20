@@ -633,16 +633,18 @@ export default function TabProvider({
             }
 
             case 'chat:message-sdk-uuid': {
-                // Backend assigns sdkUuid after SDK echoes messages — update React state
-                // Check streaming message first (most likely target), then history
+                // Backend assigns sdkUuid after SDK echoes messages — update React state.
+                // SDK may emit multiple UUIDs per turn (thinking → text); always accept the
+                // LATEST one so resumeSessionAt / fork use the final assistant message UUID.
                 const payload = data as { messageId: string; sdkUuid: string } | null;
                 if (payload?.messageId && payload?.sdkUuid) {
-                    if (streamingMessageRef.current?.id === payload.messageId && !streamingMessageRef.current.sdkUuid) {
+                    if (streamingMessageRef.current?.id === payload.messageId) {
                         setStreamingMessage(prev => prev ? { ...prev, sdkUuid: payload.sdkUuid } : prev);
                     } else {
                         setHistoryMessages(prev => {
                             const idx = prev.findIndex(m => m.id === payload.messageId);
-                            if (idx < 0 || prev[idx].sdkUuid) return prev;
+                            if (idx < 0) return prev;
+                            if (prev[idx].sdkUuid === payload.sdkUuid) return prev; // no-op
                             const updated = [...prev];
                             updated[idx] = { ...updated[idx], sdkUuid: payload.sdkUuid };
                             return updated;
