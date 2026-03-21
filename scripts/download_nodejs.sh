@@ -17,7 +17,7 @@ set -e
 # ========================================
 # Configuration
 # ========================================
-NODE_VERSION="24.14.0"  # Active LTS, pin to specific patch
+NODE_VERSION="24.14.0"  # Active LTS — moltbot 等包要求 >=24，不可降级
 NODE_BASE_URL="https://nodejs.org/dist/v${NODE_VERSION}"
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

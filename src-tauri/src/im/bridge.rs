@@ -1023,9 +1023,13 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         let path_for_add = augmented_path;
         let add_output = tokio::task::spawn_blocking(move || {
             let mut cmd = crate::process_cmd::new(&node_for_add);
+            // Node.js v24 unflagged require(esm) causes npm's dual CJS/ESM deps
+            // (minipass-sized 2.0) to crash on Windows: "Class extends value undefined".
+            // Disabling require(esm) forces pure CJS resolution, fixing the crash.
             cmd.args([cli_str_add.as_str(), "install", npm_spec_owned.as_str()])
                 .current_dir(&base_for_add)
-                .env("PATH", &path_for_add);
+                .env("PATH", &path_for_add)
+                .env("NODE_OPTIONS", "--no-experimental-require-module");
             apply_proxy_env(&mut cmd);
             cmd.output()
         })
