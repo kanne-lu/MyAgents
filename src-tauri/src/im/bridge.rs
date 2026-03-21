@@ -983,6 +983,15 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     // Prefer bundled Node.js (npm) over Bun for ecosystem compatibility.
     // Bun has known issues with certain npm packages on Windows.
     if let Some((node_bin, npm_cli)) = find_bundled_node_npm(app_handle) {
+        // Diagnostic: log npm version before install to help debug minizlib crashes.
+        // If this shows 11.9.0, the build-time npm upgrade (curl+tar) didn't work.
+        let npm_ver_output = crate::process_cmd::new(&node_bin)
+            .args([npm_cli.to_str().unwrap_or(""), "--version"])
+            .output();
+        match npm_ver_output {
+            Ok(o) => ulog_info!("[bridge] npm version: {}", String::from_utf8_lossy(&o.stdout).trim()),
+            Err(e) => ulog_warn!("[bridge] npm version check failed: {}", e),
+        }
         // Convert npm_cli path to String before closures to avoid OsStr issues
         let npm_cli_str = npm_cli.to_str()
             .ok_or_else(|| format!("npm-cli.js path contains invalid UTF-8: {:?}", npm_cli))?

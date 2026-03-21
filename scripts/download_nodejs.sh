@@ -40,6 +40,80 @@ log_ok()    { echo -e "${GREEN}[nodejs]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[nodejs]${NC} $1"; }
 log_error() { echo -e "${RED}[nodejs]${NC} $1"; }
 
+# Upgrade npm by downloading tarball directly (bypasses broken npm — no catch-22).
+# Node.js v24 bundles npm 11.9.0 whose minizlib crashes on Windows with
+# "Class extends value undefined". Self-upgrade via `npm install npm@latest`
+# CANNOT work when npm itself is broken. Instead we download the npm tarball
+# with curl and replace the node_modules/npm directory.
+#
+# Usage: upgrade_npm <npm_modules_dir> <node_bin_or_empty>
+#   npm_modules_dir: path containing npm/ (e.g., .../lib/node_modules or .../node_modules)
+#   node_bin:        path to node binary for version check (empty string to skip check)
+upgrade_npm() {
+    local npm_modules_dir="$1"
+    local node_bin="$2"
+    local npm_dir="${npm_modules_dir}/npm"
+
+    if [[ ! -d "$npm_dir" ]]; then
+        log_warn "npm directory not found at ${npm_dir}, skipping upgrade"
+        return 0
+    fi
+
+    local old_ver="unknown"
+    if [[ -n "$node_bin" && -x "$node_bin" ]]; then
+        old_ver=$("$node_bin" "${npm_dir}/bin/npm-cli.js" --version 2>/dev/null || echo "unknown")
+    fi
+    log_info "Upgrading npm (curl + tar, bypasses broken npm)... current: v${old_ver}"
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    # Query npm registry for latest tarball URL
+    local tarball_url
+    tarball_url=$(curl -sL https://registry.npmjs.org/npm/latest | grep -o '"tarball":"[^"]*"' | head -1 | cut -d'"' -f4)
+    if [[ -z "$tarball_url" ]]; then
+        log_error "Failed to query npm registry (no tarball URL returned)"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    log_info "Downloading: ${tarball_url}"
+
+    # Download and extract
+    if ! curl -sL "$tarball_url" -o "${tmp_dir}/npm.tgz"; then
+        log_error "Failed to download npm tarball"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    if ! tar -xzf "${tmp_dir}/npm.tgz" -C "$tmp_dir" 2>/dev/null; then
+        log_error "Failed to extract npm tarball"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    local extracted="${tmp_dir}/package"
+    if [[ ! -d "$extracted" ]]; then
+        log_error "Extracted npm tarball missing 'package' directory"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+
+    # Replace old npm with new
+    rm -rf "$npm_dir"
+    mv "$extracted" "$npm_dir"
+
+    # Verify
+    local new_ver="unknown"
+    if [[ -n "$node_bin" && -x "$node_bin" ]]; then
+        new_ver=$("$node_bin" "${npm_dir}/bin/npm-cli.js" --version 2>/dev/null || echo "unknown")
+    else
+        new_ver=$(grep '"version"' "${npm_dir}/package.json" 2>/dev/null | head -1 | grep -o '"[0-9][^"]*"' | tr -d '"')
+    fi
+    log_ok "npm upgraded: v${old_ver} → v${new_ver}"
+
+    rm -rf "$tmp_dir"
+}
+
 # Check if Node.js is already downloaded and correct version
 check_existing() {
     local node_bin="$1"
@@ -124,13 +198,9 @@ EOF
 
     chmod +x "${RESOURCES_DIR}/bin/node"
 
-    # Upgrade npm to latest — bundled npm may have minizlib/minipass CJS bugs.
-    log_info "Upgrading npm to latest..."
-    "${RESOURCES_DIR}/bin/node" "${RESOURCES_DIR}/lib/node_modules/npm/bin/npm-cli.js" \
-        install npm@latest --global --prefix "${RESOURCES_DIR}" 2>/dev/null || true
-    local npm_ver
-    npm_ver=$("${RESOURCES_DIR}/bin/node" "${RESOURCES_DIR}/lib/node_modules/npm/bin/npm-cli.js" --version 2>/dev/null || echo "unknown")
-    log_ok "npm upgraded to v${npm_ver}"
+    # Upgrade npm — bundled npm 11.9.0 has minizlib bug on Windows.
+    # Even for macOS builds, upgrade ensures consistency across platforms.
+    upgrade_npm "${RESOURCES_DIR}/lib/node_modules" "${RESOURCES_DIR}/bin/node"
 
     log_ok "macOS ${arch}: Node.js v${NODE_VERSION} ready"
 }
@@ -167,6 +237,10 @@ download_windows() {
     # Remove corepack
     rm -f "${RESOURCES_DIR}/corepack.cmd" "${RESOURCES_DIR}/corepack"
     rm -rf "${RESOURCES_DIR}/node_modules/corepack"
+
+    # Upgrade npm — Windows layout uses node_modules/ (no lib/ prefix).
+    # Can't run node.exe on macOS for version check, pass empty string.
+    upgrade_npm "${RESOURCES_DIR}/node_modules" ""
 
     log_ok "Windows ${arch}: Node.js v${NODE_VERSION} ready"
 }

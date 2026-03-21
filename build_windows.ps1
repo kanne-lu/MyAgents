@@ -186,15 +186,42 @@ try {
             }
             if (Test-Path $TempZip) { Remove-Item -Force $TempZip }
             if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
-            # Upgrade npm to latest — bundled npm 11.9.0 has minizlib CJS bug on Windows.
-            # Self-upgrade ensures production builds always ship working npm.
-            $nodeExe = Join-Path $NodeDir "node.exe"
-            $npmCli = Join-Path $NodeDir "node_modules\npm\bin\npm-cli.js"
-            if (Test-Path $nodeExe) {
-                Write-Host "    升级 npm..." -NoNewline
-                & $nodeExe $npmCli install npm@latest --global --prefix $NodeDir 2>&1 | Out-Null
-                $npmVer = & $nodeExe $npmCli --version 2>&1
-                Write-Host " v$npmVer" -ForegroundColor Green
+            # Upgrade npm — bundled npm 11.9.0 has minizlib CJS bug on Windows.
+            # CANNOT use `npm install npm@latest` (catch-22: broken npm can't upgrade itself).
+            # Download npm tarball directly with Invoke-WebRequest + tar (Win10+ built-in).
+            $npmDir = Join-Path $NodeDir "node_modules\npm"
+            if (Test-Path $npmDir) {
+                Write-Host "    升级 npm (curl + tar)..." -NoNewline
+                try {
+                    $nodeExe = Join-Path $NodeDir "node.exe"
+                    $oldNpmCli = Join-Path $npmDir "bin\npm-cli.js"
+                    $oldVer = if (Test-Path $oldNpmCli) { & $nodeExe $oldNpmCli --version 2>&1 } else { "unknown" }
+                    Write-Host " 当前 v$oldVer" -NoNewline
+
+                    $npmTmpDir = Join-Path $env:TEMP "npm_upgrade_$(Get-Random)"
+                    New-Item -ItemType Directory -Path $npmTmpDir -Force | Out-Null
+                    $registryJson = Invoke-RestMethod -Uri "https://registry.npmjs.org/npm/latest" -TimeoutSec 30
+                    $tarballUrl = $registryJson.dist.tarball
+                    Write-Host " → 下载 $($registryJson.version)..." -NoNewline
+                    $tgzPath = Join-Path $npmTmpDir "npm.tgz"
+                    Invoke-WebRequest -Uri $tarballUrl -OutFile $tgzPath -TimeoutSec 60
+                    tar -xzf $tgzPath -C $npmTmpDir 2>&1 | Out-Null
+                    $extractedPkg = Join-Path $npmTmpDir "package"
+                    if (Test-Path $extractedPkg) {
+                        Remove-Item -Recurse -Force $npmDir
+                        Move-Item -Path $extractedPkg -Destination $npmDir
+                        $newNpmCli = Join-Path $npmDir "bin\npm-cli.js"
+                        $newVer = & $nodeExe $newNpmCli --version 2>&1
+                        Write-Host " → v$newVer ✓" -ForegroundColor Green
+                    } else {
+                        Write-Host " 解压失败 (package/ 目录不存在)" -ForegroundColor Red
+                    }
+                    Remove-Item -Recurse -Force $npmTmpDir -ErrorAction SilentlyContinue
+                } catch {
+                    Write-Host " 下载失败: $_ " -ForegroundColor Red
+                    Write-Host "    ⚠ npm 未升级，插件安装可能失败" -ForegroundColor Yellow
+                    Remove-Item -Recurse -Force $npmTmpDir -ErrorAction SilentlyContinue
+                }
             }
             Write-Host "    OK - Node.js downloaded" -ForegroundColor Green
         } catch {
