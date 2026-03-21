@@ -205,10 +205,14 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
             loadApiKeys(),
             loadAppConfig(),
         ]);
+        const verifyStatus = config.providerVerifyStatus ?? {};
 
         const mergedProviders = mergePresetCustomModels(allProviders, config.presetCustomModels);
+        // Only include providers with valid credentials:
+        // - Subscription: must have verified status + accountEmail (same as isProviderAvailable)
+        // - API: must have a non-empty API key
         const availableProviders = mergedProviders
-            .filter(p => p.type === 'subscription' || (p.type === 'api' && apiKeys[p.id]))
+            .filter(p => isProviderAvailable(p, apiKeys, verifyStatus))
             .map(p => ({
                 id: p.id, name: p.name, primaryModel: p.primaryModel,
                 baseUrl: p.config.baseUrl, authType: p.authType,

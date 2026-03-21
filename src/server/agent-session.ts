@@ -908,6 +908,11 @@ export function setSessionModel(model: string): void {
   }
 }
 
+/** Get current provider env (used by heartbeat/memory-update to preserve provider across internal calls). */
+export function getSessionProviderEnv(): ProviderEnv | undefined {
+  return currentProviderEnv;
+}
+
 /** Set provider env (called by Rust IM router via /api/provider/set on sidecar creation).
  * This ensures the Sidecar uses the correct provider BEFORE pre-warm starts. */
 export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): void {

@@ -394,6 +394,10 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 accountEmail,
             },
         }));
+        // Rebuild availableProvidersJson so IM /provider command sees the updated status.
+        // Without this, subscription verification changes don't propagate to the on-disk
+        // cache until some other action (API key change, provider add) triggers a rebuild.
+        await rebuildAndPersistAvailableProviders();
     }, []);
 
     // --- Custom Providers ---

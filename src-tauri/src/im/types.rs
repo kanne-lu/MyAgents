@@ -770,6 +770,15 @@ pub struct ChannelConfigRust {
     #[serde(default)]
     pub overrides: Option<ChannelOverrides>,
 
+    // Legacy root-level AI fields (written by /provider command before v0.1.45 bc06386 fix).
+    // Only used as fallback in to_im_config when overrides + agent are both missing.
+    #[serde(default)]
+    provider_id: Option<String>,
+    #[serde(default)]
+    provider_env_json: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+
     #[serde(default)]
     pub setup_completed: Option<bool>,
 }
@@ -882,9 +891,19 @@ impl ChannelConfigRust {
             dingtalk_use_ai_card: self.dingtalk_use_ai_card,
             dingtalk_card_template_id: self.dingtalk_card_template_id.clone(),
             telegram_use_draft: self.telegram_use_draft,
-            provider_id: overrides.and_then(|o| o.provider_id.clone()).or_else(|| agent.provider_id.clone()),
-            model: overrides.and_then(|o| o.model.clone()).or_else(|| agent.model.clone()),
-            provider_env_json: overrides.and_then(|o| o.provider_env_json.clone()).or_else(|| agent.provider_env_json.clone()),
+            // Fallback chain: overrides → channel root (legacy pre-v0.1.45) → agent default
+            // Channel root has higher priority than agent default because the user explicitly
+            // chose a provider for this specific channel via /provider command (written to root
+            // by persist_bot_config_patch before the bc06386 fix moved writes to overrides).
+            provider_id: overrides.and_then(|o| o.provider_id.clone())
+                .or_else(|| self.provider_id.clone())
+                .or_else(|| agent.provider_id.clone()),
+            model: overrides.and_then(|o| o.model.clone())
+                .or_else(|| self.model.clone())
+                .or_else(|| agent.model.clone()),
+            provider_env_json: overrides.and_then(|o| o.provider_env_json.clone())
+                .or_else(|| self.provider_env_json.clone())
+                .or_else(|| agent.provider_env_json.clone()),
             mcp_servers_json: agent.mcp_servers_json.clone(),
             heartbeat_config: agent.heartbeat.clone(),
             group_permissions: self.group_permissions.clone(),
