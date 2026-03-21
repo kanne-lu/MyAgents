@@ -6697,17 +6697,21 @@ description: >
 
           const {
             enqueueUserMessage, waitForSessionIdle, getMessages,
+            getSessionModel, getSessionProviderEnv,
           } = await import('./agent-session');
 
           // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
           // System prompt is already permanently injected at IM session creation (/api/im/chat)
           // Heartbeat is unattended — bypass all permissions so tool use doesn't block.
+          // CRITICAL: Pass current model + providerEnv to avoid triggering provider-switch logic.
+          // Without this, undefined providerEnv triggers switchingToSubscription in enqueueUserMessage,
+          // which resets the session to Anthropic subscription and causes "Not logged in" errors.
           await enqueueUserMessage(
             enrichedPrompt,
             [],
             'fullAgency',
-            undefined,
-            undefined,
+            getSessionModel(),
+            getSessionProviderEnv(),
             {
               source: payload.source as 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group',
               sourceId: payload.sourceId,
@@ -6792,11 +6796,12 @@ description: >
 
           const prompt = `<system-reminder>\n<MEMORY_UPDATE>\n${promptContent}\n\nCurrent time: ${now}\n\n完成所有记忆维护操作后（包括文件读写和 git 操作），仅回复 MEMORY_UPDATE_OK，不要输出其他内容。\n</MEMORY_UPDATE>\n</system-reminder>`;
 
-          const { enqueueUserMessage, waitForSessionIdle } = await import('./agent-session');
+          const { enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv } = await import('./agent-session');
 
           // Inject as user message — memory update is unattended, bypass all permissions
           // so Bash/file tools (git commit, file writes) don't block waiting for approval.
-          await enqueueUserMessage(prompt, [], 'fullAgency');
+          // Pass current model + providerEnv to avoid triggering provider-switch logic.
+          await enqueueUserMessage(prompt, [], 'fullAgency', getSessionModel(), getSessionProviderEnv());
 
           // Wait synchronously for AI completion (60 min timeout — same as background tasks).
           // Memory update can be slow for large sessions: loading 100K+ token context,

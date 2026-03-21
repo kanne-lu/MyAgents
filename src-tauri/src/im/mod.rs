@@ -3364,18 +3364,9 @@ fn migrate_provider_env(
         Some(key) if !key.is_empty() => key,
         _ => return, // No API key available
     };
-    let base_url = match provider_id.as_str() {
-        "anthropic-api" => "https://api.anthropic.com",
-        "deepseek" => "https://api.deepseek.com/anthropic",
-        "moonshot" => "https://api.moonshot.cn/anthropic",
-        "zhipu" => "https://open.bigmodel.cn/api/anthropic",
-        "minimax" => "https://api.minimaxi.com/anthropic",
-        "volcengine" => "https://ark.cn-beijing.volces.com/api/coding",
-        "volcengine-api" => "https://ark.cn-beijing.volces.com/api/compatible",
-        "siliconflow" => "https://api.siliconflow.cn/",
-        "zenmux" => "https://zenmux.ai/api/anthropic",
-        "openrouter" => "https://openrouter.ai/api",
-        _ => {
+    let meta = match preset_provider_meta(&provider_id) {
+        Some(m) => m,
+        None => {
             ulog_warn!(
                 "[im] Cannot migrate providerEnvJson for unknown provider '{}' — manual restart required",
                 provider_id
@@ -3383,18 +3374,155 @@ fn migrate_provider_env(
             return;
         }
     };
-    config.provider_env_json = Some(
-        serde_json::json!({
-            "baseUrl": base_url,
-            "apiKey": api_key,
-            "authType": "api-key",
-        })
-        .to_string(),
-    );
+    let mut env = serde_json::json!({
+        "baseUrl": meta.base_url,
+        "apiKey": api_key,
+        "authType": meta.auth_type,
+    });
+    if let Some(proto) = meta.api_protocol {
+        env["apiProtocol"] = serde_json::json!(proto);
+    }
+    config.provider_env_json = Some(env.to_string());
     ulog_info!(
         "[im] Migrated providerEnvJson for provider '{}' from providerApiKeys",
         provider_id
     );
+}
+
+/// Backward-compat migration for Agent configs: rebuild missing `provider_env_json`
+/// on both the agent level and each channel's overrides.
+/// Uses the same preset baseUrl map as `migrate_provider_env`.
+fn migrate_agent_provider_env(
+    agent: &mut AgentConfigRust,
+    api_keys: &std::collections::HashMap<String, String>,
+) {
+    // 1. Migrate agent-level providerEnvJson
+    if agent.provider_env_json.is_none() {
+        if let Some(ref pid) = agent.provider_id {
+            if !pid.is_empty() && !pid.contains("sub") {
+                if let Some(api_key) = api_keys.get(pid).filter(|k| !k.is_empty()) {
+                    if let Some(meta) = preset_provider_meta(pid) {
+                        let mut env = serde_json::json!({
+                            "baseUrl": meta.base_url,
+                            "apiKey": api_key,
+                            "authType": meta.auth_type,
+                        });
+                        if let Some(proto) = meta.api_protocol {
+                            env["apiProtocol"] = serde_json::json!(proto);
+                        }
+                        agent.provider_env_json = Some(env.to_string());
+                        ulog_info!(
+                            "[agent] Migrated agent-level providerEnvJson for provider '{}'",
+                            pid
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Migrate each channel's overrides.providerEnvJson
+    for ch in &mut agent.channels {
+        if let Some(ref mut ov) = ch.overrides {
+            if ov.provider_env_json.is_none() {
+                if let Some(ref pid) = ov.provider_id {
+                    if !pid.is_empty() && !pid.contains("sub") {
+                        if let Some(api_key) = api_keys.get(pid).filter(|k| !k.is_empty()) {
+                            if let Some(meta) = preset_provider_meta(pid) {
+                                let mut env = serde_json::json!({
+                                    "baseUrl": meta.base_url,
+                                    "apiKey": api_key,
+                                    "authType": meta.auth_type,
+                                });
+                                if let Some(proto) = meta.api_protocol {
+                                    env["apiProtocol"] = serde_json::json!(proto);
+                                }
+                                ov.provider_env_json = Some(env.to_string());
+                                ulog_info!(
+                                    "[agent] Migrated channel override providerEnvJson for provider '{}'",
+                                    pid
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Preset provider metadata for migration: (baseUrl, authType, apiProtocol).
+/// Must match PRESET_PROVIDERS in src/renderer/config/types.ts.
+struct PresetProviderMeta {
+    base_url: &'static str,
+    auth_type: &'static str,
+    api_protocol: Option<&'static str>, // None = anthropic (default), Some("openai") = OpenAI bridge
+}
+
+fn preset_provider_meta(provider_id: &str) -> Option<PresetProviderMeta> {
+    match provider_id {
+        "anthropic-api" => Some(PresetProviderMeta {
+            base_url: "https://api.anthropic.com",
+            auth_type: "both",
+            api_protocol: None,
+        }),
+        "deepseek" => Some(PresetProviderMeta {
+            base_url: "https://api.deepseek.com/anthropic",
+            auth_type: "auth_token",
+            api_protocol: None,
+        }),
+        "moonshot" => Some(PresetProviderMeta {
+            base_url: "https://api.moonshot.cn/anthropic",
+            auth_type: "auth_token",
+            api_protocol: None,
+        }),
+        "zhipu" => Some(PresetProviderMeta {
+            base_url: "https://open.bigmodel.cn/api/anthropic",
+            auth_type: "auth_token",
+            api_protocol: None,
+        }),
+        "minimax" => Some(PresetProviderMeta {
+            base_url: "https://api.minimaxi.com/anthropic",
+            auth_type: "auth_token",
+            api_protocol: None,
+        }),
+        "google-gemini" => Some(PresetProviderMeta {
+            base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+            auth_type: "api_key",
+            api_protocol: Some("openai"),
+        }),
+        "volcengine" => Some(PresetProviderMeta {
+            base_url: "https://ark.cn-beijing.volces.com/api/coding",
+            auth_type: "auth_token",
+            api_protocol: None,
+        }),
+        "volcengine-api" => Some(PresetProviderMeta {
+            base_url: "https://ark.cn-beijing.volces.com/api/compatible",
+            auth_type: "auth_token",
+            api_protocol: None,
+        }),
+        "siliconflow" => Some(PresetProviderMeta {
+            base_url: "https://api.siliconflow.cn/",
+            auth_type: "api_key",
+            api_protocol: None,
+        }),
+        "zenmux" => Some(PresetProviderMeta {
+            base_url: "https://zenmux.ai/api/anthropic",
+            auth_type: "auth_token",
+            api_protocol: None,
+        }),
+        "aliyun-bailian-coding" => Some(PresetProviderMeta {
+            base_url: "https://coding.dashscope.aliyuncs.com/apps/anthropic",
+            auth_type: "auth_token",
+            api_protocol: None,
+        }),
+        "openrouter" => Some(PresetProviderMeta {
+            base_url: "https://openrouter.ai/api",
+            auth_type: "auth_token_clear_api_key",
+            api_protocol: None,
+        }),
+        _ => None,
+    }
 }
 
 // ===== Agent Config Disk Read/Write (v0.1.41) =====
@@ -3433,7 +3561,14 @@ fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
         }
 
         if !app_config.agents.is_empty() {
-            return app_config.agents;
+            let mut agents = app_config.agents;
+            let api_keys = app_config.provider_api_keys;
+            // Migration: rebuild providerEnvJson for agents/channels that have
+            // providerId but no providerEnvJson (same as parse_bot_entries does for legacy bots)
+            for agent in &mut agents {
+                migrate_agent_provider_env(agent, &api_keys);
+            }
+            return agents;
         }
 
         // Fallback: if no agents[], try converting from imBotConfigs (migration)
