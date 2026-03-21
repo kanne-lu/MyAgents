@@ -191,14 +191,35 @@ try {
             if (Test-Path $corepackCmd) { Remove-Item -Force $corepackCmd }
             if (Test-Path $corepackDir) { Remove-Item -Recurse -Force $corepackDir }
 
-            # Self-upgrade npm to latest — Node.js v24 bundles npm 11.9.0 which has
-            # a minizlib/minipass compatibility bug on Windows. Latest npm (11.12+) fixes it.
-            Write-Host "  升级 npm 到最新版..." -ForegroundColor Cyan
-            $nodeExe = Join-Path $NodeDir "node.exe"
-            $npmCli = Join-Path $NodeDir "node_modules\npm\bin\npm-cli.js"
-            & $nodeExe $npmCli install npm@latest --global --prefix $NodeDir 2>&1 | Out-Null
-            $npmVer = & $nodeExe $npmCli --version 2>&1
-            Write-Host "  npm 已升级到 v$npmVer" -ForegroundColor Green
+            # Upgrade npm — bundled npm 11.9.0 has minizlib CJS bug on Windows.
+            # CANNOT use `npm install npm@latest` (catch-22: broken npm can't upgrade itself).
+            # Download npm tarball directly with curl/Invoke-WebRequest and replace.
+            Write-Host "  升级 npm (curl + tar)..." -ForegroundColor Cyan
+            $npmDir = Join-Path $NodeDir "node_modules\npm"
+            try {
+                $npmTmpDir = Join-Path $env:TEMP "npm_upgrade_$(Get-Random)"
+                New-Item -ItemType Directory -Path $npmTmpDir -Force | Out-Null
+                $registryJson = Invoke-RestMethod -Uri "https://registry.npmjs.org/npm/latest" -TimeoutSec 30
+                $tarballUrl = $registryJson.dist.tarball
+                $tgzPath = Join-Path $npmTmpDir "npm.tgz"
+                Invoke-WebRequest -Uri $tarballUrl -OutFile $tgzPath -TimeoutSec 60
+                tar -xzf $tgzPath -C $npmTmpDir 2>&1 | Out-Null
+                $extractedPkg = Join-Path $npmTmpDir "package"
+                if (Test-Path $extractedPkg) {
+                    Remove-Item -Recurse -Force $npmDir
+                    Move-Item -Path $extractedPkg -Destination $npmDir
+                    $nodeExe = Join-Path $NodeDir "node.exe"
+                    $npmCli = Join-Path $npmDir "bin\npm-cli.js"
+                    $npmVer = & $nodeExe $npmCli --version 2>&1
+                    Write-Host "  npm 已升级到 v$npmVer" -ForegroundColor Green
+                } else {
+                    Write-Host "  npm 解压失败" -ForegroundColor Yellow
+                }
+                Remove-Item -Recurse -Force $npmTmpDir -ErrorAction SilentlyContinue
+            } catch {
+                Write-Host "  npm 升级失败: $_" -ForegroundColor Yellow
+                Remove-Item -Recurse -Force $npmTmpDir -ErrorAction SilentlyContinue
+            }
 
             Write-Host "  OK - Windows x64" -ForegroundColor Green
         } catch {
