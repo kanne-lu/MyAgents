@@ -23,8 +23,11 @@ import {
   type AgentConfigSlim,
   type ChannelConfigSlim,
 } from './utils/admin-config';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { resolve } from 'path';
 import { setMcpServers, getMcpServers, getAgentState } from './agent-session';
 import { broadcast } from './sse';
+import { getHomeDirOrNull } from './utils/platform';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -242,21 +245,93 @@ export function handleMcpEnv(payload: {
   return { success: false, error: `Unknown action: ${action}. Use 'set', 'get', or 'delete'.` };
 }
 
-export function handleMcpTest(payload: { id: string }): AdminResponse {
+export async function handleMcpTest(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
-  // Verify server exists
   const allServers = getAllMcpServers();
   const server = allServers.find(s => s.id === id);
   if (!server) return { success: false, error: `MCP server '${id}' not found` };
 
-  // For now, validate config completeness (actual connectivity test deferred to Phase 2)
+  // Validate config completeness
   if (server.type === 'stdio' && !server.command) {
     return { success: false, error: `MCP server '${id}' has no command configured` };
   }
   if ((server.type === 'sse' || server.type === 'http') && !server.url) {
     return { success: false, error: `MCP server '${id}' has no URL configured` };
+  }
+
+  // Built-in MCP: delegate to registry
+  if (server.command === '__builtin__') {
+    try {
+      const { getBuiltinMcp } = await import('./tools/builtin-mcp-registry');
+      const entry = getBuiltinMcp(server.id);
+      if (entry?.validate) {
+        const validationError = await entry.validate(server.env || {});
+        if (validationError) {
+          const errMsg = typeof validationError === 'string' ? validationError : JSON.stringify(validationError);
+          return { success: false, error: errMsg };
+        }
+      }
+    } catch { /* registry not loaded */ }
+    return { success: true, data: { id, type: 'builtin' }, hint: 'Built-in MCP validated.' };
+  }
+
+  // SSE/HTTP: test URL reachability
+  if (server.type === 'sse' || server.type === 'http') {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      const headers: Record<string, string> = {
+        'Accept': server.type === 'sse' ? 'text/event-stream' : 'application/json, text/event-stream',
+        'Accept-Encoding': 'identity',
+        ...(server.headers || {}),
+      };
+
+      const resp = server.type === 'http'
+        ? await fetch(server.url!, {
+            method: 'POST',
+            headers: { ...headers, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'MyAgents', version: '1.0' } } }),
+            signal: controller.signal,
+          })
+        : await fetch(server.url!, { method: 'GET', headers, signal: controller.signal });
+
+      clearTimeout(timeout);
+
+      if (resp.status === 401 || resp.status === 403) {
+        return { success: false, error: `Authentication failed (HTTP ${resp.status}). Check headers or API key.` };
+      }
+      if (!resp.ok) {
+        return { success: false, error: `Server returned HTTP ${resp.status}` };
+      }
+
+      return { success: true, data: { id, type: server.type, status: resp.status }, hint: `Connection OK (HTTP ${resp.status}).` };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('abort')) return { success: false, error: 'Connection timed out (15s).' };
+      return { success: false, error: `Connection failed: ${msg}` };
+    }
+  }
+
+  // stdio: check command exists in PATH
+  if (server.type === 'stdio' && server.command && server.command !== '__builtin__') {
+    try {
+      const { getShellEnv } = await import('./utils/shell');
+      const checkCmd = process.platform === 'win32' ? 'where' : 'which';
+      const { spawn } = await import('child_process');
+      const code = await new Promise<number | null>(resolve => {
+        const proc = spawn(checkCmd, [server.command!], { stdio: 'ignore', env: getShellEnv() });
+        proc.on('close', resolve);
+        proc.on('error', () => resolve(null));
+      });
+      if (code === 0) {
+        return { success: true, data: { id, type: 'stdio', command: server.command }, hint: `Command '${server.command}' found.` };
+      }
+      return { success: false, error: `Command '${server.command}' not found in PATH.` };
+    } catch (err) {
+      return { success: false, error: `Failed to check command: ${err instanceof Error ? err.message : String(err)}` };
+    }
   }
 
   return { success: true, data: { id, type: server.type }, hint: 'Configuration valid.' };
@@ -272,22 +347,31 @@ export function handleModelList(): AdminResponse {
   const verifyStatus = config.providerVerifyStatus ?? {};
 
   // Load preset providers
-  let presetProviders: Array<{ id: string; name: string; vendor?: string; isBuiltin: boolean; config?: { baseUrl?: string } }> = [];
+  let presetProviders: Array<Record<string, unknown>> = [];
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PRESET_PROVIDERS } = require('../renderer/config/types');
     presetProviders = PRESET_PROVIDERS ?? [];
   } catch { /* ignore */ }
 
-  const data = presetProviders.map(p => ({
-    id: p.id,
-    name: p.name,
-    vendor: p.vendor,
-    baseUrl: p.config?.baseUrl,
-    isBuiltin: p.isBuiltin,
-    hasApiKey: !!apiKeys[p.id],
-    status: verifyStatus[p.id]?.status ?? 'not-set',
-  }));
+  // Load custom providers
+  const customProviders = loadCustomProviderFiles();
+
+  const allProviders = [...presetProviders, ...customProviders];
+  const data = allProviders.map(p => {
+    const id = String(p.id);
+    const cfg = p.config as Record<string, unknown> | undefined;
+    return {
+      id,
+      name: String(p.name),
+      vendor: p.vendor ? String(p.vendor) : undefined,
+      baseUrl: cfg?.baseUrl ? String(cfg.baseUrl) : undefined,
+      isBuiltin: !!p.isBuiltin,
+      protocol: p.apiProtocol ? String(p.apiProtocol) : 'anthropic',
+      hasApiKey: !!apiKeys[id],
+      status: (verifyStatus[id] as Record<string, unknown>)?.status ?? 'not-set',
+    };
+  });
 
   return { success: true, data };
 }
@@ -319,19 +403,156 @@ export function handleModelSetDefault(payload: { id: string }): AdminResponse {
   return { success: true, data: { id }, hint: `Default provider set to ${id}.` };
 }
 
-export function handleModelVerify(payload: { id: string }): AdminResponse {
+export async function handleModelVerify(payload: { id: string; model?: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
-  // Check that the provider has an API key configured
   const config = loadConfig();
-  const apiKeys = config.providerApiKeys ?? {};
-  if (!apiKeys[id]) {
+  const apiKey = (config.providerApiKeys ?? {})[id];
+  if (!apiKey) {
     return { success: false, error: `No API key set for provider '${id}'. Use 'myagents model set-key' first.` };
   }
 
-  // Full SDK-based verification requires the provider-verify module; return a hint for now
-  return { success: true, data: { id }, hint: `API key is configured. Use Settings → Model Provider to run full verification.` };
+  // Look up provider config (preset or custom)
+  const provider = findProvider(id);
+  if (!provider) {
+    return { success: false, error: `Provider '${id}' not found in presets or custom providers.` };
+  }
+
+  const providerConfig = (provider.config ?? {}) as Record<string, unknown>;
+  const baseUrl = String(providerConfig.baseUrl ?? '');
+  const authType = String(provider.authType ?? 'both');
+  const apiProtocol = provider.apiProtocol as 'anthropic' | 'openai' | undefined;
+  const verifyModel = payload.model ?? String(provider.primaryModel ?? '');
+
+  try {
+    const { verifyProviderViaSdk } = await import('./provider-verify');
+    const result = await verifyProviderViaSdk(
+      baseUrl, apiKey, authType, verifyModel,
+      apiProtocol,
+      provider.maxOutputTokens ? Number(provider.maxOutputTokens) : undefined,
+      provider.upstreamFormat as 'chat_completions' | 'responses' | undefined,
+    );
+
+    if (result.success) {
+      // Persist verify status
+      atomicModifyConfig(c => ({
+        ...c,
+        providerVerifyStatus: {
+          ...(c.providerVerifyStatus ?? {}),
+          [id]: { status: 'valid', verifiedAt: new Date().toISOString() },
+        },
+      }));
+      broadcast('config:changed', { section: 'model', action: 'verify', id });
+      return { success: true, data: { id, model: verifyModel }, hint: 'Verification successful.' };
+    }
+
+    return { success: false, error: result.error ?? 'Verification failed', data: { id, detail: result.detail } };
+  } catch (err) {
+    return { success: false, error: `Verification error: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+export function handleModelAdd(payload: {
+  provider: Record<string, unknown>;
+  dryRun?: boolean;
+}): AdminResponse {
+  const { dryRun } = payload;
+  const p = payload.provider;
+
+  // Validate required fields
+  if (!p.id) return { success: false, error: 'Missing required field: id' };
+  if (!p.name) return { success: false, error: 'Missing required field: name' };
+  if (!p.baseUrl) return { success: false, error: 'Missing required field: baseUrl (API endpoint)' };
+  if (!p.models || !Array.isArray(p.models) || p.models.length === 0) {
+    return { success: false, error: 'Missing required field: models (at least one model ID required)' };
+  }
+
+  // Build model entities
+  const modelSeries = (p.modelSeries as string) || String(p.id);
+  const modelIds = p.models as string[];
+  const modelNames = (p.modelNames as string[]) || modelIds;
+  const models = modelIds.map((model, i) => ({
+    model,
+    modelName: modelNames[i] || model,
+    modelSeries,
+  }));
+
+  // Build aliases
+  let modelAliases: Record<string, string> | undefined;
+  if (p.aliases && typeof p.aliases === 'object') {
+    modelAliases = p.aliases as Record<string, string>;
+  } else if (modelIds.length > 0) {
+    // Default: map sonnet/opus/haiku to first model
+    modelAliases = { sonnet: modelIds[0], opus: modelIds[0], haiku: modelIds[0] };
+  }
+
+  const providerObj = {
+    id: String(p.id),
+    name: String(p.name),
+    vendor: String(p.vendor ?? p.name),
+    cloudProvider: String(p.cloudProvider ?? ''),
+    type: 'api' as const,
+    primaryModel: String(p.primaryModel ?? modelIds[0]),
+    isBuiltin: false,
+    config: {
+      baseUrl: String(p.baseUrl),
+      ...(p.timeout ? { timeout: Number(p.timeout) } : {}),
+      ...(p.disableNonessential ? { disableNonessential: true } : {}),
+    },
+    authType: String(p.authType ?? 'auth_token'),
+    ...(p.protocol === 'openai' || p.apiProtocol === 'openai' ? {
+      apiProtocol: 'openai' as const,
+      maxOutputTokens: Number(p.maxOutputTokens ?? 8192),
+      upstreamFormat: String(p.upstreamFormat ?? 'chat_completions') as 'chat_completions' | 'responses',
+    } : {}),
+    websiteUrl: p.websiteUrl ? String(p.websiteUrl) : undefined,
+    models,
+    modelAliases,
+  };
+
+  if (dryRun) {
+    return { success: true, dryRun: true, preview: providerObj };
+  }
+
+  // Write to ~/.myagents/providers/{id}.json
+  saveCustomProviderFile(providerObj);
+  broadcast('config:changed', { section: 'model', action: 'add', id: providerObj.id });
+  return {
+    success: true,
+    data: { id: providerObj.id, name: providerObj.name, models: modelIds },
+    hint: `Provider added. Use 'myagents model set-key ${providerObj.id} <key>' to set API key.`,
+  };
+}
+
+export function handleModelRemove(payload: { id: string }): AdminResponse {
+  const { id } = payload;
+  if (!id) return { success: false, error: 'Missing required field: id' };
+
+  // Check if it's a preset
+  const provider = findProvider(id);
+  if (provider?.isBuiltin) {
+    return { success: false, error: `Cannot remove built-in provider '${id}'. Only custom providers can be removed.` };
+  }
+
+  // Delete provider file
+  if (!deleteCustomProviderFile(id)) {
+    return { success: false, error: `Custom provider '${id}' not found.` };
+  }
+
+  // Clean up API key and verify status
+  atomicModifyConfig(c => {
+    const apiKeys = { ...(c.providerApiKeys ?? {}) };
+    delete apiKeys[id];
+    const verifyStatus = { ...(c.providerVerifyStatus ?? {}) };
+    delete verifyStatus[id];
+    // If this was the default provider, clear it
+    const defaultId = c.defaultProviderId === id ? undefined : c.defaultProviderId;
+    return { ...c, providerApiKeys: apiKeys, providerVerifyStatus: verifyStatus, defaultProviderId: defaultId };
+  });
+
+  broadcast('config:changed', { section: 'model', action: 'remove', id });
+  return { success: true, data: { id }, hint: 'Provider removed.' };
 }
 
 // ---------------------------------------------------------------------------
@@ -547,10 +768,27 @@ Options for 'env':
   model: `myagents model — Manage model providers
 
 Commands:
-  list                     List all providers
+  list                     List all providers (preset + custom)
+  add                      Add a custom provider
+  remove <id>              Remove a custom provider
   set-key <id> <api-key>   Set API key for a provider
-  verify <id>              Validate provider connectivity
-  set-default <id>         Set default provider`,
+  verify <id> [--model m]  Verify API key (sends a test message)
+  set-default <id>         Set default provider
+
+Options for 'add':
+  --id            Provider ID (required)
+  --name          Display name (required)
+  --base-url      API endpoint URL (required)
+  --models        Model IDs (repeatable, at least one)
+  --model-names   Display names for models (repeatable)
+  --primary-model Default model (default: first in --models)
+  --auth-type     auth_token | api_key | both (default: auth_token)
+  --protocol      anthropic | openai (default: anthropic)
+  --upstream-format  chat_completions | responses (openai only)
+  --max-output-tokens  Max output limit (openai only)
+  --aliases       SDK alias mapping: sonnet=model,opus=model,haiku=model
+  --vendor        Vendor name
+  --website-url   Provider website`,
 
   agent: `myagents agent — Manage agents & channels
 
@@ -595,6 +833,75 @@ Use "myagents <group> --help" for details on a specific group.`,
 
 // ---------------------------------------------------------------------------
 // Internal helpers
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Provider file I/O (~/.myagents/providers/{id}.json)
+// ---------------------------------------------------------------------------
+
+function getProvidersDir(): string {
+  const home = getHomeDirOrNull();
+  if (!home) throw new Error('Cannot determine home directory');
+  return resolve(home, '.myagents', 'providers');
+}
+
+/** Find a provider by ID (preset + custom) */
+function findProvider(id: string): Record<string, unknown> | null {
+  // Check presets first
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { PRESET_PROVIDERS } = require('../renderer/config/types');
+    const preset = (PRESET_PROVIDERS as Array<Record<string, unknown>>)?.find(
+      (p: Record<string, unknown>) => p.id === id
+    );
+    if (preset) return preset;
+  } catch { /* ignore */ }
+
+  // Check custom providers
+  const dir = getProvidersDir();
+  const filePath = resolve(dir, `${id}.json`);
+  if (existsSync(filePath)) {
+    try {
+      return JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/** Load all custom provider files */
+function loadCustomProviderFiles(): Array<Record<string, unknown>> {
+  const dir = getProvidersDir();
+  if (!existsSync(dir)) return [];
+  try {
+    return readdirSync(dir)
+      .filter(f => f.endsWith('.json'))
+      .map(f => {
+        try {
+          return JSON.parse(readFileSync(resolve(dir, f), 'utf-8')) as Record<string, unknown>;
+        } catch { return null; }
+      })
+      .filter((p): p is Record<string, unknown> => p !== null && !!p.id);
+  } catch { return []; }
+}
+
+/** Save a custom provider JSON file */
+function saveCustomProviderFile(provider: Record<string, unknown>): void {
+  const dir = getProvidersDir();
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const filePath = resolve(dir, `${provider.id}.json`);
+  writeFileSync(filePath, JSON.stringify(provider, null, 2), 'utf-8');
+}
+
+/** Delete a custom provider file. Returns true if file existed. */
+function deleteCustomProviderFile(id: string): boolean {
+  const filePath = resolve(getProvidersDir(), `${id}.json`);
+  if (!existsSync(filePath)) return false;
+  unlinkSync(filePath);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// MCP helpers
 // ---------------------------------------------------------------------------
 
 /** Update Sidecar MCP state and notify frontend after config change.

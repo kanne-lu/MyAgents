@@ -49,12 +49,96 @@ description: >-
 6. `myagents reload` 触发热加载
 7. 告诉用户"配置完成，发条消息我就能用了"
 
-### 配置模型服务
+### 配置模型服务（重点）
 
-1. `myagents model list` 查看已有 Provider 和状态
-2. 如果目标 Provider 已经是内置的（status 显示 not-set），只需设置 API Key
-3. `myagents model set-key <id> <key>` 设置 API Key
-4. 可选：`myagents model set-default <id>` 设为默认 Provider
+这是最常见也最有价值的场景。用户可能丢给你一个 API 服务商的文档，你需要理解其中的配置信息。
+
+#### 核心原则：协议优先级
+
+MyAgents 基于 Claude Agent SDK，底层是 Anthropic Messages API。接入第三方 API 时，协议选择的优先级是：
+
+1. **Anthropic 协议（最优先）** — 如果文档提到 "Claude Code"、"Anthropic 兼容"、`ANTHROPIC_BASE_URL` 环境变量，或者 URL 路径中包含 `/anthropic`，说明该服务商原生支持 Anthropic 协议。这是最佳选择，性能最好、兼容性最强。
+2. **OpenAI 兼容协议（兜底）** — 如果服务商只提供 OpenAI 兼容 API（`/v1/chat/completions`），使用 `--protocol openai`。这会通过内置的协议桥接层转换请求格式。
+
+#### 从文档提取配置的方法
+
+当用户给你一份 API 服务商的文档时：
+
+**寻找 Anthropic 协议线索（优先）：**
+- 搜索关键词：`Claude Code`、`Anthropic`、`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`/anthropic`
+- 如果找到，提取：
+  - `ANTHROPIC_BASE_URL` 的值 → `--base-url`
+  - 认证方式（Bearer Token 还是 API Key）→ `--auth-type`（多数为 `auth_token`）
+  - 模型名称列表 → `--models`
+
+**寻找 OpenAI 协议线索（兜底）：**
+- 搜索关键词：`OpenAI 兼容`、`/v1/chat/completions`、`chat completions`
+- 如果找到，提取：
+  - API base URL → `--base-url`（通常以 `/v1` 结尾或需要去掉 `/chat/completions`）
+  - 使用 `--protocol openai`
+  - 注意区分 `--upstream-format`：
+    - 大多数服务商用 `chat_completions`（默认值）
+    - 少数新服务商支持 `responses` 格式
+
+#### Claude Code 配置 → MyAgents 配置的映射
+
+如果文档给出了 Claude Code 的配置示例（环境变量方式），对应关系是：
+
+| Claude Code 环境变量 | MyAgents CLI 参数 |
+|---------------------|------------------|
+| `ANTHROPIC_BASE_URL` | `--base-url` |
+| `ANTHROPIC_API_KEY` | API Key（用 `model set-key` 设置） |
+| `ANTHROPIC_AUTH_TOKEN` | 同上（区别在 `--auth-type`） |
+
+`--auth-type` 的选择逻辑：
+- 如果文档说设置 `ANTHROPIC_AUTH_TOKEN` → 用 `auth_token`
+- 如果文档说设置 `ANTHROPIC_API_KEY` → 用 `api_key`
+- 如果文档两个都设置或没说清 → 用 `both`（默认，最安全）
+- OpenRouter 等特殊服务商 → 用 `auth_token_clear_api_key`
+
+#### `model add` 参数说明
+
+```
+myagents model add \
+  --id <唯一ID>              # 必填，如 'my-provider'
+  --name <显示名>             # 必填，如 '我的API服务'
+  --base-url <API地址>        # 必填，如 'https://api.example.com/anthropic'
+  --models <模型ID列表>       # 必填，逗号分隔或多次 --models
+  --model-names <显示名列表>   # 可选，与 models 一一对应
+  --model-series <系列名>      # 可选，默认取 provider ID
+  --primary-model <默认模型>   # 可选，默认取第一个 model
+  --auth-type <认证类型>       # 可选，默认 auth_token
+  --protocol <协议>           # 可选，anthropic(默认) 或 openai
+  --upstream-format <格式>     # 可选（仅 openai），chat_completions(默认) 或 responses
+  --max-output-tokens <数字>   # 可选（仅 openai），默认 8192
+  --vendor <供应商名>          # 可选，默认取 name
+  --website-url <官网>         # 可选
+  --dry-run                    # 预览
+```
+
+#### 免费模型优先策略
+
+很多 Provider 同时提供付费模型和免费模型。`model verify` 会用 `primaryModel` 发一条测试消息。如果用户可能还没充值，验证付费模型会失败。
+
+**策略**：如果一个 Provider 有免费模型也有付费模型，在 `--models` 列表中把免费模型放在第一位。这样 `primaryModel` 自动选中免费模型，`model verify` 更容易成功。
+
+**例外**：如果用户明确说了要用某个特定模型，按用户意愿来。
+
+#### 完整配置流程
+
+1. `myagents model list` 检查是否已有内置 Provider
+2. 如果是内置的 → 直接 `model set-key`
+3. 如果需要新增 → `model add --dry-run ...` 预览
+4. 向用户展示配置并确认
+5. `model add ...` 正式添加
+6. `myagents model set-key <id> <key>` 设置 API Key
+7. `myagents model verify <id>` 验证（会实际发送一条测试消息）
+8. 如果验证失败 → 分析原因：
+   - 认证失败 → 检查 API Key 和 auth-type
+   - 模型不存在 → 检查模型名称
+   - 余额不足 → 尝试切换到免费模型验证
+   - 协议不对 → 尝试切换 protocol（anthropic ↔ openai）
+9. `myagents model set-default <id>` 设为默认（可选）
 
 ### 配置 Agent Channel
 

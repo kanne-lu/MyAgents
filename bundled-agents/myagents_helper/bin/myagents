@@ -27,7 +27,7 @@ const rawArgs = process.argv.slice(2);
 function parseArgs(args: string[]): { positional: string[]; flags: Record<string, unknown> } {
   const positional: string[] = [];
   const flags: Record<string, unknown> = {};
-  const repeatable = new Set(['args', 'env', 'headers', 'models']);
+  const repeatable = new Set(['args', 'env', 'headers', 'models', 'model-names']);
 
   let i = 0;
   while (i < args.length) {
@@ -35,7 +35,7 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
     if (arg.startsWith('--')) {
       const key = arg.slice(2);
       // Boolean flags (no value follows, or next arg is also a flag)
-      if (key === 'help' || key === 'json' || key === 'dry-run') {
+      if (key === 'help' || key === 'json' || key === 'dry-run' || key === 'disable-nonessential') {
         flags[camelCase(key)] = true;
         i++;
         continue;
@@ -345,9 +345,38 @@ function buildRequestBody(
   // Model commands
   if (group === 'model') {
     if (action === 'set-key') return { id: rest[0] || flags.id, apiKey: rest[1] || flags.apiKey };
-    if (action === 'verify') return { id: rest[0] || flags.id };
+    if (action === 'verify') return { id: rest[0] || flags.id, model: flags.model };
     if (action === 'set-default') return { id: rest[0] || flags.id };
-    if (action === 'add') return { provider: flags, dryRun: flags.dryRun };
+    if (action === 'add') {
+      // Structure the provider object from flags
+      const provider: Record<string, unknown> = {
+        id: flags.id,
+        name: flags.name,
+        baseUrl: flags.baseUrl,
+        models: flags.models,           // array (repeatable)
+        modelNames: flags.modelNames,   // array (repeatable)
+        modelSeries: flags.modelSeries,
+        primaryModel: flags.primaryModel,
+        authType: flags.authType,
+        apiProtocol: flags.protocol,    // --protocol maps to apiProtocol
+        upstreamFormat: flags.upstreamFormat,
+        maxOutputTokens: flags.maxOutputTokens,
+        vendor: flags.vendor,
+        websiteUrl: flags.websiteUrl,
+        timeout: flags.timeout,
+        disableNonessential: flags.disableNonessential,
+      };
+      // Build aliases from --aliases sonnet=model-id,opus=model-id
+      if (typeof flags.aliases === 'string') {
+        const aliases: Record<string, string> = {};
+        for (const pair of (flags.aliases as string).split(',')) {
+          const [k, v] = pair.split('=');
+          if (k && v) aliases[k.trim()] = v.trim();
+        }
+        provider.aliases = aliases;
+      }
+      return { provider, dryRun: flags.dryRun };
+    }
     if (action === 'remove') return { id: rest[0] || flags.id };
     return {};
   }
