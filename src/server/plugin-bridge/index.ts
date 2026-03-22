@@ -751,12 +751,22 @@ const server = Bun.serve({
         }
 
         // 2. Re-resolve account with fresh credentials
+        // CRITICAL: pass accountId from QR login result — plugins like WeChat require
+        // accountId to look up the newly-saved credentials on disk
+        const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+        const qrAccountId = body.accountId as string | undefined;
         const resolveAccount = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
         let account: Record<string, unknown> = pluginConfig;
         if (typeof resolveAccount?.resolveAccount === 'function') {
           try {
-            account = await (resolveAccount.resolveAccount as (cfg: unknown) => Promise<Record<string, unknown>>)(loadedOpenclawConfig) || pluginConfig;
-          } catch { /* use fallback */ }
+            account = await (resolveAccount.resolveAccount as (cfg: unknown, id?: string) => Promise<Record<string, unknown>>)(loadedOpenclawConfig, qrAccountId) || pluginConfig;
+          } catch (err) {
+            console.warn('[plugin-bridge] resolveAccount failed after QR login:', err);
+            // If resolve failed but we have an accountId, try building a minimal account
+            if (qrAccountId) {
+              account = { accountId: qrAccountId, enabled: true, configured: true, ...pluginConfig };
+            }
+          }
         }
 
         // 3. Check if now configured

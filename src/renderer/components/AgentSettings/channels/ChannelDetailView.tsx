@@ -452,18 +452,19 @@ export default function ChannelDetailView({
             // Poll for scan completion (pass sessionKey — WeChat requires it)
             while (!qrAbortRef.current && isMountedRef.current) {
                 try {
-                    const waitResult = await invoke<{ ok: boolean; connected?: boolean; message?: string }>(
+                    const waitResult = await invoke<{ ok: boolean; connected?: boolean; message?: string; accountId?: string }>(
                         'cmd_plugin_qr_login_wait', { agentId: agent.id, channelId: channel.id, sessionKey: qrSessionKeyRef.current }
                     );
                     if (!isMountedRef.current || qrAbortRef.current) return;
                     if (waitResult.connected) {
                         setQrStatus('connected');
                         setQrMessage('登录成功！');
-                        await invoke('cmd_plugin_restart_gateway', { agentId: agent.id, channelId: channel.id });
+                        await invoke('cmd_plugin_restart_gateway', { agentId: agent.id, channelId: channel.id, accountId: waitResult.accountId });
                         toastRef.current.success('扫码登录成功');
                         return;
                     }
                     if (waitResult.message) setQrMessage(waitResult.message);
+                    await new Promise(r => setTimeout(r, 1000)); // Prevent rapid spinning on terminal errors
                 } catch (err) {
                     if (!isMountedRef.current || qrAbortRef.current) return;
                     const errMsg = err instanceof Error ? err.message : String(err);

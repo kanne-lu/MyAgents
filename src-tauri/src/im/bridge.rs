@@ -661,8 +661,10 @@ pub async fn qr_login_start(bridge_port: u16, account_id: Option<&str>) -> Resul
 }
 
 pub async fn qr_login_wait(bridge_port: u16, account_id: Option<&str>, session_key: Option<&str>) -> Result<serde_json::Value, String> {
-    // Long timeout: WeChat polls up to 35s per attempt
-    let client = crate::local_http::json_client(std::time::Duration::from_secs(60));
+    // WeChat's internal long-poll is 35s per cycle. Set Rust timeout to 45s (covers one full
+    // poll cycle + buffer). Also pass timeoutMs=40000 to the plugin so it exits after one
+    // cycle instead of looping internally for 8 minutes.
+    let client = crate::local_http::json_client(std::time::Duration::from_secs(45));
     let url = format!("http://127.0.0.1:{}/qr-login-wait", bridge_port);
     let mut body = serde_json::json!({});
     if let Some(id) = account_id {
@@ -671,6 +673,8 @@ pub async fn qr_login_wait(bridge_port: u16, account_id: Option<&str>, session_k
     if let Some(sk) = session_key {
         body["sessionKey"] = serde_json::json!(sk);
     }
+    // Limit plugin's internal poll to one cycle (~35s) so it returns control to our frontend loop
+    body["timeoutMs"] = serde_json::json!(40000);
     let resp = client.post(&url).json(&body).send().await
         .map_err(|e| format!("QR login wait request failed: {}", e))?;
     let status = resp.status();
@@ -682,10 +686,14 @@ pub async fn qr_login_wait(bridge_port: u16, account_id: Option<&str>, session_k
     Ok(result)
 }
 
-pub async fn restart_gateway(bridge_port: u16) -> Result<serde_json::Value, String> {
+pub async fn restart_gateway(bridge_port: u16, account_id: Option<&str>) -> Result<serde_json::Value, String> {
     let client = crate::local_http::json_client(std::time::Duration::from_secs(15));
     let url = format!("http://127.0.0.1:{}/restart-gateway", bridge_port);
-    let resp = client.post(&url).json(&serde_json::json!({})).send().await
+    let mut body = serde_json::json!({});
+    if let Some(id) = account_id {
+        body["accountId"] = serde_json::json!(id);
+    }
+    let resp = client.post(&url).json(&body).send().await
         .map_err(|e| format!("Restart gateway request failed: {}", e))?;
     let status = resp.status();
     let result: serde_json::Value = resp.json().await

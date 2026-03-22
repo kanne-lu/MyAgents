@@ -5007,15 +5007,18 @@ pub async fn cmd_plugin_qr_login_wait(
 
 /// Restart the gateway after QR login success.
 /// Re-resolves credentials and starts the plugin's message listener.
+/// `accountId` is returned by the plugin during QR login (e.g. WeChat's ilink_bot_id)
+/// and is REQUIRED for `resolveAccount()` to find the newly-saved credentials.
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_plugin_restart_gateway(
     agentState: tauri::State<'_, ManagedAgents>,
     agentId: String,
     channelId: String,
+    accountId: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = get_bridge_port(&agentState, &agentId, &channelId).await?;
-    bridge::restart_gateway(port).await
+    bridge::restart_gateway(port, accountId.as_deref()).await
 }
 
 /// Restart all running channels that use the given OpenClaw plugin.

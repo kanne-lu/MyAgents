@@ -442,7 +442,7 @@ export default function ChannelWizard({
             // 4. Poll for QR scan completion (pass sessionKey — WeChat requires it)
             while (!qrAbortRef.current && isMountedRef.current) {
                 try {
-                    const waitResult = await invoke<{ ok: boolean; connected?: boolean; message?: string }>(
+                    const waitResult = await invoke<{ ok: boolean; connected?: boolean; message?: string; accountId?: string }>(
                         'cmd_plugin_qr_login_wait', { agentId: agent.id, channelId, sessionKey: qrSessionKeyRef.current }
                     );
 
@@ -451,8 +451,11 @@ export default function ChannelWizard({
                     if (waitResult.connected) {
                         setQrStatus('connected');
                         setQrMessage('登录成功！正在启动...');
-                        // 5. Restart gateway with fresh credentials
-                        await invoke('cmd_plugin_restart_gateway', { agentId: agent.id, channelId });
+                        // 5. Restart gateway with fresh credentials (pass accountId for resolveAccount)
+                        await invoke('cmd_plugin_restart_gateway', {
+                            agentId: agent.id, channelId,
+                            accountId: waitResult.accountId,
+                        });
                         if (isMountedRef.current) {
                             track('agent_channel_create', { platform });
                             toastRef.current.success('扫码登录成功');
@@ -461,8 +464,10 @@ export default function ChannelWizard({
                         return;
                     }
 
-                    // Update message (e.g. "scanned, waiting for confirm")
+                    // Update message and add a small delay to prevent rapid spinning
+                    // (plugin returns connected:false immediately for terminal errors)
                     if (waitResult.message) setQrMessage(waitResult.message);
+                    await new Promise(r => setTimeout(r, 1000));
 
                 } catch (err) {
                     if (!isMountedRef.current || qrAbortRef.current) return;
