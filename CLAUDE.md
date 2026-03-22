@@ -107,6 +107,16 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 - 兼容层验证 MUST 跑完整消息收发链路（不能只验证 `register()` 成功）
 - 详细架构：@specs/research/openclaw_sdk_shim_analysis.md
 
+### OpenClaw 插件通用性原则
+
+MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编码集成。开发准则：
+
+- **协议优先**：所有功能 MUST 基于 OpenClaw SDK 协议（`ChannelPlugin` 接口），禁止为单个插件硬编码逻辑。能力检测用 duck-typing（`plugin.gateway?.loginWithQrStart` 存在 → 支持 QR 登录），不用 if/else 分平台。
+- **SDK shim 对齐源码**：新增 shim 函数 MUST 先读 OpenClaw 源码确认签名和行为（`/Users/zhihu/Documents/project/openclaw/`），禁止臆造实现。
+- **预设 = 最小定制**：`promotedPlugins.ts` 只声明元数据（npmSpec、icon、authType），功能逻辑走通用路径。预设插件与自定义插件的代码路径 MUST 相同。
+- **安装输入清洗**：用户可能粘贴 `npx -y @scope/pkg install` 等完整命令，`sanitize_npm_spec()` 统一剥离，安装/查找/manifest 全链路 MUST 用清洗后的值。
+- **鉴权方式自适应**：config 填写 vs QR 扫码由插件能力决定（`supportsQrLogin`），向导流程自动切换，不绑死某种鉴权方式。
+
 ---
 
 ## 禁止事项
