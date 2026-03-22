@@ -199,14 +199,17 @@ async function loadPlugin() {
   }
 
   // Resolve account using the plugin's own config.resolveAccount if available
+  // Pass accountId from pluginConfig (persisted after QR login) so plugins like
+  // WeChat can find credentials saved under that specific accountId on disk.
   const configAccessor = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
+  const persistedAccountId = pluginConfig.accountId as string | undefined;
   let account: Record<string, unknown> = currentAccount;
   if (typeof configAccessor?.resolveAccount === 'function') {
     try {
-      account = (configAccessor.resolveAccount as (cfg: unknown, id?: string) => Record<string, unknown>)(openclawCfg);
+      account = (configAccessor.resolveAccount as (cfg: unknown, id?: string) => Record<string, unknown>)(openclawCfg, persistedAccountId);
     } catch (err) {
       console.warn(`[plugin-bridge] resolveAccount failed, using flat config:`, err);
-      account = { accountId: 'default', enabled: true, ...pluginConfig };
+      account = { accountId: persistedAccountId || 'default', enabled: true, ...pluginConfig };
     }
   } else {
     account = { accountId: 'default', enabled: true, ...pluginConfig };

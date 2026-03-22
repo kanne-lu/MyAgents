@@ -479,6 +479,19 @@ export default function ChannelWizard({
                             agentId: agent.id, channelId,
                             accountId: waitResult.accountId,
                         });
+                        // Persist accountId to channel config so Bridge finds credentials on restart
+                        if (waitResult.accountId) {
+                            const { loadAppConfig } = await import('@/config/configService');
+                            const lat = await loadAppConfig();
+                            const latAgent = (lat.agents ?? []).find(a => a.id === agent.id);
+                            const updChs = (latAgent?.channels ?? []).map(ch =>
+                                ch.id === channelId
+                                    ? { ...ch, openclawPluginConfig: { ...(ch.openclawPluginConfig ?? {}), accountId: waitResult.accountId! } }
+                                    : ch,
+                            );
+                            await patchAgentConfig(agent.id, { channels: updChs });
+                            await refreshConfig();
+                        }
                         if (isMountedRef.current) {
                             track('agent_channel_create', { platform });
                             toastRef.current.success('扫码登录成功');

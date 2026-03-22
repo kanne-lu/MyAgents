@@ -95,7 +95,7 @@ export default function ChannelDetailView({
     onBack,
     onChanged,
 }: ChannelDetailViewProps) {
-    const { config, providers, apiKeys } = useConfig();
+    const { config, providers, apiKeys, refreshConfig } = useConfig();
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
@@ -475,6 +475,19 @@ export default function ChannelDetailView({
                         setQrStatus('connected');
                         setQrMessage('登录成功！');
                         await invoke('cmd_plugin_restart_gateway', { agentId: agent.id, channelId: channel.id, accountId: waitResult.accountId });
+                        // Persist accountId so Bridge finds credentials on restart
+                        if (waitResult.accountId) {
+                            const { loadAppConfig } = await import('@/config/configService');
+                            const lat = await loadAppConfig();
+                            const latAgent = (lat.agents ?? []).find(a => a.id === agent.id);
+                            const updChs = (latAgent?.channels ?? agent.channels ?? []).map(ch =>
+                                ch.id === channel.id
+                                    ? { ...ch, openclawPluginConfig: { ...(ch.openclawPluginConfig ?? {}), accountId: waitResult.accountId! } }
+                                    : ch,
+                            );
+                            await patchAgentConfig(agent.id, { channels: updChs });
+                            await refreshConfig();
+                        }
                         toastRef.current.success('扫码登录成功');
                         return;
                     }
