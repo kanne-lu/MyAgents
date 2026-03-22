@@ -2138,6 +2138,11 @@ async fn deliver_cron_result_to_bot(
     task_id: &str,
     summary: &str,
 ) {
+    ulog_info!(
+        "[CronTask] Delivering result for task {} to bot {} (platform: {})",
+        task_id, delivery.bot_id, delivery.platform
+    );
+
     // 1. Find the Bot's sidecar port and POST system event
     // First check ManagedAgents (v0.1.41), then fall back to ManagedImBots (legacy)
     let im_state: tauri::State<'_, crate::im::ManagedImBots> = match handle.try_state() {
@@ -2180,7 +2185,12 @@ async fn deliver_cron_result_to_bot(
             let instance = match im_guard.get(&delivery.bot_id) {
                 Some(i) => i,
                 None => {
-                    ulog_warn!("[CronTask] Cannot deliver result: Bot {} not found", delivery.bot_id);
+                    ulog_warn!(
+                        "[CronTask] Cannot deliver result: Bot {} not found or not running. \
+                         Task result stored in execution history only. \
+                         User needs to start the channel in Agent settings.",
+                        delivery.bot_id
+                    );
                     return;
                 }
             };

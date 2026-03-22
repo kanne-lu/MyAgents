@@ -327,11 +327,11 @@ pub type ManagedImBots = Arc<Mutex<HashMap<String, ImBotInstance>>>;
 /// Running IM Bot instance
 pub struct ImBotInstance {
     #[allow(dead_code)]
-    bot_id: String,
+    pub(crate) bot_id: String,
     #[allow(dead_code)]
-    platform: ImPlatform,
+    pub(crate) platform: ImPlatform,
     shutdown_tx: watch::Sender<bool>,
-    health: Arc<HealthManager>,
+    pub(crate) health: Arc<HealthManager>,
     pub(crate) router: Arc<Mutex<SessionRouter>>,
     buffer: Arc<Mutex<MessageBuffer>>,
     started_at: Instant,
@@ -346,7 +346,7 @@ pub struct ImBotInstance {
     /// Random bind code for QR code binding flow
     bind_code: String,
     #[allow(dead_code)]
-    config: ImConfig,
+    pub(crate) config: ImConfig,
     // ===== Heartbeat (v0.1.21) =====
     /// Heartbeat runner background task handle
     heartbeat_handle: Option<tokio::task::JoinHandle<()>>,

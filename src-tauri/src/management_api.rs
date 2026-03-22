@@ -74,6 +74,7 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/cron/run", post(run_cron_handler))
         .route("/api/cron/runs", get(runs_cron_handler))
         .route("/api/cron/status", get(status_cron_handler))
+        .route("/api/im/channels", get(list_im_channels_handler))
         .route("/api/im/wake", post(wake_bot_handler))
         .route("/api/im/send-media", post(send_media_handler))
         .route("/api/im-bridge/message", post(handle_bridge_message));
@@ -442,6 +443,84 @@ async fn find_bot_adapter(bot_id: &str) -> Option<std::sync::Arc<im::AnyAdapter>
         }
     }
     None
+}
+
+/// Snapshot of channel metadata extracted under lock, resolved after lock is dropped.
+struct ChannelSnapshot {
+    bot_id: String,
+    platform_str: String,
+    name: String,
+    agent_name: Option<String>,
+    health: std::sync::Arc<im::health::HealthManager>,
+}
+
+/// GET /api/im/channels — List all configured IM channels for cron delivery target discovery.
+/// Returns channel botId, platform, name, parent agent name, and runtime status.
+/// Uses snapshot-then-await pattern to avoid holding ManagedAgents/ManagedImBots lock across awaits.
+async fn list_im_channels_handler() -> Json<serde_json::Value> {
+    let mut snapshots: Vec<ChannelSnapshot> = Vec::new();
+
+    // Snapshot from ManagedAgents (primary path after v0.1.41) — lock dropped before await
+    if let Some(agents) = get_agents() {
+        let agents_guard = agents.lock().await;
+        for agent in agents_guard.values() {
+            for (ch_id, ch_inst) in &agent.channels {
+                let platform_str = serde_json::to_value(&ch_inst.bot_instance.platform)
+                    .and_then(|v| serde_json::from_value::<String>(v))
+                    .unwrap_or_else(|_| "unknown".to_string());
+                let name = ch_inst.bot_instance.config.name.clone()
+                    .unwrap_or_else(|| ch_id.clone());
+                snapshots.push(ChannelSnapshot {
+                    bot_id: ch_id.clone(),
+                    platform_str,
+                    name,
+                    agent_name: Some(agent.config.name.clone()),
+                    health: std::sync::Arc::clone(&ch_inst.bot_instance.health),
+                });
+            }
+        }
+    } // agents_guard dropped here
+
+    // Snapshot from legacy ManagedImBots — lock dropped before await
+    if let Some(bots) = get_im_bots() {
+        let bots_guard = bots.lock().await;
+        for (bot_id, instance) in bots_guard.iter() {
+            // Skip if already collected from agent channels
+            if snapshots.iter().any(|s| s.bot_id == *bot_id) {
+                continue;
+            }
+            let platform_str = serde_json::to_value(&instance.platform)
+                .and_then(|v| serde_json::from_value::<String>(v))
+                .unwrap_or_else(|_| "unknown".to_string());
+            let name = instance.config.name.clone()
+                .unwrap_or_else(|| bot_id.clone());
+            snapshots.push(ChannelSnapshot {
+                bot_id: bot_id.clone(),
+                platform_str,
+                name,
+                agent_name: None,
+                health: std::sync::Arc::clone(&instance.health),
+            });
+        }
+    } // bots_guard dropped here
+
+    // Now resolve health states without holding any lock
+    let mut channels = Vec::with_capacity(snapshots.len());
+    for snap in snapshots {
+        let health_state = snap.health.get_state().await;
+        let status_str = serde_json::to_value(&health_state.status)
+            .and_then(|v| serde_json::from_value::<String>(v))
+            .unwrap_or_else(|_| "unknown".to_string());
+        channels.push(serde_json::json!({
+            "botId": snap.bot_id,
+            "platform": snap.platform_str,
+            "name": snap.name,
+            "agentName": snap.agent_name,
+            "status": status_str,
+        }));
+    }
+
+    Json(serde_json::json!({ "ok": true, "channels": channels }))
 }
 
 async fn wake_bot_handler(

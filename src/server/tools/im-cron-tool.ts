@@ -142,12 +142,13 @@ const scheduleSchema = z.discriminatedUnion('kind', [
 ]);
 
 async function imCronToolHandler(args: {
-  action: 'list' | 'add' | 'update' | 'remove' | 'run' | 'runs' | 'status' | 'wake';
+  action: 'list' | 'add' | 'update' | 'remove' | 'run' | 'runs' | 'status' | 'wake' | 'channels';
   job?: {
     name?: string;
     schedule: z.infer<typeof scheduleSchema>;
     message: string;
     sessionTarget?: 'new_session' | 'single_session';
+    deliverTo?: string;
   };
   taskId?: string;
   patch?: {
@@ -204,7 +205,7 @@ async function imCronToolHandler(args: {
           }
         }
 
-        // Build create payload — IM sessions include delivery info, regular sessions do not
+        // Build create payload
         const createPayload: Record<string, unknown> = {
           name: args.job.name,
           schedule: args.job.schedule,
@@ -217,15 +218,45 @@ async function imCronToolHandler(args: {
           intervalMinutes: args.job.schedule.kind === 'every' ? args.job.schedule.minutes : 30,
         };
 
-        // IM-specific fields: sourceBotId and delivery for result routing
+        // --- Delivery resolution (3-tier priority) ---
+        // Always set sourceBotId when in IM context, regardless of deliverTo target.
+        // This ensures IM-created tasks remain listable/updatable from the originating IM session.
         if (imCronContext) {
           createPayload.sourceBotId = imCronContext.botId;
+        }
+
+        let deliveryDesc = '';
+        if (args.job.deliverTo) {
+          // 1. Explicit: AI specified a target channel by botId
+          const channelsResp = await managementApi('/api/im/channels') as {
+            ok: boolean; channels: Array<{ botId: string; platform: string; name: string }>;
+          };
+          const target = channelsResp.channels?.find(ch => ch.botId === args.job!.deliverTo);
+          if (!target) {
+            const available = channelsResp.channels?.length
+              ? channelsResp.channels.map(ch => `${ch.name}(${ch.platform}): ${ch.botId}`).join(', ')
+              : 'none — set up a channel in Agent settings first';
+            return {
+              content: [{ type: 'text', text: `Error: Channel "${args.job.deliverTo}" not found. Available channels: ${available}. Use "channels" action to list all.` }],
+              isError: true,
+            };
+          }
+          createPayload.delivery = {
+            botId: target.botId,
+            chatId: '_auto_', // placeholder — deliver_cron_result_to_bot resolves via router, never reads this field
+            platform: target.platform,
+          };
+          deliveryDesc = ` Results will be delivered to ${target.name} (${target.platform}).`;
+        } else if (imCronContext) {
+          // 2. Auto: IM session → deliver back to source chat
           createPayload.delivery = {
             botId: imCronContext.botId,
             chatId: imCronContext.chatId,
             platform: imCronContext.platform,
           };
+          deliveryDesc = ` Results will be delivered to this chat.`;
         }
+        // 3. None: desktop session without deliverTo → no delivery (results stored locally)
 
         const result = await managementApi('/api/cron/create', 'POST', createPayload) as {
           ok: boolean; taskId?: string; nextExecutionAt?: string; error?: string;
@@ -240,7 +271,8 @@ async function imCronToolHandler(args: {
             schedule: args.job.schedule,
             scheduleDesc: scheduleDescription,
             nextExecutionAt: result.nextExecutionAt,
-            message: `Scheduled task created. ${scheduleDescription}`,
+            deliverTo: args.job.deliverTo || (imCronContext ? imCronContext.botId : null),
+            message: `Scheduled task created. ${scheduleDescription}${deliveryDesc}`,
           };
           return {
             content: [{ type: 'text', text: JSON.stringify(resultJson) }],
@@ -464,6 +496,27 @@ async function imCronToolHandler(args: {
           : { content: [{ type: 'text', text: `Wake failed: ${resp.error}` }], isError: true };
       }
 
+      case 'channels': {
+        const result = await managementApi('/api/im/channels') as {
+          ok: boolean;
+          channels: Array<{ botId: string; platform: string; name: string; agentName?: string; status: string }>;
+        };
+
+        if (!result.channels || result.channels.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'No IM channels configured. The user needs to set up an Agent channel (Telegram/Feishu/DingTalk) in Settings first.' }],
+          };
+        }
+
+        const lines = result.channels.map((ch, i) =>
+          `${i + 1}. [${ch.status}] ${ch.name} (${ch.platform}) — botId: ${ch.botId}${ch.agentName ? ` (Agent: ${ch.agentName})` : ''}`,
+        );
+
+        return {
+          content: [{ type: 'text', text: `Available delivery channels:\n\n${lines.join('\n')}` }],
+        };
+      }
+
       default:
         return {
           content: [{ type: 'text', text: `Unknown action: ${args.action}` }],
@@ -499,28 +552,31 @@ export function createImCronToolServer() {
       tool(
         'cron',
         `Create, list, update, remove, or manually trigger scheduled tasks.
+Supports delivering results to IM channels (Telegram, Feishu, DingTalk, etc.).
 
-Use this tool when the user wants to:
-- Set a reminder ("remind me in 30 minutes")
-- Create a recurring check ("check email every hour")
-- Schedule a one-time task ("at 3pm, send me the weather")
-- List/update/delete existing scheduled tasks
-- View execution history of a task ("runs")
-- Check overall task statistics ("status")
-- Manually trigger a heartbeat check ("wake")
+Actions:
+- "add": Create a scheduled task. Optionally deliver results to an IM channel via "deliverTo" (set to a botId).
+- "list": List all scheduled tasks in the current workspace
+- "update": Modify an existing task (name, message, schedule)
+- "remove": Delete a task
+- "run": Trigger a task immediately
+- "runs": View execution history of a task
+- "status": Check overall task statistics
+- "channels": List available IM channels for delivery (returns botId, platform, name, status)
+- "wake": Manually trigger a heartbeat check (IM Bot sessions only)
 
-**IMPORTANT — Time awareness check:**
-Before creating any scheduled task (especially "at" one-shot schedules), you MUST first run \`date\` via the Bash tool to confirm the current local time and timezone. Do NOT assume or infer the current time from conversation context — your perception of time may be inaccurate. Use the actual system clock output to calculate the correct ISO-8601 datetime.
+**Delivery to IM channels:**
+When the user wants task results sent to an IM channel (e.g. "run this daily and notify me on Feishu"):
+1. Call with action "channels" to get available botIds
+2. Call with action "add" and set job.deliverTo to the chosen botId
+If "deliverTo" is omitted: IM sessions auto-deliver to the current chat; desktop sessions store results locally (viewable via "runs").
 
-Schedules can be:
-- "at": One-shot at a specific ISO-8601 datetime (MUST be in the future — verify with system clock first)
-- "every": Recurring at fixed intervals (minimum 5 minutes)
-- "cron": Standard cron expression with optional timezone
+**Time awareness:** Before creating "at" (one-shot) schedules, run \`date\` to confirm the current local time.
 
-The task runs independently in a new AI session. In IM Bot sessions, results are delivered to the chat. In desktop sessions, results are stored and viewable via the "runs" action.
-Note: "wake" action is only available in IM Bot sessions.`,
+Schedules: "at" (one-shot ISO-8601), "every" (interval ≥5min), "cron" (cron expression + optional timezone).
+Each task runs independently in a new AI session.`,
         {
-          action: z.enum(['list', 'add', 'update', 'remove', 'run', 'runs', 'status', 'wake'])
+          action: z.enum(['list', 'add', 'update', 'remove', 'run', 'runs', 'status', 'wake', 'channels'])
             .describe('Action to perform'),
           job: z.object({
             name: z.string().optional().describe('Human-readable task name'),
@@ -528,6 +584,8 @@ Note: "wake" action is only available in IM Bot sessions.`,
             message: z.string().describe('The prompt/instruction for the AI to execute'),
             sessionTarget: z.enum(['new_session', 'single_session']).optional()
               .describe('Whether to create a new session each time (default) or reuse one'),
+            deliverTo: z.string().optional()
+              .describe('botId of the IM channel to deliver results to. Use "channels" action to find available botIds.'),
           }).optional().describe('Required for "add" action'),
           taskId: z.string().optional().describe('Task ID (required for update/remove/run/runs)'),
           patch: z.object({
