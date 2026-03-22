@@ -638,6 +638,61 @@ impl ImStreamAdapter for BridgeAdapter {
     }
 }
 
+// ===== QR Login proxy functions =====
+// These call the Bridge's /qr-login-start, /qr-login-wait, /restart-gateway
+// endpoints. Used by Tauri commands during the channel wizard.
+
+pub async fn qr_login_start(bridge_port: u16, account_id: Option<&str>) -> Result<serde_json::Value, String> {
+    let client = crate::local_http::json_client(std::time::Duration::from_secs(30));
+    let url = format!("http://127.0.0.1:{}/qr-login-start", bridge_port);
+    let mut body = serde_json::json!({});
+    if let Some(id) = account_id {
+        body["accountId"] = serde_json::json!(id);
+    }
+    let resp = client.post(&url).json(&body).send().await
+        .map_err(|e| format!("QR login start request failed: {}", e))?;
+    let status = resp.status();
+    let result: serde_json::Value = resp.json().await
+        .map_err(|e| format!("QR login start parse failed: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("QR login start failed ({}): {}", status, result));
+    }
+    Ok(result)
+}
+
+pub async fn qr_login_wait(bridge_port: u16, account_id: Option<&str>) -> Result<serde_json::Value, String> {
+    // Long timeout: WeChat polls up to 35s per attempt
+    let client = crate::local_http::json_client(std::time::Duration::from_secs(60));
+    let url = format!("http://127.0.0.1:{}/qr-login-wait", bridge_port);
+    let mut body = serde_json::json!({});
+    if let Some(id) = account_id {
+        body["accountId"] = serde_json::json!(id);
+    }
+    let resp = client.post(&url).json(&body).send().await
+        .map_err(|e| format!("QR login wait request failed: {}", e))?;
+    let status = resp.status();
+    let result: serde_json::Value = resp.json().await
+        .map_err(|e| format!("QR login wait parse failed: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("QR login wait failed ({}): {}", status, result));
+    }
+    Ok(result)
+}
+
+pub async fn restart_gateway(bridge_port: u16) -> Result<serde_json::Value, String> {
+    let client = crate::local_http::json_client(std::time::Duration::from_secs(15));
+    let url = format!("http://127.0.0.1:{}/restart-gateway", bridge_port);
+    let resp = client.post(&url).json(&serde_json::json!({})).send().await
+        .map_err(|e| format!("Restart gateway request failed: {}", e))?;
+    let status = resp.status();
+    let result: serde_json::Value = resp.json().await
+        .map_err(|e| format!("Restart gateway parse failed: {}", e))?;
+    if !status.is_success() {
+        return Err(format!("Restart gateway failed ({}): {}", status, result));
+    }
+    Ok(result)
+}
+
 // ===== Bridge Process Management =====
 
 /// Handle to a running bridge process
@@ -925,16 +980,59 @@ async fn ensure_package_json(base_dir: &std::path::Path, plugin_id: &str) -> Res
     Ok(())
 }
 
+/// Sanitize user input that may contain a full command like
+/// `npx -y @scope/pkg@latest install` into just `@scope/pkg@latest`.
+///
+/// Users often paste official install commands verbatim. This function strips
+/// known package-manager prefixes (npx, npm, bun, pnpm, yarn), flags (-y, --save, etc.),
+/// and trailing action tokens (install, add) to extract the bare npm spec.
+fn sanitize_npm_spec(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+
+    // Known package-manager commands, actions, and flag tokens — never a package name
+    let is_noise = |t: &str| -> bool {
+        let lower = t.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "npx" | "npm" | "bun" | "bunx" | "pnpm" | "yarn"
+                | "install" | "add" | "i" | "exec" | "run" | "x" | "dlx"
+        )
+    };
+
+    // First token that is not a flag (starts with '-') and not a noise word = package spec
+    for token in &tokens {
+        if token.starts_with('-') {
+            continue;
+        }
+        if is_noise(token) {
+            continue;
+        }
+        return token.to_string();
+    }
+
+    // All tokens were noise/flags — return empty to fail fast at validation
+    String::new()
+}
+
 /// Install an OpenClaw plugin from npm.
-/// Uses bundled Node.js (npm install) instead of Bun to avoid Bun's npm compatibility
-/// issues — especially on Windows where certain packages fail with Bun but work with npm.
+/// Priority: system npm → bundled npm → bun add.
+/// System npm is preferred (user-maintained, most reliable); bundled npm is fallback
+/// for users without Node.js; bun add is last resort.
 pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     npm_spec: &str,
 ) -> Result<serde_json::Value, String> {
-    // Validate npm_spec: must look like an npm package name (with optional scope/version).
-    // Reject file:, git:, http:, and path traversal attempts.
-    let trimmed = npm_spec.trim();
+    // Sanitize: users may paste full commands like `npx -y @scope/pkg@latest install`
+    let trimmed = sanitize_npm_spec(npm_spec);
+    let trimmed = trimmed.as_str();
+    // Reject non-registry specs: paths, protocols, GitHub shorthand (owner/repo)
+    // Scoped packages (@scope/name) are allowed — they start with '@'
+    let has_unscoped_slash = trimmed.contains('/') && !trimmed.starts_with('@');
     if trimmed.is_empty()
         || trimmed.contains("..")
         || trimmed.starts_with('/')
@@ -942,8 +1040,10 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         || trimmed.contains("file:")
         || trimmed.contains("git:")
         || trimmed.contains("git+")
+        || trimmed.contains("github:")
         || trimmed.contains("http:")
         || trimmed.contains("https:")
+        || has_unscoped_slash
     {
         return Err(format!("Invalid npm spec '{}': only npm package names are allowed", npm_spec));
     }
@@ -978,126 +1078,125 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         .await
         .map_err(|e| format!("Failed to create plugin dir: {}", e))?;
 
-    ulog_info!("[bridge] Installing plugin {} into {:?}", npm_spec, base_dir);
+    if trimmed != npm_spec.trim() {
+        ulog_info!("[bridge] Sanitized npm spec: '{}' → '{}'", npm_spec.trim(), trimmed);
+    }
+    ulog_info!("[bridge] Installing plugin {} into {:?}", trimmed, base_dir);
 
     // Write package.json upfront (shared by both npm and bun paths).
     ensure_package_json(&base_dir, &plugin_id).await?;
 
-    // --- Try npm (bundled Node.js) first, fallback to Bun if npm is broken ---
+    // --- Try system npm first (user-maintained, most reliable) ---
     let mut npm_succeeded = false;
 
-    if let Some((node_bin, npm_cli)) = find_bundled_node_npm(app_handle) {
-        // Diagnostic: log node + npm version for troubleshooting
-        let node_ver = crate::process_cmd::new(&node_bin)
-            .args(["--version"]).output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|e| format!("error: {}", e));
-        let npm_ver = crate::process_cmd::new(&node_bin)
-            .args([npm_cli.to_str().unwrap_or(""), "--version"]).output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_else(|e| format!("error: {}", e));
-        ulog_info!("[bridge] npm install: node={}, npm={}, cli={:?}", node_ver, npm_ver, npm_cli);
-
-        let npm_cli_str = npm_cli.to_str()
-            .ok_or_else(|| format!("npm-cli.js path contains invalid UTF-8: {:?}", npm_cli))?
-            .to_string();
-
-        // Prepend node binary's directory to PATH so postinstall scripts can find `node`.
-        let node_dir_for_path = node_bin.parent()
-            .map(|d| d.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let augmented_path = {
-            let system_path = std::env::var("PATH").unwrap_or_default();
-            #[cfg(target_os = "windows")]
-            { format!("{};{}", node_dir_for_path, system_path) }
-            #[cfg(not(target_os = "windows"))]
-            { format!("{}:{}", node_dir_for_path, system_path) }
-        };
-
-        let node_for_add = node_bin;
-        let cli_str_add = npm_cli_str;
-        let base_for_add = base_dir.clone();
-        let npm_spec_owned = npm_spec.to_string();
-        let path_for_add = augmented_path;
-        let add_result = tokio::task::spawn_blocking(move || {
-            let mut cmd = crate::process_cmd::new(&node_for_add);
+    if let Ok(system_npm) = which::which("npm") {
+        ulog_info!("[bridge] Using system npm: {:?}", system_npm);
+        let sys_npm = system_npm;
+        let base_for_sys = base_dir.clone();
+        let spec_for_sys = trimmed.to_string();
+        let sys_result = tokio::task::spawn_blocking(move || {
+            let mut cmd = crate::process_cmd::new(&sys_npm);
             // --omit=peer: openclaw 插件声明 peerDependencies: { openclaw: '*' }，
             // npm 会自动安装原始 openclaw 包的 400+ 传递依赖（larksuite、playwright-core、aws-sdk 等）。
-            // 我们的 shim 会在后续覆盖 openclaw，但已安装的垃圾依赖不会被清除。
             // --omit=peer 阻止这一行为，节省安装时间/体积/安全攻击面。
             //
-            // Node.js v24 unflagged require(esm) causes npm's dual CJS/ESM deps
-            // (minipass-sized 2.0) to crash on Windows: "Class extends value undefined".
-            // --no-experimental-require-module forces pure CJS resolution (set via NODE_OPTIONS below).
-            cmd.args([cli_str_add.as_str(), "install", npm_spec_owned.as_str(), "--omit=peer"])
-                .current_dir(&base_for_add)
-                .env("PATH", &path_for_add)
+            // --no-experimental-require-module fixes Node.js v24 CJS/ESM crash on Windows.
+            cmd.args(["install", spec_for_sys.as_str(), "--omit=peer"])
+                .current_dir(&base_for_sys)
                 .env("NODE_OPTIONS", "--no-experimental-require-module");
             apply_proxy_env(&mut cmd);
             cmd.output()
         }).await;
 
-        match add_result {
+        match sys_result {
             Ok(Ok(output)) if output.status.success() => {
-                ulog_info!("[bridge] npm install {} succeeded", npm_spec);
+                ulog_info!("[bridge] System npm install {} succeeded", npm_spec);
                 npm_succeeded = true;
             }
             Ok(Ok(output)) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                ulog_error!("[bridge] npm install {} failed (exit {}): {}", npm_spec, output.status, stderr.trim());
+                ulog_error!("[bridge] System npm install {} failed: {}", npm_spec, stderr.trim());
             }
             Ok(Err(e)) => {
-                ulog_error!("[bridge] npm install {} — process spawn failed: {}", npm_spec, e);
+                ulog_error!("[bridge] System npm spawn failed: {}", e);
             }
             Err(e) => {
-                ulog_error!("[bridge] npm install {} — spawn_blocking failed: {}", npm_spec, e);
+                ulog_error!("[bridge] System npm spawn_blocking failed: {}", e);
             }
         }
     } else {
-        ulog_warn!("[bridge] Bundled Node.js/npm not found, skipping npm install");
+        ulog_info!("[bridge] System npm not found in PATH, skipping");
     }
 
-    // --- System npm fallback: if bundled npm failed or unavailable ---
+    // --- Bundled npm fallback: if system npm failed or unavailable ---
     if !npm_succeeded {
-        // Try system-installed npm (user's own Node.js installation)
-        if let Ok(system_npm) = which::which("npm") {
-            ulog_warn!("[bridge] Trying system npm: {:?}", system_npm);
-            let sys_npm = system_npm;
-            let base_for_sys = base_dir.clone();
-            let spec_for_sys = npm_spec.to_string();
-            let sys_result = tokio::task::spawn_blocking(move || {
-                let mut cmd = crate::process_cmd::new(&sys_npm);
-                // Same safeguards as bundled npm: --omit=peer avoids 400+ openclaw transitive deps,
-                // --no-experimental-require-module fixes Node.js v24 CJS/ESM crash on Windows.
-                cmd.args(["install", spec_for_sys.as_str(), "--omit=peer"])
-                    .current_dir(&base_for_sys)
+        if let Some((node_bin, npm_cli)) = find_bundled_node_npm(app_handle) {
+            // Diagnostic: log node + npm version for troubleshooting
+            let node_ver = crate::process_cmd::new(&node_bin)
+                .args(["--version"]).output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|e| format!("error: {}", e));
+            let npm_ver = crate::process_cmd::new(&node_bin)
+                .args([npm_cli.to_str().unwrap_or(""), "--version"]).output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|e| format!("error: {}", e));
+            ulog_info!("[bridge] Bundled npm install: node={}, npm={}, cli={:?}", node_ver, npm_ver, npm_cli);
+
+            let npm_cli_str = npm_cli.to_str()
+                .ok_or_else(|| format!("npm-cli.js path contains invalid UTF-8: {:?}", npm_cli))?
+                .to_string();
+
+            // Prepend node binary's directory to PATH so postinstall scripts can find `node`.
+            let node_dir_for_path = node_bin.parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let augmented_path = {
+                let system_path = std::env::var("PATH").unwrap_or_default();
+                #[cfg(target_os = "windows")]
+                { format!("{};{}", node_dir_for_path, system_path) }
+                #[cfg(not(target_os = "windows"))]
+                { format!("{}:{}", node_dir_for_path, system_path) }
+            };
+
+            let node_for_add = node_bin;
+            let cli_str_add = npm_cli_str;
+            let base_for_add = base_dir.clone();
+            let npm_spec_owned = trimmed.to_string();
+            let path_for_add = augmented_path;
+            let add_result = tokio::task::spawn_blocking(move || {
+                let mut cmd = crate::process_cmd::new(&node_for_add);
+                // --omit=peer: same rationale as system npm above.
+                // --no-experimental-require-module: Node.js v24 CJS/ESM crash fix.
+                cmd.args([cli_str_add.as_str(), "install", npm_spec_owned.as_str(), "--omit=peer"])
+                    .current_dir(&base_for_add)
+                    .env("PATH", &path_for_add)
                     .env("NODE_OPTIONS", "--no-experimental-require-module");
                 apply_proxy_env(&mut cmd);
                 cmd.output()
             }).await;
 
-            match sys_result {
+            match add_result {
                 Ok(Ok(output)) if output.status.success() => {
-                    ulog_info!("[bridge] System npm install {} succeeded", npm_spec);
+                    ulog_info!("[bridge] Bundled npm install {} succeeded", npm_spec);
                     npm_succeeded = true;
                 }
                 Ok(Ok(output)) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    ulog_error!("[bridge] System npm install {} failed: {}", npm_spec, stderr.trim());
+                    ulog_error!("[bridge] Bundled npm install {} failed (exit {}): {}", npm_spec, output.status, stderr.trim());
                 }
                 Ok(Err(e)) => {
-                    ulog_error!("[bridge] System npm spawn failed: {}", e);
+                    ulog_error!("[bridge] Bundled npm install {} — process spawn failed: {}", npm_spec, e);
                 }
                 Err(e) => {
-                    ulog_error!("[bridge] System npm spawn_blocking failed: {}", e);
+                    ulog_error!("[bridge] Bundled npm install {} — spawn_blocking failed: {}", npm_spec, e);
                 }
             }
         } else {
-            ulog_info!("[bridge] System npm not found in PATH, skipping");
+            ulog_warn!("[bridge] Bundled Node.js/npm not found, skipping bundled npm install");
         }
     }
 
-    // --- Bun fallback: if both bundled and system npm failed ---
+    // --- Bun fallback: if both system and bundled npm failed ---
     if !npm_succeeded {
         use crate::sidecar::find_bun_executable_pub;
         // find_bun_executable_pub searches bundled bun first, then system bun (PATH, ~/.bun, etc.)
@@ -1108,7 +1207,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 
         let bun_for_add = bun_path;
         let base_for_add = base_dir.clone();
-        let npm_spec_owned = npm_spec.to_string();
+        let npm_spec_owned = trimmed.to_string();
         let add_output = tokio::task::spawn_blocking(move || {
             let mut cmd = crate::process_cmd::new(&bun_for_add);
             cmd.args(["add", npm_spec_owned.as_str()])
@@ -1132,7 +1231,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     install_sdk_shim(app_handle, &base_dir).await?;
 
     // Try to read plugin manifest
-    let manifest = read_plugin_manifest(&base_dir, npm_spec).await;
+    let manifest = read_plugin_manifest(&base_dir, trimmed).await;
 
     // Extract required config fields from plugin source (isConfigured pattern)
     // read_plugin_manifest already resolved the package name; reuse the same logic
@@ -1151,7 +1250,10 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         None
     };
 
-    ulog_info!("[bridge] Plugin {} installed successfully", plugin_id);
+    // Detect QR login support by scanning plugin source for loginWithQrStart
+    let supports_qr_login = detect_qr_login_support(&npm_pkg_dir).await;
+
+    ulog_info!("[bridge] Plugin {} installed successfully (qrLogin={})", plugin_id, supports_qr_login);
 
     Ok(json!({
         "pluginId": plugin_id,
@@ -1160,6 +1262,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         "manifest": manifest,
         "packageVersion": package_version,
         "requiredFields": required_fields,
+        "supportsQrLogin": supports_qr_login,
     }))
 }
 
@@ -1471,6 +1574,7 @@ pub async fn list_openclaw_plugins() -> Result<Vec<serde_json::Value>, String> {
         // Extract required config fields from channel source (isConfigured pattern)
         let pkg_dir = plugin_dir.join("node_modules").join(&npm_spec);
         let required_fields = extract_required_fields(&pkg_dir).await;
+        let supports_qr_login = detect_qr_login_support(&pkg_dir).await;
 
         plugins.push(json!({
             "pluginId": plugin_id,
@@ -1480,6 +1584,7 @@ pub async fn list_openclaw_plugins() -> Result<Vec<serde_json::Value>, String> {
             "packageVersion": pkg_info.get("version"),
             "homepage": pkg_info.get("homepage"),
             "requiredFields": required_fields,
+            "supportsQrLogin": supports_qr_login,
         }));
     }
 
@@ -1530,4 +1635,27 @@ async fn extract_required_fields(pkg_dir: &std::path::Path) -> Vec<String> {
     }
 
     vec![]
+}
+
+/// Detect whether a plugin supports QR code login by scanning its source
+/// for `loginWithQrStart` in the channel definition.
+async fn detect_qr_login_support(pkg_dir: &std::path::Path) -> bool {
+    let candidates = [
+        pkg_dir.join("src").join("channel.ts"),
+        pkg_dir.join("dist").join("channel.js"),
+        pkg_dir.join("channel.ts"),
+        pkg_dir.join("channel.js"),
+        pkg_dir.join("src").join("index.ts"),
+        pkg_dir.join("dist").join("index.js"),
+        pkg_dir.join("index.ts"),
+        pkg_dir.join("index.js"),
+    ];
+    for path in &candidates {
+        if let Ok(content) = tokio::fs::read_to_string(path).await {
+            if content.contains("loginWithQrStart") {
+                return true;
+            }
+        }
+    }
+    false
 }

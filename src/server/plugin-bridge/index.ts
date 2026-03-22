@@ -62,6 +62,8 @@ let getCapturedToolsFn: (() => CapturedTool[]) | null = null;
 let getCapturedCommandsFn: (() => import('./compat-api').CapturedCommand[]) | null = null;
 /** OpenClaw-format config (channels.{brand}.{...}), set during loadPlugin() */
 let loadedOpenclawConfig: Record<string, unknown> = {};
+/** Current resolved account — shared by sendText/sendMedia closures, updated by /restart-gateway */
+let currentAccount: Record<string, unknown> = {};
 
 async function loadPlugin() {
   // Find the plugin entry point FIRST — we need the module name to infer the channel brand
@@ -197,7 +199,7 @@ async function loadPlugin() {
 
   // Resolve account using the plugin's own config.resolveAccount if available
   const configAccessor = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
-  let account: Record<string, unknown>;
+  let account: Record<string, unknown> = currentAccount;
   if (typeof configAccessor?.resolveAccount === 'function') {
     try {
       account = (configAccessor.resolveAccount as (cfg: unknown, id?: string) => Record<string, unknown>)(openclawCfg);
@@ -208,6 +210,8 @@ async function loadPlugin() {
   } else {
     account = { accountId: 'default', enabled: true, ...pluginConfig };
   }
+
+  currentAccount = account; // Share with /restart-gateway and sendText/sendMedia closures
 
   // Log account with secrets redacted
   const redactedAccount = Object.fromEntries(
@@ -324,6 +328,7 @@ const server = Bun.serve({
       const commands = getCapturedCommandsFn
         ? getCapturedCommandsFn().map(c => ({ name: c.name, description: c.description }))
         : [];
+      const supportsQrLogin = typeof capturedPlugin?.gateway?.loginWithQrStart === 'function';
       return Response.json({
         pluginId: capturedPlugin?.id || 'unknown',
         textChunkLimit: outbound?.textChunkLimit ?? 4096,
@@ -341,6 +346,7 @@ const server = Bun.serve({
           hasTools,
           toolGroups,
           commands,
+          supportsQrLogin,
         },
       });
     }
@@ -682,6 +688,101 @@ const server = Bun.serve({
         });
         const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
         return Response.json({ ok: true, result: text });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    // ===== QR Login endpoints (generic OpenClaw gateway protocol) =====
+
+    if (path === '/qr-login-start' && req.method === 'POST') {
+      const loginWithQrStart = capturedPlugin?.gateway?.loginWithQrStart;
+      if (typeof loginWithQrStart !== 'function') {
+        return Response.json({ ok: false, error: 'Plugin does not support QR login' }, { status: 501 });
+      }
+      try {
+        const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+        const result = await (loginWithQrStart as (params: Record<string, unknown>) => Promise<Record<string, unknown>>)(body);
+        return Response.json({ ok: true, ...result });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    if (path === '/qr-login-wait' && req.method === 'POST') {
+      const loginWithQrWait = capturedPlugin?.gateway?.loginWithQrWait;
+      if (typeof loginWithQrWait !== 'function') {
+        return Response.json({ ok: false, error: 'Plugin does not support QR login' }, { status: 501 });
+      }
+      try {
+        const body = await req.json().catch(() => ({})) as Record<string, unknown>;
+        // loginWithQrWait may long-poll (up to 35s for WeChat), so no timeout here
+        const result = await (loginWithQrWait as (params: Record<string, unknown>) => Promise<Record<string, unknown>>)(body);
+        return Response.json({ ok: true, ...result });
+      } catch (err) {
+        return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+      }
+    }
+
+    if (path === '/restart-gateway' && req.method === 'POST') {
+      // After QR login success, restart the gateway with fresh credentials
+      if (!capturedPlugin) {
+        return Response.json({ ok: false, error: 'No plugin loaded' }, { status: 500 });
+      }
+      try {
+        // 1. Stop current gateway gracefully (abort + explicit stopAccount)
+        const abortCtrl = (globalThis as Record<string, unknown>).__bridgeAbort as AbortController | undefined;
+        if (abortCtrl) abortCtrl.abort();
+        const stopAccount = capturedPlugin.gateway?.stopAccount;
+        if (typeof stopAccount === 'function') {
+          try { await (stopAccount as () => Promise<void>)(); } catch { /* best-effort */ }
+        }
+
+        // 2. Re-resolve account with fresh credentials
+        const resolveAccount = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
+        let account: Record<string, unknown> = pluginConfig;
+        if (typeof resolveAccount?.resolveAccount === 'function') {
+          try {
+            account = await (resolveAccount.resolveAccount as (cfg: unknown) => Promise<Record<string, unknown>>)(loadedOpenclawConfig) || pluginConfig;
+          } catch { /* use fallback */ }
+        }
+
+        // 3. Check if now configured
+        const isConfigured = resolveAccount;
+        if (typeof isConfigured?.isConfigured === 'function') {
+          const configured = (isConfigured.isConfigured as (a: unknown) => boolean)(account);
+          if (!configured) {
+            return Response.json({ ok: false, error: 'Account still not configured after QR login' }, { status: 400 });
+          }
+        }
+
+        // 4. Update shared account (sendText/sendMedia closures use currentAccount)
+        currentAccount = account;
+
+        // 5. Start gateway with new account
+        const startAccount = capturedPlugin.gateway?.startAccount;
+        if (typeof startAccount === 'function') {
+          const newAbort = new AbortController();
+          let status: Record<string, unknown> = { running: false, connected: false };
+          const ctx = {
+            account,
+            abortSignal: newAbort.signal,
+            log: console,
+            cfg: loadedOpenclawConfig,
+            getStatus: () => status,
+            setStatus: (s: Record<string, unknown>) => { status = s; },
+          };
+          gatewayError = null;
+          gatewayStarted = true;
+          (startAccount as (ctx: Record<string, unknown>) => Promise<void>)(ctx)
+            .then(() => console.log('[plugin-bridge] Gateway restarted after QR login'))
+            .catch((err: unknown) => {
+              gatewayError = err instanceof Error ? err.message : String(err);
+              console.error('[plugin-bridge] Gateway restart error:', gatewayError);
+            });
+          (globalThis as Record<string, unknown>).__bridgeAbort = newAbort;
+        }
+        return Response.json({ ok: true });
       } catch (err) {
         return Response.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
       }

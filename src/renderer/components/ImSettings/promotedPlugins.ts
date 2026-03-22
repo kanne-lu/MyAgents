@@ -13,6 +13,7 @@ import feishuStep1Img from './assets/feishu_step1.png';
 import feishuStep2EventsImg from './assets/feishu_step2_events.png';
 import feishuStep2PermissionsImg from './assets/feishu_step2_permissions.png';
 import feishuStep2AddBotImg from './assets/feishu_step2_5_add_bot.png';
+import weixinIcon from './assets/weixin.svg';
 
 export interface PromotedPlugin {
     /** Plugin ID — must match InstalledPlugin.pluginId after installation */
@@ -33,6 +34,13 @@ export interface PromotedPlugin {
     requiredFields?: string[];
     /** Default config values merged into pluginConfig when creating a new channel */
     defaultConfig?: Record<string, string>;
+    /**
+     * Authentication type:
+     * - 'config' (default): user fills config fields (appId, appSecret, etc.)
+     * - 'qrLogin': user scans QR code to login (e.g. WeChat)
+     * Auto-detected for custom plugins via Bridge /capabilities supportsQrLogin.
+     */
+    authType?: 'config' | 'qrLogin';
     /** Custom setup guidance for the wizard config step */
     setupGuide?: {
         /** Section title in config panel (e.g. "QQ Bot 应用凭证") */
@@ -126,6 +134,16 @@ export const PROMOTED_PLUGINS: PromotedPlugin[] = [
                 },
             ],
         },
+    },
+    {
+        pluginId: 'openclaw-weixin',
+        npmSpec: '@tencent-weixin/openclaw-weixin',
+        name: '微信',
+        description: '通过微信聊天使用 AI Agent，扫码即可连接',
+        icon: weixinIcon,
+        platformColor: '#07C160',
+        badge: 'official',
+        authType: 'qrLogin',
     },
 ];
 

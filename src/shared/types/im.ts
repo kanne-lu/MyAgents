@@ -128,6 +128,8 @@ export interface InstalledPlugin {
   homepage?: string;
   /** Required config field names extracted from the plugin's isConfigured check */
   requiredFields?: string[];
+  /** Whether the plugin supports QR code login (detected from gateway.loginWithQrStart) */
+  supportsQrLogin?: boolean;
 }
 
 /**

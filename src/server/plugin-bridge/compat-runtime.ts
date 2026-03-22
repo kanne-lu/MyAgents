@@ -428,10 +428,42 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
             return null;
           }
         },
-        async saveMediaBuffer(buffer: Buffer | Uint8Array, opts?: { ext?: string }) {
-          const dir = join(tmpdir(), 'myagents-media');
+        /**
+         * Save a media buffer to a temp file.
+         * OpenClaw signature: saveMediaBuffer(buffer, contentType, subdir, maxBytes, originalFilename)
+         * - contentType: MIME type string (e.g. "image/jpeg")
+         * - subdir: subdirectory name (e.g. "images")
+         * - maxBytes: size limit (ignored in Bridge mode)
+         * - originalFilename: original filename for extension inference
+         */
+        async saveMediaBuffer(
+          buffer: Buffer | Uint8Array,
+          contentType?: string,
+          subdir?: string,
+          _maxBytes?: number,
+          originalFilename?: string,
+        ) {
+          // Sanitize subdir to prevent path traversal (strip '..', '/', '\')
+          const safeSubdir = (subdir || '').replace(/\.\./g, '').replace(/[/\\]/g, '');
+          const dir = join(tmpdir(), 'myagents-media', safeSubdir);
           await mkdir(dir, { recursive: true });
-          const filename = `media-${Date.now()}${opts?.ext || ''}`;
+          // Infer extension from originalFilename, then contentType
+          let ext = '';
+          if (originalFilename) {
+            const dotIdx = originalFilename.lastIndexOf('.');
+            // Sanitize: only allow alphanumeric + dot in extension (prevent path traversal)
+            if (dotIdx >= 0) ext = originalFilename.slice(dotIdx).replace(/[^a-zA-Z0-9.]/g, '');
+          }
+          if (!ext && contentType) {
+            const mimeToExt: Record<string, string> = {
+              'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif',
+              'image/webp': '.webp', 'video/mp4': '.mp4', 'audio/wav': '.wav',
+              'audio/mpeg': '.mp3', 'audio/ogg': '.ogg', 'audio/silk': '.silk',
+              'application/pdf': '.pdf',
+            };
+            ext = mimeToExt[contentType] || '';
+          }
+          const filename = `media-${Date.now()}${ext}`;
           const filepath = join(dir, filename);
           await writeFile(filepath, buffer);
           return filepath;

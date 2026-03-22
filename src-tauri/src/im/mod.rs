@@ -4959,6 +4959,62 @@ pub async fn cmd_uninstall_openclaw_plugin(pluginId: String) -> Result<(), Strin
     bridge::uninstall_openclaw_plugin(&pluginId).await
 }
 
+/// Helper: get bridge port from agent channel.
+/// Both the outer (ManagedAgents) and inner (BridgeProcess) locks are held briefly
+/// to extract the port value, then released before the actual HTTP call.
+async fn get_bridge_port(agent_state: &ManagedAgents, agent_id: &str, channel_id: &str) -> Result<u16, String> {
+    let agents_guard = agent_state.lock().await;
+    let agent = agents_guard.get(agent_id)
+        .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
+    let ch = agent.channels.get(channel_id)
+        .ok_or_else(|| format!("Channel '{}' not found on agent '{}'", channel_id, agent_id))?;
+    let bp_mutex = ch.bot_instance.bridge_process.as_ref()
+        .ok_or_else(|| "Channel has no Bridge process (not an OpenClaw plugin)".to_string())?;
+    let port = bp_mutex.lock().await.port;
+    drop(agents_guard);
+    Ok(port)
+}
+
+/// QR login: start QR code generation via Bridge.
+/// The channel must already be started (Bridge process running).
+/// Returns { ok, qrDataUrl?, message, sessionKey? }.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_plugin_qr_login_start(
+    agentState: tauri::State<'_, ManagedAgents>,
+    agentId: String,
+    channelId: String,
+) -> Result<serde_json::Value, String> {
+    let port = get_bridge_port(&agentState, &agentId, &channelId).await?;
+    bridge::qr_login_start(port, None).await
+}
+
+/// QR login: wait for user to scan QR code via Bridge.
+/// Long-polls (up to 60s). Returns { ok, connected, message }.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_plugin_qr_login_wait(
+    agentState: tauri::State<'_, ManagedAgents>,
+    agentId: String,
+    channelId: String,
+) -> Result<serde_json::Value, String> {
+    let port = get_bridge_port(&agentState, &agentId, &channelId).await?;
+    bridge::qr_login_wait(port, None).await
+}
+
+/// Restart the gateway after QR login success.
+/// Re-resolves credentials and starts the plugin's message listener.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_plugin_restart_gateway(
+    agentState: tauri::State<'_, ManagedAgents>,
+    agentId: String,
+    channelId: String,
+) -> Result<serde_json::Value, String> {
+    let port = get_bridge_port(&agentState, &agentId, &channelId).await?;
+    bridge::restart_gateway(port).await
+}
+
 /// Restart all running channels that use the given OpenClaw plugin.
 /// Called after a plugin update to reload the new plugin code.
 /// Returns `{ restarted, failed }` so the frontend can show appropriate feedback.
