@@ -429,6 +429,7 @@ export default function ChannelDetailView({
     const [qrMessage, setQrMessage] = useState('');
     const [qrStatus, setQrStatus] = useState<'idle' | 'loading' | 'waiting' | 'connected' | 'error'>('idle');
     const qrAbortRef = useRef(false);
+    const qrSessionKeyRef = useRef<string | undefined>(undefined);
 
     const startDetailQrLogin = useCallback(async () => {
         if (!isTauriEnvironment() || !isRunning) return;
@@ -437,21 +438,22 @@ export default function ChannelDetailView({
         setQrMessage('正在获取二维码...');
         try {
             const { invoke } = await import('@tauri-apps/api/core');
-            const startResult = await invoke<{ ok: boolean; qrDataUrl?: string; message?: string }>(
+            const startResult = await invoke<{ ok: boolean; qrDataUrl?: string; message?: string; sessionKey?: string }>(
                 'cmd_plugin_qr_login_start', { agentId: agent.id, channelId: channel.id }
             );
             if (!startResult.ok || !startResult.qrDataUrl) {
                 throw new Error(startResult.message || '获取二维码失败');
             }
             if (!isMountedRef.current) return;
+            qrSessionKeyRef.current = startResult.sessionKey;
             setQrDataUrl(startResult.qrDataUrl);
             setQrStatus('waiting');
             setQrMessage(`请使用${promoted?.name || channel.name || '对应 App'}扫描二维码`);
-            // Poll for scan completion
+            // Poll for scan completion (pass sessionKey — WeChat requires it)
             while (!qrAbortRef.current && isMountedRef.current) {
                 try {
                     const waitResult = await invoke<{ ok: boolean; connected?: boolean; message?: string }>(
-                        'cmd_plugin_qr_login_wait', { agentId: agent.id, channelId: channel.id }
+                        'cmd_plugin_qr_login_wait', { agentId: agent.id, channelId: channel.id, sessionKey: qrSessionKeyRef.current }
                     );
                     if (!isMountedRef.current || qrAbortRef.current) return;
                     if (waitResult.connected) {
@@ -472,8 +474,8 @@ export default function ChannelDetailView({
                     }
                     // Refresh QR on timeout/expired
                     try {
-                        const r = await invoke<{ ok: boolean; qrDataUrl?: string }>('cmd_plugin_qr_login_start', { agentId: agent.id, channelId: channel.id });
-                        if (r.ok && r.qrDataUrl) { setQrDataUrl(r.qrDataUrl); setQrMessage('二维码已刷新，请重新扫描'); }
+                        const r = await invoke<{ ok: boolean; qrDataUrl?: string; sessionKey?: string }>('cmd_plugin_qr_login_start', { agentId: agent.id, channelId: channel.id });
+                        if (r.ok && r.qrDataUrl) { qrSessionKeyRef.current = r.sessionKey; setQrDataUrl(r.qrDataUrl); setQrMessage('二维码已刷新，请重新扫描'); }
                     } catch { setQrStatus('error'); setQrMessage('二维码获取失败'); return; }
                 }
             }

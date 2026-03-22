@@ -199,6 +199,7 @@ export default function ChannelWizard({
     const [qrMessage, setQrMessage] = useState<string>('');
     const [qrStatus, setQrStatus] = useState<'idle' | 'loading' | 'waiting' | 'scanned' | 'connected' | 'error'>('idle');
     const qrAbortRef = useRef(false);
+    const qrSessionKeyRef = useRef<string | undefined>(undefined);
 
     // Derived: QR login detection (from preset or installed plugin's detected capability)
     const isQrLogin = isQrLoginFromPreset || (!promoted && installedPlugin?.supportsQrLogin === true);
@@ -433,15 +434,16 @@ export default function ChannelWizard({
             }
 
             if (!isMountedRef.current || qrAbortRef.current) return;
+            qrSessionKeyRef.current = startResult.sessionKey;
             setQrDataUrl(startResult.qrDataUrl);
             setQrStatus('waiting');
             setQrMessage(`请使用${openclawPluginName}扫描二维码`);
 
-            // 4. Poll for QR scan completion
+            // 4. Poll for QR scan completion (pass sessionKey — WeChat requires it)
             while (!qrAbortRef.current && isMountedRef.current) {
                 try {
                     const waitResult = await invoke<{ ok: boolean; connected?: boolean; message?: string }>(
-                        'cmd_plugin_qr_login_wait', { agentId: agent.id, channelId }
+                        'cmd_plugin_qr_login_wait', { agentId: agent.id, channelId, sessionKey: qrSessionKeyRef.current }
                     );
 
                     if (!isMountedRef.current || qrAbortRef.current) return;
@@ -475,10 +477,11 @@ export default function ChannelWizard({
                     }
                     // Transient: try to refresh QR code
                     try {
-                        const refreshResult = await invoke<{ ok: boolean; qrDataUrl?: string; message?: string }>(
+                        const refreshResult = await invoke<{ ok: boolean; qrDataUrl?: string; message?: string; sessionKey?: string }>(
                             'cmd_plugin_qr_login_start', { agentId: agent.id, channelId }
                         );
                         if (refreshResult.ok && refreshResult.qrDataUrl) {
+                            qrSessionKeyRef.current = refreshResult.sessionKey;
                             setQrDataUrl(refreshResult.qrDataUrl);
                             setQrMessage('二维码已刷新，请重新扫描');
                         }

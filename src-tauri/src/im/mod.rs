@@ -4991,15 +4991,18 @@ pub async fn cmd_plugin_qr_login_start(
 
 /// QR login: wait for user to scan QR code via Bridge.
 /// Long-polls (up to 60s). Returns { ok, connected, message }.
+/// `sessionKey` is returned by `cmd_plugin_qr_login_start` and MUST be forwarded here
+/// (WeChat plugin uses it to track the active login session).
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_plugin_qr_login_wait(
     agentState: tauri::State<'_, ManagedAgents>,
     agentId: String,
     channelId: String,
+    sessionKey: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let port = get_bridge_port(&agentState, &agentId, &channelId).await?;
-    bridge::qr_login_wait(port, None).await
+    bridge::qr_login_wait(port, None, sessionKey.as_deref()).await
 }
 
 /// Restart the gateway after QR login success.
