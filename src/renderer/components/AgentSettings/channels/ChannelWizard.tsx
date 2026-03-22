@@ -440,6 +440,10 @@ export default function ChannelWizard({
             setQrMessage(`请使用${openclawPluginName}扫描二维码`);
 
             // 4. Poll for QR scan completion (pass sessionKey — WeChat requires it)
+            // Auto-retry with QR refresh on timeout/error, up to MAX_QR_RETRIES
+            const MAX_QR_RETRIES = 10;
+            let qrRetryCount = 0;
+
             while (!qrAbortRef.current && isMountedRef.current) {
                 try {
                     const waitResult = await invoke<{ ok: boolean; connected?: boolean; message?: string; accountId?: string }>(
@@ -451,7 +455,6 @@ export default function ChannelWizard({
                     if (waitResult.connected) {
                         setQrStatus('connected');
                         setQrMessage('登录成功！正在启动...');
-                        // 5. Restart gateway with fresh credentials (pass accountId for resolveAccount)
                         await invoke('cmd_plugin_restart_gateway', {
                             agentId: agent.id, channelId,
                             accountId: waitResult.accountId,
@@ -459,28 +462,33 @@ export default function ChannelWizard({
                         if (isMountedRef.current) {
                             track('agent_channel_create', { platform });
                             toastRef.current.success('扫码登录成功');
-                            setStep(2); // Advance to binding step
+                            setStep(2);
                         }
                         return;
                     }
 
-                    // Update message and add a small delay to prevent rapid spinning
-                    // (plugin returns connected:false immediately for terminal errors)
+                    // connected:false — could be timeout or terminal. Add delay to prevent spinning.
                     if (waitResult.message) setQrMessage(waitResult.message);
                     await new Promise(r => setTimeout(r, 1000));
 
                 } catch (err) {
                     if (!isMountedRef.current || qrAbortRef.current) return;
+
+                    // Most errors are transient: Rust proxy timeout, connection reset, QR expired.
+                    // Only truly terminal: plugin 501 (not supported), Bridge crashed (ECONNREFUSED).
                     const errMsg = err instanceof Error ? err.message : String(err);
-                    // Distinguish transient (timeout/expired) from terminal errors
-                    const isTransient = /timeout|expired|ETIMEDOUT|ECONNRESET/i.test(errMsg);
-                    if (!isTransient) {
-                        // Terminal error — stop retrying
+                    const isTerminal = /ECONNREFUSED|not support|501/i.test(errMsg);
+
+                    if (isTerminal || qrRetryCount >= MAX_QR_RETRIES) {
                         setQrStatus('error');
-                        setQrMessage(`登录失败: ${errMsg}`);
+                        setQrMessage(qrRetryCount >= MAX_QR_RETRIES
+                            ? `超过最大重试次数 (${MAX_QR_RETRIES})，请手动重试`
+                            : `登录失败: ${errMsg}`);
                         return;
                     }
-                    // Transient: try to refresh QR code
+
+                    // Auto-retry: refresh QR code and continue polling
+                    qrRetryCount++;
                     try {
                         const refreshResult = await invoke<{ ok: boolean; qrDataUrl?: string; message?: string; sessionKey?: string }>(
                             'cmd_plugin_qr_login_start', { agentId: agent.id, channelId }
@@ -488,13 +496,11 @@ export default function ChannelWizard({
                         if (refreshResult.ok && refreshResult.qrDataUrl) {
                             qrSessionKeyRef.current = refreshResult.sessionKey;
                             setQrDataUrl(refreshResult.qrDataUrl);
-                            setQrMessage('二维码已刷新，请重新扫描');
+                            setQrMessage(`二维码已刷新 (${qrRetryCount}/${MAX_QR_RETRIES})，请扫描`);
                         }
                     } catch {
-                        if (isMountedRef.current) {
-                            setQrStatus('error');
-                            setQrMessage(`二维码获取失败: ${errMsg}`);
-                        }
+                        setQrStatus('error');
+                        setQrMessage('二维码获取失败，请手动重试');
                         return;
                     }
                 }

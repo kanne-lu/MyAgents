@@ -450,6 +450,8 @@ export default function ChannelDetailView({
             setQrStatus('waiting');
             setQrMessage(`请使用${promoted?.name || channel.name || '对应 App'}扫描二维码`);
             // Poll for scan completion (pass sessionKey — WeChat requires it)
+            const MAX_QR_RETRIES = 10;
+            let qrRetryCount = 0;
             while (!qrAbortRef.current && isMountedRef.current) {
                 try {
                     const waitResult = await invoke<{ ok: boolean; connected?: boolean; message?: string; accountId?: string }>(
@@ -464,20 +466,23 @@ export default function ChannelDetailView({
                         return;
                     }
                     if (waitResult.message) setQrMessage(waitResult.message);
-                    await new Promise(r => setTimeout(r, 1000)); // Prevent rapid spinning on terminal errors
+                    await new Promise(r => setTimeout(r, 1000));
                 } catch (err) {
                     if (!isMountedRef.current || qrAbortRef.current) return;
                     const errMsg = err instanceof Error ? err.message : String(err);
-                    if (!/timeout|expired|ETIMEDOUT/i.test(errMsg)) {
+                    const isTerminal = /ECONNREFUSED|not support|501/i.test(errMsg);
+                    if (isTerminal || qrRetryCount >= MAX_QR_RETRIES) {
                         setQrStatus('error');
-                        setQrMessage(`登录失败: ${errMsg}`);
+                        setQrMessage(qrRetryCount >= MAX_QR_RETRIES
+                            ? `超过最大重试次数 (${MAX_QR_RETRIES})，请手动重试`
+                            : `登录失败: ${errMsg}`);
                         return;
                     }
-                    // Refresh QR on timeout/expired
+                    qrRetryCount++;
                     try {
                         const r = await invoke<{ ok: boolean; qrDataUrl?: string; sessionKey?: string }>('cmd_plugin_qr_login_start', { agentId: agent.id, channelId: channel.id });
-                        if (r.ok && r.qrDataUrl) { qrSessionKeyRef.current = r.sessionKey; setQrDataUrl(r.qrDataUrl); setQrMessage('二维码已刷新，请重新扫描'); }
-                    } catch { setQrStatus('error'); setQrMessage('二维码获取失败'); return; }
+                        if (r.ok && r.qrDataUrl) { qrSessionKeyRef.current = r.sessionKey; setQrDataUrl(r.qrDataUrl); setQrMessage(`二维码已刷新 (${qrRetryCount}/${MAX_QR_RETRIES})，请扫描`); }
+                    } catch { setQrStatus('error'); setQrMessage('二维码获取失败，请手动重试'); return; }
                 }
             }
         } catch (err) {
