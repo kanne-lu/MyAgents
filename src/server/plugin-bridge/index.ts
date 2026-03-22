@@ -51,6 +51,7 @@ let capturedPlugin: CapturedPlugin | null = null;
 let pluginName = 'unknown';
 let gatewayError: string | null = null;
 let gatewayStarted = false; // true once startAccount() has been invoked
+let waitingForQrLogin = false; // true when plugin supports QR login but isn't configured yet
 
 // Streaming sessions (keyed by streamId)
 const streamingSessions = new Map<string, FeishuStreamingSession>();
@@ -254,14 +255,23 @@ async function loadPlugin() {
 
   // Validate credentials before starting gateway
   // Check if the plugin's isConfigured function reports the account as configured
-  const isConfigured = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
-  if (typeof isConfigured?.isConfigured === 'function') {
-    const configured = (isConfigured.isConfigured as (a: unknown) => boolean)(account);
+  const configAccessorForCheck = capturedPlugin.raw?.config as Record<string, unknown> | undefined;
+  const supportsQrLogin = typeof capturedPlugin.gateway?.loginWithQrStart === 'function';
+  if (typeof configAccessorForCheck?.isConfigured === 'function') {
+    const configured = (configAccessorForCheck.isConfigured as (a: unknown) => boolean)(account);
     if (!configured) {
-      const errMsg = 'Plugin reports account is not configured (missing required credentials)';
-      console.error(`[plugin-bridge] ${errMsg}`);
-      gatewayError = errMsg;
-      return; // Don't start gateway — credentials are missing
+      if (supportsQrLogin) {
+        // QR login plugins: isConfigured=false is expected (user hasn't scanned yet).
+        // Keep Bridge alive and healthy — QR login endpoints will handle authentication.
+        waitingForQrLogin = true;
+        console.log('[plugin-bridge] Account not configured, but plugin supports QR login — waiting for /qr-login-start');
+        return; // Skip gateway start — /restart-gateway will start it after QR login
+      } else {
+        const errMsg = 'Plugin reports account is not configured (missing required credentials)';
+        console.error(`[plugin-bridge] ${errMsg}`);
+        gatewayError = errMsg;
+        return; // Don't start gateway — credentials are missing
+      }
     }
   }
 
@@ -314,8 +324,10 @@ const server = Bun.serve({
         ok: !gatewayError,
         pluginName,
         pluginId: capturedPlugin?.id || 'unknown',
-        ready: !!capturedPlugin && !gatewayError && gatewayStarted,
+        // Ready when: gateway running OR waiting for QR login (plugin loaded, endpoints available)
+        ready: !!capturedPlugin && !gatewayError && (gatewayStarted || waitingForQrLogin),
         error: gatewayError || undefined,
+        waitingForQrLogin,
       });
     }
 
@@ -758,6 +770,7 @@ const server = Bun.serve({
 
         // 4. Update shared account (sendText/sendMedia closures use currentAccount)
         currentAccount = account;
+        waitingForQrLogin = false; // QR login complete, transitioning to running state
 
         // 5. Start gateway with new account
         const startAccount = capturedPlugin.gateway?.startAccount;
