@@ -499,12 +499,16 @@ export default function ChannelWizard({
         }
     }, [buildChannelConfig, agent, channelId, platform, refreshConfig]);
 
-    // Auto-start QR login when entering step 1 for QR plugins
+    // Auto-start QR login when entering step 1 for QR plugins.
+    // Use a ref to avoid re-triggering: qrStatus changes (loading/waiting/etc.)
+    // would cause cleanup → abort → stuck. Only abort on unmount or step change.
+    const qrStartedRef = useRef(false);
     useEffect(() => {
-        if (!isQrLogin || step !== 1 || qrStatus !== 'idle') return;
+        if (!isQrLogin || step !== 1 || qrStartedRef.current) return;
+        qrStartedRef.current = true;
         startQrLogin();
         return () => { qrAbortRef.current = true; };
-    }, [isQrLogin, step, qrStatus, startQrLogin]);
+    }, [isQrLogin, step, startQrLogin]);
 
     // Handle "Next" for all steps
     const handleNext = useCallback(async () => {
@@ -1334,7 +1338,7 @@ export default function ChannelWizard({
                 <div className="space-y-6">
                     {/* Action bar at top */}
                     {renderActionBar({
-                        onBack: () => setStep((isFeishu || isDingtalk || isOpenClaw) ? 2 : 1),
+                        onBack: isQrLogin ? undefined : () => setStep((isFeishu || isDingtalk || isOpenClaw) ? 2 : 1),
                         onNext: handleComplete,
                         nextLabel: '完成',
                         nextIcon: <Check className="h-4 w-4" />,
