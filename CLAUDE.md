@@ -143,6 +143,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 | 裸 `std::process::Command::new()` | Windows 弹出黑色控制台窗口 | `crate::process_cmd::new()` |
 | 前端 `@tauri-apps/plugin-fs` 读写工作区文件 | Tauri fs scope 仅覆盖 `~/.myagents/**`，工作区路径写入必失败 | `invoke('cmd_read_workspace_file')` / `invoke('cmd_write_workspace_file')` 走 Rust 原生 I/O |
 | 对接外部 SDK/插件时凭假设写适配代码 | 函数签名、config 格式、返回值结构全部猜错 | MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层 |
+| 修改 `bundled-agents/myagents_helper/` 后不 bump 版本 | 用户端小助理不会更新，改动形同虚设 | 修改 Helper 的 CLAUDE.md / Skills / bin 后，MUST bump `ADMIN_AGENT_VERSION`（`src-tauri/src/commands.rs`），否则 `cmd_sync_admin_agent` 版本门控不会触发同步 |
 
 ---
 
