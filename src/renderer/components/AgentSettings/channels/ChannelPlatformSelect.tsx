@@ -181,11 +181,12 @@ export default function ChannelPlatformSelect({ onSelect }: ChannelPlatformSelec
               disabled={isInstalling || loading}
               className="flex w-full flex-col items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-6 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:translate-y-[-1px] disabled:opacity-70"
             >
-              {isInstalling ? (
-                <Loader2 className="h-12 w-12 animate-spin text-[var(--ink-muted)]" />
-              ) : (
-                <img src={pp.icon} alt={pp.name} className="h-12 w-12 rounded-xl" />
-              )}
+              <div className="relative">
+                <img src={pp.icon} alt={pp.name} className={`h-12 w-12 rounded-xl${isInstalling ? ' opacity-40' : ''}`} />
+                {isInstalling && (
+                  <Loader2 className="absolute inset-0 m-auto h-6 w-6 animate-spin text-[var(--ink-muted)]" />
+                )}
+              </div>
               <div className="text-center">
                 <p className="text-sm font-medium text-[var(--ink)]">{pp.name}</p>
                 <p className="mt-1 text-xs text-[var(--ink-muted)]">{pp.description}</p>
