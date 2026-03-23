@@ -89,6 +89,7 @@ npm run typecheck && npm run lint  # 代码质量检查
 - MCP/Agents 同步触发 `schedulePreWarm()`（500ms 防抖），Model 同步不触发
 - 持久 Session 中 pre-warm 就是最终 session，用户消息通过 `wakeGenerator()` 注入。任何 `!preWarm` 条件守卫都可能导致逻辑在持久模式下永远不执行
 - 新增配置同步端点时，确保 `currentXxx` 变量在 pre-warm 前已设置
+- **MCP 配置权威来源分离**：Tab 会话的 MCP 由前端 `/api/mcp/set` 配置（`initializeAgent` 中 MUST NOT self-resolve MCP），IM/Cron 会话的 MCP 由 self-resolve 从磁盘读取。混用会导致 fingerprint 差异 → abort → 30s 重启循环
 
 ### 定时任务系统
 
