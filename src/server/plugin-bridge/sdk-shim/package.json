@@ -3,9 +3,6 @@
   "version": "0.0.1-shim",
   "exports": {
     "./plugin-sdk": "./plugin-sdk/index.js",
-    "./plugin-sdk/feishu": "./plugin-sdk/feishu.js",
-    "./plugin-sdk/compat": "./plugin-sdk/compat.js",
-    "./plugin-sdk/account-id": "./plugin-sdk/account-id.js",
-    "./plugin-sdk/channel-status": "./plugin-sdk/channel-status.js"
+    "./plugin-sdk/*": "./plugin-sdk/*.js"
   }
 }
