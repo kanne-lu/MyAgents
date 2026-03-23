@@ -1094,19 +1094,20 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         }
     };
 
-    // OAuth: probe MCP server for OAuth requirements
-    const handleMcpOAuthProbe = async (serverId: string, mcpUrl: string) => {
-        if (!mcpUrl) return;
+    // OAuth: probe MCP server for OAuth requirements (returns probe result for chaining)
+    const handleMcpOAuthProbe = async (serverId: string, mcpUrl: string): Promise<{ supportsDynamicRegistration?: boolean } | null> => {
+        if (!mcpUrl) return null;
         try {
             const result = await apiPostJson<{ success: boolean; required?: boolean; supportsDynamicRegistration?: boolean; scopes?: string[] }>('/api/mcp/oauth/discover', {
                 serverId, mcpUrl,
             });
             if (result.success && result.required) {
                 setMcpOAuthProbe(prev => ({ ...prev, [serverId]: { required: true, supportsDynamicRegistration: result.supportsDynamicRegistration, scopes: result.scopes } }));
-            } else {
-                setMcpOAuthProbe(prev => ({ ...prev, [serverId]: { required: false } }));
+                return { supportsDynamicRegistration: result.supportsDynamicRegistration };
             }
-        } catch { /* ignore probe errors */ }
+            setMcpOAuthProbe(prev => ({ ...prev, [serverId]: { required: false } }));
+            return null;
+        } catch { return null; }
     };
 
     // OAuth: start OAuth flow (auto mode = no clientId, manual mode = with clientId)
@@ -4339,14 +4340,16 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                         {(!mcpOAuthProbe[mcpForm.id] || mcpOAuthProbe[mcpForm.id]?.supportsDynamicRegistration !== false) && (
                                                             <div className="flex items-center gap-3">
                                                                 <button
-                                                                    onClick={() => {
+                                                                    onClick={async () => {
                                                                         if (!mcpOAuthProbe[mcpForm.id]) {
-                                                                            handleMcpOAuthProbe(mcpForm.id, mcpForm.url).then(() => {
-                                                                                handleMcpOAuthConnect(mcpForm.id, mcpForm.url);
-                                                                            });
-                                                                        } else {
-                                                                            handleMcpOAuthConnect(mcpForm.id, mcpForm.url);
+                                                                            const probe = await handleMcpOAuthProbe(mcpForm.id, mcpForm.url);
+                                                                            if (probe?.supportsDynamicRegistration === false) {
+                                                                                // No dynamic registration — expand manual config instead of auto-connect
+                                                                                setMcpOAuthExpanded(true);
+                                                                                return;
+                                                                            }
                                                                         }
+                                                                        handleMcpOAuthConnect(mcpForm.id, mcpForm.url);
                                                                     }}
                                                                     disabled={mcpOAuthConnecting === mcpForm.id || !mcpForm.url}
                                                                     className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition-colors hover:opacity-90 disabled:opacity-50"

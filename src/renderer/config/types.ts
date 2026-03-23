@@ -766,40 +766,44 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
 
 /**
  * OAuth 2.0 configuration for an MCP server (user-provided or discovered)
+ * @deprecated Use ManualOAuthConfig for manual mode. Auto mode needs no config.
  */
 export interface McpOAuthConfig {
-  /** OAuth client ID (from server registration or manual entry) */
   clientId: string;
-  /** OAuth client secret (optional, for confidential clients) */
   clientSecret?: string;
-  /** Requested scopes (space-separated in protocol, stored as array) */
   scopes?: string[];
 }
 
 /**
- * Stored OAuth token for an MCP server
+ * @deprecated Legacy type — backend now uses McpOAuthState from mcp-oauth/types.ts
  */
 export interface McpOAuthToken {
-  /** Access token */
   accessToken: string;
-  /** Refresh token (if provided by server) */
   refreshToken?: string;
-  /** Token type (usually "Bearer") */
   tokenType: string;
-  /** Expiry timestamp (ms since epoch) */
   expiresAt?: number;
-  /** Scopes granted */
   scope?: string;
-  /** Server URL this token is for (token endpoint) */
   serverUrl: string;
-  /** Client ID — needed for token refresh (RFC 6749 Section 6) */
   clientId?: string;
 }
 
-/**
- * OAuth status for display in the UI
- */
+/** OAuth status for display in the UI */
 export type McpOAuthStatus = 'disconnected' | 'connecting' | 'connected' | 'expired' | 'error';
+
+/** Result of probing an MCP server for OAuth requirements */
+export type OAuthProbeResult =
+  | { required: false }
+  | { required: true; supportsDynamicRegistration: boolean; scopes?: string[] };
+
+/** Manual OAuth config (advanced fallback when dynamic registration unavailable) */
+export interface ManualOAuthConfig {
+  clientId: string;
+  clientSecret?: string;
+  callbackPort?: number;
+  scopes?: string[];
+  authorizationUrl?: string;
+  tokenUrl?: string;
+}
 
 /**
  * MCP discovery links

@@ -1329,10 +1329,14 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
       }
 
       // Inject OAuth token as Authorization header (auto-refreshes if needed)
-      const oauthHeaders = await resolveAuthHeaders(server.id);
-      const headers = { ...server.headers, ...oauthHeaders };
-      if (oauthHeaders['Authorization']) {
-        console.log(`[agent] MCP ${server.id}: OAuth token injected`);
+      // Respect user-supplied Authorization — don't overwrite if already present
+      const headers = { ...server.headers };
+      if (!headers['Authorization'] && !headers['authorization']) {
+        const oauthHeaders = await resolveAuthHeaders(server.id);
+        if (oauthHeaders['Authorization']) {
+          Object.assign(headers, oauthHeaders);
+          console.log(`[agent] MCP ${server.id}: OAuth token injected`);
+        }
       }
 
       result[server.id] = {
