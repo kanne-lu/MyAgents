@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.50] - 2026-03-23
+
+### Added
+- **Session Sidecar 健康监控**：15 秒间隔检测死掉的 Session Sidecar（Tab/Cron/IM），自动重启并保留 owner 关联，recovery queue 机制确保重启失败后不丢失跟踪
+- **Agent Channel 健康监控**：30 秒间隔检测 Error/Stopped 的 IM Bot Channel，自动从磁盘配置重建，支持指数退避（30s→300s）和 orphaned channel 重试
+- **IM 发送诊断日志**：Bridge adapter 4 个发送函数 + stream_to_im 全链路约 50 处静默 `let _ =` 改为带上下文的 `ulog_warn` 日志
+- **QR 登录状态展示**：Channel 详情页 QR 区域在已登录时显示绿点 + accountId + "重新扫码"按钮
+
+### Fixed
+- **微信 QR 重新登录后消息不回复**：sendText/sendMedia 闭包捕获了 loadPlugin() 时的局部 `account` 变量，QR 重登录更新 `currentAccount` 后闭包仍用旧 token，改为引用模块级 `currentAccount`
+- **微信图标**：替换手绘 SVG 为真实微信 App 圆角矩形 PNG 图标
+
+---
+
 ## [0.1.49] - 2026-03-23
 
 ### Added
