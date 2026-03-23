@@ -533,7 +533,19 @@ impl ImStreamAdapter for BridgeAdapter {
         message_id: &str,
         text: &str,
     ) -> super::adapter::AdapterResult<()> {
-        self.edit_message(chat_id, message_id, text).await
+        // For Bridge plugins, finalize = try edit-in-place.
+        // If the plugin doesn't support edit (501 Not Implemented), that's OK —
+        // the message was already sent via send_message_returning_id, so we just
+        // log and return Ok. Returning Err here would trigger the caller's fallback
+        // which re-sends the same message, causing duplicates.
+        match self.edit_message(chat_id, message_id, text).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.contains("501") || e.contains("Not Implemented") || e.contains("Not supported") => {
+                ulog_info!("[bridge:{}] finalize: edit not supported, message already sent — skipping", self.plugin_id);
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
     }
 
     fn use_draft_streaming(&self) -> bool {
