@@ -402,7 +402,9 @@ impl ImStreamAdapter for BridgeAdapter {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
             ulog_warn!("[bridge:{}] edit_message returned {}: {}", self.plugin_id, status, text);
-            return Err(format!("Bridge edit-message returned {}: {}", status, text));
+            // Prefix with "status:<code>:" for structured matching in finalize_message.
+            // This avoids fragile substring matching on the error body.
+            return Err(format!("status:{}:Bridge edit-message returned {}: {}", status.as_u16(), status, text));
         }
         Ok(())
     }
@@ -540,7 +542,7 @@ impl ImStreamAdapter for BridgeAdapter {
         // which re-sends the same message, causing duplicates.
         match self.edit_message(chat_id, message_id, text).await {
             Ok(()) => Ok(()),
-            Err(e) if e.contains("501") || e.contains("Not Implemented") || e.contains("Not supported") => {
+            Err(e) if e.starts_with("status:501:") || e.starts_with("status:405:") => {
                 ulog_info!("[bridge:{}] finalize: edit not supported, message already sent — skipping", self.plugin_id);
                 Ok(())
             }

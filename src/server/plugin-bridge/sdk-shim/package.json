@@ -3,6 +3,20 @@
   "version": "0.0.1-shim",
   "exports": {
     "./plugin-sdk": "./plugin-sdk/index.js",
-    "./plugin-sdk/*": "./plugin-sdk/*.js"
+    "./plugin-sdk/account-id": "./plugin-sdk/account-id.js",
+    "./plugin-sdk/allow-from": "./plugin-sdk/allow-from.js",
+    "./plugin-sdk/channel-feedback": "./plugin-sdk/channel-feedback.js",
+    "./plugin-sdk/channel-runtime": "./plugin-sdk/channel-runtime.js",
+    "./plugin-sdk/channel-status": "./plugin-sdk/channel-status.js",
+    "./plugin-sdk/compat": "./plugin-sdk/compat.js",
+    "./plugin-sdk/feishu": "./plugin-sdk/feishu.js",
+    "./plugin-sdk/param-readers": "./plugin-sdk/param-readers.js",
+    "./plugin-sdk/reply-history": "./plugin-sdk/reply-history.js",
+    "./plugin-sdk/reply-runtime": "./plugin-sdk/reply-runtime.js",
+    "./plugin-sdk/routing": "./plugin-sdk/routing.js",
+    "./plugin-sdk/setup": "./plugin-sdk/setup.js",
+    "./plugin-sdk/temp-path": "./plugin-sdk/temp-path.js",
+    "./plugin-sdk/tool-send": "./plugin-sdk/tool-send.js",
+    "./plugin-sdk/zalouser": "./plugin-sdk/zalouser.js"
   }
 }
