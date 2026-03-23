@@ -4170,9 +4170,15 @@ pub async fn monitor_agent_channels(
     tokio::time::sleep(Duration::from_secs(15)).await;
     ulog_info!("[agent-monitor] Agent channel health monitor started");
 
-    // Track per-channel: consecutive failures + next retry timestamp
+    // Track per-channel: consecutive failures + next retry timestamp.
+    // failure_counts keys persist across cycles even if the channel is removed from
+    // agent_state during a failed restart — this prevents orphaned channels from
+    // being lost to monitoring.
     let mut failure_counts: HashMap<String, u32> = HashMap::new();
     let mut next_retry: HashMap<String, tokio::time::Instant> = HashMap::new();
+    // Orphaned channels: (channel_id → agent_id) for channels removed from agent_state
+    // during a failed restart. Merged into dead_channels on each cycle so they get retried.
+    let mut orphaned: HashMap<String, String> = HashMap::new();
 
     loop {
         tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
@@ -4205,6 +4211,13 @@ pub async fn monitor_agent_channels(
         for (agent_id, channel_id, health) in &channel_health_refs {
             let state = health.get_state().await;
             if matches!(state.status, types::ImStatus::Error | types::ImStatus::Stopped) {
+                dead_channels.push((agent_id.clone(), channel_id.clone()));
+            }
+        }
+
+        // Merge orphaned channels (failed restart last cycle, no longer in agent_state)
+        for (channel_id, agent_id) in &orphaned {
+            if !dead_channels.iter().any(|(_, cid)| cid == channel_id) {
                 dead_channels.push((agent_id.clone(), channel_id.clone()));
             }
         }
@@ -4293,6 +4306,7 @@ pub async fn monitor_agent_channels(
                 Ok((bot_instance, _status)) => {
                     failure_counts.remove(channel_id);
                     next_retry.remove(channel_id);
+                    orphaned.remove(channel_id);
 
                     // Re-insert into agent state
                     let mut agents_guard = agent_state.lock().await;
@@ -4329,6 +4343,9 @@ pub async fn monitor_agent_channels(
                 }
                 Err(e) => {
                     *count += 1;
+                    // Track as orphaned so next cycle retries even though
+                    // the channel was removed from agent_state
+                    orphaned.insert(channel_id.clone(), agent_id.clone());
                     // Schedule next retry with exponential backoff
                     let backoff = std::cmp::min(
                         BACKOFF_BASE_SECS.saturating_mul(2u64.saturating_pow(*count - 1)),
@@ -4349,11 +4366,15 @@ pub async fn monitor_agent_channels(
             }
         }
 
-        // Clean up stale failure_counts for channels no longer tracked
-        let live_channel_ids: std::collections::HashSet<String> =
-            dead_channels.iter().map(|(_, cid)| cid.clone()).collect();
-        failure_counts.retain(|cid, _| live_channel_ids.contains(cid));
-        next_retry.retain(|cid, _| live_channel_ids.contains(cid));
+        // Clean up: remove entries for channels that recovered or were manually stopped
+        // Keep entries that are in orphaned (awaiting retry) or in dead_channels
+        let tracked: std::collections::HashSet<String> = dead_channels
+            .iter()
+            .map(|(_, cid)| cid.clone())
+            .chain(orphaned.keys().cloned())
+            .collect();
+        failure_counts.retain(|cid, _| tracked.contains(cid));
+        next_retry.retain(|cid, _| tracked.contains(cid));
     }
 }
 

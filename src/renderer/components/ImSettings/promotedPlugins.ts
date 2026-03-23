@@ -13,7 +13,7 @@ import feishuStep1Img from './assets/feishu_step1.png';
 import feishuStep2EventsImg from './assets/feishu_step2_events.png';
 import feishuStep2PermissionsImg from './assets/feishu_step2_permissions.png';
 import feishuStep2AddBotImg from './assets/feishu_step2_5_add_bot.png';
-import weixinIcon from './assets/weixin.svg';
+import weixinIcon from './assets/weixin.png';
 
 export interface PromotedPlugin {
     /** Plugin ID — must match InstalledPlugin.pluginId after installation */

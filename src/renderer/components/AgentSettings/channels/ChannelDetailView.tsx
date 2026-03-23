@@ -734,14 +734,34 @@ export default function ChannelDetailView({
                         {isRunning && isQrLoginPlugin && (
                             <div className="rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                 <div className="flex flex-col items-center gap-3">
-                                    {qrStatus === 'idle' && (
-                                        <button
-                                            onClick={startDetailQrLogin}
-                                            className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
-                                        >
-                                            扫码登录
-                                        </button>
-                                    )}
+                                    {qrStatus === 'idle' && (() => {
+                                        const savedAccountId = (channel.openclawPluginConfig as Record<string, unknown> | undefined)?.accountId as string | undefined;
+                                        if (savedAccountId) {
+                                            return (
+                                                <>
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="h-2 w-2 rounded-full bg-[var(--accent-success)]" />
+                                                        <span className="text-sm font-medium text-[var(--ink)]">已登录</span>
+                                                    </div>
+                                                    <p className="text-xs text-[var(--ink-muted)] font-mono">{savedAccountId}</p>
+                                                    <button
+                                                        onClick={startDetailQrLogin}
+                                                        className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-1.5 text-xs font-medium text-[var(--ink-muted)] hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
+                                                    >
+                                                        重新扫码
+                                                    </button>
+                                                </>
+                                            );
+                                        }
+                                        return (
+                                            <button
+                                                onClick={startDetailQrLogin}
+                                                className="rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] hover:bg-[var(--button-primary-bg-hover)]"
+                                            >
+                                                扫码登录
+                                            </button>
+                                        );
+                                    })()}
                                     {qrStatus === 'loading' && (
                                         <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />
                                     )}

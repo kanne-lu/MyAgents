@@ -324,7 +324,7 @@ pub fn run() {
                     cleanup_done_for_session_monitor,
                 ).await;
             });
-            log::info!("[App] Session sidecar health monitor spawned");
+            ulog_info!("[App] Session sidecar health monitor spawned");
 
             // Start Agent Channel health monitor (15s initial delay)
             let app_handle_for_agent_monitor = app.handle().clone();
@@ -334,7 +334,7 @@ pub fn run() {
                     cleanup_done_for_agent_monitor,
                 ).await;
             });
-            log::info!("[App] Agent channel health monitor spawned");
+            ulog_info!("[App] Agent channel health monitor spawned");
 
             // Start background update check (5 second delay to let app initialize)
             log::info!("[App] Setup complete, spawning background update check task...");
