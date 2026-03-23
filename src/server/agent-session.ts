@@ -804,7 +804,6 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
     if (isProcessing && !isPreWarming) {
       // Active user turn in progress (e.g. IM responding) — defer restart to avoid killing mid-response.
       // The restart will fire after the current turn completes (see result handler pendingConfigRestart).
-      // Pre-warm sessions are safe to abort immediately (no user message to lose).
       console.log(`[agent] MCP config changed → [${ids}], deferring restart (active turn)`);
       pendingConfigRestart = true;
     } else {
@@ -829,6 +828,7 @@ function mcpConfigFingerprint(servers: McpServerDefinition[]): string {
       .map(s => ({ id: s.id, type: s.type, command: s.command, args: s.args, url: s.url, env: s.env, headers: s.headers }))
   );
 }
+
 
 /**
  * Get current MCP servers
@@ -3425,8 +3425,16 @@ export async function initializeAgent(
   if (hasInitialPrompt) {
     void enqueueUserMessage(initialPrompt!.trim());
   } else {
-    // Pre-warm subprocess + MCP so first message is fast
-    schedulePreWarm();
+    // Pre-warm subprocess + MCP so first message is fast.
+    // Only start immediately if MCP is already resolved (IM Bot sessions that
+    // self-resolved from disk). For Tab sessions, the frontend will call
+    // /api/mcp/set shortly after connecting, which triggers schedulePreWarm()
+    // with the authoritative config. This avoids the race where self-resolve
+    // and frontend produce slightly different MCP fingerprints, causing an
+    // unnecessary abort + 30s restart loop.
+    if (currentMcpServers !== null) {
+      schedulePreWarm();
+    }
   }
 }
 
