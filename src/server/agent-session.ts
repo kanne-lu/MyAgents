@@ -1292,19 +1292,36 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
         }
       }
 
-      // Playwright MCP: dynamic storage-state injection for login state persistence
-      // --storage-state is injected at runtime (not saved to static config) so it
-      // always reflects the latest file state across sessions.
+      // Playwright MCP: ensure isolated mode for concurrent browser sessions.
+      // Handles three scenarios:
+      // 1. Old default args with --user-data-dir=~/.playwright-mcp-profile → migrate to --isolated
+      // 2. User-customized --user-data-dir (different path) → keep persistent mode, remove --isolated
+      // 3. New config already has --isolated → no change needed
       if (server.id === 'playwright') {
         const storageStatePath = join(getMyAgentsUserDir(), 'browser-storage-state.json');
-        const hasUserDataDir = args.some((a: string) => a.startsWith('--user-data-dir'));
         const hasIsolated = args.includes('--isolated');
 
-        // If user explicitly set --user-data-dir, remove --isolated to avoid conflict
-        // (persistent profile mode is single-session only, respect user's choice)
-        if (hasUserDataDir && hasIsolated) {
+        // Detect old default --user-data-dir pointing to ~/.playwright-mcp-profile
+        // This was the v0.1.50 default that causes SingletonLock conflicts.
+        // Auto-migrate: strip old --user-data-dir and inject --isolated + --caps=storage.
+        const { home: envHome } = getCrossPlatformEnv();
+        const oldDefaultProfile = envHome ? join(envHome, '.playwright-mcp-profile') : null;
+        const oldDefaultIdx = args.findIndex((a: string) =>
+          a.startsWith('--user-data-dir=') && oldDefaultProfile && a === `--user-data-dir=${oldDefaultProfile}`
+        );
+        if (oldDefaultIdx !== -1) {
+          args.splice(oldDefaultIdx, 1);
+          if (!hasIsolated) args.push('--isolated');
+          if (!args.some((a: string) => a.startsWith('--caps='))) args.push('--caps=storage');
+          console.log(`[agent] MCP playwright: migrated old default --user-data-dir to --isolated mode`);
+        }
+
+        // If user explicitly set a CUSTOM --user-data-dir (non-default path),
+        // remove --isolated to avoid conflict (persistent mode, single-session only)
+        const hasCustomUserDataDir = args.some((a: string) => a.startsWith('--user-data-dir'));
+        if (hasCustomUserDataDir && args.includes('--isolated')) {
           args = args.filter((a: string) => a !== '--isolated');
-          console.log(`[agent] MCP playwright: --user-data-dir detected, removing --isolated (persistent mode)`);
+          console.log(`[agent] MCP playwright: custom --user-data-dir detected, removing --isolated (persistent mode)`);
         }
 
         // Inject --storage-state if file exists and not already specified
