@@ -1268,9 +1268,6 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
         }
       }
 
-      // Log full command for debugging
-      console.log(`[agent] MCP ${server.id}: ${command} ${args.join(' ')}`);
-
       // Build MCP config with isolated env to prevent proxy interference.
       // The parent Sidecar may have HTTP_PROXY set (injected by Rust at spawn),
       // which leaks into MCP child processes and breaks localhost WebSocket connections
@@ -1306,9 +1303,9 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
         // Auto-migrate: strip old --user-data-dir and inject --isolated + --caps=storage.
         const { home: envHome } = getCrossPlatformEnv();
         const oldDefaultProfile = envHome ? join(envHome, '.playwright-mcp-profile') : null;
-        const oldDefaultIdx = args.findIndex((a: string) =>
-          a.startsWith('--user-data-dir=') && oldDefaultProfile && a === `--user-data-dir=${oldDefaultProfile}`
-        );
+        const oldDefaultIdx = oldDefaultProfile
+          ? args.findIndex((a: string) => a === `--user-data-dir=${oldDefaultProfile}`)
+          : -1;
         if (oldDefaultIdx !== -1) {
           args.splice(oldDefaultIdx, 1);
           if (!hasIsolated) args.push('--isolated');
@@ -1318,7 +1315,7 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
 
         // If user explicitly set a CUSTOM --user-data-dir (non-default path),
         // remove --isolated to avoid conflict (persistent mode, single-session only)
-        const hasCustomUserDataDir = args.some((a: string) => a.startsWith('--user-data-dir'));
+        const hasCustomUserDataDir = args.some((a: string) => a.startsWith('--user-data-dir='));
         if (hasCustomUserDataDir && args.includes('--isolated')) {
           args = args.filter((a: string) => a !== '--isolated');
           console.log(`[agent] MCP playwright: custom --user-data-dir detected, removing --isolated (persistent mode)`);
@@ -1330,6 +1327,9 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
           console.log(`[agent] MCP playwright: injecting storage-state from ${storageStatePath}`);
         }
       }
+
+      // Log full command for debugging (after Playwright arg rewrite so logs show actual args)
+      console.log(`[agent] MCP ${server.id}: ${command} ${args.join(' ')}`);
 
       const mcpConfig: SdkMcpServerConfig = {
         command,
