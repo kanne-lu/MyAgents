@@ -47,7 +47,7 @@ When you receive one, follow its instructions.
 </myagents-heartbeat-instructions>`;
 
 const TMPL_BROWSER_STORAGE_STATE = `<myagents-browser-storage-instructions>
-当你使用浏览器工具完成任务后（特别是涉及用户登录操作后），请调用 browser_storage_state 工具将当前浏览器的登录状态保存到 ~/.myagents/browser-storage-state.json，以便后续对话复用登录态。
+当你在浏览器中执行了登录操作或用户帮你完成了登录（输入账号密码、OAuth 授权、扫码登录等），必须在登录成功后**立即**调用 browser_storage_state 工具将登录状态保存到 ~/.myagents/browser-storage-state.json，然后再继续执行后续任务。这样即使后续任务中断或会话异常终止，登录态也不会丢失，后续对话可以复用。
 </myagents-browser-storage-instructions>`;
 
 // ===== Variable replacement =====
