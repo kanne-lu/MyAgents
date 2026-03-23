@@ -9,6 +9,7 @@
 #
 # Usage:
 #   ./scripts/download_nodejs.sh              # Download for current platform only
+#   ./scripts/download_nodejs.sh --target arm64|x64  # Download specific macOS arch
 #   ./scripts/download_nodejs.sh --all        # Download for all platforms (CI/CD)
 #   ./scripts/download_nodejs.sh --clean      # Remove existing downloads first
 
@@ -114,15 +115,33 @@ upgrade_npm() {
     rm -rf "$tmp_dir"
 }
 
-# Check if Node.js is already downloaded and correct version
+# Check if Node.js is already downloaded with correct version AND architecture
+# Usage: check_existing <node_bin> [expected_arch]
+#   expected_arch: "arm64" or "x64" (optional, skips arch check if omitted)
 check_existing() {
     local node_bin="$1"
+    local expected_arch="$2"
     if [[ -f "$node_bin" ]]; then
+        # Check version
         local existing_ver
         existing_ver=$("$node_bin" --version 2>/dev/null || echo "")
-        if [[ "$existing_ver" == "v${NODE_VERSION}" ]]; then
-            return 0  # Already correct version
+        if [[ "$existing_ver" != "v${NODE_VERSION}" ]]; then
+            return 1
         fi
+        # Check architecture (macOS only, using `file` command)
+        if [[ -n "$expected_arch" && "$(uname -s)" == "Darwin" ]]; then
+            local file_info
+            file_info=$(file "$node_bin" 2>/dev/null || echo "")
+            if [[ "$expected_arch" == "arm64" && "$file_info" != *"arm64"* ]]; then
+                log_warn "Architecture mismatch: expected arm64, got x86_64"
+                return 1
+            fi
+            if [[ "$expected_arch" == "x64" && "$file_info" != *"x86_64"* ]]; then
+                log_warn "Architecture mismatch: expected x64, got arm64"
+                return 1
+            fi
+        fi
+        return 0  # Version and arch match
     fi
     return 1
 }
@@ -145,8 +164,8 @@ download_macos() {
     local url="${NODE_BASE_URL}/${tarball}"
     local node_bin="${RESOURCES_DIR}/bin/node"
 
-    # Check if already downloaded
-    if check_existing "$node_bin"; then
+    # Check if already downloaded with correct architecture
+    if check_existing "$node_bin" "$arch"; then
         log_ok "macOS ${arch}: Already at v${NODE_VERSION}, checking npm..."
         upgrade_npm "${RESOURCES_DIR}/lib/node_modules" "${RESOURCES_DIR}/bin/node"
         return 0
@@ -276,6 +295,17 @@ if [[ "$1" == "--all" ]]; then
     log_warn "Windows binaries must be downloaded on the Windows build machine"
 elif [[ "$1" == "--windows" ]]; then
     download_windows "${2:-x64}"
+elif [[ "$1" == "--target" ]]; then
+    # Download for a specific macOS architecture (used by build_macos.sh for cross-compilation)
+    TARGET_ARCH="${2:-}"
+    if [[ "$TARGET_ARCH" == "arm64" || "$TARGET_ARCH" == "aarch64" ]]; then
+        download_macos "arm64"
+    elif [[ "$TARGET_ARCH" == "x64" || "$TARGET_ARCH" == "x86_64" ]]; then
+        download_macos "x64"
+    else
+        log_error "Invalid target architecture: '${TARGET_ARCH}' (expected: arm64, x64, aarch64, x86_64)"
+        exit 1
+    fi
 else
     # Download for current platform only
     ARCH=$(uname -m)

@@ -276,14 +276,8 @@ bun run build:web
 echo -e "${GREEN}✓ 前端和服务端构建完成${NC}"
 echo ""
 
-# ========================================
-# 确保 Node.js 运行时已下载（MCP Server / 社区工具需要）
-# ========================================
+# Node.js 运行时目录（每个构建目标在循环中按架构下载）
 NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
-if [ ! -f "${NODEJS_DIR}/bin/node" ] && [ ! -f "${NODEJS_DIR}/node.exe" ]; then
-    echo -e "${YELLOW}Node.js 运行时未找到，正在下载...${NC}"
-    "${PROJECT_DIR}/scripts/download_nodejs.sh"
-fi
 
 # 签名 Bun 可执行文件 (重要：确保与应用使用相同签名)
 # ========================================
@@ -328,20 +322,6 @@ if [ $BUN_FAILED_COUNT -gt 0 ]; then
 fi
 echo -e "${GREEN}✓ Bun 签名完成 (${BUN_SIGNED_COUNT} 个文件)${NC}"
 
-# 签名 Node.js 二进制 (与 Bun 相同原因：TCC / notarization 需要统一签名)
-NODE_BINARY="${NODEJS_DIR}/bin/node"
-if [ -f "$NODE_BINARY" ]; then
-    echo -e "  ${CYAN}签名 Node.js 二进制...${NC}"
-    xattr -d com.apple.quarantine "$NODE_BINARY" 2>/dev/null || true
-    if codesign --force --options runtime --timestamp \
-        --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
-        --sign "$APPLE_SIGNING_IDENTITY" "$NODE_BINARY"; then
-        echo -e "    ${GREEN}✓ node 签名成功${NC}"
-    else
-        echo -e "    ${RED}✗ node 签名失败${NC}"
-        exit 1
-    fi
-fi
 echo ""
 
 # ========================================
@@ -428,9 +408,34 @@ echo -e "${YELLOW}这可能需要 5-10 分钟 (包含公证等待时间)...${NC}
 for TARGET in "${BUILD_TARGETS[@]}"; do
     echo ""
     echo -e "${YELLOW}━━━ 构建目标: $TARGET ━━━${NC}"
-    
+
+    # ---- 确保 Node.js 匹配目标架构 ----
+    # 将 Tauri target triple 映射为 Node.js 架构名
+    if [[ "$TARGET" == "aarch64-apple-darwin" ]]; then
+        NODE_TARGET_ARCH="arm64"
+    else
+        NODE_TARGET_ARCH="x64"
+    fi
+
+    echo -e "  ${CYAN}确保 Node.js 匹配目标架构 (${NODE_TARGET_ARCH})...${NC}"
+    "${PROJECT_DIR}/scripts/download_nodejs.sh" --target "$NODE_TARGET_ARCH"
+
+    # 签名 Node.js 二进制 (TCC / notarization 需要统一签名)
+    NODE_BINARY="${NODEJS_DIR}/bin/node"
+    if [ -f "$NODE_BINARY" ]; then
+        xattr -d com.apple.quarantine "$NODE_BINARY" 2>/dev/null || true
+        if codesign --force --options runtime --timestamp \
+            --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
+            --sign "$APPLE_SIGNING_IDENTITY" "$NODE_BINARY"; then
+            echo -e "    ${GREEN}✓ node (${NODE_TARGET_ARCH}) 签名成功${NC}"
+        else
+            echo -e "    ${RED}✗ node 签名失败${NC}"
+            exit 1
+        fi
+    fi
+
     bun run tauri:build -- --target "$TARGET"
-    
+
     echo -e "${GREEN}✓ $TARGET 构建完成${NC}"
 done
 
