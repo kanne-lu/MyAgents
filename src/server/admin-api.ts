@@ -477,6 +477,7 @@ export async function handleModelVerify(payload: { id: string; model?: string })
       baseUrl, apiKey, authType, verifyModel,
       apiProtocol,
       provider.maxOutputTokens ? Number(provider.maxOutputTokens) : undefined,
+      provider.maxOutputTokensParamName as 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens' | undefined,
       provider.upstreamFormat as 'chat_completions' | 'responses' | undefined,
     );
 
@@ -550,7 +551,8 @@ export function handleModelAdd(payload: {
     authType: String(p.authType ?? 'auth_token'),
     ...(p.protocol === 'openai' || p.apiProtocol === 'openai' ? {
       apiProtocol: 'openai' as const,
-      maxOutputTokens: Number(p.maxOutputTokens ?? 8192),
+      ...(p.maxOutputTokens ? { maxOutputTokens: Number(p.maxOutputTokens) } : {}),
+      ...(p.maxOutputTokensParamName ? { maxOutputTokensParamName: String(p.maxOutputTokensParamName) } : {}),
       upstreamFormat: String(p.upstreamFormat ?? 'chat_completions') as 'chat_completions' | 'responses',
     } : {}),
     websiteUrl: p.websiteUrl ? String(p.websiteUrl) : undefined,

@@ -3274,6 +3274,8 @@ pub struct ProviderEnv {
     pub api_protocol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens_param_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_format: Option<String>,
 }

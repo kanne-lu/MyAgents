@@ -427,6 +427,7 @@ export type ProviderEnv = {
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
   apiProtocol?: 'anthropic' | 'openai';
   maxOutputTokens?: number;
+  maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   upstreamFormat?: 'chat_completions' | 'responses';
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
@@ -441,6 +442,8 @@ export type OpenAiBridgeConfig = {
   model?: string;
   /** Max output tokens cap for upstream provider */
   maxOutputTokens?: number;
+  /** Parameter name for token limit sent to upstream. Default 'max_tokens'. */
+  maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   /** Upstream API format: 'chat_completions' (default) or 'responses' */
   upstreamFormat?: 'chat_completions' | 'responses';
 } | null;
@@ -1020,6 +1023,7 @@ function providerEnvEqual(a: ProviderEnv | undefined, b: ProviderEnv | undefined
     && a.authType === b.authType
     && a.apiProtocol === b.apiProtocol
     && a.maxOutputTokens === b.maxOutputTokens
+    && a.maxOutputTokensParamName === b.maxOutputTokensParamName
     && a.upstreamFormat === b.upstreamFormat;
 }
 
@@ -2351,6 +2355,7 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
       baseUrl: effectiveProviderEnv.baseUrl ?? '',
       apiKey: effectiveProviderEnv.apiKey ?? '',
       maxOutputTokens: effectiveProviderEnv.maxOutputTokens,
+      maxOutputTokensParamName: effectiveProviderEnv.maxOutputTokensParamName,
       upstreamFormat: effectiveProviderEnv.upstreamFormat,
     };
     console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);

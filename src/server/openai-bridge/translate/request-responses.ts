@@ -39,24 +39,18 @@ export function translateRequestToResponses(
   // 3. Input messages
   const input = translateMessagesToResponses(req.messages);
 
-  // 4. Token budget overflow protection
-  let maxOutputTokens = req.max_tokens;
-  if (req.thinking?.type === 'enabled' && req.thinking.budget_tokens >= maxOutputTokens) {
-    maxOutputTokens = req.thinking.budget_tokens + 4096;
-  }
-
-  // 5. Build request
+  // 4. Build request
+  // NOTE: max_output_tokens, temperature, top_p are intentionally NOT forwarded.
+  // - max_output_tokens: handler injects user-configured cap via the correct param name.
+  // - temperature, top_p: SDK values may not be compatible with target model. Let upstream use defaults.
   const responsesReq: ResponsesRequest = {
     model,
     input,
-    max_output_tokens: maxOutputTokens,
   };
 
   if (instructions) responsesReq.instructions = instructions;
-  if (req.temperature !== undefined) responsesReq.temperature = req.temperature;
-  if (req.top_p !== undefined) responsesReq.top_p = req.top_p;
 
-  // 6. Tools
+  // 5. Tools
   if (req.tools && req.tools.length > 0) {
     responsesReq.tools = req.tools.map(t => ({
       type: 'function' as const,
@@ -66,17 +60,17 @@ export function translateRequestToResponses(
     }));
   }
 
-  // 7. Tool choice
+  // 6. Tool choice
   if (req.tool_choice) {
     responsesReq.tool_choice = translateToolChoiceToResponses(req.tool_choice);
   }
 
-  // 8. Stream
+  // 7. Stream
   if (req.stream) {
     responsesReq.stream = true;
   }
 
-  // 9. Thinking → reasoning: intentionally omitted.
+  // 8. Thinking → reasoning: intentionally omitted.
   // Many OpenAI-compatible providers don't support reasoning/reasoning_effort,
   // and custom providers would return 400 "Unrecognized request argument".
 

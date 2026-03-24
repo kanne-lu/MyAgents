@@ -28,7 +28,7 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort } from '@/api/tauriClient';
+import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar } from '@/api/tauriClient';
 import type { PermissionMode } from '@/config/types';
 import type { QueuedMessageInfo } from '@/types/queue';
 import {
@@ -317,7 +317,7 @@ export default function TabProvider({
     // Each send pushes to the queue; each message-complete shifts from it.
     const pendingUserMessagesRef = useRef<string[]>([]);
     const lastCompletedTextRef = useRef('');
-    const lastProviderEnvRef = useRef<{ baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' } | undefined>(undefined);
+    const lastProviderEnvRef = useRef<{ baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' } | undefined>(undefined);
     const lastModelRef = useRef<string | undefined>(undefined);
 
     // Notify parent when generating state changes (for close confirmation)
@@ -1506,6 +1506,51 @@ export default function TabProvider({
         }
     }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState]);
 
+    // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
+    const recoveryInFlightRef = useRef(false);
+    const recoveryAttemptsRef = useRef(0);
+    const MAX_RECOVERY_ATTEMPTS = 3;
+    // Stable ref for connectSse (avoids circular dependency: recoverSessionSidecar → connectSse → recoverSessionSidecar)
+    const connectSseRef = useRef<() => Promise<void>>(() => Promise.resolve());
+    // Unmount guard for async recovery
+    const isMountedRef = useRef(true);
+    useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
+
+    // Recover a dead Session Sidecar: re-ensure + reconnect SSE.
+    // Called when SSE retries exhaust OR when Rust health monitor restarts the sidecar.
+    const recoverSessionSidecar = useCallback(async () => {
+        if (recoveryInFlightRef.current) return; // Deduplicate concurrent calls
+        if (sseRef.current?.isConnected()) return; // Already recovered
+        if (recoveryAttemptsRef.current >= MAX_RECOVERY_ATTEMPTS) {
+            console.error(`[TabProvider ${tabId}] Max recovery attempts (${MAX_RECOVERY_ATTEMPTS}) reached, giving up`);
+            return;
+        }
+        const sid = currentSessionIdRef.current;
+        if (!sid) return;
+        recoveryInFlightRef.current = true;
+        recoveryAttemptsRef.current++;
+        try {
+            console.log(`[TabProvider ${tabId}] Recovering Session Sidecar for ${sid} (attempt ${recoveryAttemptsRef.current}/${MAX_RECOVERY_ATTEMPTS})...`);
+            // ensureSessionSidecar includes health check — sidecar is ready when it returns
+            await ensureSessionSidecar(sid, agentDir, 'tab', tabId);
+            if (!isMountedRef.current) return;
+            // Disconnect old SSE and reconnect with fresh port
+            if (sseRef.current) {
+                await sseRef.current.disconnect();
+                sseRef.current = null;
+            }
+            if (!isMountedRef.current) return;
+            await connectSseRef.current();
+            if (!isMountedRef.current) return;
+            console.log(`[TabProvider ${tabId}] Session Sidecar recovered successfully`);
+            recoveryAttemptsRef.current = 0; // Reset on success
+        } catch (err) {
+            console.error(`[TabProvider ${tabId}] Session Sidecar recovery failed:`, err);
+        } finally {
+            recoveryInFlightRef.current = false;
+        }
+    }, [tabId, agentDir]);
+
     // Connect SSE
     // Uses Session-centric port lookup via currentSessionIdRef
     const connectSse = useCallback(async () => {
@@ -1517,6 +1562,13 @@ export default function TabProvider({
             if (status === 'disconnected' || status === 'failed') {
                 setIsConnected(false);
                 setIsLoading(false);
+            }
+            // When SSE retries exhaust (failed), trigger sidecar recovery as fallback.
+            // Primary recovery is via session-sidecar:restarted event from Rust health monitor,
+            // but this catches cases where the monitor hasn't run yet or missed the death.
+            if (status === 'failed') {
+                console.warn(`[TabProvider ${tabId}] SSE failed — triggering sidecar recovery`);
+                void recoverSessionSidecar();
             }
         });
         sseRef.current = sse;
@@ -1530,7 +1582,8 @@ export default function TabProvider({
             console.error(`[TabProvider ${tabId}] SSE connect failed:`, error);
             throw error;
         }
-    }, [tabId, handleSseEvent]);
+    }, [tabId, handleSseEvent, recoverSessionSidecar]);
+    connectSseRef.current = connectSse;
 
     // Disconnect SSE
     const disconnectSse = useCallback(() => {
@@ -1560,10 +1613,28 @@ export default function TabProvider({
         };
     }, [tabId]);
 
-    // Note: sidecarPort change effect removed
-    // With Session-centric Sidecar (Owner model), the port is dynamically looked up via
-    // getSessionPort(sessionId) on each API call. SSE reconnection is no longer needed
-    // when stopping cron tasks because the Sidecar continues running if Tab still owns it.
+    // Listen for Rust health monitor restarting our Session Sidecar.
+    // Mirrors the Global Sidecar pattern (App.tsx global-sidecar:restarted).
+    // When Rust detects a dead Session Sidecar and restarts it on a new port,
+    // we need to reconnect SSE to the new port.
+    useEffect(() => {
+        if (!isTauri()) return;
+        let cancelled = false;
+        let unlisten: (() => void) | null = null;
+        (async () => {
+            const { listen } = await import('@tauri-apps/api/event');
+            if (cancelled) return; // Unmounted before listen resolved
+            unlisten = await listen<{ sessionId: string; port: number }>('session-sidecar:restarted', (event) => {
+                if (cancelled) return; // Stale listener after unmount
+                const { sessionId: restartedSid, port } = event.payload;
+                if (restartedSid === currentSessionIdRef.current) {
+                    console.log(`[TabProvider ${tabId}] Session Sidecar restarted on port ${port}, reconnecting SSE`);
+                    void recoverSessionSidecar();
+                }
+            });
+        })();
+        return () => { cancelled = true; if (unlisten) unlisten(); };
+    }, [tabId, recoverSessionSidecar]);
 
     // Send message with optional images, permission mode, and model
     // Returns true immediately (optimistic) to clear the input without waiting for HTTP response.
@@ -1574,7 +1645,7 @@ export default function TabProvider({
         images?: ImageAttachment[],
         permissionMode?: PermissionMode,
         model?: string,
-        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' },
+        providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' },
         isCron?: boolean
     ): Promise<boolean> => {
         const trimmed = text.trim();
@@ -1593,7 +1664,7 @@ export default function TabProvider({
             pendingUserMessagesRef.current.push(trimmed);
         }
         lastModelRef.current = model;
-        lastProviderEnvRef.current = providerEnv ? { baseUrl: providerEnv.baseUrl, apiKey: providerEnv.apiKey, authType: providerEnv.authType, apiProtocol: providerEnv.apiProtocol, maxOutputTokens: providerEnv.maxOutputTokens, upstreamFormat: providerEnv.upstreamFormat } : undefined;
+        lastProviderEnvRef.current = providerEnv ? { baseUrl: providerEnv.baseUrl, apiKey: providerEnv.apiKey, authType: providerEnv.authType, apiProtocol: providerEnv.apiProtocol, maxOutputTokens: providerEnv.maxOutputTokens, maxOutputTokensParamName: providerEnv.maxOutputTokensParamName, upstreamFormat: providerEnv.upstreamFormat } : undefined;
 
         // Store attachments for merging with SSE replay
         if (hasImages) {

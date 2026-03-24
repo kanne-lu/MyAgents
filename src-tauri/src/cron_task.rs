@@ -185,6 +185,8 @@ pub struct TaskProviderEnv {
     pub api_protocol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens_param_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstream_format: Option<String>,
 }
@@ -1670,6 +1672,7 @@ async fn execute_task_directly(
             api_key: env.api_key.clone(),
             api_protocol: env.api_protocol.clone(),
             max_output_tokens: env.max_output_tokens,
+            max_output_tokens_param_name: env.max_output_tokens_param_name.clone(),
             upstream_format: env.upstream_format.clone(),
         }),
         run_mode: Some(run_mode_str.to_string()),

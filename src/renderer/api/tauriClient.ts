@@ -715,6 +715,7 @@ export interface ProviderEnv {
     api_key?: string;
     api_protocol?: 'anthropic' | 'openai';
     max_output_tokens?: number;
+    max_output_tokens_param_name?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     upstream_format?: 'chat_completions' | 'responses';
 }
 

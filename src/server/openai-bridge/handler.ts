@@ -137,20 +137,22 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
       }
     }
 
-    // 4b. Cap max_tokens if configured (CLI may send Claude-scale values like 128k)
+    // 4b. Inject token limit if configured.
+    // Request translators intentionally omit token limits (SDK sends Claude-scale values
+    // that are meaningless for other providers). Only inject when the user explicitly
+    // configured a cap via maxOutputTokens in provider settings.
     const maxOutputTokensCap = upstream.maxOutputTokens ?? config.maxOutputTokens;
-    if (!isResponses && maxOutputTokensCap) {
-      const chatReq = translatedReq as { max_tokens?: number };
-      if (chatReq.max_tokens !== undefined && chatReq.max_tokens > maxOutputTokensCap) {
-        log(`[bridge] Capping max_tokens: ${chatReq.max_tokens} → ${maxOutputTokensCap}`);
-        chatReq.max_tokens = maxOutputTokensCap;
-      }
-    }
-    if (isResponses && maxOutputTokensCap) {
-      const respReq = translatedReq as { max_output_tokens?: number };
-      if (respReq.max_output_tokens !== undefined && respReq.max_output_tokens > maxOutputTokensCap) {
-        log(`[bridge] Capping max_output_tokens: ${respReq.max_output_tokens} → ${maxOutputTokensCap}`);
-        respReq.max_output_tokens = maxOutputTokensCap;
+    if (maxOutputTokensCap) {
+      if (isResponses) {
+        // Responses API always uses max_output_tokens
+        (translatedReq as { max_output_tokens?: number }).max_output_tokens = maxOutputTokensCap;
+        log(`[bridge] Injecting max_output_tokens=${maxOutputTokensCap}`);
+      } else {
+        // Chat Completions: use user-configured param name (default max_tokens for widest compatibility)
+        const paramName = upstream.maxOutputTokensParamName ?? 'max_tokens';
+        const chatReq = translatedReq as OpenAIRequest & { [key: string]: unknown };
+        chatReq[paramName] = maxOutputTokensCap;
+        log(`[bridge] Injecting ${paramName}=${maxOutputTokensCap}`);
       }
     }
 

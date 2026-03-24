@@ -303,6 +303,7 @@ export interface ResolvedProviderEnv {
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
   apiProtocol?: 'anthropic' | 'openai';
   maxOutputTokens?: number;
+  maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   upstreamFormat?: 'chat_completions' | 'responses';
 }
 
@@ -338,6 +339,7 @@ export function resolveProviderEnv(
   };
   if (provider.apiProtocol) result.apiProtocol = provider.apiProtocol as ResolvedProviderEnv['apiProtocol'];
   if (provider.maxOutputTokens) result.maxOutputTokens = Number(provider.maxOutputTokens);
+  if (provider.maxOutputTokensParamName) result.maxOutputTokensParamName = provider.maxOutputTokensParamName as ResolvedProviderEnv['maxOutputTokensParamName'];
   if (provider.upstreamFormat) result.upstreamFormat = provider.upstreamFormat as ResolvedProviderEnv['upstreamFormat'];
 
   return result;

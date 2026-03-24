@@ -36,30 +36,17 @@ export function translateRequest(
   const messages = translateMessages(req.system, req.messages, thinkingEnabled);
 
   // 3. Build request
-  let maxTokens = req.max_tokens;
-
-  // Token budget overflow protection: if thinking.budget_tokens >= max_tokens,
-  // auto-increase max_tokens so the model has room for non-thinking output
-  if (req.thinking?.type === 'enabled' && req.thinking.budget_tokens >= maxTokens) {
-    maxTokens = req.thinking.budget_tokens + 4096;
-  }
-
+  // NOTE: max_tokens, temperature, top_p, stop are intentionally NOT forwarded.
+  // - max_tokens: SDK sends Claude-scale values (128k); the handler injects the user-configured
+  //   cap via the correct param name (max_tokens / max_completion_tokens) based on provider config.
+  // - temperature, top_p, stop: Anthropic SDK values may not be compatible with the target model
+  //   (e.g., reasoning models reject non-default temperature/top_p/stop). Let upstream use defaults.
   const openaiReq: OpenAIRequest = {
     model,
     messages,
-    max_tokens: maxTokens,
   };
 
-  // 4. Optional parameters
-  if (req.temperature !== undefined) openaiReq.temperature = req.temperature;
-  if (req.top_p !== undefined) openaiReq.top_p = req.top_p;
-  // top_k → discard (OpenAI doesn't support)
-
-  if (req.stop_sequences) {
-    openaiReq.stop = req.stop_sequences;
-  }
-
-  // 5. Tools
+  // 4. Tools
   if (req.tools && req.tools.length > 0) {
     openaiReq.tools = translateToolDefinitions(req.tools);
   }
@@ -71,13 +58,13 @@ export function translateRequest(
     }
   }
 
-  // 6. Stream
+  // 5. Stream
   if (req.stream) {
     openaiReq.stream = true;
     openaiReq.stream_options = { include_usage: true };
   }
 
-  // 7. Thinking → reasoning_effort: intentionally omitted.
+  // 6. Thinking → reasoning_effort: intentionally omitted.
   // Many OpenAI-compatible providers don't support reasoning_effort,
   // and custom providers would return 400 "Unrecognized request argument".
 

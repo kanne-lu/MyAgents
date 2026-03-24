@@ -199,6 +199,7 @@ type SendMessagePayload = {
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
     apiProtocol?: 'anthropic' | 'openai';
     maxOutputTokens?: number;
+    maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     upstreamFormat?: 'chat_completions' | 'responses';
   };
 };
@@ -219,6 +220,7 @@ type CronExecutePayload = {
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
     apiProtocol?: 'anthropic' | 'openai';
     maxOutputTokens?: number;
+    maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     upstreamFormat?: 'chat_completions' | 'responses';
   };
   /** Run mode: "single_session" (keep context) or "new_session" (fresh each time) */
@@ -1296,6 +1298,7 @@ async function main() {
         apiKey: config.apiKey,
         model: config.model,
         maxOutputTokens: config.maxOutputTokens,
+        maxOutputTokensParamName: config.maxOutputTokensParamName,
         upstreamFormat: config.upstreamFormat,
       };
     },
@@ -3669,10 +3672,11 @@ async function main() {
             authType?: string;
             apiProtocol?: string;
             maxOutputTokens?: number;
+            maxOutputTokensParamName?: string;
             upstreamFormat?: string;
           };
 
-          const { baseUrl, apiKey, model, authType, apiProtocol, maxOutputTokens, upstreamFormat } = payload;
+          const { baseUrl, apiKey, model, authType, apiProtocol, maxOutputTokens, maxOutputTokensParamName, upstreamFormat } = payload;
 
           if (!baseUrl || !apiKey) {
             return jsonResponse({ success: false, error: 'baseUrl and apiKey are required.' }, 400);
@@ -3693,6 +3697,7 @@ async function main() {
             baseUrl, apiKey, authType ?? 'both', model || undefined,
             apiProtocol === 'openai' ? 'openai' : undefined,
             maxOutputTokens,
+            maxOutputTokensParamName as 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens' | undefined,
             upstreamFormat === 'responses' ? 'responses' : undefined,
           );
 
@@ -6629,6 +6634,9 @@ async function main() {
                 apiKey: payload.providerEnv.apiKey,
                 authType: payload.providerEnv.authType,
                 apiProtocol: payload.providerEnv.apiProtocol,
+                maxOutputTokens: payload.providerEnv.maxOutputTokens,
+                maxOutputTokensParamName: payload.providerEnv.maxOutputTokensParamName,
+                upstreamFormat: payload.providerEnv.upstreamFormat,
               } : undefined,
             });
 

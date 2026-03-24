@@ -266,6 +266,7 @@ export async function patchAgentConfig(
           authType: provider.authType,
           apiProtocol: provider.apiProtocol,
           maxOutputTokens: provider.maxOutputTokens,
+          maxOutputTokensParamName: provider.maxOutputTokensParamName,
           upstreamFormat: provider.upstreamFormat,
         });
       } else {

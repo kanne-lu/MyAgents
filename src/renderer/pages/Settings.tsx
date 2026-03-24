@@ -91,6 +91,7 @@ interface CustomProviderForm {
     newModelInput: string;  // 用于输入新模型的临时值
     apiKey: string;
     maxOutputTokens: string;  // 最大输出 token（字符串便于输入，空串=不限制）
+    maxOutputTokensParamName: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';  // token limit 参数名
     upstreamFormat: 'chat_completions' | 'responses';  // 上游 API 格式
 }
 
@@ -105,7 +106,8 @@ const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     models: [],
     newModelInput: '',
     apiKey: '',
-    maxOutputTokens: '8192',
+    maxOutputTokens: '',
+    maxOutputTokensParamName: 'max_tokens',
     upstreamFormat: 'chat_completions',
 };
 
@@ -122,6 +124,7 @@ interface ProviderEditForm {
     editBaseUrl?: string;
     editAuthType?: Extract<ProviderAuthType, 'auth_token' | 'api_key'>;
     editMaxOutputTokens?: string;
+    editMaxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     editUpstreamFormat?: 'chat_completions' | 'responses';
     // Model alias mapping (sub-agent model redirection)
     editModelAliases?: ModelAliases;
@@ -1729,6 +1732,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 authType: provider.authType,
                 apiProtocol: provider.apiProtocol,
                 maxOutputTokens: provider.maxOutputTokens,
+                maxOutputTokensParamName: provider.maxOutputTokensParamName,
                 upstreamFormat: provider.upstreamFormat,
             });
 
@@ -1811,6 +1815,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             authType: customForm.authType,
             apiProtocol: customForm.apiProtocol === 'openai' ? 'openai' : undefined,
             ...(customForm.apiProtocol === 'openai' && customForm.maxOutputTokens ? { maxOutputTokens: parsePositiveInt(customForm.maxOutputTokens) } : {}),
+            ...(customForm.apiProtocol === 'openai' && customForm.maxOutputTokensParamName !== 'max_tokens' ? { maxOutputTokensParamName: customForm.maxOutputTokensParamName } : {}),
             ...(customForm.apiProtocol === 'openai' && customForm.upstreamFormat !== 'chat_completions' ? { upstreamFormat: customForm.upstreamFormat } : {}),
             config: {
                 baseUrl: customForm.baseUrl,
@@ -1908,7 +1913,8 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 editApiProtocol: provider.apiProtocol ?? 'anthropic',
                 editBaseUrl: provider.config.baseUrl || '',
                 editAuthType: provider.authType === 'api_key' ? 'api_key' : 'auth_token',
-                editMaxOutputTokens: String(provider.maxOutputTokens ?? 8192),
+                editMaxOutputTokens: provider.maxOutputTokens ? String(provider.maxOutputTokens) : '',
+                editMaxOutputTokensParamName: provider.maxOutputTokensParamName ?? 'max_tokens',
                 editUpstreamFormat: provider.upstreamFormat ?? 'chat_completions',
             }),
         });
@@ -2029,6 +2035,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 authType: editAuthType ?? provider.authType ?? 'auth_token',
                 apiProtocol: editApiProtocol === 'openai' ? 'openai' : undefined,
                 maxOutputTokens: editApiProtocol === 'openai' && editingProvider?.editMaxOutputTokens ? parsePositiveInt(editingProvider.editMaxOutputTokens) : undefined,
+                maxOutputTokensParamName: editApiProtocol === 'openai' && editingProvider?.editMaxOutputTokensParamName && editingProvider.editMaxOutputTokensParamName !== 'max_tokens' ? editingProvider.editMaxOutputTokensParamName : undefined,
                 upstreamFormat: editApiProtocol === 'openai' && editingProvider?.editUpstreamFormat !== 'chat_completions' ? editingProvider?.editUpstreamFormat : undefined,
                 modelAliases: editModelAliases
                     ? Object.fromEntries(Object.entries(editModelAliases).filter(([, v]) => v)) as ModelAliases
@@ -4883,16 +4890,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             {customForm.apiProtocol === 'openai' && (
                                 <>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
-                                        <input
-                                            type="number"
-                                            value={customForm.maxOutputTokens}
-                                            onChange={(e) => setCustomForm((p) => ({ ...p, maxOutputTokens: e.target.value }))}
-                                            placeholder="8192"
-                                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                        />
-                                    </div>
-                                    <div>
                                         <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">接口格式</label>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
@@ -4901,7 +4898,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     name="create-upstreamFormat"
                                                     value="chat_completions"
                                                     checked={customForm.upstreamFormat === 'chat_completions'}
-                                                    onChange={() => setCustomForm((p) => ({ ...p, upstreamFormat: 'chat_completions' }))}
+                                                    onChange={() => setCustomForm((p) => ({ ...p, upstreamFormat: 'chat_completions', maxOutputTokensParamName: p.maxOutputTokensParamName === 'max_output_tokens' ? 'max_tokens' : p.maxOutputTokensParamName }))}
                                                     className="accent-[var(--ink)]"
                                                 />
                                                 <span className="text-sm text-[var(--ink)]">Chat Completions</span>
@@ -4912,11 +4909,41 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     name="create-upstreamFormat"
                                                     value="responses"
                                                     checked={customForm.upstreamFormat === 'responses'}
-                                                    onChange={() => setCustomForm((p) => ({ ...p, upstreamFormat: 'responses' }))}
+                                                    onChange={() => setCustomForm((p) => ({ ...p, upstreamFormat: 'responses', maxOutputTokensParamName: 'max_output_tokens' }))}
                                                     className="accent-[var(--ink)]"
                                                 />
                                                 <span className="text-sm text-[var(--ink)]">Responses API</span>
                                             </label>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                        <div className="flex gap-2 items-center">
+                                            <div className="flex gap-3 shrink-0">
+                                                {(customForm.upstreamFormat === 'responses'
+                                                    ? [{ value: 'max_output_tokens', label: 'max_output_tokens' }] as const
+                                                    : [{ value: 'max_tokens', label: 'max_tokens' }, { value: 'max_completion_tokens', label: 'max_completion_tokens' }] as const
+                                                ).map((opt) => (
+                                                    <label key={opt.value} className="flex items-center gap-1.5 cursor-pointer">
+                                                        <input
+                                                            type="radio"
+                                                            name="create-maxOutputTokensParamName"
+                                                            value={opt.value}
+                                                            checked={customForm.maxOutputTokensParamName === opt.value}
+                                                            onChange={() => setCustomForm((p) => ({ ...p, maxOutputTokensParamName: opt.value }))}
+                                                            className="accent-[var(--ink)]"
+                                                        />
+                                                        <span className="text-xs text-[var(--ink-muted)] font-mono">{opt.label}</span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                            <input
+                                                type="number"
+                                                value={customForm.maxOutputTokens}
+                                                onChange={(e) => setCustomForm((p) => ({ ...p, maxOutputTokens: e.target.value }))}
+                                                placeholder="留空则不限制"
+                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                            />
                                         </div>
                                     </div>
                                 </>
@@ -5163,16 +5190,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             {!editingProvider.provider.isBuiltin && editingProvider.editApiProtocol === 'openai' && (
                                 <>
                                     <div>
-                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
-                                        <input
-                                            type="number"
-                                            value={editingProvider.editMaxOutputTokens || ''}
-                                            onChange={(e) => setEditingProvider((p) => p ? { ...p, editMaxOutputTokens: e.target.value } : null)}
-                                            placeholder="8192"
-                                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                        />
-                                    </div>
-                                    <div>
                                         <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">接口格式</label>
                                         <div className="flex gap-4">
                                             <label className="flex items-center gap-2 cursor-pointer">
@@ -5181,7 +5198,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     name="edit-upstreamFormat"
                                                     value="chat_completions"
                                                     checked={(editingProvider.editUpstreamFormat || 'chat_completions') === 'chat_completions'}
-                                                    onChange={() => setEditingProvider((p) => p ? { ...p, editUpstreamFormat: 'chat_completions' } : null)}
+                                                    onChange={() => setEditingProvider((p) => p ? { ...p, editUpstreamFormat: 'chat_completions', editMaxOutputTokensParamName: (p.editMaxOutputTokensParamName === 'max_output_tokens' ? 'max_tokens' : p.editMaxOutputTokensParamName) } : null)}
                                                     className="accent-[var(--ink)]"
                                                 />
                                                 <span className="text-sm text-[var(--ink)]">Chat Completions</span>
@@ -5192,11 +5209,41 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                     name="edit-upstreamFormat"
                                                     value="responses"
                                                     checked={editingProvider.editUpstreamFormat === 'responses'}
-                                                    onChange={() => setEditingProvider((p) => p ? { ...p, editUpstreamFormat: 'responses' } : null)}
+                                                    onChange={() => setEditingProvider((p) => p ? { ...p, editUpstreamFormat: 'responses', editMaxOutputTokensParamName: 'max_output_tokens' } : null)}
                                                     className="accent-[var(--ink)]"
                                                 />
                                                 <span className="text-sm text-[var(--ink)]">Responses API</span>
                                             </label>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">最大输出 Token</label>
+                                        <div className="flex gap-2 items-center">
+                                            <div className="flex gap-3 shrink-0">
+                                                {((editingProvider.editUpstreamFormat || 'chat_completions') === 'responses'
+                                                    ? [{ value: 'max_output_tokens', label: 'max_output_tokens' }] as const
+                                                    : [{ value: 'max_tokens', label: 'max_tokens' }, { value: 'max_completion_tokens', label: 'max_completion_tokens' }] as const
+                                                ).map((opt) => (
+                                                    <label key={opt.value} className="flex items-center gap-1.5 cursor-pointer">
+                                                        <input
+                                                            type="radio"
+                                                            name="edit-maxOutputTokensParamName"
+                                                            value={opt.value}
+                                                            checked={(editingProvider.editMaxOutputTokensParamName ?? 'max_tokens') === opt.value}
+                                                            onChange={() => setEditingProvider((p) => p ? { ...p, editMaxOutputTokensParamName: opt.value } : null)}
+                                                            className="accent-[var(--ink)]"
+                                                        />
+                                                        <span className="text-xs text-[var(--ink-muted)] font-mono">{opt.label}</span>
+                                                    </label>
+                                                ))}
+                                            </div>
+                                            <input
+                                                type="number"
+                                                value={editingProvider.editMaxOutputTokens || ''}
+                                                onChange={(e) => setEditingProvider((p) => p ? { ...p, editMaxOutputTokens: e.target.value } : null)}
+                                                placeholder="留空则不限制"
+                                                className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                            />
                                         </div>
                                     </div>
                                 </>

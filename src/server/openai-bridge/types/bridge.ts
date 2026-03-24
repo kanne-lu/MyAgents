@@ -31,6 +31,8 @@ export interface UpstreamConfig {
   model?: string;
   /** Per-request max output tokens cap (takes priority over BridgeConfig.maxOutputTokens) */
   maxOutputTokens?: number;
+  /** Parameter name for token limit. Default 'max_tokens' for Chat Completions, forced 'max_output_tokens' for Responses. */
+  maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   /** Upstream API format: 'chat_completions' (default) or 'responses' (OpenAI Responses API) */
   upstreamFormat?: 'chat_completions' | 'responses';
 }

@@ -137,8 +137,13 @@ export interface Provider {
   upstreamFormat?: 'chat_completions' | 'responses';
 
   // 最大输出 token 数限制（仅 apiProtocol === 'openai' 时生效）
-  // Bridge 会将 SDK 发送的 max_tokens 截断到此值
+  // 有值时 Bridge 向上游注入此 token limit；空/undefined = 不发送
   maxOutputTokens?: number;
+  // 上游 API 的 token limit 参数名（仅 apiProtocol === 'openai' 时生效）
+  // 'max_tokens' (默认，兼容大多数 provider)
+  // 'max_completion_tokens' (OpenAI o1/o3/GPT-5、vLLM、OpenRouter)
+  // 'max_output_tokens' (OpenAI Responses API)
+  maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
 
   // 官网链接 (用于"去官网"入口)
   websiteUrl?: string;

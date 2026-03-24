@@ -320,6 +320,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           authType: provider.authType,
           apiProtocol: provider.apiProtocol,
           maxOutputTokens: provider.maxOutputTokens,
+          maxOutputTokensParamName: provider.maxOutputTokensParamName,
           upstreamFormat: provider.upstreamFormat,
         } : undefined;
 
@@ -380,6 +381,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         authType: currentProvider.authType,
         apiProtocol: currentProvider.apiProtocol,
         maxOutputTokens: currentProvider.maxOutputTokens,
+        maxOutputTokensParamName: currentProvider.maxOutputTokensParamName,
         upstreamFormat: currentProvider.upstreamFormat,
       } : undefined;
       await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv, true /* isCron */);
@@ -1065,6 +1067,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         authType: provider.authType,
         apiProtocol: provider.apiProtocol,
         maxOutputTokens: provider.maxOutputTokens,
+        maxOutputTokensParamName: provider.maxOutputTokensParamName,
         upstreamFormat: provider.upstreamFormat,
       } : undefined;
 
@@ -1768,6 +1771,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             authType: currentProvider.authType,
             apiProtocol: currentProvider.apiProtocol,
             maxOutputTokens: currentProvider.maxOutputTokens,
+            maxOutputTokensParamName: currentProvider.maxOutputTokensParamName,
             upstreamFormat: currentProvider.upstreamFormat,
           } : undefined;
 

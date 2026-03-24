@@ -170,7 +170,7 @@ export async function generateSessionTitle(
     sessionId: string,
     rounds: TitleRound[],
     model: string,
-    providerEnv?: { baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; upstreamFormat?: 'chat_completions' | 'responses' },
+    providerEnv?: { baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' },
 ): Promise<{ success: boolean; title?: string }> {
     try {
         return await postJson<{ success: boolean; title?: string }>(

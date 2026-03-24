@@ -34,6 +34,8 @@ export interface SendMessagePayload {
     apiProtocol?: 'anthropic' | 'openai';
     /** Max output tokens cap for OpenAI bridge (only used when apiProtocol === 'openai') */
     maxOutputTokens?: number;
+    /** Parameter name for token limit sent to upstream. Default 'max_tokens'. */
+    maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     /** Upstream API format for OpenAI bridge (only used when apiProtocol === 'openai') */
     upstreamFormat?: 'chat_completions' | 'responses';
   };

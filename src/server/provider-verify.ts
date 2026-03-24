@@ -239,6 +239,7 @@ export async function verifyProviderViaSdk(
   model?: string,
   apiProtocol?: 'anthropic' | 'openai',
   maxOutputTokens?: number,
+  maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens',
   upstreamFormat?: 'chat_completions' | 'responses',
 ): Promise<{ success: boolean; error?: string; detail?: string }> {
   console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}, apiProtocol=${apiProtocol ?? 'anthropic'}, maxOutputTokens=${maxOutputTokens ?? 'none'}`);
@@ -248,6 +249,7 @@ export async function verifyProviderViaSdk(
     authType: authType as 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key',
     apiProtocol,
     maxOutputTokens,
+    maxOutputTokensParamName,
     upstreamFormat,
   });
   return verifyViaSdk(env, {
