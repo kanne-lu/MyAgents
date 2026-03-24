@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
-import { join, resolve, sep } from 'path';
+import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
@@ -2080,7 +2080,6 @@ export function resolveClaudeCodeCli(): string {
     const sdkMain = requireModule.resolve('@anthropic-ai/claude-agent-sdk');
     // dirname(sdkMain) gives us the package root — assumes main export is in root dir.
     // This is the standard Node.js ecosystem pattern for exports-locked packages.
-    const { dirname } = require('path') as typeof import('path');
     const sdkDir = dirname(sdkMain);
     const cliPath = join(sdkDir, 'cli.js');
     if (!existsSync(cliPath)) {

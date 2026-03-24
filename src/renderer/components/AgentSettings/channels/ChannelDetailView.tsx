@@ -409,23 +409,13 @@ export default function ChannelDetailView({
 
     const hasAnyOverride = !!(channel?.overrides && Object.keys(channel.overrides).length > 0);
 
-    if (!channel) {
-        return (
-            <div className="text-center py-12">
-                <p className="text-sm text-[var(--ink-muted)]">Channel 配置未找到</p>
-                <button onClick={onBack} className="mt-4 text-sm text-[var(--button-primary-bg)] hover:underline">
-                    返回列表
-                </button>
-            </div>
-        );
-    }
-
+    // Derived values that depend on channel (safe with optional chaining before early return)
     const isRunning = botStatus?.status === 'online' || botStatus?.status === 'connecting';
-    const isOpenClaw = isOpenClawPlatform(channel.type);
-    const promoted = isOpenClaw ? findPromotedByPlatform(channel.type) : undefined;
+    const isOpenClaw = channel ? isOpenClawPlatform(channel.type) : false;
+    const promoted = isOpenClaw && channel ? findPromotedByPlatform(channel.type) : undefined;
     const isQrLoginPlugin = promoted?.authType === 'qrLogin' || installedPlugin?.supportsQrLogin === true;
 
-    // QR Login state for detail page (used when plugin needs QR auth)
+    // QR Login state — must be declared before any early return (rules-of-hooks)
     const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
     const [qrMessage, setQrMessage] = useState('');
     const [qrStatus, setQrStatus] = useState<'idle' | 'loading' | 'waiting' | 'connected' | 'error'>('idle');
@@ -445,7 +435,7 @@ export default function ChannelDetailView({
     }, [qrDataUrl]);
 
     const startDetailQrLogin = useCallback(async () => {
-        if (!isTauriEnvironment() || !isRunning) return;
+        if (!channel || !isTauriEnvironment() || !isRunning) return;
         qrAbortRef.current = false;
         setQrStatus('loading');
         setQrMessage('正在获取二维码...');
@@ -514,7 +504,19 @@ export default function ChannelDetailView({
         } catch (err) {
             if (isMountedRef.current) { setQrStatus('error'); setQrMessage(`失败: ${err}`); }
         }
-    }, [isRunning, agent.id, channel.id, channel.name, promoted?.name]);
+    }, [isRunning, agent.id, agent.channels, channel, promoted?.name, refreshConfig]);
+
+    // Early return AFTER all hooks (rules-of-hooks compliance)
+    if (!channel) {
+        return (
+            <div className="text-center py-12">
+                <p className="text-sm text-[var(--ink-muted)]">Channel 配置未找到</p>
+                <button onClick={onBack} className="mt-4 text-sm text-[var(--button-primary-bg)] hover:underline">
+                    返回列表
+                </button>
+            </div>
+        );
+    }
 
     // Platform icon for header
     const detailPlatformIcon = (() => {

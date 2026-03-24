@@ -544,6 +544,7 @@ export default function ChannelWizard({
                 setQrMessage(`启动失败: ${err}`);
             }
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [buildChannelConfig, agent, channelId, platform, refreshConfig]);
 
     // Auto-start QR login when entering step 1 for QR plugins.
@@ -556,7 +557,6 @@ export default function ChannelWizard({
         if (!isQrLogin || step !== 1 || qrStartedRef.current) return;
         qrStartedRef.current = true;
         startQrLoginRef.current();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [isQrLogin, step]);
 
     // Handle "Next" for all steps
