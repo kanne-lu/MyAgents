@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **微信 Bot 长文丢失**：finalize 检测到 501 时发送完整消息替代静默丢弃，用户不再只看到前 50 字符
 - **Session Sidecar SSE 自动恢复**：系统休眠/crash 后 Tab 不再永久 loading
 - **定时任务"仅一次"模式显示错误**：StatusBar/Overlay 未读 schedule 字段导致显示为"每 30 分钟"
+- **飞书 Bot 输出中断**：`capabilities.edit` 从 `editMessage` 函数存在性推导，飞书不再被误判为不支持编辑
+- **时间回溯丢失 Session 上下文**：从磁盘消息种子填充 `currentSessionUuids`，pre-warm 窗口期 rewind 不再创建空 session
 
 ---
 
