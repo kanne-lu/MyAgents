@@ -80,11 +80,13 @@ interface SimpleChatInputProps {
   /** Cron task config (for status bar display) */
   cronConfig?: {
     intervalMinutes: number;
+    schedule?: import('@/types/cronTask').CronSchedule;
   } | null;
   /** Active cron task (for overlay display) */
   cronTask?: {
     status: 'running' | 'paused' | 'stopped' | 'completed';
     intervalMinutes: number;
+    schedule?: import('@/types/cronTask').CronSchedule;
     executionCount: number;
     lastExecutedAt?: string;
     endConditions?: {
@@ -1112,6 +1114,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         {!isLauncherMode && cronModeEnabled && !cronTask && cronConfig && (
           <CronTaskStatusBar
             intervalMinutes={cronConfig.intervalMinutes}
+            schedule={cronConfig.schedule}
             onSettings={() => onCronSettings?.()}
             onCancel={() => onCronCancel?.()}
           />
@@ -1127,6 +1130,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             <CronTaskOverlay
               status={cronTask.status}
               intervalMinutes={cronTask.intervalMinutes}
+              schedule={cronTask.schedule}
               executionCount={cronTask.executionCount}
               maxExecutions={cronTask.endConditions?.maxExecutions}
               nextExecutionTime={cronTask.lastExecutedAt

@@ -2,12 +2,13 @@
 // Follows design_guide.md: warm paper tones, elegant and unobtrusive
 import { useState, useEffect } from 'react';
 import { Timer, Pencil } from 'lucide-react';
-import type { CronTaskStatus } from '@/types/cronTask';
+import type { CronTaskStatus, CronSchedule } from '@/types/cronTask';
 import { formatCronInterval } from '@/types/cronTask';
 
 interface CronTaskOverlayProps {
   status: CronTaskStatus;
   intervalMinutes: number;
+  schedule?: CronSchedule | null;
   executionCount: number;
   maxExecutions?: number; // For showing progress like "1/3"
   nextExecutionTime?: Date;
@@ -33,6 +34,7 @@ function AnimatedHeartIcon({ isRunning }: { isRunning: boolean }) {
 export default function CronTaskOverlay({
   status,
   intervalMinutes,
+  schedule,
   executionCount,
   maxExecutions,
   nextExecutionTime,
@@ -124,7 +126,12 @@ export default function CronTaskOverlay({
             )}
           </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-xs text-[var(--ink-muted)]">
-            <span>每 {formatCronInterval(intervalMinutes)}</span>
+            <span>{schedule?.kind === 'at'
+              ? `仅一次 (${new Date(schedule.at).toLocaleString('zh-CN')})`
+              : schedule?.kind === 'cron'
+                ? `Cron: ${schedule.expr}`
+                : `每 ${formatCronInterval(schedule?.kind === 'every' ? schedule.minutes : intervalMinutes)}`
+            }</span>
             <span className="text-[var(--line-strong)]">·</span>
             <span>{getExecutionText()}</span>
           </div>

@@ -1,15 +1,31 @@
-// Cron Task Status Bar - Shows above input when heartbeat loop mode is enabled
+// Cron Task Status Bar - Shows above input when cron mode is enabled
 import { Timer, Settings2, X } from 'lucide-react';
-import { formatCronInterval } from '@/types/cronTask';
+import { formatCronInterval, type CronSchedule } from '@/types/cronTask';
 
 interface CronTaskStatusBarProps {
   intervalMinutes: number;
+  schedule?: CronSchedule | null;
   onSettings: () => void;
   onCancel: () => void;
 }
 
+function formatStatusBarSchedule(schedule: CronSchedule | null | undefined, intervalMinutes: number): string {
+  if (schedule) {
+    switch (schedule.kind) {
+      case 'at':
+        return `${new Date(schedule.at).toLocaleString('zh-CN')} 执行一次`;
+      case 'every':
+        return `每 ${formatCronInterval(schedule.minutes)} 执行一次`;
+      case 'cron':
+        return `Cron: ${schedule.expr}`;
+    }
+  }
+  return `每 ${formatCronInterval(intervalMinutes)} 执行一次`;
+}
+
 export default function CronTaskStatusBar({
   intervalMinutes,
+  schedule,
   onSettings,
   onCancel
 }: CronTaskStatusBarProps) {
@@ -24,7 +40,7 @@ export default function CronTaskStatusBar({
           定时模式
         </span>
         <span className="text-sm text-[var(--ink-muted)]">
-          每 {formatCronInterval(intervalMinutes)} 执行一次
+          {formatStatusBarSchedule(schedule, intervalMinutes)}
         </span>
       </div>
       <div className="flex items-center gap-1">
