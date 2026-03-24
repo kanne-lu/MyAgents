@@ -1,6 +1,7 @@
 // MyAgents Tauri Application
 // Main entry point with sidecar lifecycle management
 
+pub mod app_dirs;
 pub mod cli;
 mod commands;
 pub mod cron_task;
@@ -227,16 +228,8 @@ pub fn run() {
             commands::cmd_open_file,
         ])
         .setup(|app| {
-            // IMPORTANT: Clean up stale sidecar processes from previous app instances.
-            // This prevents "No available port found" errors caused by orphaned processes.
-            // Placed here (inside .setup()) instead of before Builder so it only runs
-            // for the primary instance. The single-instance plugin exits duplicate
-            // processes before .setup() is called, preventing accidental kills.
-            cleanup_stale_sidecars();
-
-            // Initialize logging for all builds
-            // Debug builds: DEBUG level for verbose output including third-party crates
-            // Production builds: INFO level for important events only
+            // Initialize logging FIRST — acquire_lock() and cleanup_stale_sidecars()
+            // need a logger backend for their log::warn!/info! calls.
             use tauri_plugin_log::{Target, TargetKind};
 
             let log_level = if cfg!(debug_assertions) {
@@ -256,6 +249,20 @@ pub fn run() {
             // Initialize global AppHandle for unified logging (IM module etc.)
             logger::init_app_handle(app.handle().clone());
 
+            // Acquire PID lock — kills any stale instance that macOS auto-restarted
+            // (e.g., after build_dev.sh pkill). Must run before cleanup_stale_sidecars
+            // so we don't kill sidecars belonging to an instance we're about to replace.
+            // The single-instance plugin handles the "user double-clicked" case via IPC;
+            // this lock handles the "build script killed + macOS restarted" case via PID.
+            app_dirs::acquire_lock();
+
+            // IMPORTANT: Clean up stale sidecar processes from previous app instances.
+            // This prevents "No available port found" errors caused by orphaned processes.
+            // Placed here (inside .setup()) instead of before Builder so it only runs
+            // for the primary instance. The single-instance plugin exits duplicate
+            // processes before .setup() is called, preventing accidental kills.
+            cleanup_stale_sidecars();
+
             // Setup system tray
             if let Err(e) = tray::setup_tray(app) {
                 log::error!("[App] Failed to setup system tray: {}", e);
@@ -271,6 +278,7 @@ pub fn run() {
                     im::signal_all_agents_shutdown(&agent_state_for_tray_exit);
                     im::signal_all_bots_shutdown(&im_state_for_tray_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_tray_exit);
+                    app_dirs::release_lock();
                 }
                 app_handle_for_tray.exit(0);
             });
@@ -388,6 +396,7 @@ pub fn run() {
                         im::signal_all_agents_shutdown(&agent_state_for_window);
                         im::signal_all_bots_shutdown(&im_state_for_window);
                         let _ = stop_all_sidecars(&sidecar_state_for_window);
+                        app_dirs::release_lock();
                     }
                 }
                 _ => {}
@@ -408,6 +417,7 @@ pub fn run() {
                     im::signal_all_agents_shutdown(&agent_state_for_exit);
                     im::signal_all_bots_shutdown(&im_state_for_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_exit);
+                    app_dirs::release_lock();
                 }
             }
             // Handle Dock icon click on macOS (Reopen event)

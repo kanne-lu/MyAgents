@@ -50,12 +50,23 @@ if [ "$PKG_VERSION" != "$TAURI_VERSION" ] || [ "$PKG_VERSION" != "$CARGO_VERSION
     fi
 fi
 
-# 杀死残留进程（避免"旧代码"问题）
-# 使用 SIGKILL(-9) 而非默认 SIGTERM：macOS Automatic Termination 会在 SIGTERM 后
-# 自动重启从 Finder/Dock 打开的 .app，导致生产版和 debug 版同时运行互相打架。
+# 杀死残留 MyAgents 实例（避免生产版和 debug 版同时运行互相打架）
+# 优先使用 PID lock file 精确杀——只杀 MyAgents 主进程，不误杀其他 bun 进程。
+# SIGKILL(-9) 防止 macOS Automatic Termination 自动重启被杀的 .app。
 echo -e "${BLUE}[准备] 杀死残留进程...${NC}"
-pkill -9 -f "bun run.*server" 2>/dev/null || true
+LOCK_FILE="$HOME/.myagents/app.lock"
+if [ -f "$LOCK_FILE" ]; then
+    OLD_PID=$(cat "$LOCK_FILE" 2>/dev/null)
+    # Validate PID is a positive integer before using it with kill
+    if [[ "$OLD_PID" =~ ^[1-9][0-9]*$ ]] && kill -0 "$OLD_PID" 2>/dev/null; then
+        echo -e "${YELLOW}  杀死运行中的 MyAgents (PID $OLD_PID)...${NC}"
+        kill -9 "$OLD_PID" 2>/dev/null || true
+    fi
+    rm -f "$LOCK_FILE"
+fi
+# Fallback: 杀死任何漏网的 MyAgents 进程（lock file 可能不存在或 PID 已过期）
 pkill -9 -f "MyAgents.app" 2>/dev/null || true
+pkill -9 -f "bun run.*server" 2>/dev/null || true
 sleep 1  # 等待进程完全退出
 echo -e "${GREEN}✓ 进程已清理${NC}"
 echo ""
