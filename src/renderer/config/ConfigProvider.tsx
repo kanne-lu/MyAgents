@@ -373,7 +373,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             return [project, ...filtered];
         });
         return project;
-    }, []);
+    }, [config.defaultPermissionMode]);
 
     const updateProject = useCallback(async (project: Project) => {
         await updateProjectService(project);

@@ -2080,6 +2080,7 @@ export function resolveClaudeCodeCli(): string {
     const sdkMain = requireModule.resolve('@anthropic-ai/claude-agent-sdk');
     // dirname(sdkMain) gives us the package root — assumes main export is in root dir.
     // This is the standard Node.js ecosystem pattern for exports-locked packages.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { dirname } = require('path') as typeof import('path');
     const sdkDir = dirname(sdkMain);
     const cliPath = join(sdkDir, 'cli.js');
