@@ -506,12 +506,9 @@ async fn shutdown_bot_instance(
     // Wait for auxiliary tasks
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.approval_handle).await;
     if let Some(hb) = instance.heartbeat_handle {
-        // IMPORTANT: abort() the heartbeat task, don't just timeout-wait for it.
-        // The heartbeat may be holding the router lock while blocked in ensure_sidecar
-        // (which can take up to 5 minutes for TCP health checks). If we only timeout-wait,
-        // the task continues running in the background holding the lock, and our later
-        // router.lock().await calls (active_sessions, release_all) deadlock until it finishes.
-        // abort() cancels the task at the next .await point, releasing any held locks.
+        // abort() the heartbeat task to ensure prompt shutdown.
+        // Heartbeat may be blocked in create_sidecar_blocking (Phase 2, up to 5 min)
+        // or in the heartbeat HTTP call itself. abort() cancels at the next .await point.
         hb.abort();
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), hb).await;
     }

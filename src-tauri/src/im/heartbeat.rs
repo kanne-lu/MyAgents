@@ -15,7 +15,7 @@ use crate::sidecar::ManagedSidecarManager;
 use crate::{ulog_info, ulog_warn, ulog_debug};
 
 use super::adapter::ImAdapter;
-use super::router::SessionRouter;
+use super::router::{EnsureSidecarPrep, SessionRouter};
 use super::types::{ActiveHours, HeartbeatConfig, WakeReason};
 use super::{AnyAdapter, PeerLocks};
 
@@ -346,11 +346,10 @@ impl HeartbeatRunner {
         // during the blocking sidecar creation (up to 5 minutes).
         // Phase 1: Check health / extract info (brief lock)
         let prep = {
-            let router_guard = router.lock().await;
+            let mut router_guard = router.lock().await;
             router_guard.prepare_ensure_sidecar(&session_key).await
         };
 
-        use super::router::EnsureSidecarPrep;
         let (port, is_new_sidecar) = match prep {
             EnsureSidecarPrep::Healthy(p) => (p, false),
             EnsureSidecarPrep::NeedCreate(info) => {
@@ -375,14 +374,19 @@ impl HeartbeatRunner {
             }
         };
 
-        // Sync AI config for newly created sidecar (same as user message flow)
+        // Sync AI config for newly created sidecar (same as user message flow).
+        // Use brief lock to get http_client, then release — HTTP calls happen outside the lock.
         if is_new_sidecar {
             let model = self.current_model.read().await.clone();
             let penv = self.current_provider_env.read().await.clone();
             let mcp = self.mcp_servers_json.read().await.clone();
-            router.lock().await
-                .sync_ai_config(port, model.as_deref(), mcp.as_deref(), penv.as_ref())
-                .await;
+            let http_client = {
+                let rg = router.lock().await;
+                rg.http_client().clone()
+            };
+            super::router::SessionRouter::sync_ai_config_with_client(
+                &http_client, port, model.as_deref(), mcp.as_deref(), penv.as_ref(),
+            ).await;
             ulog_info!("[heartbeat] Woke up sidecar for {} on port {}", self.bot_label, port);
         }
 

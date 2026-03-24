@@ -144,10 +144,11 @@ impl SessionRouter {
     /// (caller should sync AI config like model/MCP after creation).
     ///
     /// IMPORTANT: This method holds the router lock for the ENTIRE duration including
-    /// the blocking `ensure_session_sidecar` call (up to 5 minutes). Use `ensure_sidecar_split`
-    /// when the caller can release the lock between phases (e.g., heartbeat, background tasks).
-    /// This legacy method is kept for callers that need atomic read-create-write under one lock
-    /// (e.g., the message processing loop where per-peer locks already serialize access).
+    /// the blocking `ensure_session_sidecar` call (up to 5 minutes). For callers that can
+    /// release the lock between phases, use the 3-phase split instead:
+    /// `prepare_ensure_sidecar` → `create_sidecar_blocking` → `commit_ensure_sidecar`.
+    /// This single-lock method is kept for the message processing loop where per-peer locks
+    /// already serialize same-peer access.
     pub async fn ensure_sidecar<R: Runtime>(
         &mut self,
         session_key: &str,
@@ -176,8 +177,10 @@ impl SessionRouter {
     // ---- Split ensure_sidecar into 3 phases for lock-free blocking ----
 
     /// Phase 1: Check if sidecar is healthy, or extract info needed to create one.
+    /// If unhealthy, zeros `sidecar_port` to prevent idle-collector from killing
+    /// the sidecar that Phase 2 will create (TOCTOU guard).
     /// Holds the lock briefly (health check ~4.5s worst case).
-    pub async fn prepare_ensure_sidecar(&self, session_key: &str) -> EnsureSidecarPrep {
+    pub async fn prepare_ensure_sidecar(&mut self, session_key: &str) -> EnsureSidecarPrep {
         // Check existing peer session
         if let Some(ps) = self.peer_sessions.get(session_key) {
             if ps.sidecar_port > 0 {
@@ -190,6 +193,12 @@ impl SessionRouter {
                     session_key
                 );
             }
+        }
+        // Zero the port BEFORE releasing the lock. This prevents idle-collector
+        // from calling release_session_sidecar on a sidecar that Phase 2 is about
+        // to create (idle-collector skips entries with port=0).
+        if let Some(ps) = self.peer_sessions.get_mut(session_key) {
+            ps.sidecar_port = 0;
         }
 
         let prev_count = self
@@ -640,6 +649,45 @@ impl SessionRouter {
             if let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(mcp_json) {
                 let url = format!("http://127.0.0.1:{}/api/mcp/set", port);
                 match self.http_client.post(&url).json(&json!({ "servers": servers })).send().await {
+                    Ok(_) => ulog_info!("[im-router] Synced {} MCP server(s) to port {}", servers.len(), port),
+                    Err(e) => ulog_warn!("[im-router] Failed to sync MCP to port {}: {}", port, e),
+                }
+            }
+        }
+    }
+
+    /// Get a reference to the HTTP client (for callers that need to sync config outside the lock).
+    pub fn http_client(&self) -> &Client {
+        &self.http_client
+    }
+
+    /// Static version of sync_ai_config — takes an explicit HTTP client instead of &self.
+    /// Used by heartbeat to sync config WITHOUT holding the router lock.
+    pub async fn sync_ai_config_with_client(
+        client: &Client,
+        port: u16,
+        model: Option<&str>,
+        mcp_servers_json: Option<&str>,
+        provider_env: Option<&serde_json::Value>,
+    ) {
+        if let Some(penv) = provider_env {
+            let url = format!("http://127.0.0.1:{}/api/provider/set", port);
+            match client.post(&url).json(&json!({ "providerEnv": penv })).send().await {
+                Ok(_) => ulog_info!("[im-router] Synced provider env to port {}", port),
+                Err(e) => ulog_warn!("[im-router] Failed to sync provider env to port {}: {}", port, e),
+            }
+        }
+        if let Some(model_id) = model {
+            let url = format!("http://127.0.0.1:{}/api/model/set", port);
+            match client.post(&url).json(&json!({ "model": model_id })).send().await {
+                Ok(_) => ulog_info!("[im-router] Synced model {} to port {}", model_id, port),
+                Err(e) => ulog_warn!("[im-router] Failed to sync model to port {}: {}", port, e),
+            }
+        }
+        if let Some(mcp_json) = mcp_servers_json {
+            if let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(mcp_json) {
+                let url = format!("http://127.0.0.1:{}/api/mcp/set", port);
+                match client.post(&url).json(&json!({ "servers": servers })).send().await {
                     Ok(_) => ulog_info!("[im-router] Synced {} MCP server(s) to port {}", servers.len(), port),
                     Err(e) => ulog_warn!("[im-router] Failed to sync MCP to port {}: {}", port, e),
                 }
