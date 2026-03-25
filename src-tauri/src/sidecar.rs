@@ -1660,12 +1660,14 @@ pub fn start_tab_sidecar<R: Runtime>(
         let tab_id_clone = tab_id.to_string();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
+            let mut bun_logger_active = false;
             for line in reader.lines().flatten() {
-                // Skip noise already written by Bun's unified logger
-                if line.starts_with("[sse] ") || line.starts_with("[http] ") {
-                    continue;
+                if !bun_logger_active {
+                    if line.contains("[Logger] Unified logging initialized") {
+                        bun_logger_active = true;
+                    }
+                    ulog_info!("[bun-out][{}] {}", tab_id_clone, line);
                 }
-                ulog_info!("[bun-out][{}] {}", tab_id_clone, line);
             }
         });
     }
@@ -2407,15 +2409,19 @@ fn create_new_session_sidecar<R: Runtime>(
         let session_id_for_log = session_id_clone.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
+            let mut bun_logger_active = false;
             for line in reader.lines().flatten() {
-                // Skip noise that Bun's unified logger already writes directly:
-                // [sse] streaming events, [http] routing, [agent][sdk] message summaries.
-                // Bun writes these to the unified log file via its own logger interceptor;
-                // capturing them again from stdout causes double-write.
-                if line.starts_with("[sse] ") || line.starts_with("[http] ") {
-                    continue;
+                // Once Bun's unified logger is initialized, ALL console.log output is
+                // written directly to the unified log file by Bun's logger interceptor.
+                // Capturing stdout after this point causes 100% duplication ([BUN] + [bun-out]).
+                // Only pre-logger startup lines need to go through bun-out.
+                if !bun_logger_active {
+                    if line.contains("[Logger] Unified logging initialized") {
+                        bun_logger_active = true;
+                    }
+                    ulog_info!("[bun-out][session:{}] {}", session_id_for_log, line);
                 }
-                ulog_info!("[bun-out][session:{}] {}", session_id_for_log, line);
+                // After logger init: silently drop stdout (Bun logger handles it)
             }
         });
     }
