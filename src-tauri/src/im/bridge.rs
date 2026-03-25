@@ -1173,7 +1173,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     // --- Try system npm first (user-maintained, most reliable) ---
     let mut npm_succeeded = false;
 
-    if let Ok(system_npm) = which::which("npm") {
+    if let Some(system_npm) = crate::system_binary::find("npm") {
         ulog_info!("[bridge] Using system npm: {:?}", system_npm);
         let sys_npm = system_npm;
         let base_for_sys = base_dir.clone();

@@ -11,6 +11,7 @@ pub mod logger;
 pub mod management_api;
 pub mod process_cmd;
 mod proxy_config;
+pub mod system_binary;
 mod sidecar;
 mod sse_proxy;
 mod tray;
