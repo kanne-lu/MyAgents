@@ -846,28 +846,6 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .map(|v| v.to_string())
         .unwrap_or_else(|| "{}".to_string());
 
-    // ── Shim integrity check ──
-    // If node_modules/openclaw/ exists but is the real npm package (not our shim),
-    // the bridge will crash with "Cannot find module 'openclaw/plugin-sdk/...'".
-    // This happens when a previous install's npm/bun overwrote the shim.
-    // Auto-repair by re-copying the shim before spawning.
-    {
-        let openclaw_pkg = std::path::Path::new(plugin_dir)
-            .join("node_modules").join("openclaw").join("package.json");
-        let needs_repair = if openclaw_pkg.exists() {
-            // Check if it's our shim (name="openclaw", version contains "shim")
-            std::fs::read_to_string(&openclaw_pkg)
-                .map(|s| !s.contains("-shim"))
-                .unwrap_or(true)
-        } else {
-            true // Missing entirely
-        };
-        if needs_repair {
-            ulog_warn!("[bridge] Shim integrity check failed for {}, re-installing", plugin_dir);
-            let _ = install_sdk_shim(app_handle, &std::path::PathBuf::from(plugin_dir)).await;
-        }
-    }
-
     ulog_info!(
         "[bridge] Spawning bridge: bun={:?} script={:?} plugin_dir={} port={} rust_port={}",
         bun_path, bridge_script, plugin_dir, port, rust_port
