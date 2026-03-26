@@ -2352,6 +2352,10 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // that survives session restarts, supports IM delivery, and uses wall-clock scheduling.
   // The SDK's cron is session-scoped/in-memory, would conflict and confuse users.
   env.CLAUDE_CODE_DISABLE_CRON = '1';
+  // SDK 0.2.83+: Emit session_state_changed events (idle/running/requires_action).
+  // Currently used for diagnostic logging only (parallel data collection).
+  // Future: may replace self-built sessionState tracking for more accurate turn boundary detection.
+  env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = '1';
   // DO NOT set CLAUDE_CONFIG_DIR here — it would change the Keychain service name
   // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
   // into project .claude/skills/ by syncProjectUserConfig() instead.
@@ -2399,9 +2403,18 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // Hoisted above the OpenAI early return so both protocol paths benefit.
   const aliases = effectiveProviderEnv?.modelAliases;
   if (aliases) {
-    if (aliases.sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = aliases.sonnet;
-    if (aliases.opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = aliases.opus;
-    if (aliases.haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = aliases.haiku;
+    if (aliases.sonnet) {
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = aliases.sonnet;
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = aliases.sonnet; // SDK 0.2.84: display name in supportedModels()
+    }
+    if (aliases.opus) {
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = aliases.opus;
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = aliases.opus;
+    }
+    if (aliases.haiku) {
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = aliases.haiku;
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = aliases.haiku;
+    }
     console.log(`[env] Model aliases set: sonnet=${aliases.sonnet ?? '(none)'}, opus=${aliases.opus ?? '(none)'}, haiku=${aliases.haiku ?? '(none)'}`);
   }
 
@@ -5061,6 +5074,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           prePlanPermissionMode = null;
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
         }
+      }
+
+      // SDK 0.2.83+: session_state_changed — authoritative turn boundary signal.
+      // Currently logged for diagnostic comparison with self-built sessionState.
+      if (sdkMessage.type === 'system' && (sdkMessage as { subtype?: string }).subtype === 'session_state_changed') {
+        const state = (sdkMessage as { state?: string }).state;
+        console.log(`[agent] SDK session_state_changed: ${state} (our sessionState: ${sessionState})`);
       }
 
       // Handle background task lifecycle (SDK Task tool with run_in_background)
