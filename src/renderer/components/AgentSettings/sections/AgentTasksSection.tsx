@@ -1,7 +1,7 @@
 // Agent tasks section — display cron tasks associated with this agent, clickable to open detail
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { AgentConfig } from '../../../../shared/types/agent';
-import { getAllCronTasks, deleteCronTask, startCronTask, stopCronTask, startCronScheduler } from '@/api/cronTaskClient';
+import { getWorkspaceCronTasks, deleteCronTask, startCronTask, stopCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { getCronStatusText, formatScheduleDescription } from '@/types/cronTask';
 import { useToast } from '@/components/Toast';
@@ -43,15 +43,13 @@ export default function AgentTasksSection({ agent }: AgentTasksSectionProps) {
 
   const loadTasks = useCallback(async () => {
     try {
-      const all = await getAllCronTasks();
+      const tasks = await getWorkspaceCronTasks(agent.workspacePath);
       if (!isMountedRef.current) return;
-      // Filter tasks by agent's channel IDs (sourceBotId matches channel ID)
-      const channelIds = new Set((agent.channels ?? []).map(ch => ch.id));
-      setTasks(all.filter(t => t.sourceBotId && channelIds.has(t.sourceBotId)));
+      setTasks(tasks);
     } catch {
       // Silent — tasks are optional
     }
-  }, [agent.channels]);
+  }, [agent.workspacePath]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- loadTasks fetches from external API then sets state, which is the correct pattern for effects
