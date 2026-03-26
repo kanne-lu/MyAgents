@@ -2525,6 +2525,10 @@ struct GroupStreamContext {
     tools_deny: Vec<String>,
 }
 
+/// Placeholder message sent when the AI's first response block is non-text (thinking/tool_use).
+/// Gives users immediate feedback that the AI is processing their message.
+const THINKING_PLACEHOLDER: &str = "思考中…";
+
 /// Each text block → independent IM message (streamed draft edits).
 /// Returns sessionId on success.
 async fn stream_to_im<A: adapter::ImStreamAdapter>(
@@ -2670,7 +2674,8 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     let mut any_text_sent = false;
 
     // Response-level placeholder state:
-    // - placeholder_id: message ID of "🤖 生成中..." sent when first block is non-text
+    // - placeholder_id: message ID of "思考中…" sent when first block is non-text
+    //   (kept for cleanup on error/silent/no-response; NOT adopted as draft)
     // - first_content_sent: true once user has seen any content (placeholder or real text)
     let mut placeholder_id: Option<String> = None;
     let mut first_content_sent = false;
@@ -2706,32 +2711,23 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                     if let Some(text) = json_val["text"].as_str() {
                         block_text = text.to_string();
 
-                        // First meaningful text in this block → create or adopt draft
-                        // Skip whitespace-only blocks (API spacer blocks before thinking)
-                        // Accumulate until sentence boundary or min length for meaningful first send
+                        // First meaningful text in this block → create a new draft message.
+                        // Skip whitespace-only blocks (API spacer blocks before thinking).
+                        // Accumulate until sentence boundary or min length for meaningful first send.
                         //
                         // When !supports_edit (e.g., WeChat), skip draft creation and edit calls
                         // entirely. Text accumulates in block_text and finalize_block sends it
                         // once at block-end — no fragment, no wasted 501 roundtrips.
                         if adapter.supports_edit() && draft_id.is_none() && !block_text.trim().is_empty() && has_sentence_boundary(&block_text) {
-                            if let Some(pid) = placeholder_id.take() {
-                                // Adopt the placeholder as draft → edit with real content
-                                draft_id = Some(pid);
-                                let display = format_draft_text(&block_text, adapter.max_message_length());
-                                if let Err(e) = adapter.edit_message(chat_id, draft_id.as_ref().unwrap(), &display).await {
-                                    ulog_warn!("[im] Placeholder→draft edit failed: {}", e);
+                            // Send real content as a new draft message.
+                            // Placeholder (if any) stays as a separate "思考中…" message.
+                            let display = format_draft_text(&block_text, adapter.max_message_length());
+                            match adapter.send_message_returning_id(chat_id, &display).await {
+                                Ok(Some(id)) => {
+                                    draft_id = Some(id);
+                                    last_edit = Instant::now();
                                 }
-                                last_edit = Instant::now();
-                            } else {
-                                // No placeholder — send real content directly as draft
-                                let display = format_draft_text(&block_text, adapter.max_message_length());
-                                match adapter.send_message_returning_id(chat_id, &display).await {
-                                    Ok(Some(id)) => {
-                                        draft_id = Some(id);
-                                        last_edit = Instant::now();
-                                    }
-                                    _ => {} // draft creation failed; block-end will send_message directly
-                                }
+                                _ => {} // draft creation failed; block-end will send_message directly
                             }
                             first_content_sent = true;
                         }
@@ -2754,13 +2750,23 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
                 }
                 "activity" => {
                     // Non-text block started (thinking, tool_use).
-                    // If user hasn't seen any content yet, send a placeholder.
+                    // If user hasn't seen any content yet, send a "thinking" placeholder
+                    // as a NEW message (not adopted as draft later). This ensures
+                    // immediate feedback even on platforms without edit support.
                     if !first_content_sent {
-                        match adapter.send_message_returning_id(chat_id, "🤖 生成中...").await {
+                        match adapter.send_message_returning_id(chat_id, THINKING_PLACEHOLDER).await {
                             Ok(Some(id)) => {
                                 placeholder_id = Some(id);
                             }
-                            _ => {} // placeholder failed; text blocks will create their own message
+                            Ok(None) => {
+                                // Adapter skipped send (e.g. DingTalk non-card) → force via send_message
+                                if let Err(e) = adapter.send_message(chat_id, THINKING_PLACEHOLDER).await {
+                                    ulog_warn!("[im-stream] send_message (thinking placeholder) failed: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                ulog_warn!("[im-stream] send_message_returning_id (thinking placeholder) failed: {}", e);
+                            }
                         }
                         first_content_sent = true;
                     }
@@ -2947,6 +2953,9 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
     let mut block_text = String::new();
     let mut sequence: u32 = 0;
     let mut any_text_sent = false;
+    let mut first_content_sent = false;
+    // Placeholder message ID for cleanup on silent/error/no-response (mirrors stream_to_im)
+    let mut placeholder_id: Option<String> = None;
     let mut session_id: Option<String> = None;
 
     while let Some(chunk_result) = byte_stream.next().await {
@@ -2984,6 +2993,7 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                                     stream_id = Some(sid);
                                     sequence = 1;
                                     any_text_sent = true;
+                                    first_content_sent = true;
                                 }
                                 Ok(_) => {
                                     ulog_warn!("[im-stream] start_stream returned empty stream_id");
@@ -3003,12 +3013,30 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                 }
                 "activity" => {
                     // Non-text block (thinking, tool_use).
-                    // If we have an active stream, send a thinking indicator.
                     if let Some(ref sid) = stream_id {
+                        // Stream already active → send thinking indicator within stream
                         sequence += 1;
                         if let Err(e) = adapter.stream_chunk(chat_id, sid, "", sequence, true).await {
                             ulog_warn!("[im-stream] stream_chunk (activity indicator) failed: {}", e);
                         }
+                    } else if !first_content_sent {
+                        // No stream yet and user hasn't seen any content →
+                        // send placeholder as a standalone message for immediate feedback.
+                        // Track ID for cleanup on silent/error/no-response.
+                        match adapter.send_message_returning_id(chat_id, THINKING_PLACEHOLDER).await {
+                            Ok(Some(id)) => {
+                                placeholder_id = Some(id);
+                            }
+                            Ok(None) => {
+                                if let Err(e) = adapter.send_message(chat_id, THINKING_PLACEHOLDER).await {
+                                    ulog_warn!("[im-stream] send_message (streaming thinking placeholder) failed: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                ulog_warn!("[im-stream] send_message_returning_id (streaming thinking placeholder) failed: {}", e);
+                            }
+                        }
+                        first_content_sent = true;
                     }
                 }
                 "block-end" => {
@@ -3054,6 +3082,11 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                                 ulog_warn!("[im-stream] abort_stream (silent) failed: {}", e);
                             }
                         }
+                        if let Some(ref pid) = placeholder_id {
+                            if let Err(e) = adapter.delete_message(chat_id, pid).await {
+                                ulog_warn!("[im-stream] delete_message (streaming silent placeholder) failed: {}", e);
+                            }
+                        }
                         return Ok(session_id);
                     }
 
@@ -3077,8 +3110,18 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                     }
 
                     if !any_text_sent {
-                        if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                            ulog_warn!("[im-stream] send_message (streaming no response) failed: {}", e);
+                        // Edit placeholder in-place if possible, otherwise delete + send
+                        if let Some(ref pid) = placeholder_id {
+                            if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
+                                let _ = adapter.delete_message(chat_id, pid).await;
+                                if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                                    ulog_warn!("[im-stream] send_message (streaming no response fallback) failed: {}", e);
+                                }
+                            }
+                        } else {
+                            if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                                ulog_warn!("[im-stream] send_message (streaming no response) failed: {}", e);
+                            }
                         }
                     }
                     return Ok(session_id);
@@ -3122,6 +3165,11 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
                             ulog_warn!("[im-stream] abort_stream (error) failed: {}", e);
                         }
                     }
+                    if let Some(ref pid) = placeholder_id {
+                        if let Err(e) = adapter.delete_message(chat_id, pid).await {
+                            ulog_warn!("[im-stream] delete_message (streaming error placeholder) failed: {}", e);
+                        }
+                    }
                     return Err(RouteError::Response(500, error.to_string()));
                 }
                 _ => {}
@@ -3148,8 +3196,17 @@ async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
         }
     }
     if !any_text_sent {
-        if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-            ulog_warn!("[im-stream] send_message (streaming disconnect no response) failed: {}", e);
+        if let Some(ref pid) = placeholder_id {
+            if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
+                let _ = adapter.delete_message(chat_id, pid).await;
+                if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                    ulog_warn!("[im-stream] send_message (streaming disconnect no response fallback) failed: {}", e);
+                }
+            }
+        } else {
+            if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
+                ulog_warn!("[im-stream] send_message (streaming disconnect no response) failed: {}", e);
+            }
         }
     }
     Ok(session_id)
