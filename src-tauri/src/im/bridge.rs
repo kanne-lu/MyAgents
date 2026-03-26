@@ -1317,24 +1317,22 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         ulog_info!("[bridge] Bun fallback install {} succeeded", npm_spec);
     }
 
-    // Install plugin-sdk shim (copies from bundled resource files)
-    install_sdk_shim(app_handle, &base_dir).await?;
-
-    // Post-shim dependency repair: the shim replaces node_modules/openclaw/ which may
-    // break the dependency tree (e.g., Bun's hardlink structure on Windows). Run a quick
-    // `npm install` to ensure transitive dependencies like `zod` are intact.
-    // CRITICAL: --omit=peer prevents npm from reinstalling the real `openclaw` package
-    // (which is a peer dep of the plugin) and overwriting the shim we just installed.
+    // Dependency repair + shim install (order matters: repair FIRST, shim LAST).
+    //
+    // The shim replaces node_modules/openclaw/ with our custom exports. But npm/bun
+    // may overwrite it during dependency resolution (lockfile reconciliation, peer dep
+    // auto-install). To guarantee the shim survives:
+    //   1. Run `npm install --ignore-scripts` to fix transitive deps (e.g., zod)
+    //   2. THEN install shim as the FINAL step (last-write-wins)
     {
         let repair_dir = base_dir.clone();
-        let repaired = if let Some((node_path, npm_cli)) = find_bundled_node_npm(app_handle) {
+        if let Some((node_path, npm_cli)) = find_bundled_node_npm(app_handle) {
             let node_dir = node_path.parent().map(|p| p.to_path_buf());
             match tokio::task::spawn_blocking(move || {
                 let mut cmd = crate::process_cmd::new(&node_path);
-                cmd.args([npm_cli.to_str().unwrap_or(""), "install", "--ignore-scripts", "--omit=peer"])
+                cmd.args([npm_cli.to_str().unwrap_or(""), "install", "--ignore-scripts"])
                     .current_dir(&repair_dir)
                     .env("NODE_OPTIONS", "--no-experimental-require-module");
-                // Ensure node is in PATH for npm to find it
                 if let Some(ref nd) = node_dir {
                     if let Some(path) = std::env::var_os("PATH") {
                         let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
@@ -1346,42 +1344,39 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
                 cmd.output()
             }).await {
                 Ok(Ok(output)) if output.status.success() => {
-                    ulog_info!("[bridge] Post-shim dependency repair succeeded");
-                    true
+                    ulog_info!("[bridge] Dependency repair succeeded");
                 }
                 Ok(Ok(output)) => {
-                    ulog_warn!("[bridge] Post-shim repair failed (exit {}): {}",
+                    ulog_warn!("[bridge] Dependency repair failed (exit {}): {}",
                         output.status, String::from_utf8_lossy(&output.stderr).trim());
-                    false
                 }
-                _ => { ulog_warn!("[bridge] Post-shim repair: spawn failed"); false }
+                _ => { ulog_warn!("[bridge] Dependency repair: spawn failed"); }
             }
         } else {
-            false
-        };
-        // Bun fallback: `bun install` has no --omit=peer, so it would reinstall openclaw
-        // over the shim. Instead, re-copy the shim after bun install to ensure it survives.
-        if !repaired {
+            // Bun fallback
             use crate::sidecar::find_bun_executable_pub;
             if let Some(bun_path) = find_bun_executable_pub(app_handle) {
                 let bun_repair_dir = base_dir.clone();
-                let bun_result = tokio::task::spawn_blocking(move || {
+                match tokio::task::spawn_blocking(move || {
                     let mut cmd = crate::process_cmd::new(&bun_path);
-                    cmd.args(["install"])
+                    cmd.args(["install", "--ignore-scripts"])
                         .current_dir(&bun_repair_dir);
                     apply_proxy_env(&mut cmd);
                     cmd.output()
-                }).await;
-                if matches!(&bun_result, Ok(Ok(o)) if o.status.success()) {
-                    ulog_info!("[bridge] Post-shim repair (bun) succeeded, re-applying shim");
-                    // Re-copy shim after bun install (bun may have overwritten openclaw)
-                    let _ = install_sdk_shim(app_handle, &base_dir).await;
-                } else {
-                    ulog_warn!("[bridge] Post-shim repair (bun) failed");
+                }).await {
+                    Ok(Ok(output)) if output.status.success() => {
+                        ulog_info!("[bridge] Dependency repair (bun) succeeded");
+                    }
+                    _ => { ulog_warn!("[bridge] Dependency repair (bun) failed"); }
                 }
             }
         }
     }
+
+    // Install plugin-sdk shim as the FINAL step (after dependency repair).
+    // This MUST be last — npm/bun install above may overwrite node_modules/openclaw/
+    // with the real package from the registry. Our shim must always win.
+    install_sdk_shim(app_handle, &base_dir).await?;
 
     // Try to read plugin manifest
     let manifest = read_plugin_manifest(&base_dir, trimmed).await;
