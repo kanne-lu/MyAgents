@@ -1245,7 +1245,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (!rewindTarget) return;
     const { messageId, content, attachments } = rewindTarget;
 
-    // 1. 立即关闭对话框 + 乐观更新 UI
+    // 快照：保存当前 messages 以便后端失败时回滚
+    const snapshot = messagesRef.current.slice();
+
+    // 1. 乐观更新 UI（瞬时反馈）
     // Pause auto-scroll to prevent animated scrolling during rewind's DOM changes.
     // Without this, the smooth scroll animation fights with the browser's natural
     // scroll clamping (messages removed → scrollHeight shrinks → scrollTop adjusts).
@@ -1270,7 +1273,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       chatInputRef.current?.setImages(restoredImages);
     }
 
-    // 2. 显示固定 loading 文案（后端 rewindPromise 会阻塞 enqueueUserMessage 防止竞态）
+    // 2. 后端回溯（rewindPromise 会阻塞 enqueueUserMessage 防止竞态）
+    //    成功：丢弃快照；失败：从快照回滚 UI
     track('session_rewind', {});
     setIsLoading(true);
     setRewindStatus('rewinding');
@@ -1278,12 +1282,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       .then(res => {
         const r = res as { success?: boolean; error?: string } | undefined;
         if (r && !r.success) {
+          // 后端明确返回失败 → 回滚 UI
+          setMessages(snapshot);
+          chatInputRef.current?.setValue('');
+          chatInputRef.current?.setImages([]);
           toastRef.current.error('时间回溯失败：' + (r.error || '未知错误'));
         }
       })
       .catch(err => {
+        // 网络错误或异常 → 回滚 UI
         console.error('[Chat] Rewind failed:', err);
-        toastRef.current.error('文件回溯失败，对话记录已回退但文件状态可能未还原');
+        setMessages(snapshot);
+        chatInputRef.current?.setValue('');
+        chatInputRef.current?.setImages([]);
+        toastRef.current.error('时间回溯失败，请重试');
       })
       .finally(() => {
         setRewindStatus(null);
@@ -1309,6 +1321,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const attachments = userMsg.attachments;
     const userMessageId = userMsg.id;
 
+    // 快照：后端失败时回滚（与 handleRewindConfirm 一致）
+    const snapshot = messagesRef.current.slice();
+
     // 1. Optimistic UI: truncate to before user message
     pauseAutoScroll(500);
     setMessages(prev => {
@@ -1324,6 +1339,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       .then(res => {
         const r = res as { success?: boolean; error?: string } | undefined;
         if (r && !r.success) {
+          setMessages(snapshot);
           toastRef.current.error('重试失败：' + (r.error || '未知错误'));
           return;
         }
@@ -1341,6 +1357,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       })
       .catch(err => {
         console.error('[Chat] Retry failed:', err);
+        setMessages(snapshot);
         toastRef.current.error('重试失败');
       })
       .finally(() => {

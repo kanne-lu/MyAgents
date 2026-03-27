@@ -4406,11 +4406,10 @@ export async function rewindSession(userMessageId: string): Promise<{
     if (targetIndex < 0) return { success: false as const, error: 'Message not found' };
     const targetMessage = messages[targetIndex];
 
-    // 2. 找到目标前的最后一个 assistant UUID
-    //    持久 session 模式下，user 消息不会通过 SDK stdout 回传（无 resume 重放），
-    //    因此 user 消息没有 sdkUuid。使用前一个 assistant 的 UUID 替代：
-    //    - rewindFiles(assistantUuid) → 回退该 assistant 之后的文件变更
-    //    - pendingResumeSessionAt = assistantUuid → 下次 resume 从该 assistant 截断
+    // 2. 两个 UUID 分离：
+    //    - lastAssistantUuid → 用于 resumeSessionAt（截断 SDK 会话历史到目标前的 assistant）
+    //    - targetMessage.sdkUuid → 用于 rewindFiles（文件检查点按 user message 打点）
+    //    SDK 文档：rewindFiles(userMessageUuid) — 检查点关联用户消息，非 assistant 消息
     let lastAssistantUuid: string | undefined;
     for (let i = targetIndex - 1; i >= 0; i--) {
       if (messages[i].role === 'assistant' && messages[i].sdkUuid) {
@@ -4419,14 +4418,16 @@ export async function rewindSession(userMessageId: string): Promise<{
       }
     }
 
-    // 3. 在活跃 session 上直接执行 rewindFiles（subprocess 存活，即时调用！）
+    // 3. 在活跃 session 上执行 rewindFiles（文件检查点关联 user message UUID）
     //    跳过已被 force-abort 的 session：subprocess 正在死亡，发 IPC 会阻塞到超时（~100s）。
     //    跳过不属于当前 session 的 UUID：SDK 不认识，调用必定失败且日志噪声。
-    if (querySession && lastAssistantUuid && !shouldAbortSession && currentSessionUuids.has(lastAssistantUuid)) {
+    //    跳过无 sdkUuid 的用户消息：旧存储加载或 SDK 尚未回传 UUID。
+    const targetUserUuid = targetMessage.sdkUuid;
+    if (querySession && targetUserUuid && !shouldAbortSession && currentSessionUuids.has(targetUserUuid)) {
       try {
         const REWIND_FILES_TIMEOUT_MS = 5_000;
         const result = await Promise.race([
-          querySession.rewindFiles(lastAssistantUuid),
+          querySession.rewindFiles(targetUserUuid),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error('rewindFiles timeout')), REWIND_FILES_TIMEOUT_MS)
           ),
@@ -4439,6 +4440,8 @@ export async function rewindSession(userMessageId: string): Promise<{
         console.error('[agent] rewindFiles error:', err);
         // 文件回溯失败不阻断消息截断
       }
+    } else if (!targetUserUuid) {
+      console.log('[agent] rewind: target user message has no sdkUuid, skipping rewindFiles');
     }
 
     // 4. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
