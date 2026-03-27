@@ -264,12 +264,13 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 
 ## Pit-of-Success 模块
 
-这三个 Rust 模块构成"正确路径默认化"三驾马车，消除常见陷阱：
+这四个 Rust 模块构成"正确路径默认化"四驾马车，消除常见陷阱：
 
 | 模块 | 用途 | 防止的问题 |
 |------|------|-----------|
 | `local_http` (`src-tauri/src/local_http.rs`) | 所有连接 localhost 的 reqwest 客户端 | 系统代理拦截 localhost → 502 |
 | `process_cmd` (`src-tauri/src/process_cmd.rs`) | 所有 Rust 层子进程创建 | Windows GUI 弹黑色控制台窗口 |
+| `proxy_config` (`src-tauri/src/proxy_config.rs`) | 子进程代理环境变量注入 | Bun `fetch()` 读取继承的 HTTP_PROXY → localhost 通信被代理拦截 |
 | `system_binary` (`src-tauri/src/system_binary.rs`) | 系统工具查找（pgrep/taskkill 等） | Tauri GUI 从 Finder 启动不继承 shell PATH |
 
 ## 资源管理
@@ -374,6 +375,7 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 | 文档 | 内容 |
 |------|------|
 | [IM 集成技术架构](./im_integration_architecture.md) | Agent/Channel 详细设计、适配器模型 |
+| [Plugin Bridge 架构](./plugin_bridge_architecture.md) | OpenClaw 插件加载、SDK shim、消息流转、QR 登录 |
 | [Session ID 架构](./session_id_architecture.md) | Session 生命周期、ID 格式 |
 | [React 稳定性规范](./react_stability_rules.md) | Context/useEffect/memo 等 5 条规则 |
 | [代理配置](./proxy_config.md) | 系统代理 + SOCKS5 桥接 |

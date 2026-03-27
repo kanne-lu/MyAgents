@@ -1573,52 +1573,8 @@ pub fn start_tab_sidecar<R: Runtime>(
         log::info!("[sidecar] Working directory set to: {:?}", script_dir);
     }
 
-    // Inject proxy environment variables if configured
-    if let Some(proxy_settings) = proxy_config::read_proxy_settings() {
-        match proxy_config::get_proxy_url(&proxy_settings) {
-            Ok(proxy_url) => {
-                log::info!("[sidecar] Injecting proxy for Claude Agent SDK: {}", proxy_url);
-                cmd.env("HTTP_PROXY", &proxy_url);
-                cmd.env("HTTPS_PROXY", &proxy_url);
-                cmd.env("http_proxy", &proxy_url);
-                cmd.env("https_proxy", &proxy_url);
-                // Ensure localhost traffic doesn't go through proxy
-                // Comprehensive NO_PROXY list for maximum compatibility
-                cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-                cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-            }
-            Err(e) => {
-                // Invalid proxy configuration (bad protocol, port, etc.)
-                // Log as error since user explicitly enabled proxy but config is invalid
-                log::error!(
-                    "[sidecar] Invalid proxy configuration: {}. \
-                     Please check Settings > General > Network Proxy. \
-                     Sidecar will start without proxy.",
-                    e
-                );
-                // Still strip inherited system proxy env vars to prevent leaking
-                for var in &[
-                    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                    "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
-                ] {
-                    cmd.env_remove(var);
-                }
-            }
-        }
-    } else {
-        // No MyAgents proxy configured: actively strip inherited system proxy env vars.
-        // This matches Rust-side build_client_with_proxy() which calls .no_proxy().
-        // Without this, proxy tools (Clash/V2Ray) leak HTTP_PROXY into the sidecar,
-        // causing SDK to unconditionally route ALL requests through the proxy — even
-        // domestic API calls that don't need it — resulting in timeouts.
-        log::debug!("[sidecar] No proxy configured, stripping inherited proxy env vars");
-        for var in &[
-            "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-            "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
-        ] {
-            cmd.env_remove(var);
-        }
-    }
+    // Apply proxy policy: user proxy / inherit system / protect localhost (pit-of-success)
+    proxy_config::apply_to_subprocess(&mut cmd);
 
     // Inject management API port for Bun→Rust IPC (v0.1.21)
     let mgmt_port = crate::management_api::get_management_port();
@@ -2344,39 +2300,8 @@ fn create_new_session_sidecar<R: Runtime>(
         cmd.current_dir(script_dir);
     }
 
-    // Inject proxy environment variables if configured
-    if let Some(proxy_settings) = proxy_config::read_proxy_settings() {
-        match proxy_config::get_proxy_url(&proxy_settings) {
-            Ok(proxy_url) => {
-                log::info!("[sidecar] Injecting proxy for Claude Agent SDK: {}", proxy_url);
-                cmd.env("HTTP_PROXY", &proxy_url);
-                cmd.env("HTTPS_PROXY", &proxy_url);
-                cmd.env("http_proxy", &proxy_url);
-                cmd.env("https_proxy", &proxy_url);
-                cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-                cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-            }
-            Err(e) => {
-                log::error!("[sidecar] Invalid proxy configuration: {}", e);
-                // Still strip inherited system proxy env vars to prevent leaking
-                for var in &[
-                    "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                    "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
-                ] {
-                    cmd.env_remove(var);
-                }
-            }
-        }
-    } else {
-        // Same as normal sidecar: strip inherited system proxy env vars
-        log::debug!("[sidecar] No proxy configured for IM bot, stripping inherited proxy env vars");
-        for var in &[
-            "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-            "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
-        ] {
-            cmd.env_remove(var);
-        }
-    }
+    // Apply proxy policy: user proxy / inherit system / protect localhost (pit-of-success)
+    proxy_config::apply_to_subprocess(&mut cmd);
 
     // Inject management API port for Bun→Rust IPC (v0.1.21)
     let mgmt_port = crate::management_api::get_management_port();

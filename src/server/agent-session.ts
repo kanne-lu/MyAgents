@@ -35,6 +35,24 @@ const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'devel
 // Shared NO_PROXY value — comprehensive list of localhost addresses to bypass proxy
 const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
 
+// ===== Inherited Proxy Env Snapshot =====
+// Capture system proxy state at sidecar startup (before any setProxyConfig call).
+// When Rust spawns this sidecar WITHOUT explicit proxy config, the process inherits
+// system proxy env vars (e.g., from Clash TUN/global proxy). We snapshot them so
+// setProxyConfig(disabled) can restore the inherited state instead of force-clearing.
+const PROXY_VARS_LIST = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+                         'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'] as const;
+const proxyWasInjectedByRust = process.env.MYAGENTS_PROXY_INJECTED === '1';
+delete process.env.MYAGENTS_PROXY_INJECTED; // Don't leak to SDK subprocess
+
+// Only capture system state when NOT explicitly injected by Rust
+const inheritedProxySnapshot: Record<string, string | undefined> = {};
+if (!proxyWasInjectedByRust) {
+  for (const v of PROXY_VARS_LIST) {
+    inheritedProxySnapshot[v] = process.env[v];
+  }
+}
+
 // ===== OAuth Token Change Listener =====
 // Register once at module load. Token changes trigger session restart
 // so buildSdkMcpServers() picks up the new/refreshed Authorization headers.
@@ -766,7 +784,7 @@ export function setProxyConfig(proxySettings: {
   host?: string;
   port?: number;
 } | null): void {
-  const PROXY_VARS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'];
+  const PROXY_VARS = [...PROXY_VARS_LIST];
 
   // Bump generation to invalidate in-flight SOCKS5 bridge callbacks
   const generation = ++proxyConfigGeneration;
@@ -814,12 +832,26 @@ export function setProxyConfig(proxySettings: {
     applyProxyEnvVars(rawProxyUrl, PROXY_NO_PROXY_VAL);
     console.log(`[agent] Proxy hot-reloaded: ${rawProxyUrl}`);
   } else {
-    // Disabled: stop bridge, clear env vars
+    // Disabled: stop bridge, restore inherited system proxy state
     if (isSocksBridgeRunning()) {
       stopSocksBridge().catch(() => { /* ignore */ });
     }
-    for (const v of PROXY_VARS) delete process.env[v];
-    console.log('[agent] Proxy cleared (direct connection)');
+    if (proxyWasInjectedByRust) {
+      // Sidecar started with explicit proxy — can't restore unknown system state, just clear
+      for (const v of PROXY_VARS) delete process.env[v];
+      console.log('[agent] Proxy cleared (was explicitly injected, falling back to direct)');
+    } else {
+      // Sidecar started with inherited system env — restore snapshot
+      for (const v of PROXY_VARS) {
+        if (inheritedProxySnapshot[v] !== undefined) {
+          process.env[v] = inheritedProxySnapshot[v]!;
+        } else {
+          delete process.env[v];
+        }
+      }
+      const restoredProxy = inheritedProxySnapshot.HTTP_PROXY || inheritedProxySnapshot.http_proxy || '';
+      console.log(`[agent] Proxy disabled, restored inherited system state${restoredProxy ? ` (${restoredProxy})` : ' (no system proxy)'}`);
+    }
   }
 
   const newProxyUrl = process.env.HTTP_PROXY || '';

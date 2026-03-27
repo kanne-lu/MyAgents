@@ -964,36 +964,9 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
 }
 
 /// Apply MyAgents proxy policy to a child `Command`.
-/// Reusable across spawn_plugin_bridge, npm install, etc.
+/// Delegates to the centralized `proxy_config::apply_to_subprocess()` (pit-of-success).
 fn apply_proxy_env(cmd: &mut std::process::Command) {
-    if let Some(proxy_settings) = crate::proxy_config::read_proxy_settings() {
-        match crate::proxy_config::get_proxy_url(&proxy_settings) {
-            Ok(proxy_url) => {
-                ulog_info!("[bridge] Injecting proxy: {}", proxy_url);
-                cmd.env("HTTP_PROXY", &proxy_url);
-                cmd.env("HTTPS_PROXY", &proxy_url);
-                cmd.env("http_proxy", &proxy_url);
-                cmd.env("https_proxy", &proxy_url);
-                cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-                cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-            }
-            Err(e) => {
-                ulog_warn!("[bridge] Invalid proxy config ({}), stripping proxy env vars", e);
-                for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                             "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"] {
-                    cmd.env_remove(var);
-                }
-            }
-        }
-    } else {
-        ulog_debug!("[bridge] No proxy configured, stripping inherited proxy env vars");
-        for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                     "ALL_PROXY", "all_proxy"] {
-            cmd.env_remove(var);
-        }
-        cmd.env("NO_PROXY", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-        cmd.env("no_proxy", "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]");
-    }
+    crate::proxy_config::apply_to_subprocess(cmd);
 }
 
 /// Locate bundled Node.js binary and npm-cli.js for plugin installation.

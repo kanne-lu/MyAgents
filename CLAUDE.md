@@ -91,6 +91,10 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 所有 Rust 层子进程 MUST 通过 `crate::process_cmd::new()` 创建，**禁止**裸 `std::process::Command::new()`。内置 Windows `CREATE_NO_WINDOW` 标志，防止 GUI 应用启动子进程（bun.exe Sidecar / Plugin Bridge / bun init 等）时弹出黑色控制台窗口。遵循与 `local_http` 相同的 "pit of success" 模式。例外：`#[cfg(windows)]` 守卫内的系统工具命令（taskkill/powershell/wmic）已内联处理；`commands.rs` 的 OS opener（open/explorer/xdg-open）和 Unix pgrep 是用户可见的系统命令，无需隐藏。
 
+### proxy_config 子进程代理策略（Bun fetch 陷阱）
+
+所有可能发起 HTTP 请求的 Rust 层子进程（Bun Sidecar、Plugin Bridge、npm install 等）MUST 在 spawn 前调用 `crate::proxy_config::apply_to_subprocess(&mut cmd)`。该函数确保：用户配置代理时注入 `HTTP_PROXY` + `NO_PROXY`；未配置时继承系统网络行为但**始终注入 `NO_PROXY`** 保护 localhost。**禁止**手动 `cmd.env("HTTP_PROXY", ...)` 或 `cmd.env_remove("HTTP_PROXY")`。Bun 的 `fetch()` 会读取 `HTTP_PROXY` 环境变量，没有 `NO_PROXY` 的话，Sidecar 内部的 localhost 通信（admin-api、cron-tool、bridge-tools 等）会被系统代理拦截 → 502。
+
 ### 零外部依赖与双运行时
 
 应用内置三个运行时依赖，用户无需自行安装任何东西：
@@ -138,7 +142,9 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 - Bridge 是独立 Bun 进程，MUST 与 Sidecar 保持同等待遇：环境变量注入（`proxy_config`、`NO_PROXY`）、日志宏（`ulog_*` 不是 `log::*`）、config 查询范围（`imBotConfigs` + `agents[].channels[]`）
 - Bun 对 Node.js `http` 模块兼容性不完整，使用 axios 的 npm 包可能静默挂起。新接入插件 MUST 验证其 HTTP 调用在 Bun 下正常（不能只验证 import 成功）
 - 兼容层验证 MUST 跑完整消息收发链路（不能只验证 `register()` 成功）
-- 详细架构：@specs/research/openclaw_sdk_shim_analysis.md
+- **SDK Shim 全量覆盖**：shim 覆盖 OpenClaw 全部 154 个 `plugin-sdk/*` 导出（26 手写 + 129 自动生成 stub）。手写模块受 `_handwritten.json` 清单保护，新增手写 shim 后 MUST 加入该清单（否则 `generate:sdk-shims` 会覆盖）。OpenClaw 更新时运行 `bun run generate:sdk-shims` 重新生成 stub
+- **Shim 版本三处同步**：`sdk-shim/package.json` version、`compat-runtime.ts` SHIM_COMPAT_VERSION、`bridge.rs` SHIM_COMPAT_VERSION 三处 MUST 保持一致，否则完整性检查或插件兼容性判断失效
+- 详细架构：@specs/tech_docs/plugin_bridge_architecture.md
 
 ### OpenClaw 插件通用性原则
 
@@ -168,6 +174,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 | UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 design_guide.md |
 | 表单用原生 `<select>` | 系统下拉框样式各平台不一致 | 使用 `<CustomSelect>` 组件（`@/components/CustomSelect`） |
 | 函数参数用 `undefined`/`null` 表示特定业务动作 | 内部调用方无意触发该动作 | 业务动作用自解释字面量（如 `'subscription'`），`undefined` 只表示"未提供 / 保持现状" |
+| 新增手写 shim 不加入 `_handwritten.json` | `generate:sdk-shims` 下次运行覆盖手写文件 | 手写 shim MUST 同步加入 `sdk-shim/plugin-sdk/_handwritten.json` |
 
 ---
 
@@ -201,6 +208,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 - 整体架构：@specs/tech_docs/architecture.md
 - React 稳定性规范（Context/useEffect/memo 等 5 条规则）：@specs/tech_docs/react_stability_rules.md
 - IM Bot 集成：@specs/tech_docs/im_integration_architecture.md
+- Plugin Bridge（OpenClaw 插件加载、SDK shim、消息流转）：@specs/tech_docs/plugin_bridge_architecture.md
 - Session ID 架构：@specs/tech_docs/session_id_architecture.md
 - 代理配置：@specs/tech_docs/proxy_config.md
 - Windows 平台适配：@specs/tech_docs/windows_platform_guide.md
