@@ -289,6 +289,23 @@ export default function SessionHistoryDropdown({
 
     // Export session as .md file
     const [exportingId, setExportingId] = useState<string | null>(null);
+    const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+
+    /** Extract text content from assistant message (stored as JSON array of content blocks) */
+    const extractAssistantText = (content: string): string => {
+        try {
+            const blocks = JSON.parse(content);
+            if (!Array.isArray(blocks)) return content;
+            return blocks
+                .filter((b: { type: string }) => b.type === 'text')
+                .map((b: { text: string }) => b.text)
+                .join('\n\n');
+        } catch {
+            // Plain string content (user messages or legacy format)
+            return content;
+        }
+    };
+
     const handleExport = useCallback(async (e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
         setExportingId(session.id);
@@ -320,7 +337,10 @@ export default function SessionHistoryDropdown({
                 const ts = fmtTs(msg.timestamp);
                 lines.push(`[ ${roleLabel} | ${ts} ]`);
                 lines.push('');
-                lines.push(msg.content);
+                const text = msg.role === 'assistant'
+                    ? extractAssistantText(msg.content)
+                    : msg.content;
+                lines.push(text);
                 lines.push('');
                 lines.push('---');
                 lines.push('');
@@ -340,6 +360,10 @@ export default function SessionHistoryDropdown({
             a.download = fileName;
             a.click();
             URL.revokeObjectURL(url);
+
+            // Show success toast (auto-dismiss after 3s)
+            setExportSuccess(`已导出到下载目录：${fileName}`);
+            setTimeout(() => setExportSuccess(null), 3000);
         } catch {
             setDeleteError('导出失败，请重试');
         } finally {
@@ -384,6 +408,13 @@ export default function SessionHistoryDropdown({
                 {deleteError && (
                     <div className="border-b border-[var(--error)]/20 bg-[var(--error)]/10 px-4 py-2 text-xs text-[var(--error)]">
                         {deleteError}
+                    </div>
+                )}
+
+                {/* Export success toast */}
+                {exportSuccess && (
+                    <div className="border-b border-[var(--success)]/20 bg-[var(--success)]/10 px-4 py-2 text-xs text-[var(--success)]">
+                        {exportSuccess}
                     </div>
                 )}
 
