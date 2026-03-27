@@ -1183,14 +1183,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     [handleForceExecuteQueued]
   );
 
-  // Format selected text as Markdown blockquote with [引用] header
+  // Format selected text as Markdown blockquote
   const formatQuote = useCallback((text: string) =>
-    `[引用]\n${text.split('\n').map(line => `> ${line}`).join('\n')}`,
+    text.split('\n').map(line => `> ${line}`).join('\n'),
   []);
 
-  // Quote selected text — append to input with leading newline
+  // Quote selected text — append blockquote + placeholder for user to type over
   const handleQuoteSelection = useCallback((selectedText: string) => {
-    const quote = `\n${formatQuote(selectedText)}\n`;
+    const quote = `\n${formatQuote(selectedText)}\n针对引用的内容：`;
     // Read current input value from the textarea DOM element
     const currentValue = inputRef.current?.value ?? '';
     const appended = currentValue + quote;
@@ -1200,13 +1200,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       const textarea = inputRef.current;
       if (textarea) {
         textarea.setSelectionRange(appended.length, appended.length);
+        textarea.focus();
       }
     }, 0);
   }, [inputRef, formatQuote]);
 
-  // Elaborate = quote + "深入讲讲" then auto-send (uses ref for stability)
+  // Elaborate = quote + placeholder + "深入讲讲" then auto-send
   const handleElaborateSelection = useCallback((selectedText: string) => {
-    const prompt = `${formatQuote(selectedText)}\n\n深入讲讲`;
+    const prompt = `${formatQuote(selectedText)}\n针对引用的内容：深入讲讲`;
     void handleSendMessageRef.current(prompt);
   }, [formatQuote]);
 
