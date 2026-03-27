@@ -15,7 +15,7 @@ import {
     checkCanResume,
     MIN_CRON_INTERVAL,
 } from '@/types/cronTask';
-import { getFolderName } from '@/utils/taskCenterUtils';
+import { getFolderName, getChannelTypeLabel } from '@/utils/taskCenterUtils';
 import WorkspaceIcon from './launcher/WorkspaceIcon';
 import { useToast } from './Toast';
 import { useConfig } from '@/hooks/useConfig';
@@ -331,18 +331,28 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 <div className="border-t border-[var(--line)]" />
 
-                                {/* 结束条件与通知 */}
+                                {/* 结束条件 */}
                                 <div>
-                                    <SectionHeader icon={Flag}>结束条件与通知</SectionHeader>
+                                    <SectionHeader icon={Flag}>结束条件</SectionHeader>
                                     <div className="mt-2 flex flex-wrap gap-2">
                                         <DetailTag label={task.endConditions.deadline ? `截止 ${new Date(task.endConditions.deadline).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '无截止'} />
                                         <DetailTag label={task.endConditions.maxExecutions ? `最多 ${task.endConditions.maxExecutions} 次` : '无限次'} />
                                         <DetailTag label={task.endConditions.aiCanExit ? 'AI 可退出' : 'AI 不可退出'} />
+                                    </div>
+                                </div>
+
+                                <div className="border-t border-[var(--line)]" />
+
+                                {/* 任务通知 */}
+                                <div>
+                                    <SectionHeader icon={Bell}>任务通知</SectionHeader>
+                                    <div className="mt-2 flex flex-wrap gap-2">
                                         <DetailTag label={task.notifyEnabled ? '通知开启' : '通知关闭'} />
-                                        {task.delivery && (() => {
+                                        {(() => {
+                                            if (!task.delivery) return <DetailTag label="桌面通知" />;
                                             const info = getChannelInfo(task.delivery.botId);
                                             const label = info
-                                                ? `投递: ${info.name} (${info.platform})${info.status !== 'online' ? ' · 离线' : ''}`
+                                                ? `投递: ${info.name} (${getChannelTypeLabel(info.platform)})${info.status !== 'online' ? ' · 离线' : ''}`
                                                 : `投递: ${task.delivery.botId} (${task.delivery.platform}) · 已移除`;
                                             return <DetailTag label={label} />;
                                         })()}
