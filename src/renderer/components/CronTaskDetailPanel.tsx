@@ -253,18 +253,22 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     </div>
                                 )}
 
-                                <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-                                    <div className="flex items-center gap-2.5"><Bell className="h-4 w-4 text-[var(--ink-muted)]" /><span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span></div>
-                                    <ToggleSwitch enabled={editNotify} onChange={setEditNotify} />
-                                </div>
-
-                                {/* 投递渠道 — 仅在通知开启且有可用 Channel 时显示 */}
-                                {editNotify && hasChannels && (
-                                    <div className="space-y-2">
-                                        <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
-                                        <CustomSelect value={editDeliveryBotId} options={deliveryOptions} onChange={setEditDeliveryBotId} placeholder="桌面通知（默认）" />
+                                {/* 任务通知 */}
+                                <div>
+                                    <SectionHeader icon={Bell}>任务通知</SectionHeader>
+                                    <div className="mt-2 space-y-3">
+                                        <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
+                                            <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+                                            <ToggleSwitch enabled={editNotify} onChange={setEditNotify} />
+                                        </div>
+                                        {editNotify && hasChannels && (
+                                            <div className="space-y-2">
+                                                <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
+                                                <CustomSelect value={editDeliveryBotId} options={deliveryOptions} onChange={setEditDeliveryBotId} placeholder="桌面通知（默认）" />
+                                            </div>
+                                        )}
                                     </div>
-                                )}
+                                </div>
                             </>
                         ) : (
                             /* ====== DETAIL MODE ====== */

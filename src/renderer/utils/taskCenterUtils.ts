@@ -95,6 +95,18 @@ export function extractPlatformDisplay(sessionKey: string): string {
     return PLATFORM_DISPLAY_NAMES[platform] ?? (platform.charAt(0).toUpperCase() + platform.slice(1));
 }
 
+/**
+ * Get a concise display label for a channel type (e.g., "飞书", "Telegram", "钉钉").
+ * Handles both plain types ("telegram") and openclaw prefixed ("openclaw:openclaw-lark").
+ */
+export function getChannelTypeLabel(channelType: string): string {
+    if (channelType.startsWith('openclaw:')) {
+        const pluginId = channelType.slice(9);
+        return PLATFORM_DISPLAY_NAMES[pluginId] ?? findPromotedPlugin(pluginId)?.name ?? (pluginId.charAt(0).toUpperCase() + pluginId.slice(1));
+    }
+    return PLATFORM_DISPLAY_NAMES[channelType] ?? (channelType.charAt(0).toUpperCase() + channelType.slice(1));
+}
+
 /** Platform display names — MUST match WorkspaceCard's CH_LABEL */
 const PLATFORM_DISPLAY_NAMES: Record<string, string> = {
     feishu: '飞书',

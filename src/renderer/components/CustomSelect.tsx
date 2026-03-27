@@ -48,14 +48,20 @@ export default function CustomSelect({
     const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
 
     // Compute dropdown position from trigger's bounding rect
+    // Auto-detect: open upward when not enough space below
     const updatePosition = useCallback(() => {
         if (!triggerRef.current) return;
         const rect = triggerRef.current.getBoundingClientRect();
+        const maxDropdownHeight = 240; // max-h-60 = 15rem = 240px
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const openUpward = spaceBelow < maxDropdownHeight && rect.top > spaceBelow;
         setDropdownStyle({
             position: 'fixed',
-            top: rect.bottom + 4,
             left: rect.left,
             width: rect.width,
+            ...(openUpward
+                ? { bottom: window.innerHeight - rect.top + 4 }
+                : { top: rect.bottom + 4 }),
         });
     }, []);
 

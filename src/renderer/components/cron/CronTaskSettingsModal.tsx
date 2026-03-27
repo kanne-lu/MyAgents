@@ -314,22 +314,22 @@ function CronTaskSettingsForm({
             </div>
           )}
 
-          {/* ── 通知 ── */}
-          <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-            <div className="flex items-center gap-2.5">
-              <Bell className="h-4 w-4 text-[var(--ink-muted)]" />
-              <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+          {/* ── 任务通知 ── */}
+          <div>
+            <SectionHeader icon={Bell}>任务通知</SectionHeader>
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
+                <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+                <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
+              </div>
+              {notifyEnabled && hasChannels && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
+                  <CustomSelect value={deliveryBotId} options={deliveryOptions} onChange={setDeliveryBotId} placeholder="桌面通知（默认）" />
+                </div>
+              )}
             </div>
-            <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
           </div>
-
-          {/* 投递渠道 — 仅在通知开启且有可用 Channel 时显示 */}
-          {notifyEnabled && hasChannels && (
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
-              <CustomSelect value={deliveryBotId} options={deliveryOptions} onChange={setDeliveryBotId} placeholder="桌面通知（默认）" />
-            </div>
-          )}
 
           {/* Validation Errors */}
           {validationErrors.length > 0 && (

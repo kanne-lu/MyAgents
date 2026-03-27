@@ -6,6 +6,7 @@ import { useAgentStatuses } from './useAgentStatuses';
 import { useConfig } from './useConfig';
 import type { SelectOption } from '@/components/CustomSelect';
 import type { CronDelivery } from '@/types/cronTask';
+import { getChannelTypeLabel } from '@/utils/taskCenterUtils';
 
 /** Sentinel value: Rust deliver_cron_result_to_bot uses the bot's router to auto-determine chat target */
 const AUTO_CHAT_ID = '_auto_';
@@ -24,10 +25,10 @@ export interface DeliveryChannelInfo {
  *
  * Ordering:
  * 1. "桌面通知（默认）" — value = ''
- * 2. Separator: current workspace agent name
- * 3. Channels from current workspace's agent
- * 4. Separator: other agent names
- * 5. Channels from other agents
+ * 2. Separator: current workspace agent display name
+ * 3. Channels from current workspace's agent (sorted by channelId)
+ * 4. Separator: other agent display names (sorted by agentId)
+ * 5. Channels from other agents (sorted by channelId)
  */
 export function useDeliveryChannels(currentWorkspacePath?: string) {
   const { statuses, loading } = useAgentStatuses();
@@ -40,34 +41,42 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
       { value: '', label: '桌面通知（默认）' },
     ];
 
-    // Build workspace -> agentId mapping
+    // Build agentId -> display name mapping from config
+    const agentDisplayNames = new Map<string, string>();
     const wsToAgent = new Map<string, string>();
     for (const a of agents) {
       wsToAgent.set(a.workspacePath, a.id);
+      agentDisplayNames.set(a.id, a.name || a.workspacePath.split('/').pop() || a.id);
     }
 
-    // Collect channels grouped by current vs other
     const currentAgentId = currentWorkspacePath ? wsToAgent.get(currentWorkspacePath) : undefined;
 
     interface ChannelGroup {
       agentId: string;
-      agentName: string;
+      displayName: string;
       channels: SelectOption[];
     }
 
-    const currentGroup: ChannelGroup = { agentId: '', agentName: '', channels: [] };
+    const currentGroup: ChannelGroup = { agentId: '', displayName: '', channels: [] };
     const otherGroups: ChannelGroup[] = [];
 
-    for (const [agentKey, agentStatus] of Object.entries(statuses)) {
+    // Collect entries and sort by agentId for stable ordering
+    const sortedEntries = Object.entries(statuses).sort(([a], [b]) => a.localeCompare(b));
+
+    for (const [agentKey, agentStatus] of sortedEntries) {
       if (!agentStatus.enabled || agentStatus.channels.length === 0) continue;
 
       const agentId = agentStatus.agentId || agentKey;
-      const agentName = agentStatus.agentName || agentKey;
+      const displayName = agentDisplayNames.get(agentId) || agentStatus.agentName || agentKey;
       const isCurrent = agentId === currentAgentId;
 
+      // Sort channels by channelId for stable ordering
+      const sortedChannels = [...agentStatus.channels].sort((a, b) => a.channelId.localeCompare(b.channelId));
+
       const channelOptions: SelectOption[] = [];
-      for (const ch of agentStatus.channels) {
-        const displayName = ch.name || ch.channelId;
+      for (const ch of sortedChannels) {
+        const botName = ch.name || ch.channelId;
+        const platformTag = getChannelTypeLabel(ch.channelType);
         const statusText = ch.status === 'online' ? '在线' : ch.status === 'connecting' ? '连接中' : ch.status === 'error' ? '异常' : '离线';
         const statusColor = ch.status === 'online' ? 'text-[var(--success)]' : 'text-[var(--ink-muted)]';
 
@@ -75,36 +84,36 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
           botId: ch.channelId,
           chatId: AUTO_CHAT_ID,
           platform: ch.channelType,
-          name: displayName,
-          agentName,
+          name: botName,
+          agentName: displayName,
           status: ch.status,
         });
 
         channelOptions.push({
           value: ch.channelId,
-          label: `${displayName} (${ch.channelType})`,
+          label: `${botName} (${platformTag})`,
           suffix: <span className={`text-[10px] ${statusColor}`}>{statusText}</span>,
         });
       }
 
       if (isCurrent) {
         currentGroup.agentId = agentId;
-        currentGroup.agentName = agentName;
+        currentGroup.displayName = displayName;
         currentGroup.channels = channelOptions;
       } else if (channelOptions.length > 0) {
-        otherGroups.push({ agentId, agentName, channels: channelOptions });
+        otherGroups.push({ agentId, displayName, channels: channelOptions });
       }
     }
 
     // Add current workspace channels first
     if (currentGroup.channels.length > 0) {
-      result.push({ value: '__sep_current__', label: currentGroup.agentName, isSeparator: true });
+      result.push({ value: '__sep_current__', label: currentGroup.displayName, isSeparator: true });
       result.push(...currentGroup.channels);
     }
 
-    // Add other workspace channels
+    // Add other workspace channels (already sorted by agentId via sortedEntries)
     for (const group of otherGroups) {
-      result.push({ value: `__sep_${group.agentId}__`, label: group.agentName, isSeparator: true });
+      result.push({ value: `__sep_${group.agentId}__`, label: group.displayName, isSeparator: true });
       result.push(...group.channels);
     }
 
