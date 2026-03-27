@@ -21,18 +21,28 @@ export interface DeliveryChannelInfo {
 }
 
 /**
+ * Derive the best display name for a channel bot.
+ * Priority: botUsername (runtime) > name (config, skip npm specs) > platform label + " Bot"
+ */
+function deriveBotDisplayName(ch: { name?: string; botUsername?: string; channelType: string }): string {
+  // 1. Runtime bot name from verify_connection() — most accurate
+  if (ch.botUsername) return ch.botUsername;
+  // 2. Config name, but skip npm package specs (contain "/")
+  if (ch.name && !ch.name.includes('/')) return ch.name;
+  // 3. Fallback: platform label
+  return getChannelTypeLabel(ch.channelType) + ' Bot';
+}
+
+/**
  * Build grouped SelectOption[] for delivery channel picker.
  *
- * Ordering:
- * 1. "桌面通知（默认）" — value = ''
- * 2. Separator: current workspace agent display name
- * 3. Channels from current workspace's agent (sorted by channelId)
- * 4. Separator: other agent display names (sorted by agentId)
- * 5. Channels from other agents (sorted by channelId)
+ * Section headers use Project display name (matching Agent card list).
+ * Channel labels use runtime bot name with platform tag.
+ * Lists are sorted by agentId + channelId for stable ordering.
  */
 export function useDeliveryChannels(currentWorkspacePath?: string) {
   const { statuses, loading } = useAgentStatuses();
-  const { config } = useConfig();
+  const { config, projects } = useConfig();
   const agents = useMemo(() => config.agents ?? [], [config.agents]);
 
   const { options, channelMap } = useMemo(() => {
@@ -41,12 +51,15 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
       { value: '', label: '桌面通知（默认）' },
     ];
 
-    // Build agentId -> display name mapping from config
+    // Build agentId → Project display name mapping (matches Agent card list logic)
     const agentDisplayNames = new Map<string, string>();
     const wsToAgent = new Map<string, string>();
     for (const a of agents) {
       wsToAgent.set(a.workspacePath, a.id);
-      agentDisplayNames.set(a.id, a.name || a.workspacePath.split('/').pop() || a.id);
+      // Find corresponding Project for display name (same logic as AgentCardList/AgentSettingsPanel)
+      const proj = projects.find(p => p.agentId === a.id);
+      const displayName = proj?.displayName || proj?.name || a.workspacePath.split('/').pop() || a.id;
+      agentDisplayNames.set(a.id, displayName);
     }
 
     const currentAgentId = currentWorkspacePath ? wsToAgent.get(currentWorkspacePath) : undefined;
@@ -75,7 +88,7 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
 
       const channelOptions: SelectOption[] = [];
       for (const ch of sortedChannels) {
-        const botName = ch.name || ch.channelId;
+        const botName = deriveBotDisplayName(ch);
         const platformTag = getChannelTypeLabel(ch.channelType);
         const statusText = ch.status === 'online' ? '在线' : ch.status === 'connecting' ? '连接中' : ch.status === 'error' ? '异常' : '离线';
         const statusColor = ch.status === 'online' ? 'text-[var(--success)]' : 'text-[var(--ink-muted)]';
@@ -118,7 +131,7 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
     }
 
     return { options: result, channelMap: map };
-  }, [statuses, agents, currentWorkspacePath]);
+  }, [statuses, agents, projects, currentWorkspacePath]);
 
   const hasChannels = options.length > 1; // More than just "桌面通知"
 
