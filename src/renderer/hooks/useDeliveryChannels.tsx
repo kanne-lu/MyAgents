@@ -25,8 +25,8 @@ export interface DeliveryChannelInfo {
  * Priority: botUsername (runtime) > name (config, skip npm specs) > platform label + " Bot"
  */
 function deriveBotDisplayName(ch: { name?: string; botUsername?: string; channelType: string }): string {
-  // 1. Runtime bot name from verify_connection() — most accurate
-  if (ch.botUsername) return ch.botUsername;
+  // 1. Runtime bot name from verify_connection() — most accurate (skip npm specs)
+  if (ch.botUsername && !ch.botUsername.includes('/')) return ch.botUsername;
   // 2. Config name, but skip npm package specs (contain "/")
   if (ch.name && !ch.name.includes('/')) return ch.name;
   // 3. Fallback: platform label

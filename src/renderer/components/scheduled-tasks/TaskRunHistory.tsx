@@ -10,9 +10,13 @@ import type { CronRunRecord } from '@/types/cronTask';
 
 interface TaskRunHistoryProps {
   taskId: string;
+  /** Open a session in a new tab when clicking a history row */
+  onOpenSession?: (sessionId: string) => void;
+  /** Session ID to open (the task's internal session) */
+  sessionId?: string;
 }
 
-export default function TaskRunHistory({ taskId }: TaskRunHistoryProps) {
+export default function TaskRunHistory({ taskId, onOpenSession, sessionId }: TaskRunHistoryProps) {
   const [runs, setRuns] = useState<CronRunRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [limit, setLimit] = useState(10);
@@ -61,7 +65,13 @@ export default function TaskRunHistory({ taskId }: TaskRunHistoryProps) {
           <button
             key={`${run.ts}-${i}`}
             type="button"
-            onClick={() => setExpandedIndex(isExpanded ? null : i)}
+            onClick={() => {
+              if (onOpenSession && sessionId) {
+                onOpenSession(sessionId);
+              } else {
+                setExpandedIndex(isExpanded ? null : i);
+              }
+            }}
             className="flex w-full flex-col rounded-[var(--radius-sm)] px-2.5 py-1.5 text-left hover:bg-[var(--hover-bg)] transition-colors"
           >
             <div className="flex w-full items-center gap-2">

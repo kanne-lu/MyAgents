@@ -15,7 +15,7 @@ import {
     checkCanResume,
     MIN_CRON_INTERVAL,
 } from '@/types/cronTask';
-import { getFolderName, getChannelTypeLabel } from '@/utils/taskCenterUtils';
+import { getFolderName } from '@/utils/taskCenterUtils';
 import WorkspaceIcon from './launcher/WorkspaceIcon';
 import { useToast } from './Toast';
 import { useConfig } from '@/hooks/useConfig';
@@ -33,6 +33,8 @@ interface CronTaskDetailPanelProps {
     onDelete: (taskId: string) => Promise<void>;
     onResume: (taskId: string) => Promise<void>;
     onStop?: (taskId: string) => Promise<void>;
+    /** Open a session in a new tab (for execution history click) */
+    onOpenSession?: (sessionId: string) => void;
 }
 
 const INPUT_CLS = 'w-full rounded-lg border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none transition-colors';
@@ -70,7 +72,7 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
     );
 }
 
-export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, onResume, onStop }: CronTaskDetailPanelProps) {
+export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, onResume, onStop, onOpenSession }: CronTaskDetailPanelProps) {
     const toast = useToast();
     const { projects } = useConfig();
     const isMountedRef = useRef(true);
@@ -351,10 +353,8 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                         {(() => {
                                             if (!task.delivery) return <DetailTag label="桌面通知" />;
                                             const info = getChannelInfo(task.delivery.botId);
-                                            const label = info
-                                                ? `投递: ${info.name} (${getChannelTypeLabel(info.platform)})${info.status !== 'online' ? ' · 离线' : ''}`
-                                                : `投递: ${task.delivery.botId} (${task.delivery.platform}) · 已移除`;
-                                            return <DetailTag label={label} />;
+                                            if (!info) return <DetailTag label={`${task.delivery.botId} · 已移除`} />;
+                                            return <DetailTag label={`${info.agentName}: ${info.name}`} />;
                                         })()}
                                     </div>
                                 </div>
@@ -388,7 +388,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                 {/* 执行历史 */}
                                 <div>
                                     <SectionHeader icon={History}>执行历史</SectionHeader>
-                                    <div className="mt-2"><TaskRunHistory taskId={task.id} /></div>
+                                    <div className="mt-2"><TaskRunHistory taskId={task.id} sessionId={task.internalSessionId || task.sessionId} onOpenSession={onOpenSession ? (sid) => { onOpenSession(sid); onClose(); } : undefined} /></div>
                                 </div>
                             </>
                         )}

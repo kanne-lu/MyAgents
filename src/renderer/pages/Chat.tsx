@@ -1867,6 +1867,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             setCronDetailTask(updated);
             toastRef.current?.success('任务已停止');
           }}
+          onOpenSession={handleSelectSession}
         />
       )}
     </div>
