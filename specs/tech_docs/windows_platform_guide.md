@@ -82,38 +82,27 @@ export function getPlatformPaths() {
 
 ### 进程清理
 
-**Windows**（使用 `wmic` + `taskkill`）：
+**Windows**（使用 PowerShell + wmic fallback，通过 `process_cmd::new()` 避免黑色控制台窗口）：
 ```rust
-// src-tauri/src/sidecar.rs
-#[cfg(target_os = "windows")]
-fn kill_by_port(port: u16) {
-    // wmic process where (commandline like '%--port 31415%') get processid
-    let output = Command::new("wmic")
-        .args(&["process", "where", &format!("(commandline like '%--port {}%')", port)])
-        .output();
+// src-tauri/src/sidecar.rs — kill_windows_processes_by_pattern()
+// 优先 PowerShell，fallback 到 wmic（兼容旧 Windows）
+let mut cmd = crate::process_cmd::new("powershell");
+cmd.args(["-NoProfile", "-Command",
+    &format!("Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}", pattern)
+]);
+```
 
-    // taskkill /F /PID 12345
-    Command::new("taskkill")
-        .args(&["/F", "/PID", &pid])
-        .spawn();
+**macOS/Linux**（使用 `pgrep` + `kill`，通过 `system_binary::find()` 确保 PATH 可用）：
+```rust
+// src-tauri/src/sidecar.rs — cleanup_stale_sidecars()
+if let Some(pgrep) = crate::system_binary::find("pgrep") {
+    let mut cmd = crate::process_cmd::new(&pgrep);
+    cmd.args(["-f", "--myagents-sidecar"]);
+    // ...
 }
 ```
 
-**macOS/Linux**（使用 `lsof` + `kill`）：
-```rust
-#[cfg(not(target_os = "windows"))]
-fn kill_by_port(port: u16) {
-    // lsof -ti:31415
-    let output = Command::new("lsof")
-        .args(&[&format!("-ti:{}", port)])
-        .output();
-
-    // kill -9 12345
-    Command::new("kill")
-        .args(&["-9", &pid])
-        .spawn();
-}
-```
+> **关键**：所有子进程 MUST 使用 `process_cmd::new()`（Windows CREATE_NO_WINDOW）和 `system_binary::find()`（PATH 补充），禁止裸 `std::process::Command::new()`。
 
 ---
 

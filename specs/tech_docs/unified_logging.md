@@ -209,16 +209,18 @@ for (const entry of entries) {
 ### 统一日志文件格式
 
 ```
-2025-01-25T10:30:45.123Z [REACT] [INFO ] [TabProvider] SSE connected
-2025-01-25T10:30:45.234Z [BUN  ] [INFO ] Server started on port 31415
-2025-01-25T10:30:45.345Z [RUST ] [INFO ] Sidecar process spawned
+2026-03-26 10:30:45.123 [REACT] [INFO ] [TabProvider] SSE connected
+2026-03-26 10:30:45.234 [BUN  ] [INFO ] Server started on port 31415
+2026-03-26 10:30:45.345 [RUST ] [INFO ] Sidecar process spawned
 ```
+
+> **注意**：时间戳使用**本地时间** `YYYY-MM-DD HH:MM:SS.mmm`（非 UTC ISO 8601）。
 
 ### Agent 会话日志格式
 
 ```
-[2025-01-25T10:30:45.123Z] User: Hello
-[2025-01-25T10:30:46.234Z] Assistant: Hi there!
+2026-03-26 10:30:45.123 {"type":"user","message":{"role":"user","content":"Hello"},...}
+2026-03-26 10:30:46.234 {"type":"assistant","message":{"role":"assistant","content":[...]},...}
 ```
 
 ## Boot Banner (v0.1.53)

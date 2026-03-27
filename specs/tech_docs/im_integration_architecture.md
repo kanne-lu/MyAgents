@@ -85,10 +85,12 @@ pub struct ImBotInstance {
 }
 ```
 
-### 2.2 Tauri Commands
+### 2.2 Tauri Commands（Legacy，已 Deprecated）
+
+> **v0.1.41+**：以下旧命令已标 `@deprecated`，内部转发到新 Agent Channel API。新代码应使用 `cmd_start_agent_channel` 等新命令（见文档末尾"Agent Channel 架构"章节）。
 
 ```rust
-/// 启动指定 Bot（若已运行则先优雅停止再重启）
+/// @deprecated — 使用 cmd_start_agent_channel 替代
 #[tauri::command]
 async fn cmd_start_im_bot(
     botId: String,
