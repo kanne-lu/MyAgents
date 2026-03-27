@@ -203,49 +203,6 @@ export async function pickFolderForDialog(): Promise<{ folderName: string; defau
     return { folderName, defaultPath };
 }
 
-/** @deprecated Use pickFolderForDialog instead - window.prompt gets blocked by browser security */
-export async function mockOpenFolderDialog(): Promise<string | null> {
-    // Try using showDirectoryPicker to get directory name as a hint
-    let dirNameHint = 'my-project';
-
-    if ('showDirectoryPicker' in window) {
-        try {
-            // @ts-expect-error - showDirectoryPicker is not in TypeScript's lib yet
-            const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
-            dirNameHint = dirHandle.name;
-            console.log('[browserMock] Selected directory name:', dirNameHint);
-        } catch (err) {
-            if ((err as Error).name === 'AbortError') {
-                console.log('[browserMock] User cancelled directory selection');
-                return null;
-            }
-            // Fall through to prompt
-        }
-    }
-
-    // Get smart default directory based on existing projects
-    const defaultParentDir = getSmartDefaultProjectDir();
-    const defaultPath = `${defaultParentDir}/${dirNameHint}`;
-
-    // Prompt for full path confirmation
-    const path = window.prompt(
-        `确认项目路径\n\n` +
-        `已选择文件夹: ${dirNameHint}\n` +
-        `请确认或修改完整路径:`,
-        defaultPath
-    );
-
-    // Save the parent directory for next time
-    if (path) {
-        const parentDir = path.split('/').slice(0, -1).join('/');
-        if (parentDir) {
-            localStorage.setItem(LAST_PROJECT_DIR_KEY, parentDir);
-        }
-    }
-
-    return path;
-}
-
 // ============= Server URL Mock =============
 
 /** Get server URL - browser mode uses localhost:3000 */

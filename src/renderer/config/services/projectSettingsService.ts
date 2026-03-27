@@ -2,7 +2,7 @@
 import { exists, mkdir, readTextFile } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 
-import type { Provider, ProjectSettings } from '../types';
+import type { ProjectSettings } from '../types';
 import { isBrowserDevMode, safeWriteJson } from './configStore';
 
 const PROJECT_SETTINGS_DIR = '.claude';
@@ -51,35 +51,3 @@ export async function saveProjectSettings(projectPath: string, settings: Project
     }
 }
 
-export async function syncProviderToProjectSettings(
-    projectPath: string,
-    provider: Provider,
-    apiKey?: string
-): Promise<void> {
-    const settings = await loadProjectSettings(projectPath);
-
-    const env: Record<string, string> = {};
-    if (provider.config.baseUrl) {
-        env['ANTHROPIC_BASE_URL'] = provider.config.baseUrl;
-    }
-    if (apiKey) {
-        env['ANTHROPIC_AUTH_TOKEN'] = apiKey;
-    }
-    if (provider.primaryModel) {
-        env['ANTHROPIC_MODEL'] = provider.primaryModel;
-    }
-    const models = provider.models ?? [];
-    for (const model of models) {
-        if (model.modelSeries === 'claude') {
-            if (model.modelName.toLowerCase().includes('haiku')) {
-                env['ANTHROPIC_DEFAULT_HAIKU_MODEL'] = model.model;
-            } else if (model.modelName.toLowerCase().includes('opus')) {
-                env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = model.model;
-            } else if (model.modelName.toLowerCase().includes('sonnet')) {
-                env['ANTHROPIC_DEFAULT_SONNET_MODEL'] = model.model;
-            }
-        }
-    }
-
-    await saveProjectSettings(projectPath, { ...settings, env });
-}
