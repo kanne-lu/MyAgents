@@ -201,7 +201,10 @@ Project (工作区)
 
 **Plugin Bridge**（`src/server/plugin-bridge/`）：
 - 独立 Bun 进程加载 OpenClaw Channel Plugin
-- SDK Shim（`sdk-shim/`）提供 `openclaw/plugin-sdk/*` 兼容层，当前 compat level 3.25
+- SDK Shim（`sdk-shim/`）提供 `openclaw/plugin-sdk/*` 兼容层，**全量覆盖** OpenClaw 所有 154 个子路径导出
+  - 25 个手写模块（`_handwritten.json` 清单保护）：提供 Bridge 模式下的真实逻辑
+  - 129 个自动生成 stub（`scripts/generate-sdk-shims.ts`）：命名导出 + 首次调用警告，防止 `Cannot find module` 崩溃
+  - 更新流程：`bun run generate:sdk-shims`（读取 OpenClaw 源码，跳过手写模块，重新生成 stub）
 - 安装流程：`npm install` → `install_sdk_shim`（最后写入，last-write-wins）→ bridge 启动前 shim 完整性检查
 - 消息通过 HTTP 双向转发，AI 推理仍走 Rust → Bun Sidecar 标准管道
 
