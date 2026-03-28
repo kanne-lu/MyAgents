@@ -875,6 +875,13 @@ export default function TabProvider({
                     if (block.type !== 'tool_use' || !block.tool) return prev;
                     const newInputJson = (block.tool.inputJson || '') + delta;
                     const parsedInput = parsePartialJson<ToolInput>(newInputJson);
+                    // DEBUG: trace generative-ui streaming
+                    if (block.tool.name?.includes('generative-ui')) {
+                        const wc = parsedInput && typeof parsedInput === 'object' && 'widget_code' in parsedInput
+                            ? String((parsedInput as Record<string, unknown>).widget_code).length
+                            : 0;
+                        console.log(`[TabProvider] generative-ui tool-input-delta: inputJsonLen=${newInputJson.length}, parsedOk=${!!parsedInput}, widgetCodeLen=${wc}`);
+                    }
                     const updated = [...contentArray];
                     updated[idx] = {
                         ...block,

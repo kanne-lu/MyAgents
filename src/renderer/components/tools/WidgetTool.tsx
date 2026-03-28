@@ -57,6 +57,13 @@ export default function WidgetTool({ tool }: WidgetToolProps) {
   const displayTitle = formatTitle(title);
   const icon = pickIcon(title);
 
+  // DEBUG: trace streaming data flow
+  if (tool.name === 'mcp__generative-ui__show_widget') {
+    const inputJsonLen = tool.inputJson?.length ?? 0;
+    const parsedKeys = tool.parsedInput ? Object.keys(tool.parsedInput as unknown as Record<string, unknown>) : [];
+    console.log(`[WidgetTool] render: isLoading=${tool.isLoading}, hasResult=${!!tool.result}, inputJsonLen=${inputJsonLen}, parsedKeys=[${parsedKeys}], widgetCodeLen=${widgetCode.length}, isStreaming=${isStreaming}`);
+  }
+
   // No widget_code yet — show skeleton
   if (!widgetCode && isStreaming) {
     return (
