@@ -82,38 +82,27 @@ export function getPlatformPaths() {
 
 ### 进程清理
 
-**Windows**（使用 `wmic` + `taskkill`）：
+**Windows**（使用 PowerShell + wmic fallback，通过 `process_cmd::new()` 避免黑色控制台窗口）：
 ```rust
-// src-tauri/src/sidecar.rs
-#[cfg(target_os = "windows")]
-fn kill_by_port(port: u16) {
-    // wmic process where (commandline like '%--port 31415%') get processid
-    let output = Command::new("wmic")
-        .args(&["process", "where", &format!("(commandline like '%--port {}%')", port)])
-        .output();
+// src-tauri/src/sidecar.rs — kill_windows_processes_by_pattern()
+// 优先 PowerShell，fallback 到 wmic（兼容旧 Windows）
+let mut cmd = crate::process_cmd::new("powershell");
+cmd.args(["-NoProfile", "-Command",
+    &format!("Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}", pattern)
+]);
+```
 
-    // taskkill /F /PID 12345
-    Command::new("taskkill")
-        .args(&["/F", "/PID", &pid])
-        .spawn();
+**macOS/Linux**（使用 `pgrep` + `kill`，通过 `system_binary::find()` 确保 PATH 可用）：
+```rust
+// src-tauri/src/sidecar.rs — cleanup_stale_sidecars()
+if let Some(pgrep) = crate::system_binary::find("pgrep") {
+    let mut cmd = crate::process_cmd::new(&pgrep);
+    cmd.args(["-f", "--myagents-sidecar"]);
+    // ...
 }
 ```
 
-**macOS/Linux**（使用 `lsof` + `kill`）：
-```rust
-#[cfg(not(target_os = "windows"))]
-fn kill_by_port(port: u16) {
-    // lsof -ti:31415
-    let output = Command::new("lsof")
-        .args(&[&format!("-ti:{}", port)])
-        .output();
-
-    // kill -9 12345
-    Command::new("kill")
-        .args(&["-9", &pid])
-        .spawn();
-}
-```
+> **关键**：所有子进程 MUST 使用 `process_cmd::new()`（Windows CREATE_NO_WINDOW）和 `system_binary::find()`（PATH 补充），禁止裸 `std::process::Command::new()`。
 
 ---
 
@@ -243,6 +232,37 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release\resources -Recurse -
 - [ ] 版本号、下载链接、签名正确
 
 **详见**：[windows_build_guide.md](../guides/windows_build_guide.md)
+
+---
+
+## Pit-of-Success 进程管理模块
+
+### process_cmd (`src-tauri/src/process_cmd.rs`)
+
+所有 Rust 层子进程 MUST 通过 `crate::process_cmd::new()` 创建。内置 Windows `CREATE_NO_WINDOW` 标志，防止 GUI 应用启动子进程时弹出黑色控制台窗口。
+
+### system_binary (`src-tauri/src/system_binary.rs`)
+
+Tauri GUI 应用从 Finder/Explorer 启动时不继承 shell PATH（无 homebrew、无用户 PATH）。`system_binary::find(binary_name)` 自动补充常见路径（`/opt/homebrew/bin`、`/usr/local/bin`、`C:\Program Files\nodejs` 等），确保系统工具（npm、git、pgrep 等）可被发现。
+
+## Plugin 安装 Fallback 链
+
+三级 fallback 确保社区插件安装成功：
+
+```
+1. 系统 npm（system_binary::find("npm")）
+   └─ 失败 →
+2. 内置 npm（bundled Node.js + npm-cli.js）
+   └─ NODE_OPTIONS=--no-experimental-require-module（Windows Node.js v24 CJS/ESM 修复）
+   └─ 失败 →
+3. Bun fallback（bun add）
+```
+
+安装后流程：
+1. `npm/bun install` → 安装插件及其依赖
+2. **依赖修复**：`npm install --ignore-scripts --omit=peer`
+3. **SDK Shim 安装**（最后一步，last-write-wins）：覆盖 `node_modules/openclaw/` 为自定义 shim
+4. **Bridge 启动前 shim 完整性检查**：解析 `package.json` version 字段，检测损坏自动修复
 
 ---
 

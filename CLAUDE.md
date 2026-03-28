@@ -17,9 +17,26 @@
 - `src/renderer/` — React 前端（api/、context/、hooks/、components/、pages/）
 - `src/server/` — Bun 后端 Sidecar
 - `src/server/plugin-bridge/` — OpenClaw Plugin Bridge（独立 Bun 进程，加载社区 Channel 插件）
+- `src/cli/` — 自配置 CLI（`myagents` 命令，同步到 `~/.myagents/bin/`，详见下方说明）
 - `src/shared/` — 前后端共享类型
 - `src-tauri/` — Tauri Rust 层
 - `specs/` — 设计文档（tech_docs/、guides/、prd/、research/）
+- `bundled-agents/myagents_helper/` — 内置 MA 小助理（见下方说明）
+
+### 内置 MA 小助理（`bundled-agents/myagents_helper/`）
+
+应用内置了一个 AI 助手（MA 小助理），运行在 `~/.myagents/` 工作区中，职能是产品首席客服 — 帮用户诊断问题、配置工具、管理 Agent。
+
+**核心机制**：小助理通过 `/self-config` Skill 调用内置 `myagents` CLI 工具，**直接执行**用户请求的管理操作（配置 Provider、安装 MCP、管理 Agent Channel、创建定时任务等），而不是输出操作步骤让用户自己做。CLI 通过 Admin API（`/api/admin/*`）与 Rust Management API 通信，能力与 GUI 对等。
+
+**文件结构**：
+- `CLAUDE.md` — 小助理的元认知（架构速览、日志格式、错误速查表、诊断工作流）
+- `.claude/skills/self-config/SKILL.md` — CLI 操作技能（MCP/Provider/Agent/Cron/Plugin CRUD）
+- `.claude/skills/support/SKILL.md` — 用户支持技能（日志分析、Bug Report 生成）
+
+**开发约束**：
+- 修改 `bundled-agents/myagents_helper/` 的 CLAUDE.md 或 Skills 后，MUST bump `ADMIN_AGENT_VERSION`（`src-tauri/src/commands.rs`），否则用户端小助理不会更新。
+- 修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` 后，MUST bump `CLI_VERSION`（`src-tauri/src/commands.rs`），否则用户端 CLI 不会更新。两个版本门控独立运作。
 
 ## 开发命令
 
@@ -37,11 +54,27 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 ## 核心架构约束
 
-### 开发前置要求
+### 第一原则：架构延续性
 
-进行新功能开发或模块重构时，MUST 先阅读整体架构文档 @specs/tech_docs/architecture.md ，从宏观视角理解系统分层、模块边界和数据流，避免局部修改破坏全局设计。对接外部 SDK/插件时，MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层。
+**每个功能都在已有架构上生长，而不是另起炉灶。** 项目已有成熟的分层设计、通信模式、安全约束和前端规范。新功能 MUST 复用现有模块和模式（如 `local_http`、`process_cmd`、`broadcast()`、`awaitSessionTermination()`），禁止为单点需求发明新的技术方案。
 
-开发前端界面时，MUST 先阅读项目设计系统（Token/组件/页面规范）：@specs/guides/design_guide.md ，遵循设计系统，并参考行业最佳交互方式进行设计开发。
+开发前 MUST 做的三件事：
+1. **读架构文档** @specs/tech_docs/architecture.md — 理解系统分层、模块边界、数据流
+2. **读设计规范** @specs/guides/design_guide.md — 遵循 Token/组件/页面规范（前端）
+3. **搜索现有实现** — 先在代码库中搜索类似功能是否已有模式，复用而非重建
+
+如果需求确实需要架构变更（新的通信模式、新的状态管理方式、新的进程类型），MUST 先与用户讨论方案，不得自行引入。对接外部 SDK/插件时，MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层。
+
+### Claude Agent SDK 交互规范
+
+项目的核心 AI 运行时是 Claude Agent SDK（`@anthropic-ai/claude-agent-sdk`），所有 Agent 会话、工具调用、子 Agent 派发都通过它驱动。SDK 持续迭代，API 行为、环境变量、消息类型可能随版本变更。
+
+**禁止凭假设编写 SDK 交互代码。** 涉及 SDK 的任何开发（`query()` 参数、`SDKMessage` 类型处理、环境变量设置、Hook 注册、MCP 集成等），MUST 先查阅官方文档确认实际行为：
+- **SDK 文档**：https://platform.claude.com/docs/zh-CN/agent-sdk/overview
+- **SDK 类型定义**：`node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts`（当前版本 0.2.84）
+- **SDK 工具类型**：`node_modules/@anthropic-ai/claude-agent-sdk/sdk-tools.d.ts`
+
+典型错误案例：臆测 `seedReadState` 的调用时机导致"先读后改"语义被绕过、臆测环境变量名导致模型别名不生效。这类问题的根因都是没有查文档就动手写代码。
 
 ### Tab-scoped 隔离
 
@@ -58,6 +91,10 @@ npm run typecheck && npm run lint  # 代码质量检查
 ### process_cmd 模块（Windows 控制台窗口陷阱）
 
 所有 Rust 层子进程 MUST 通过 `crate::process_cmd::new()` 创建，**禁止**裸 `std::process::Command::new()`。内置 Windows `CREATE_NO_WINDOW` 标志，防止 GUI 应用启动子进程（bun.exe Sidecar / Plugin Bridge / bun init 等）时弹出黑色控制台窗口。遵循与 `local_http` 相同的 "pit of success" 模式。例外：`#[cfg(windows)]` 守卫内的系统工具命令（taskkill/powershell/wmic）已内联处理；`commands.rs` 的 OS opener（open/explorer/xdg-open）和 Unix pgrep 是用户可见的系统命令，无需隐藏。
+
+### proxy_config 子进程代理策略（Bun fetch 陷阱）
+
+所有可能发起 HTTP 请求的 Rust 层子进程（Bun Sidecar、Plugin Bridge、npm install 等）MUST 在 spawn 前调用 `crate::proxy_config::apply_to_subprocess(&mut cmd)`。该函数确保：用户配置代理时注入 `HTTP_PROXY` + `NO_PROXY`；未配置时继承系统网络行为但**始终注入 `NO_PROXY`** 保护 localhost。**禁止**手动 `cmd.env("HTTP_PROXY", ...)` 或 `cmd.env_remove("HTTP_PROXY")`。Bun 的 `fetch()` 会读取 `HTTP_PROXY` 环境变量，没有 `NO_PROXY` 的话，Sidecar 内部的 localhost 通信（admin-api、cron-tool、bridge-tools 等）会被系统代理拦截 → 502。
 
 ### 零外部依赖与双运行时
 
@@ -106,7 +143,9 @@ Agent 配置通过 Rust 命令 `cmd_update_agent_config` 写盘，写盘后 MUST
 - Bridge 是独立 Bun 进程，MUST 与 Sidecar 保持同等待遇：环境变量注入（`proxy_config`、`NO_PROXY`）、日志宏（`ulog_*` 不是 `log::*`）、config 查询范围（`imBotConfigs` + `agents[].channels[]`）
 - Bun 对 Node.js `http` 模块兼容性不完整，使用 axios 的 npm 包可能静默挂起。新接入插件 MUST 验证其 HTTP 调用在 Bun 下正常（不能只验证 import 成功）
 - 兼容层验证 MUST 跑完整消息收发链路（不能只验证 `register()` 成功）
-- 详细架构：@specs/research/openclaw_sdk_shim_analysis.md
+- **SDK Shim 全量覆盖**：shim 覆盖 OpenClaw 全部 154 个 `plugin-sdk/*` 导出（26 手写 + 129 自动生成 stub）。手写模块受 `_handwritten.json` 清单保护，新增手写 shim 后 MUST 加入该清单（否则 `generate:sdk-shims` 会覆盖）。OpenClaw 更新时运行 `bun run generate:sdk-shims` 重新生成 stub
+- **Shim 版本三处同步**：`sdk-shim/package.json` version、`compat-runtime.ts` SHIM_COMPAT_VERSION、`bridge.rs` SHIM_COMPAT_VERSION 三处 MUST 保持一致，否则完整性检查或插件兼容性判断失效
+- 详细架构：@specs/tech_docs/plugin_bridge_architecture.md
 
 ### OpenClaw 插件通用性原则
 
@@ -120,32 +159,23 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 
 ---
 
-## 禁止事项
+## 补充禁止事项
+
+> 核心架构约束（Rust 代理层、local_http、process_cmd、Tab 隔离、持久 Session、Config disk-first 等）已在上方各节以 MUST/禁止 形式给出，此处不重复。以下为上方未覆盖的补充规则。
 
 | 禁止 | 后果 | 正确做法 |
 |------|------|----------|
-| WebView 直接 fetch | CORS 失败 | `proxyFetch()` 经 Rust 代理 |
-| Tab 内用全局 API | 请求发到错误 Sidecar | `useTabState()` |
-| 裸 `reqwest::Client` 连 localhost（含 Plugin Bridge） | 系统代理拦截 → 502 | `local_http::builder()` / `json_client()` / `sse_client()` |
-| 依赖用户系统安装的运行时 | 用户未安装 | 使用内置 Bun 或内置 Node.js（`runtime.ts`） |
-| 直接设 `shouldAbortSession = true` | generator 永久阻塞 | `abortPersistentSession()` |
-| 配置变更不设 `resumeSessionId` | abort 后 SDK 从空对话开始，丢失上下文 | 先设 resumeSessionId 再 abort |
-| 用 `if (!preWarm)` / `if (!isPreWarming)` 守卫逻辑 | 持久 Session 中 pre-warm 即最终 session，该逻辑永远不执行 | 移除守卫或改用其他条件 |
-| Config 写盘用 React state | 覆盖其他字段（如 API Key） | `await loadAppConfig()` 磁盘读 |
-| IM config 写盘后不 `refreshConfig()` | UI 显示过期数据 | 写盘后调 `refreshConfig()` |
+| 依赖用户系统安装的运行时 | 用户未安装 → 功能不可用 | 使用内置 Bun 或内置 Node.js（`runtime.ts`） |
 | 新增 SSE 事件不注册白名单 | 前端静默丢弃该事件 | 在 `SseConnection.ts` 的 `JSON_EVENTS` 注册 |
 | Sidecar 用 `__dirname` / `readFileSync` | bun build 硬编码路径，生产环境出错 | 内联常量或 `getScriptDir()` |
 | 日志日期用 UTC `toISOString` | 与本地日期文件名不匹配 | 统一用 `localDate()`（`src/shared/logTime.ts`） |
+| Rust 日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
+| 裸 `which::which()` 查找系统工具 | Finder 启动时 PATH 缺少 homebrew 等路径 | `crate::system_binary::find()` |
+| 前端 `@tauri-apps/plugin-fs` 读写工作区文件 | Tauri fs scope 仅覆盖 `~/.myagents/**` | `invoke('cmd_read_workspace_file')` / `invoke('cmd_write_workspace_file')` |
 | UI 硬编码颜色（`#fff`、`bg-blue-500`） | 破坏设计系统一致性 | 使用 CSS Token `var(--xxx)`，参考 design_guide.md |
-| 表单用原生 `<select>` | 系统下拉框样式与设计系统不一致（macOS/Windows 各异） | 使用 `<CustomSelect>` 组件（`@/components/CustomSelect`） |
-| CronTask 新增字段不加 `#[serde(default)]` | 旧版 JSON 反序列化失败 | 非核心字段 MUST 加 `#[serde(default)]` |
-| Rust 子进程日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
-| 裸 `std::process::Command::new()` | Windows 弹出黑色控制台窗口 | `crate::process_cmd::new()` |
-| 裸 `which::which()` 查找系统工具 | Finder 启动时 PATH 缺少 homebrew 等路径，找不到已安装的工具 | `crate::system_binary::find()` |
-| 前端 `@tauri-apps/plugin-fs` 读写工作区文件 | Tauri fs scope 仅覆盖 `~/.myagents/**`，工作区路径写入必失败 | `invoke('cmd_read_workspace_file')` / `invoke('cmd_write_workspace_file')` 走 Rust 原生 I/O |
-| 对接外部 SDK/插件时凭假设写适配代码 | 函数签名、config 格式、返回值结构全部猜错 | MUST 先读源码确认接口约定（函数签名、config schema、返回值格式），再写适配层 |
-| 修改 `bundled-agents/myagents_helper/` 后不 bump 版本 | 用户端小助理不会更新，改动形同虚设 | 修改 Helper 的 CLAUDE.md / Skills / bin 后，MUST bump `ADMIN_AGENT_VERSION`（`src-tauri/src/commands.rs`），否则 `cmd_sync_admin_agent` 版本门控不会触发同步 |
-| 函数参数用 `undefined`/`null` 表示特定业务动作 | 不同调用方对"不传"含义不同，内部调用方会无意触发该动作 | 业务动作用自解释的字面量（如 `'subscription'`），`undefined` 只表示"未提供 / 保持现状"——确保不传参数永远是安全的 |
+| 表单用原生 `<select>` | 系统下拉框样式各平台不一致 | 使用 `<CustomSelect>` 组件（`@/components/CustomSelect`） |
+| 函数参数用 `undefined`/`null` 表示特定业务动作 | 内部调用方无意触发该动作 | 业务动作用自解释字面量（如 `'subscription'`），`undefined` 只表示"未提供 / 保持现状" |
+| 新增手写 shim 不加入 `_handwritten.json` | `generate:sdk-shims` 下次运行覆盖手写文件 | 手写 shim MUST 同步加入 `sdk-shim/plugin-sdk/_handwritten.json` |
 
 ---
 
@@ -177,8 +207,10 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 修改相关模块前建议先阅读：
 
 - 整体架构：@specs/tech_docs/architecture.md
+- 自配置 CLI（myagents 命令、Admin API、版本门控）：@specs/tech_docs/cli_architecture.md
 - React 稳定性规范（Context/useEffect/memo 等 5 条规则）：@specs/tech_docs/react_stability_rules.md
 - IM Bot 集成：@specs/tech_docs/im_integration_architecture.md
+- Plugin Bridge（OpenClaw 插件加载、SDK shim、消息流转）：@specs/tech_docs/plugin_bridge_architecture.md
 - Session ID 架构：@specs/tech_docs/session_id_architecture.md
 - 代理配置：@specs/tech_docs/proxy_config.md
 - Windows 平台适配：@specs/tech_docs/windows_platform_guide.md

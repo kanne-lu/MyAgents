@@ -25,12 +25,22 @@ export interface CronEndConditions {
 }
 
 /**
+ * Delivery target for cron task results (mirrors Rust CronDelivery)
+ */
+export interface CronDelivery {
+  botId: string;
+  chatId: string;
+  platform: string;
+}
+
+/**
  * Flexible schedule types for cron tasks (mirrors Rust CronSchedule)
  */
 export type CronSchedule =
   | { kind: 'at'; at: string }
   | { kind: 'every'; minutes: number; startAt?: string }
-  | { kind: 'cron'; expr: string; tz?: string };
+  | { kind: 'cron'; expr: string; tz?: string }
+  | { kind: 'loop' };
 
 /**
  * A scheduled cron task (returned from Rust)
@@ -57,6 +67,8 @@ export interface CronTask {
   lastError?: string;
   /** Source IM Bot ID that created this task */
   sourceBotId?: string;
+  /** Where to deliver execution results (IM channel) */
+  delivery?: CronDelivery;
   /** Flexible schedule (overrides intervalMinutes when present) */
   schedule?: CronSchedule;
   /** Human-readable name for the task */
@@ -103,6 +115,8 @@ export interface CronTaskConfig {
   schedule?: CronSchedule;
   /** Human-readable name */
   name?: string;
+  /** Where to deliver execution results (IM channel) */
+  delivery?: CronDelivery;
 }
 
 /**
@@ -214,6 +228,8 @@ export function formatScheduleDescription(task: CronTask): string {
         return `每 ${formatCronInterval(task.schedule.minutes)}`;
       case 'cron':
         return formatCronExpression(task.schedule.expr);
+      case 'loop':
+        return 'Ralph Loop 无限循环';
     }
   }
   return `每 ${formatCronInterval(task.intervalMinutes)}`;

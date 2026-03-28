@@ -1,25 +1,14 @@
-import { Fragment, memo, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Copy, Check, Undo2, RotateCcw, GitBranch } from 'lucide-react';
+import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { ChevronDown, Copy, Check, Undo2, RotateCcw, GitBranch } from 'lucide-react';
 
 import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
 import BlockGroup from '@/components/BlockGroup';
 import Markdown from '@/components/Markdown';
+import Tip from '@/components/Tip';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
 import { SOURCE_LABELS, type MessageSource } from '../../shared/types/im';
-
-/** Lightweight CSS-only tooltip — appears instantly on hover, no JS timers. */
-function Tip({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <span className="group/tip relative inline-flex">
-      {children}
-      <span className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)]/90 px-2 py-1 text-[11px] text-[var(--button-primary-text)] opacity-0 transition-opacity group-hover/tip:opacity-100">
-        {label}
-      </span>
-    </span>
-  );
-}
 
 interface MessageProps {
   message: MessageType;
@@ -175,6 +164,12 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
   );
 }
 
+/** Whitelist: system-injection tags → display label (for user message badge) */
+const SYSTEM_TAG_MAP: Record<string, string> = {
+  'HEARTBEAT': '心跳感知',
+  'CRON_TASK': '定时任务',
+};
+
 /**
  * Message component with memo optimization.
  * History messages won't re-render when streaming message updates.
@@ -184,6 +179,10 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
   const [copied, setCopied] = useState(false);
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const [userHovered, setUserHovered] = useState(false);
+  // User message collapse: default collapsed, expand on click (no re-collapse)
+  const [userExpanded, setUserExpanded] = useState(false);
+  const userContentRef = useRef<HTMLDivElement>(null);
+  const [userOverflows, setUserOverflows] = useState(false);
 
   // Delay AssistantActions rendering on the STREAMING message only.
   // Uses isLoading (not isStreaming) so that HISTORY messages (isLoading=false always)
@@ -205,15 +204,38 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
     };
   }, []);
 
+  // Collapse threshold: 50vh at mount time (no resize reactivity needed — memo prevents re-render)
+  const USER_COLLAPSE_HEIGHT = useMemo(() => typeof window !== 'undefined' ? window.innerHeight * 0.5 : 400, []);
+  // Measure content height after DOM commit to determine if collapse is needed.
+  // Uses rAF to avoid synchronous setState in effect body (react-hooks/set-state-in-effect).
+  useEffect(() => {
+    if (message.role !== 'user' || userExpanded) return;
+    const rafId = requestAnimationFrame(() => {
+      const el = userContentRef.current;
+      if (el && el.scrollHeight > USER_COLLAPSE_HEIGHT) {
+        setUserOverflows(true);
+      }
+    });
+    return () => cancelAnimationFrame(rafId);
+  }, [message.role, userExpanded, USER_COLLAPSE_HEIGHT]);
+
   if (message.role === 'user') {
     const rawUserContent = typeof message.content === 'string' ? message.content : '';
-    // Strip system injection tags (<system-reminder>, <HEARTBEAT>, <MEMORY_UPDATE>) that
-    // the heartbeat/cron system wraps around delivered content. These HTML-like tags trigger
+
+    // Detect system injection type from <system-reminder><TAG> wrapper (whitelist)
+    let systemTag: string | null = null;
+    const tagMatch = rawUserContent.match(/<system-reminder>\s*<(\w+)>/);
+    if (tagMatch && tagMatch[1] in SYSTEM_TAG_MAP) {
+      systemTag = SYSTEM_TAG_MAP[tagMatch[1]];
+    }
+
+    // Strip system injection tags that wrap delivered content. These HTML-like tags trigger
     // Markdown's HTML block mode, breaking \n rendering and Markdown syntax.
     const userContent = rawUserContent
       .replace(/<\/?system-reminder>/g, '')
       .replace(/<\/?HEARTBEAT>/g, '')
       .replace(/<\/?MEMORY_UPDATE>/g, '')
+      .replace(/<\/?CRON_TASK>/g, '')
       .trim();
     const hasAttachments = Boolean(message.attachments?.length);
     const attachmentItems =
@@ -263,19 +285,48 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               <span>via {SOURCE_LABELS[imSource as MessageSource] ?? imSource}</span>
             </div>
           )}
-          <article className="relative w-fit max-w-[66%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
-            {hasAttachments && (
-              <div className={hasText ? 'mb-2' : ''}>
-                <AttachmentPreviewList
-                  attachments={attachmentItems}
-                  compact
-                  onPreview={openPreview}
-                />
+          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
+            {/* System injection tag badge */}
+            {systemTag && (
+              <div className="mb-2 -mt-0.5">
+                <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--accent-warm)]">
+                  {systemTag}
+                </span>
               </div>
             )}
-            {hasText && (
-              <div className="text-[var(--ink)]">
-                <Markdown preserveNewlines>{userContent}</Markdown>
+            {/* Collapsible content wrapper: max 50vh when collapsed */}
+            <div
+              ref={userContentRef}
+              className={!userExpanded && userOverflows ? 'overflow-hidden' : ''}
+              style={!userExpanded && userOverflows ? { maxHeight: `${USER_COLLAPSE_HEIGHT}px` } : undefined}
+            >
+              {hasAttachments && (
+                <div className={hasText ? 'mb-2' : ''}>
+                  <AttachmentPreviewList
+                    attachments={attachmentItems}
+                    compact
+                    onPreview={openPreview}
+                  />
+                </div>
+              )}
+              {hasText && (
+                <div className="text-[var(--ink)]">
+                  <Markdown preserveNewlines>{userContent}</Markdown>
+                </div>
+              )}
+            </div>
+            {/* Expand button with gradient fade */}
+            {!userExpanded && userOverflows && (
+              <div className="relative -mx-4 -mb-3 mt-0">
+                <div className="pointer-events-none h-10 bg-gradient-to-t from-[var(--paper-elevated)] to-transparent" />
+                <button
+                  type="button"
+                  onClick={() => setUserExpanded(true)}
+                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--paper-elevated)] py-1.5 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                >
+                  <ChevronDown className="size-3.5" />
+                  展开
+                </button>
               </div>
             )}
           </article>
@@ -316,7 +367,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
   // Assistant message
   if (typeof message.content === 'string') {
     return (
-      <div className="flex justify-start w-full px-4 py-2 select-none">
+      <div className="flex justify-start w-full px-4 py-2 select-none" data-role="assistant">
         <div className="w-full max-w-none">
           <div className="text-[var(--ink)] select-text">
             <Markdown>{message.content}</Markdown>
@@ -392,7 +443,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
     : -1;
 
   return (
-    <div className="flex justify-start select-none">
+    <div className="flex justify-start select-none" data-role="assistant">
       <div className="w-full">
         <article className="w-full px-3 py-2">
           <div className="space-y-3">

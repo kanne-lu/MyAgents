@@ -130,7 +130,9 @@ export default function CronTaskOverlay({
               ? `仅一次 (${new Date(schedule.at).toLocaleString('zh-CN')})`
               : schedule?.kind === 'cron'
                 ? `Cron: ${schedule.expr}`
-                : `每 ${formatCronInterval(schedule?.kind === 'every' ? schedule.minutes : intervalMinutes)}`
+                : schedule?.kind === 'loop'
+                  ? 'Ralph Loop 无限循环'
+                  : `每 ${formatCronInterval(schedule?.kind === 'every' ? schedule.minutes : intervalMinutes)}`
             }</span>
             <span className="text-[var(--line-strong)]">·</span>
             <span>{getExecutionText()}</span>

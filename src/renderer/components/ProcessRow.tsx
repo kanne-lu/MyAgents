@@ -208,7 +208,7 @@ const ProcessRow = memo(function ProcessRow({
             >
                 {/* Left indicator dot - smaller */}
                 <div className={`flex size-1.5 shrink-0 rounded-full ${isBlockActive
-                    ? 'bg-[var(--warning)] animate-pulse'
+                    ? 'bg-[var(--success)] animate-pulse'
                     : block.isFailed || block.tool?.isFailed
                         ? 'bg-[var(--error)]'
                         : block.isStopped || block.tool?.isStopped
@@ -242,7 +242,7 @@ const ProcessRow = memo(function ProcessRow({
                         </span>
                     )}
                     {subLabel && subLabel !== mainLabel && (
-                        <span className="text-xs text-[var(--ink-muted)] font-mono truncate">
+                        <span className="max-w-[60%] text-xs text-[var(--ink-muted)] font-mono truncate">
                             {subLabel}
                         </span>
                     )}

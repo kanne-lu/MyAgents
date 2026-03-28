@@ -723,7 +723,7 @@ pub fn cmd_copy_folder_to_templates(
 
 // ============= Admin Agent Sync =============
 
-const ADMIN_AGENT_VERSION: &str = "6";
+const ADMIN_AGENT_VERSION: &str = "8";
 
 /// Merge bundled admin agent files into ~/.myagents/
 /// Version-gated: only runs when ADMIN_AGENT_VERSION changes.
@@ -759,6 +759,74 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
         .map_err(|e| format!("Version write failed: {}", e))?;
 
     ulog_info!("[admin-agent] Synced v{}", ADMIN_AGENT_VERSION);
+    Ok(true)
+}
+
+// ============= CLI Sync =============
+
+const CLI_VERSION: &str = "1";
+
+/// Sync the CLI script from bundled resources to ~/.myagents/bin/.
+/// Version-gated: only runs when CLI_VERSION changes.
+/// Renames myagents.ts → myagents (strips .ts extension for shebang execution).
+#[tauri::command]
+pub fn cmd_sync_cli<R: Runtime>(
+    app_handle: AppHandle<R>,
+) -> Result<bool, String> {
+    let home = dirs::home_dir().ok_or("Home dir not found")?;
+    let bin_dir = home.join(".myagents").join("bin");
+
+    // Version gate
+    let ver_file = home.join(".myagents").join(".cli-version");
+    if ver_file.exists() {
+        let ver = fs::read_to_string(&ver_file).unwrap_or_default();
+        if ver.trim() == CLI_VERSION {
+            return Ok(false);
+        }
+    }
+
+    // Source: app resources/cli/
+    let res = app_handle.path().resource_dir()
+        .map_err(|e| format!("Resource dir: {}", e))?;
+    let cli_src = res.join("cli");
+    if !cli_src.exists() {
+        return Err(format!("CLI source not found: {:?}", cli_src));
+    }
+
+    // Ensure ~/.myagents/bin/ exists
+    fs::create_dir_all(&bin_dir)
+        .map_err(|e| format!("Failed to create bin dir: {}", e))?;
+
+    // Copy myagents.ts → myagents (strip .ts extension)
+    let src_script = cli_src.join("myagents.ts");
+    let dst_script = bin_dir.join("myagents");
+    if !src_script.exists() {
+        return Err(format!("CLI script not found: {:?} (packaging issue?)", src_script));
+    }
+    fs::copy(&src_script, &dst_script)
+        .map_err(|e| format!("Failed to copy CLI script: {}", e))?;
+    // Ensure executable permission on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&dst_script, perms)
+            .map_err(|e| format!("Failed to set permissions: {}", e))?;
+    }
+
+    // Copy myagents.cmd (Windows launcher, no rename needed)
+    let src_cmd = cli_src.join("myagents.cmd");
+    let dst_cmd = bin_dir.join("myagents.cmd");
+    if src_cmd.exists() {
+        fs::copy(&src_cmd, &dst_cmd)
+            .map_err(|e| format!("Failed to copy CLI cmd script: {}", e))?;
+    }
+
+    // Write version gate
+    fs::write(&ver_file, CLI_VERSION)
+        .map_err(|e| format!("CLI version write failed: {}", e))?;
+
+    ulog_info!("[cli] Synced CLI v{}", CLI_VERSION);
     Ok(true)
 }
 

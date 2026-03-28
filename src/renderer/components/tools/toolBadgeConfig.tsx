@@ -476,8 +476,6 @@ export function getToolLabel(tool: ToolUseSimple): string {
       const description = getStringProp(tool.parsedInput, 'description');
       const subagentType = getStringProp(tool.parsedInput, 'subagent_type') || tool.name;
       const isTaskRunning = tool.isLoading && !tool.result;
-      const isBackground = isObject(tool.parsedInput) && tool.parsedInput.run_in_background === true;
-
       // When Task/Agent is running, show the latest subagent tool (running or most recent)
       if (isTaskRunning && tool.subagentCalls && tool.subagentCalls.length > 0) {
         // Prefer running tool, otherwise show the last tool
@@ -487,13 +485,11 @@ export function getToolLabel(tool: ToolUseSimple): string {
           return getSubagentCallLabel(latestCall);
         }
       }
-      // When completed or no subagent calls yet, show the description
-      const bgSuffix = isBackground && !isTaskRunning ? ' (后台)' : '';
-      if (description) {
-        const desc = description.length > 25 ? `${description.substring(0, 22)}...` : description;
-        return desc + bgSuffix;
-      }
-      return subagentType + bgSuffix;
+      // When completed or no subagent calls yet, show the description.
+      // No JS truncation — CSS truncate handles overflow via max-width in ProcessRow.
+      // No (后台) suffix — the 后台 badge tag already indicates background mode.
+      if (description) return description;
+      return subagentType;
     }
     case 'WebFetch': {
       const urlStr = getStringProp(tool.parsedInput, 'url');

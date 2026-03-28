@@ -16,6 +16,7 @@ import * as cronClient from '@/api/cronTaskClient';
 import { getSessions, type SessionMetadata } from '@/api/sessionClient';
 import type { CronSchedule, CronEndConditions, CronRunMode } from '@/types/cronTask';
 import { MIN_CRON_INTERVAL } from '@/types/cronTask';
+import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 
 function toLocalDateTimeString(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -99,6 +100,7 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
   const [schedule, setSchedule] = useState<CronSchedule | null>(null);
   const [intervalMinutes, setIntervalMinutes] = useState(30);
   const [notifyEnabled, setNotifyEnabled] = useState(true);
+  const [deliveryBotId, setDeliveryBotId] = useState('');
   const [runMode, setRunMode] = useState<CronRunMode>('new_session');
   const [selectedSessionId, setSelectedSessionId] = useState<string>('');
   const [workspaceSessions, setWorkspaceSessions] = useState<SessionMetadata[]>([]);
@@ -110,7 +112,9 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
   const [aiCanExit, setAiCanExit] = useState(true);
   const [isCreating, setIsCreating] = useState(false);
 
+  const { options: deliveryOptions, hasChannels, resolveDelivery } = useDeliveryChannels(selectedProjectPath);
   const isAtSchedule = schedule?.kind === 'at';
+  const isLoopSchedule = schedule?.kind === 'loop';
 
   useEffect(() => {
     isMountedRef.current = true;
@@ -185,10 +189,12 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
           ? { aiCanExit }
           : { deadline: deadline ? new Date(deadline).toISOString() : undefined, maxExecutions: maxExecutions ? parseInt(maxExecutions, 10) : undefined, aiCanExit };
 
+      const delivery = (notifyEnabled && deliveryBotId) ? resolveDelivery(deliveryBotId) : undefined;
       const task = await cronClient.createCronTask({
         workspacePath: selectedProjectPath, sessionId, prompt: prompt.trim(),
         intervalMinutes: schedule?.kind === 'every' ? schedule.minutes : intervalMinutes,
-        endConditions, runMode, notifyEnabled, schedule: schedule ?? undefined, name: name.trim() || undefined,
+        endConditions, runMode: isLoopSchedule ? 'single_session' : runMode, notifyEnabled, schedule: schedule ?? undefined, name: name.trim() || undefined,
+        delivery,
       });
       await cronClient.startCronTask(task.id);
       await cronClient.startCronScheduler(task.id);
@@ -198,7 +204,7 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
     } catch (err) {
       toast.error(`创建失败: ${err instanceof Error ? err.message : String(err)}`);
     } finally { setIsCreating(false); }
-  }, [errors, isCreating, name, prompt, selectedProjectPath, schedule, intervalMinutes, endConditionMode, deadline, maxExecutions, aiCanExit, notifyEnabled, runMode, selectedSessionId, onClose, onCreated, toast, isAtSchedule]);
+  }, [errors, isCreating, name, prompt, selectedProjectPath, schedule, intervalMinutes, endConditionMode, deadline, maxExecutions, aiCanExit, notifyEnabled, deliveryBotId, resolveDelivery, runMode, selectedSessionId, onClose, onCreated, toast, isAtSchedule, isLoopSchedule]);
 
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
@@ -249,14 +255,20 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
           <div>
             <SectionHeader icon={MessageSquare}>执行模式</SectionHeader>
             <div className="mt-3">
+              {isLoopSchedule ? (
+                <p className="text-sm text-[var(--ink-muted)]">连续对话（保持上下文）— Ralph Loop 固定使用此模式</p>
+              ) : (
               <div className="flex gap-2">
                 <PillButton selected={runMode === 'new_session'} onClick={() => { setRunMode('new_session'); setSelectedSessionId(''); }}>新开对话</PillButton>
                 <PillButton selected={runMode === 'single_session'} onClick={() => setRunMode('single_session')}>连续对话</PillButton>
               </div>
+              )}
+              {!isLoopSchedule && (
               <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
                 {runMode === 'new_session' ? '每次执行创建新对话，无记忆' : '所有执行共用同一对话，AI 能记住之前内容'}
               </p>
-              {runMode === 'single_session' && (
+              )}
+              {!isLoopSchedule && runMode === 'single_session' && (
                 <div className="mt-3">
                   <label className="mb-1 block text-[13px] text-[var(--ink-muted)]">选择对话</label>
                   <CustomSelect value={selectedSessionId}
@@ -338,13 +350,21 @@ export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalP
             </div>
           )}
 
-          {/* 通知 — Switch row style */}
-          <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-            <div className="flex items-center gap-2.5">
-              <Bell className="h-4 w-4 text-[var(--ink-muted)]" />
-              <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+          {/* 任务通知 */}
+          <div>
+            <SectionHeader icon={Bell}>任务通知</SectionHeader>
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
+                <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+                <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
+              </div>
+              {notifyEnabled && hasChannels && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
+                  <CustomSelect value={deliveryBotId} options={deliveryOptions} onChange={setDeliveryBotId} placeholder="桌面通知（默认）" />
+                </div>
+              )}
             </div>
-            <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
           </div>
         </div>
 

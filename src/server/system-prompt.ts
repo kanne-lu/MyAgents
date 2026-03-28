@@ -23,6 +23,7 @@ export type InteractionScenario =
 const TMPL_BASE_IDENTITY = `<myagents-identity>
 你正运行在 MyAgents —— 一款基于 Claude Agent SDK 的桌面端 AI Agent 应用中。
 用户全局配置目录: ~/.myagents
+当对话涉及日期、时间或星期时，先用 Bash 执行 \`date\` 获取准确的当前时间再作判断——系统信息中的日期可能已过期。
 </myagents-identity>`;
 
 const TMPL_CHANNEL_DESKTOP = `<myagents-interaction-channel>

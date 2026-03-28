@@ -313,3 +313,13 @@ function checkDecorativeToolText(text: string): { filtered: boolean; reason?: st
 - 添加长度限制（50-5000 字符），进一步降低误判风险
 - 记录过滤日志，便于调试
 
+---
+
+## 自定义供应商 (v0.1.51+)
+
+用户可通过 Settings 或 Admin API 添加自定义 OpenAI 兼容供应商。自定义供应商配置持久化到 `~/.myagents/providers/{id}.json`。
+
+### modelAliases 默认值
+
+自定义供应商如果没有主动设置 modelAliases，`getEffectiveModelAliases()` 和 `resolveProviderEnv()` 会用 `primaryModel` 或第一个可用模型作为 sonnet/opus/haiku 的 fallback，防止子 Agent 发送 raw `claude-*` 到三方 API。
+

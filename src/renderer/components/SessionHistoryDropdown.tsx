@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState, useMemo } from 'react';
+import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { BarChart2, Clock, Trash2 } from 'lucide-react';
+import { BarChart2, Clock, Download, Trash2 } from 'lucide-react';
 
-import { deleteSession, getSessions, type SessionMetadata } from '@/api/sessionClient';
+import { deleteSession, getSessionDetails, getSessions, type SessionMetadata } from '@/api/sessionClient';
 import { deactivateSession } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { getWorkspaceCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
@@ -15,6 +15,8 @@ import type { SessionTag } from '@/hooks/useTaskCenterData';
 
 import SessionStatsModal from './SessionStatsModal';
 import SessionTagBadge from './SessionTagBadge';
+import Tip from './Tip';
+import { useToast } from './Toast';
 
 interface SessionHistoryDropdownProps {
     agentDir: string;
@@ -38,6 +40,7 @@ export default function SessionHistoryDropdown({
     isOpen,
     onClose,
 }: SessionHistoryDropdownProps) {
+    const toast = useToast();
     const [sessions, setSessions] = useState<FetchState>(null);
     const [cronTasks, setCronTasks] = useState<CronTaskFetchState>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
@@ -286,6 +289,96 @@ export default function SessionHistoryDropdown({
         setStatsSession({ id: session.id, title: session.title });
     };
 
+    // Export session as .md file
+    const [exportingId, setExportingId] = useState<string | null>(null);
+
+    /** Extract text content from assistant message (stored as JSON array of content blocks) */
+    const extractAssistantText = (content: string): string => {
+        try {
+            const blocks = JSON.parse(content);
+            if (!Array.isArray(blocks)) return content;
+            return blocks
+                .filter((b: { type: string }) => b.type === 'text')
+                .map((b: { text: string }) => b.text)
+                .join('\n\n');
+        } catch {
+            // Plain string content (user messages or legacy format)
+            return content;
+        }
+    };
+
+    const handleExport = useCallback(async (e: React.MouseEvent, session: SessionMetadata) => {
+        e.stopPropagation();
+        setExportingId(session.id);
+        try {
+            const data = await getSessionDetails(session.id);
+            if (!data || data.messages.length === 0) {
+                toast.error('该对话暂无内容可导出');
+                return;
+            }
+
+            // Format timestamp: YYYY-MM-DD HH:mm:ss
+            const fmtTs = (iso: string) => {
+                const d = new Date(iso);
+                const pad2 = (n: number) => String(n).padStart(2, '0');
+                return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+            };
+
+            const lines: string[] = [];
+            // Header
+            const now = new Date();
+            const pad2 = (n: number) => String(n).padStart(2, '0');
+            const dateStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+            lines.push(`<!-- Exported from MyAgents · ${dateStr} -->`);
+            lines.push(`<!-- Session: ${data.title} -->`);
+            lines.push('');
+
+            for (const msg of data.messages) {
+                const roleLabel = msg.role === 'user' ? 'User' : 'Assistant';
+                const ts = fmtTs(msg.timestamp);
+                lines.push(`[ ${roleLabel} | ${ts} ]`);
+                lines.push('');
+                const text = msg.role === 'assistant'
+                    ? extractAssistantText(msg.content)
+                    : msg.content;
+                lines.push(text);
+                lines.push('');
+                lines.push('---');
+                lines.push('');
+            }
+
+            const markdown = lines.join('\n');
+
+            // File name: {date}_{title}.md — sanitize title for filename
+            const safeTitle = data.title.replace(/[/\\:*?"<>|]/g, '_').slice(0, 60);
+            const fileName = `${dateStr}_${safeTitle}.md`;
+
+            // Trigger download via Blob URL (same pattern as UnifiedLogsPanel)
+            const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            // Show global toast with full download path
+            try {
+                const { downloadDir, join: joinPath } = await import('@tauri-apps/api/path');
+                const dlDir = await downloadDir();
+                const fullPath = await joinPath(dlDir, fileName);
+                toast.success(`已导出：${fullPath}`);
+            } catch {
+                // Fallback if Tauri path API unavailable (browser dev mode)
+                toast.success(`已导出到下载目录：${fileName}`);
+            }
+        } catch {
+            toast.error('导出失败，请重试');
+        } finally {
+            setExportingId(null);
+        }
+    }, [toast]);
+
     const formatTime = (isoString: string) => {
         const date = new Date(isoString);
         const now = new Date();
@@ -406,30 +499,46 @@ export default function SessionHistoryDropdown({
                                             </>
                                         ) : (
                                             <>
-                                                <button
-                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper)] hover:text-[var(--ink)] group-hover:opacity-100"
-                                                    onClick={(e) => handleShowStats(e, session)}
-                                                    title="查看统计"
-                                                >
-                                                    <BarChart2 className="h-3.5 w-3.5" />
-                                                </button>
+                                                <Tip label="导出对话内容为 md 文件" position="bottom">
+                                                    <button
+                                                        aria-label="导出"
+                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
+                                                        onClick={(e) => { void handleExport(e, session); }}
+                                                        disabled={exportingId === session.id}
+                                                    >
+                                                        <Download className="h-3.5 w-3.5" />
+                                                    </button>
+                                                </Tip>
+                                                <Tip label="查看统计" position="bottom">
+                                                    <button
+                                                        aria-label="查看统计"
+                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
+                                                        onClick={(e) => handleShowStats(e, session)}
+                                                    >
+                                                        <BarChart2 className="h-3.5 w-3.5" />
+                                                    </button>
+                                                </Tip>
                                                 {/* Disable delete for sessions with running cron tasks */}
                                                 {tags.some(t => t.type === 'cron') ? (
-                                                    <button
-                                                        className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 group-hover:opacity-40"
-                                                        disabled
-                                                        title="请先停止循环任务后再删除"
-                                                    >
-                                                        <Trash2 className="h-3.5 w-3.5" />
-                                                    </button>
+                                                    <Tip label="请先停止循环任务后再删除" position="bottom">
+                                                        <button
+                                                            aria-label="删除（请先停止循环任务）"
+                                                            className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 group-hover:opacity-40"
+                                                            disabled
+                                                        >
+                                                            <Trash2 className="h-3.5 w-3.5" />
+                                                        </button>
+                                                    </Tip>
                                                 ) : (
-                                                    <button
-                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--error-bg)] hover:text-[var(--error)] group-hover:opacity-100"
-                                                        onClick={(e) => handleDeleteClick(e, session.id)}
-                                                        title="删除"
-                                                    >
-                                                        <Trash2 className="h-3.5 w-3.5" />
-                                                    </button>
+                                                    <Tip label="删除" position="bottom">
+                                                        <button
+                                                            aria-label="删除"
+                                                            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-0 transition-all hover:bg-[var(--error-bg)] hover:text-[var(--error)] group-hover:opacity-100"
+                                                            onClick={(e) => handleDeleteClick(e, session.id)}
+                                                        >
+                                                            <Trash2 className="h-3.5 w-3.5" />
+                                                        </button>
+                                                    </Tip>
                                                 )}
                                             </>
                                         )}

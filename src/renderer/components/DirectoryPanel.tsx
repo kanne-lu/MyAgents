@@ -311,7 +311,9 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
   // Track previous item count to only log when changed
   const prevItemCountRef = useRef(-1);
 
-  const refresh = useCallback(() => {
+  // Raw refresh — fetches full directory tree from backend.
+  // Not debounced; used for initial load and explicit user actions (manual refresh button).
+  const rawRefresh = useCallback(() => {
     setError(null);
     apiGet<DirectoryTree>('/agent/dir')
       .then((data) => {
@@ -327,6 +329,24 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
         console.error('[DirectoryPanel] Failed to refresh:', err);
       });
   }, [apiGet]);
+
+  // Debounced refresh — coalesces rapid triggers (file watcher + tool completion
+  // can fire within 500ms of each other) into a single API call.
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const refresh = useCallback(() => {
+    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = null;
+      rawRefresh();
+    }, 300);
+  }, [rawRefresh]);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+    };
+  }, []);
 
   // Stable ref for refresh to avoid timer recreation
   const refreshRef = useRef(refresh);
@@ -395,26 +415,26 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
   }, [apiGet, updateNodeInTree]);
 
   useEffect(() => {
-    refresh();
+    rawRefresh(); // Initial load — no debounce needed
     // Clear old branch first to avoid flash, then fetch new
     setGitBranch(null);
     apiGet<{ branch: string | null }>('/api/git/branch')
       .then((data) => setGitBranch(data.branch))
       .catch(() => setGitBranch(null));
-  }, [agentDir, apiGet, refresh]);
+  }, [agentDir, apiGet, rawRefresh]);
 
-  // Respond to external refresh trigger (e.g., when file-modifying tools complete)
+  // Respond to external refresh trigger (file watcher SSE + tool completion fast-path).
+  // Uses debounced refresh to coalesce rapid triggers.
   useEffect(() => {
     if (refreshTrigger && refreshTrigger > 0) {
-      console.log(`[DirectoryPanel] Refresh triggered by file-modifying tool (trigger=${refreshTrigger})`);
       refresh();
     }
   }, [refreshTrigger, refresh]);
 
-  // Auto-refresh every 60 seconds to catch external file system changes
-  // Use refreshRef to avoid timer recreation when refresh function changes
+  // Safety-net polling: catch anything the file watcher might miss.
+  // With the watcher active, this is a fallback — 120s is sufficient.
   useEffect(() => {
-    const interval = setInterval(() => refreshRef.current(), 60000);
+    const interval = setInterval(() => refreshRef.current(), 120_000);
     return () => clearInterval(interval);
   }, []);
 

@@ -210,6 +210,9 @@ pub enum CronSchedule {
     Every { minutes: u32, #[serde(default, skip_serializing_if = "Option::is_none")] start_at: Option<String> },
     /// Cron expression with optional timezone
     Cron { expr: String, tz: Option<String> },
+    /// Ralph Loop: completion-triggered re-execution (no time-based scheduling)
+    /// AI finishes → 3s buffer → execute again. Exponential backoff on failure.
+    Loop,
 }
 
 /// A scheduled cron task
@@ -527,6 +530,10 @@ fn compute_next_execution(task: &CronTask) -> Option<String> {
                 Err(_) => None,
             }
         }
+        Some(CronSchedule::Loop) => {
+            // Ralph Loop: no scheduled time, triggered by completion
+            None
+        }
         None => {
             // Legacy: use interval_minutes
             let base = task.last_executed_at.unwrap_or(task.created_at);
@@ -753,6 +760,7 @@ impl CronTaskManager {
             // For CronSchedule::Cron — compute next fire time from cron expression
             let is_one_shot = matches!(&schedule, Some(CronSchedule::At { .. }));
             let is_cron_expr = matches!(&schedule, Some(CronSchedule::Cron { .. }));
+            let is_loop = matches!(&schedule, Some(CronSchedule::Loop));
             let cron_expr_info = match &schedule {
                 Some(CronSchedule::Cron { expr, tz }) => Some((expr.clone(), tz.clone())),
                 _ => None,
@@ -762,7 +770,11 @@ impl CronTaskManager {
             // This is critical: we use sleep_until_wallclock() which polls Utc::now()
             // instead of tokio::time::sleep() which uses monotonic time that pauses
             // during system sleep/suspend.
-            let initial_target: Option<DateTime<Utc>> = if let Some(CronSchedule::At { ref at }) = schedule {
+            let initial_target: Option<DateTime<Utc>> = if is_loop {
+                // Ralph Loop: execute immediately (2s startup delay)
+                log::info!("[CronTask] Task {} Ralph Loop mode, executing in 2 seconds", task_id_owned);
+                Some(Utc::now() + chrono::Duration::seconds(2))
+            } else if let Some(CronSchedule::At { ref at }) = schedule {
                 // One-shot: target is the specified time
                 match DateTime::parse_from_rfc3339(at).or_else(|_| DateTime::parse_from_str(at, "%Y-%m-%dT%H:%M:%S")) {
                     Ok(target) => {
@@ -842,6 +854,9 @@ impl CronTaskManager {
                 log::info!("[CronTask] Task {} no lastExecutedAt but count={}, waiting full interval", task_id_owned, execution_count);
                 Some(Utc::now() + chrono::Duration::seconds(interval_secs))
             };
+
+            // Ralph Loop: track consecutive failures for exponential backoff
+            let mut loop_consecutive_failures: u32 = 0;
 
             // Wait for initial period using wall-clock polling (survives system sleep)
             if let Some(target) = initial_target {
@@ -1052,6 +1067,26 @@ impl CronTaskManager {
                             }
                         }
 
+                        // Ralph Loop: reset failure counter on success, increment on logical failure
+                        if is_loop {
+                            if success {
+                                loop_consecutive_failures = 0;
+                            } else {
+                                loop_consecutive_failures += 1;
+                                if loop_consecutive_failures >= 10 {
+                                    log::error!("[CronTask] Task {} Ralph Loop: 10 consecutive failures (logical), stopping", task_id_owned);
+                                    stop_task_internal(&handle, &tasks, &task_id_owned,
+                                        Some("Ralph Loop: 10 consecutive failures".to_string())).await;
+                                    break;
+                                }
+                                let backoff_secs = match loop_consecutive_failures {
+                                    1 => 3, 2 => 10, 3 => 30, 4 => 60, 5 => 120, _ => 300,
+                                };
+                                log::warn!("[CronTask] Task {} Ralph Loop: logical failure #{}, backoff {}s",
+                                    task_id_owned, loop_consecutive_failures, backoff_secs);
+                            }
+                        }
+
                         // Emit execution-complete for ALL success paths
                         // (one-shot, AI exit, end condition, and normal continue)
                         // Must happen before any break so frontend always gets the update
@@ -1126,6 +1161,27 @@ impl CronTaskManager {
                             "taskId": task_id_owned,
                             "error": e
                         }));
+
+                        // Ralph Loop: exponential backoff on failure (3→10→30→60→120→300s, max 10 consecutive)
+                        if is_loop {
+                            loop_consecutive_failures += 1;
+                            if loop_consecutive_failures >= 10 {
+                                log::error!("[CronTask] Task {} Ralph Loop: 10 consecutive failures, stopping", task_id_owned);
+                                stop_task_internal(&handle, &tasks, &task_id_owned,
+                                    Some("Ralph Loop: 10 consecutive failures".to_string())).await;
+                                break;
+                            }
+                            let backoff_secs = match loop_consecutive_failures {
+                                1 => 3, 2 => 10, 3 => 30, 4 => 60, 5 => 120, _ => 300,
+                            };
+                            log::warn!("[CronTask] Task {} Ralph Loop: failure #{}, backoff {}s",
+                                task_id_owned, loop_consecutive_failures, backoff_secs);
+                            let backoff_target = Utc::now() + chrono::Duration::seconds(backoff_secs as i64);
+                            if !sleep_until_wallclock(backoff_target, &shutdown, &task_id_owned).await {
+                                log::info!("[CronTask] Task {} shutdown during Loop backoff", task_id_owned);
+                                break;
+                            }
+                        }
                         // Continue to next interval (don't break on error)
                     }
                 }
@@ -1133,6 +1189,17 @@ impl CronTaskManager {
                 // Save updated state atomically (temp file + rename)
                 if let Err(e) = atomic_save_tasks(&storage_path, &tasks).await {
                     log::warn!("[CronTask] Failed to save task state: {}", e);
+                }
+
+                // Ralph Loop: skip time-based scheduling, re-execute after 3s buffer
+                if is_loop {
+                    log::info!("[CronTask] Task {} Ralph Loop: next execution in 3 seconds", task_id_owned);
+                    let buffer_target = Utc::now() + chrono::Duration::seconds(3);
+                    if !sleep_until_wallclock(buffer_target, &shutdown, &task_id_owned).await {
+                        log::info!("[CronTask] Task {} shutdown during Loop buffer", task_id_owned);
+                        break;
+                    }
+                    continue;
                 }
 
                 // Wait for the next execution time using wall-clock polling.
@@ -2075,6 +2142,8 @@ pub async fn cmd_update_cron_task_fields(
     notify_enabled: Option<bool>,
     model: Option<String>,
     permission_mode: Option<String>,
+    delivery: Option<CronDelivery>,
+    clear_delivery: Option<bool>,
 ) -> Result<CronTask, String> {
     let manager = get_cron_task_manager();
 
@@ -2116,6 +2185,8 @@ pub async fn cmd_update_cron_task_fields(
         if let Some(ne) = notify_enabled { task.notify_enabled = ne; }
         if let Some(m) = model { task.model = Some(m); }
         if let Some(pm) = permission_mode { task.permission_mode = pm; }
+        if let Some(d) = delivery { task.delivery = Some(d); }
+        else if clear_delivery == Some(true) { task.delivery = None; }
         task.updated_at = Utc::now();
     }
 

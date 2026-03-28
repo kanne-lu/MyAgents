@@ -12,6 +12,7 @@ import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import QueryNavigator from '@/components/chat/QueryNavigator';
+import SelectionCommentMenu from '@/components/SelectionCommentMenu';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
@@ -1082,6 +1083,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               permissionMode: cron.config.permissionMode,
               providerEnv: cron.config.providerEnv,
               schedule: cron.config.schedule,
+              delivery: cron.config.delivery,
             });
             await startCronTaskIpc(task.id);
             await startCronScheduler(task.id);
@@ -1181,6 +1183,36 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     [handleForceExecuteQueued]
   );
 
+  // Format selected text as Markdown blockquote
+  const formatQuote = useCallback((text: string) =>
+    text.split('\n').map(line => `> ${line}`).join('\n'),
+  []);
+
+  // Quote selected text — append blockquote + placeholder for user to type over
+  const handleQuoteSelection = useCallback((selectedText: string) => {
+    const currentValue = inputRef.current?.value ?? '';
+    // Only prepend \n when there's existing content (so the quote starts on a new line)
+    const prefix = currentValue ? '\n' : '';
+    const quote = `${prefix}${formatQuote(selectedText)}\n针对引用的内容：`;
+    const appended = currentValue + quote;
+    chatInputRef.current?.setValue(appended);
+    // Move cursor to end + scroll textarea to bottom so user sees the appended quote
+    setTimeout(() => {
+      const textarea = inputRef.current;
+      if (textarea) {
+        textarea.setSelectionRange(appended.length, appended.length);
+        textarea.scrollTop = textarea.scrollHeight;
+        textarea.focus();
+      }
+    }, 0);
+  }, [inputRef, formatQuote]);
+
+  // Elaborate = quote + placeholder + "深入讲讲" then auto-send
+  const handleElaborateSelection = useCallback((selectedText: string) => {
+    const prompt = `${formatQuote(selectedText)}\n针对引用的内容：深入讲讲`;
+    void handleSendMessageRef.current(prompt);
+  }, [formatQuote]);
+
   // Navigate to a specific query message (used by QueryNavigator with virtuoso)
   // Uses messagesRef to avoid invalidating the callback on every streaming token update
   const handleNavigateToQuery = useCallback((messageId: string) => {
@@ -1245,7 +1277,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (!rewindTarget) return;
     const { messageId, content, attachments } = rewindTarget;
 
-    // 1. 立即关闭对话框 + 乐观更新 UI
+    // 快照：保存当前 messages 以便后端失败时回滚
+    const snapshot = messagesRef.current.slice();
+
+    // 1. 乐观更新 UI（瞬时反馈）
     // Pause auto-scroll to prevent animated scrolling during rewind's DOM changes.
     // Without this, the smooth scroll animation fights with the browser's natural
     // scroll clamping (messages removed → scrollHeight shrinks → scrollTop adjusts).
@@ -1270,7 +1305,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       chatInputRef.current?.setImages(restoredImages);
     }
 
-    // 2. 显示固定 loading 文案（后端 rewindPromise 会阻塞 enqueueUserMessage 防止竞态）
+    // 2. 后端回溯（rewindPromise 会阻塞 enqueueUserMessage 防止竞态）
+    //    成功：丢弃快照；失败：从快照回滚 UI
     track('session_rewind', {});
     setIsLoading(true);
     setRewindStatus('rewinding');
@@ -1278,12 +1314,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       .then(res => {
         const r = res as { success?: boolean; error?: string } | undefined;
         if (r && !r.success) {
+          // 后端明确返回失败 → 回滚 UI
+          setMessages(snapshot);
+          chatInputRef.current?.setValue('');
+          chatInputRef.current?.setImages([]);
           toastRef.current.error('时间回溯失败：' + (r.error || '未知错误'));
         }
       })
       .catch(err => {
+        // 网络错误或异常 → 回滚 UI
         console.error('[Chat] Rewind failed:', err);
-        toastRef.current.error('文件回溯失败，对话记录已回退但文件状态可能未还原');
+        setMessages(snapshot);
+        chatInputRef.current?.setValue('');
+        chatInputRef.current?.setImages([]);
+        toastRef.current.error('时间回溯失败，请重试');
       })
       .finally(() => {
         setRewindStatus(null);
@@ -1309,6 +1353,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const attachments = userMsg.attachments;
     const userMessageId = userMsg.id;
 
+    // 快照：后端失败时回滚（与 handleRewindConfirm 一致）
+    const snapshot = messagesRef.current.slice();
+
     // 1. Optimistic UI: truncate to before user message
     pauseAutoScroll(500);
     setMessages(prev => {
@@ -1324,6 +1371,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       .then(res => {
         const r = res as { success?: boolean; error?: string } | undefined;
         if (r && !r.success) {
+          setMessages(snapshot);
           toastRef.current.error('重试失败：' + (r.error || '未知错误'));
           return;
         }
@@ -1341,6 +1389,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       })
       .catch(err => {
         console.error('[Chat] Retry failed:', err);
+        setMessages(snapshot);
         toastRef.current.error('重试失败');
       })
       .finally(() => {
@@ -1636,6 +1685,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             )}
           </FileActionProvider>
 
+          {/* Text selection floating menu for quoting AI text */}
+          <SelectionCommentMenu
+            onQuote={handleQuoteSelection}
+            onElaborate={handleElaborateSelection}
+          />
+
           {/* Floating input with integrated cron task components */}
           <SimpleChatInput
             ref={chatInputRef}
@@ -1756,6 +1811,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         onClose={() => setShowCronSettings(false)}
         initialPrompt={cronPrompt}
         initialConfig={cronState.config}
+        workspacePath={agentDir}
         onConfirm={async (config: CronSettingsResult) => {
           const providerEnv = buildProviderEnv(currentProvider);
 
@@ -1814,6 +1870,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             setCronDetailTask(updated);
             toastRef.current?.success('任务已停止');
           }}
+          onOpenSession={handleSelectSession}
         />
       )}
     </div>

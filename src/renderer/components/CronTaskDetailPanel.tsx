@@ -20,9 +20,11 @@ import WorkspaceIcon from './launcher/WorkspaceIcon';
 import { useToast } from './Toast';
 import { useConfig } from '@/hooks/useConfig';
 import ConfirmDialog from './ConfirmDialog';
+import CustomSelect from './CustomSelect';
 import TaskRunHistory from './scheduled-tasks/TaskRunHistory';
 import ScheduleTypeTabs from './scheduled-tasks/ScheduleTypeTabs';
 import * as cronClient from '@/api/cronTaskClient';
+import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 
 interface CronTaskDetailPanelProps {
     task: CronTask;
@@ -31,6 +33,8 @@ interface CronTaskDetailPanelProps {
     onDelete: (taskId: string) => Promise<void>;
     onResume: (taskId: string) => Promise<void>;
     onStop?: (taskId: string) => Promise<void>;
+    /** Open a session in a new tab (for execution history click) */
+    onOpenSession?: (sessionId: string) => void;
 }
 
 const INPUT_CLS = 'w-full rounded-lg border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none transition-colors';
@@ -68,7 +72,7 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
     );
 }
 
-export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, onResume, onStop }: CronTaskDetailPanelProps) {
+export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, onResume, onStop, onOpenSession }: CronTaskDetailPanelProps) {
     const toast = useToast();
     const { projects } = useConfig();
     const isMountedRef = useRef(true);
@@ -94,6 +98,8 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
     const [editMaxExec, setEditMaxExec] = useState(task.endConditions.maxExecutions ? String(task.endConditions.maxExecutions) : '');
     const [editAiCanExit, setEditAiCanExit] = useState(task.endConditions.aiCanExit);
     const [editNotify, setEditNotify] = useState(task.notifyEnabled);
+    const [editDeliveryBotId, setEditDeliveryBotId] = useState(task.delivery?.botId ?? '');
+    const { options: deliveryOptions, hasChannels, resolveDelivery, getChannelInfo } = useDeliveryChannels(task.workspacePath);
     const isAtSchedule = editSchedule?.kind === 'at';
 
     useEffect(() => {
@@ -109,6 +115,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
         setEditDeadline(task.endConditions.deadline || '');
         setEditMaxExec(task.endConditions.maxExecutions ? String(task.endConditions.maxExecutions) : '');
         setEditAiCanExit(task.endConditions.aiCanExit); setEditNotify(task.notifyEnabled);
+        setEditDeliveryBotId(task.delivery?.botId ?? '');
         setIsEditing(true);
     }, [task]);
 
@@ -118,16 +125,29 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
             const endConditions: CronEndConditions = isAtSchedule ? { aiCanExit: false }
                 : editEndMode === 'forever' ? { aiCanExit: editAiCanExit }
                 : { deadline: editDeadline ? new Date(editDeadline).toISOString() : undefined, maxExecutions: editMaxExec ? parseInt(editMaxExec, 10) : undefined, aiCanExit: editAiCanExit };
+            // Delivery update logic: set if resolved, clear if user chose default, preserve if unchanged
+            const deliveryFields: { delivery?: import('@/types/cronTask').CronDelivery; clearDelivery?: boolean } = {};
+            if (editDeliveryBotId) {
+                const resolved = resolveDelivery(editDeliveryBotId);
+                if (resolved) {
+                    deliveryFields.delivery = resolved;
+                }
+                // If channel was removed and can't resolve, don't touch delivery (preserve existing)
+            } else {
+                // User explicitly selected "桌面通知" (empty value) — clear delivery
+                deliveryFields.clearDelivery = true;
+            }
             await cronClient.updateCronTaskFields(task.id, {
                 name: editName.trim() || undefined, prompt: editPrompt.trim(),
                 schedule: editSchedule ?? undefined, intervalMinutes: editSchedule?.kind === 'every' ? editSchedule.minutes : editInterval,
                 endConditions, notifyEnabled: editNotify,
+                ...deliveryFields,
             });
             if (!isMountedRef.current) return;
             toast.success('任务已更新'); onClose(); // Close to refresh — cron:task-updated event triggers parent list reload
         } catch (err) { if (!isMountedRef.current) return; toast.error(`更新失败: ${err instanceof Error ? err.message : String(err)}`); }
         finally { if (isMountedRef.current) setIsSaving(false); }
-    }, [task.id, editName, editPrompt, editSchedule, editInterval, editEndMode, editDeadline, editMaxExec, editAiCanExit, editNotify, isAtSchedule, toast, onClose]);
+    }, [task.id, editName, editPrompt, editSchedule, editInterval, editEndMode, editDeadline, editMaxExec, editAiCanExit, editNotify, editDeliveryBotId, resolveDelivery, isAtSchedule, toast, onClose]);
 
     const handleDelete = useCallback(async () => {
         setIsDeleting(true); try { await onDelete(task.id); onClose(); } catch { /* caller handles */ } finally { if (isMountedRef.current) { setIsDeleting(false); setShowDeleteConfirm(false); } }
@@ -235,9 +255,21 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     </div>
                                 )}
 
-                                <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-                                    <div className="flex items-center gap-2.5"><Bell className="h-4 w-4 text-[var(--ink-muted)]" /><span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span></div>
-                                    <ToggleSwitch enabled={editNotify} onChange={setEditNotify} />
+                                {/* 任务通知 */}
+                                <div>
+                                    <SectionHeader icon={Bell}>任务通知</SectionHeader>
+                                    <div className="mt-2 space-y-3">
+                                        <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
+                                            <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+                                            <ToggleSwitch enabled={editNotify} onChange={setEditNotify} />
+                                        </div>
+                                        {editNotify && hasChannels && (
+                                            <div className="space-y-2">
+                                                <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
+                                                <CustomSelect value={editDeliveryBotId} options={deliveryOptions} onChange={setEditDeliveryBotId} placeholder="桌面通知（默认）" />
+                                            </div>
+                                        )}
+                                    </div>
                                 </div>
                             </>
                         ) : (
@@ -301,14 +333,29 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
 
                                 <div className="border-t border-[var(--line)]" />
 
-                                {/* 结束条件与通知 */}
+                                {/* 结束条件 */}
                                 <div>
-                                    <SectionHeader icon={Flag}>结束条件与通知</SectionHeader>
+                                    <SectionHeader icon={Flag}>结束条件</SectionHeader>
                                     <div className="mt-2 flex flex-wrap gap-2">
                                         <DetailTag label={task.endConditions.deadline ? `截止 ${new Date(task.endConditions.deadline).toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}` : '无截止'} />
                                         <DetailTag label={task.endConditions.maxExecutions ? `最多 ${task.endConditions.maxExecutions} 次` : '无限次'} />
                                         <DetailTag label={task.endConditions.aiCanExit ? 'AI 可退出' : 'AI 不可退出'} />
+                                    </div>
+                                </div>
+
+                                <div className="border-t border-[var(--line)]" />
+
+                                {/* 任务通知 */}
+                                <div>
+                                    <SectionHeader icon={Bell}>任务通知</SectionHeader>
+                                    <div className="mt-2 flex flex-wrap gap-2">
                                         <DetailTag label={task.notifyEnabled ? '通知开启' : '通知关闭'} />
+                                        {(() => {
+                                            if (!task.delivery) return <DetailTag label="桌面通知" />;
+                                            const info = getChannelInfo(task.delivery.botId);
+                                            if (!info) return <DetailTag label={`${task.delivery.botId} · 已移除`} />;
+                                            return <DetailTag label={`${info.agentName}: ${info.name}`} />;
+                                        })()}
                                     </div>
                                 </div>
 
@@ -341,7 +388,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                 {/* 执行历史 */}
                                 <div>
                                     <SectionHeader icon={History}>执行历史</SectionHeader>
-                                    <div className="mt-2"><TaskRunHistory taskId={task.id} /></div>
+                                    <div className="mt-2"><TaskRunHistory taskId={task.id} sessionId={task.internalSessionId || task.sessionId} onOpenSession={onOpenSession ? (sid) => { onOpenSession(sid); onClose(); } : undefined} /></div>
                                 </div>
                             </>
                         )}

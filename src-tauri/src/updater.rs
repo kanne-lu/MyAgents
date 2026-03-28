@@ -107,7 +107,7 @@ pub struct UpdateReadyInfo {
 /// Build an updater with user's proxy configuration applied.
 /// Reads proxy settings from ~/.myagents/config.json:
 /// - Proxy enabled → `.proxy(url)`
-/// - No proxy configured → `.no_proxy()` (bypass system proxy env vars)
+/// - No proxy configured → inherit system network behavior (respect system proxy)
 fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     let target = get_update_target();
     let mut builder = app.updater_builder().target(target.to_string());
@@ -119,8 +119,9 @@ fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Upd
             .map_err(|e| format!("Invalid proxy URL '{}': {}", proxy_url, e))?;
         builder = builder.proxy(url);
     } else {
-        log::info!("[Updater] No proxy configured, using direct connection for updates");
-        builder = builder.no_proxy();
+        log::info!("[Updater] No proxy configured, inheriting system network behavior");
+        // Don't call .no_proxy() — let the updater respect system proxy settings
+        // (Clash TUN, global proxy, etc.) just like other normal applications.
     }
 
     builder.build().map_err(|e| format!("Failed to build updater: {}", e))

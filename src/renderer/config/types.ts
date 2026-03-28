@@ -770,27 +770,9 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
 // ===== MCP OAuth 2.0 Types =====
 
 /**
- * OAuth 2.0 configuration for an MCP server (user-provided or discovered)
- * @deprecated Use ManualOAuthConfig for manual mode. Auto mode needs no config.
+ * OAuth 2.0 configuration — see ManualOAuthConfig for manual mode,
+ * McpOAuthState (mcp-oauth/types.ts) for backend state.
  */
-export interface McpOAuthConfig {
-  clientId: string;
-  clientSecret?: string;
-  scopes?: string[];
-}
-
-/**
- * @deprecated Legacy type — backend now uses McpOAuthState from mcp-oauth/types.ts
- */
-export interface McpOAuthToken {
-  accessToken: string;
-  refreshToken?: string;
-  tokenType: string;
-  expiresAt?: number;
-  scope?: string;
-  serverUrl: string;
-  clientId?: string;
-}
 
 /** OAuth status for display in the UI */
 export type McpOAuthStatus = 'disconnected' | 'connecting' | 'connected' | 'expired' | 'error';

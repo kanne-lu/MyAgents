@@ -139,6 +139,9 @@ const scheduleSchema = z.discriminatedUnion('kind', [
     expr: z.string().describe('Cron expression, e.g. "0 9 * * *" for daily 9 AM'),
     tz: z.string().optional().describe('IANA timezone, e.g. "Asia/Shanghai"'),
   }),
+  z.object({
+    kind: z.literal('loop'),
+  }).describe('Ralph Loop: completion-triggered infinite loop. AI finishes → 3s buffer → execute again. Always uses single_session. Stops after 10 consecutive failures.'),
 ]);
 
 async function imCronToolHandler(args: {
@@ -539,6 +542,8 @@ function formatSchedule(schedule: z.infer<typeof scheduleSchema>): string {
       return `Every ${schedule.minutes} minutes`;
     case 'cron':
       return `Cron: ${schedule.expr}${schedule.tz ? ` (${schedule.tz})` : ''}`;
+    case 'loop':
+      return 'Ralph Loop (completion-triggered)';
   }
 }
 
@@ -573,8 +578,8 @@ If "deliverTo" is omitted: IM sessions auto-deliver to the current chat; desktop
 
 **Time awareness:** Before creating "at" (one-shot) schedules, run \`date\` to confirm the current local time.
 
-Schedules: "at" (one-shot ISO-8601), "every" (interval ≥5min), "cron" (cron expression + optional timezone).
-Each task runs independently in a new AI session.`,
+Schedules: "at" (one-shot ISO-8601), "every" (interval ≥5min), "cron" (cron expression + optional timezone), "loop" (Ralph Loop — completion-triggered infinite loop, always single_session, stops after 10 consecutive failures).
+Each task runs independently in a new AI session (except "loop" which uses single_session).`,
         {
           action: z.enum(['list', 'add', 'update', 'remove', 'run', 'runs', 'status', 'wake', 'channels'])
             .describe('Action to perform'),

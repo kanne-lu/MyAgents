@@ -1,7 +1,7 @@
 # 代理配置说明
 
-**更新日期**: 2026-01-31
-**版本**: v0.1.7
+**更新日期**: 2026-03-27
+**版本**: v0.1.54
 
 ---
 
@@ -114,25 +114,23 @@ pub fn build_client_with_proxy(builder: ClientBuilder) -> Client {
         // 使用用户配置的代理，但排除 localhost
         builder.proxy(Proxy::all(url)?.no_proxy(...))
     } else {
-        // 禁用所有代理（包括系统代理）
-        builder.no_proxy()
+        // 继承系统网络行为（reqwest 默认代理检测：env vars + macOS 系统代理）
+        builder
     }
 }
 ```
 
-#### 2. Bun Sidecar 环境变量 (`sidecar.rs`)
+#### 2. 子进程代理注入 (`proxy_config::apply_to_subprocess`)
 
 ```rust
 if let Some(proxy_settings) = read_proxy_settings() {
     cmd.env("HTTP_PROXY", proxy_url);
     cmd.env("HTTPS_PROXY", proxy_url);
-    cmd.env("NO_PROXY", "localhost,127.0.0.1,::1");
+    cmd.env("NO_PROXY", "localhost,...");
+    cmd.env("MYAGENTS_PROXY_INJECTED", "1"); // TypeScript 端区分显式注入 vs 系统继承
 } else {
-    // 主动剥离继承的系统代理 env vars，防止 Clash/V2Ray 泄漏
-    for var in &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-                 "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"] {
-        cmd.env_remove(var);
-    }
+    // 继承系统网络行为，但始终注入 NO_PROXY 保护 Bun 的 localhost fetch 调用
+    cmd.env("NO_PROXY", "localhost,...");
 }
 ```
 
@@ -185,10 +183,10 @@ let client = reqwest::Client::builder()
 ### Q4: 可以使用系统代理吗？
 
 **A**:
-- **启用应用代理** → 只使用应用配置的代理
-- **禁用应用代理** → 完全禁用代理（不使用系统代理）
+- **启用应用代理** → 使用应用配置的代理
+- **禁用应用代理** → 继承系统网络行为（与其他软件一致）
 
-这是为了避免 Windows 上系统代理干扰 localhost 连接的问题。
+禁用时，应用不会主动干预网络代理设置，行为与普通软件一致：如果系统开了全局代理/TUN 模式，流量会走代理；如果系统没有代理，则直连。Localhost 通信始终直连（由 `local_http` 模块保障）。
 
 ---
 
@@ -199,7 +197,7 @@ let client = reqwest::Client::builder()
 **Rust 日志** (`~/.myagents/logs/unified-*.log`):
 ```
 [proxy_config] Using proxy for external requests: http://127.0.0.1:7890
-[proxy_config] No proxy configured, using direct connection
+[proxy_config] No proxy configured, inheriting system network behavior
 ```
 
 **Bun Sidecar 日志**:
@@ -276,3 +274,23 @@ let client = reqwest::Client::builder()
 - `src-tauri/src/sidecar.rs` - Bun Sidecar 代理注入
 - `src-tauri/src/updater.rs` - Updater 代理配置
 - `src-tauri/src/sse_proxy.rs` - SSE 代理禁用
+
+---
+
+## 代理使用场景完整列表
+
+| 组件 | 代理来源 | 特殊处理 |
+|------|---------|---------|
+| Rust reqwest（HTTP proxy） | `proxy_config::read_proxy_settings()` | `local_http` 内置 `.no_proxy()` |
+| Bun Sidecar subprocess | env vars（`HTTP_PROXY` 等） | SDK 子进程继承 |
+| OpenAI Bridge subprocess | **代理变量被剥离** | SDK→Bridge 是 loopback，Bridge→upstream 从 `process.env` 读代理 |
+| Plugin Bridge | `apply_proxy_env()` 注入 | 与 Sidecar 相同逻辑 |
+| Updater | Rust reqwest | 使用 `local_http` |
+
+### SOCKS5 桥接机制
+
+Bun/Node.js 的 `fetch()` 不支持 `socks5://` 环境变量。系统启动 HTTP-to-SOCKS5 桥接代理（`src/server/utils/socks-bridge.ts`）在本地随机端口，SDK subprocess 连接桥接代理而非直连 SOCKS5 服务器。
+
+### OpenAI Bridge 代理剥离
+
+当供应商使用 OpenAI 协议时，SDK subprocess 的 `ANTHROPIC_BASE_URL` 指向 sidecar loopback。此时**必须剥离所有代理变量**，否则 SDK 的 `fetchOptions.proxy` 会将 loopback 请求路由到系统代理（→ 超时/502）。Bridge handler 自身从 `process.env` 读取代理访问上游 API。

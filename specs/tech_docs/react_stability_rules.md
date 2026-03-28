@@ -105,3 +105,51 @@ const MemoChild = memo(function Child(props) { ... }, (prev, next) => {
 - 自定义 comparator 跳过回调检查的前提是 **所有回调 props 确实稳定**（`[]` 依赖）。若某个回调依赖了不稳定值（如来自 hook 的函数），必须用 ref 包一层
 - `setTabs(prev => prev.map(...))` 会保留未变更 item 的对象引用，使 `prev.data === next.data` 生效
 - 仅影响特定子组件类型的 prop，用条件表达式限制传递范围
+
+## 扩展模式（v0.1.53+）
+
+### 模式 A：多 Ref 同步稳定复杂依赖
+
+当 `useCallback` 需要依赖多个 hook 返回值时，通过 Ref 同步避免 callback 频繁重建：
+
+```typescript
+const configRef = useRef(config);
+configRef.current = config;
+const apiKeysRef = useRef(apiKeys);
+apiKeysRef.current = apiKeys;
+
+const buildProviderEnv = useCallback((provider) => {
+  const aliases = getEffectiveModelAliases(provider, configRef.current.providerModelAliases);
+  return { apiKey: apiKeysRef.current[provider.id], ... };
+}, []);  // 依赖为空 → 永不重建
+```
+
+**应用**：`Chat.tsx` 的 `buildProviderEnv`、`handleSendMessage`。
+
+### 模式 B：isMountedRef 防竞态
+
+异步操作完成前检查组件是否仍 mounted：
+
+```typescript
+const isMountedRef = useRef(true);
+useEffect(() => () => { isMountedRef.current = false; }, []);
+
+loadData().then(result => {
+  if (!isMountedRef.current) return;
+  setState(result);
+});
+```
+
+**应用**：`ConfigProvider`、`TabProvider`、`BotPlatformRegistry`。
+
+### 模式 C：Dual Context 分离数据与行为
+
+当 Context 消费者众多且数据变化频繁时，将 data 和 actions 分为两个 Context：
+
+```typescript
+export const ConfigDataContext = createContext<ConfigDataValue>(null);
+export const ConfigActionsContext = createContext<ConfigActionsValue>(null);
+```
+
+**优势**：Actions 保持稳定引用，数据变化不导致 action 消费者重渲染。
+**应用**：`ConfigProvider`（`ConfigDataContext` + `ConfigActionsContext`）。

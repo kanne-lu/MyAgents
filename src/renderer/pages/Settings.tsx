@@ -549,6 +549,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         newArg: string;
         env: Record<string, string>;
         newEnvKey: string;
+        newEnvValue: string;
     } | null>(null);
 
     // Gemini Image MCP custom settings dialog
@@ -656,6 +657,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         url: string;
         env: Record<string, string>;
         newEnvKey: string;
+        newEnvValue: string;
         headers: Record<string, string>;
         newHeaderKey: string;
         newHeaderValue: string;
@@ -676,6 +678,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         url: '',
         env: {},
         newEnvKey: '',
+        newEnvValue: '',
         headers: {},
         newHeaderKey: '',
         newHeaderValue: '',
@@ -825,7 +828,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         setMcpJsonError('');
         setMcpForm({
             id: '', name: '', type: 'stdio', command: '', args: [], newArg: '', url: '',
-            env: {}, newEnvKey: '', headers: {}, newHeaderKey: '', newHeaderValue: '',
+            env: {}, newEnvKey: '', newEnvValue: '', headers: {}, newHeaderKey: '', newHeaderValue: '',
             oauthClientId: '', oauthClientSecret: '', oauthScopes: '', oauthCallbackPort: '', oauthAuthUrl: '', oauthTokenUrl: '',
         });
         setMcpHeadersExpanded(false);
@@ -933,6 +936,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             newArg: '',
             env,
             newEnvKey: '',
+            newEnvValue: '',
         });
     };
 
@@ -1345,6 +1349,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             url: server.url || '',
             env: server.env ? { ...server.env } : {},
             newEnvKey: '',
+            newEnvValue: '',
             headers: server.headers ? { ...server.headers } : {},
             newHeaderKey: '',
             newHeaderValue: '',
@@ -3341,14 +3346,36 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             placeholder="变量名"
                                             className="w-1/3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
                                         />
+                                        <input
+                                            type="text"
+                                            value={builtinMcpSettings.newEnvValue}
+                                            onChange={e => setBuiltinMcpSettings(prev => prev ? { ...prev, newEnvValue: e.target.value } : null)}
+                                            placeholder="值"
+                                            className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1.5 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none focus:border-[var(--accent)]"
+                                            onKeyDown={e => {
+                                                if (e.key === 'Enter') {
+                                                    e.preventDefault();
+                                                    const key = builtinMcpSettings.newEnvKey.trim();
+                                                    if (key && !(key in builtinMcpSettings.env)) {
+                                                        setBuiltinMcpSettings(prev => prev ? {
+                                                            ...prev,
+                                                            env: { ...prev.env, [key]: prev.newEnvValue },
+                                                            newEnvKey: '',
+                                                            newEnvValue: '',
+                                                        } : null);
+                                                    }
+                                                }
+                                            }}
+                                        />
                                         <button
                                             onClick={() => {
                                                 const key = builtinMcpSettings.newEnvKey.trim();
                                                 if (key && !(key in builtinMcpSettings.env)) {
                                                     setBuiltinMcpSettings(prev => prev ? {
                                                         ...prev,
-                                                        env: { ...prev.env, [key]: '' },
+                                                        env: { ...prev.env, [key]: prev.newEnvValue },
                                                         newEnvKey: '',
+                                                        newEnvValue: '',
                                                     } : null);
                                                 }
                                             }}
@@ -4407,22 +4434,31 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 </div>
                                             ))}
 
-                                            {/* Add new env var */}
+                                            {/* Add new env var (key + value) */}
                                             <div className="flex items-center gap-2">
                                                 <input
                                                     type="text"
                                                     value={mcpForm.newEnvKey}
                                                     onChange={(e) => setMcpForm((p) => ({ ...p, newEnvKey: e.target.value.toUpperCase().replace(/\s/g, '_') }))}
-                                                    placeholder="变量名（如 API_KEY）"
+                                                    placeholder="变量名"
+                                                    className="w-[140px] shrink-0 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
+                                                />
+                                                <input
+                                                    type="text"
+                                                    value={mcpForm.newEnvValue}
+                                                    onChange={(e) => setMcpForm((p) => ({ ...p, newEnvValue: e.target.value }))}
+                                                    placeholder="值"
                                                     className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2 text-sm font-mono transition-colors focus:border-[var(--focus-border)] focus:outline-none"
                                                     onKeyDown={(e) => {
                                                         if (e.key === 'Enter') {
                                                             e.preventDefault();
-                                                            if (mcpForm.newEnvKey) {
+                                                            const key = mcpForm.newEnvKey.trim();
+                                                            if (key && !(key in mcpForm.env)) {
                                                                 setMcpForm((p) => ({
                                                                     ...p,
-                                                                    env: { ...p.env, [p.newEnvKey]: '' },
-                                                                    newEnvKey: ''
+                                                                    env: { ...p.env, [key]: p.newEnvValue },
+                                                                    newEnvKey: '',
+                                                                    newEnvValue: '',
                                                                 }));
                                                             }
                                                         }
@@ -4430,15 +4466,17 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 />
                                                 <button
                                                     onClick={() => {
-                                                        if (mcpForm.newEnvKey) {
+                                                        const key = mcpForm.newEnvKey.trim();
+                                                        if (key && !(key in mcpForm.env)) {
                                                             setMcpForm((p) => ({
                                                                 ...p,
-                                                                env: { ...p.env, [p.newEnvKey]: '' },
-                                                                newEnvKey: ''
+                                                                env: { ...p.env, [key]: p.newEnvValue },
+                                                                newEnvKey: '',
+                                                                newEnvValue: '',
                                                             }));
                                                         }
                                                     }}
-                                                    disabled={!mcpForm.newEnvKey}
+                                                    disabled={!mcpForm.newEnvKey.trim() || mcpForm.newEnvKey.trim() in mcpForm.env}
                                                     className="flex items-center gap-1.5 rounded-lg border border-[var(--ink)] px-3 py-2 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
                                                 >
                                                     <Plus className="h-4 w-4" />

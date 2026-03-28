@@ -117,7 +117,7 @@ fn find_bun_binary() -> Option<PathBuf> {
 }
 
 /// Find the CLI script at ~/.myagents/bin/myagents.
-/// This script is synced from bundled-agents/myagents_helper by cmd_sync_admin_agent.
+/// This script is synced from src/cli/ by cmd_sync_cli.
 fn find_cli_script() -> Option<PathBuf> {
     let home = dirs::home_dir()?;
 

@@ -159,6 +159,8 @@ pub fn run() {
             commands::cmd_remove_template_folder,
             // Admin agent sync
             commands::cmd_sync_admin_agent,
+            // CLI sync (independent version gate)
+            commands::cmd_sync_cli,
             // Cron task commands
             cron_task::cmd_create_cron_task,
             cron_task::cmd_start_cron_task,

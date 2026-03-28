@@ -62,5 +62,4 @@ export {
 export {
     loadProjectSettings,
     saveProjectSettings,
-    syncProviderToProjectSettings,
 } from './services/projectSettingsService';

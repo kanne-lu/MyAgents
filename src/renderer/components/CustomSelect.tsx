@@ -11,6 +11,10 @@ export interface SelectOption {
     value: string;
     label: string;
     icon?: ReactNode;
+    /** Right-aligned suffix content (e.g., status badge) */
+    suffix?: ReactNode;
+    /** Renders as a non-selectable section header/divider */
+    isSeparator?: boolean;
 }
 
 interface CustomSelectProps {
@@ -44,14 +48,20 @@ export default function CustomSelect({
     const [dropdownStyle, setDropdownStyle] = useState<React.CSSProperties>({});
 
     // Compute dropdown position from trigger's bounding rect
+    // Auto-detect: open upward when not enough space below
     const updatePosition = useCallback(() => {
         if (!triggerRef.current) return;
         const rect = triggerRef.current.getBoundingClientRect();
+        const maxDropdownHeight = 240; // max-h-60 = 15rem = 240px
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const openUpward = spaceBelow < maxDropdownHeight && rect.top > spaceBelow;
         setDropdownStyle({
             position: 'fixed',
-            top: rect.bottom + 4,
             left: rect.left,
             width: rect.width,
+            ...(openUpward
+                ? { bottom: window.innerHeight - rect.top + 4 }
+                : { top: rect.bottom + 4 }),
         });
     }, []);
 
@@ -115,7 +125,12 @@ export default function CustomSelect({
                     className="z-[300] max-h-60 overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md"
                     style={dropdownStyle}
                 >
-                    {options.map(option => (
+                    {options.map(option =>
+                        option.isSeparator ? (
+                            <div key={option.value} className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]/50">
+                                {option.label}
+                            </div>
+                        ) : (
                         <button
                             key={option.value}
                             type="button"
@@ -130,11 +145,15 @@ export default function CustomSelect({
                                 <span className="shrink-0">{option.icon}</span>
                             )}
                             <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                            {option.suffix && (
+                                <span className="shrink-0">{option.suffix}</span>
+                            )}
                             {option.value === value && (
                                 <Check className="h-3 w-3 shrink-0" />
                             )}
                         </button>
-                    ))}
+                        )
+                    )}
 
                     {/* Footer action */}
                     {footerAction && (

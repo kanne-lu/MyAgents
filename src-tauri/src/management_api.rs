@@ -211,15 +211,21 @@ async fn create_cron_handler(
 ) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();
 
-    let run_mode = match req.session_target.as_deref() {
-        Some("single_session") => cron_task::RunMode::SingleSession,
-        _ => cron_task::RunMode::NewSession,
+    let is_loop = matches!(&req.schedule, Some(CronSchedule::Loop));
+    let run_mode = if is_loop {
+        cron_task::RunMode::SingleSession // Loop always uses single_session
+    } else {
+        match req.session_target.as_deref() {
+            Some("single_session") => cron_task::RunMode::SingleSession,
+            _ => cron_task::RunMode::NewSession,
+        }
     };
 
     let interval_minutes = match &req.schedule {
         Some(CronSchedule::Every { minutes, .. }) => *minutes,
         Some(CronSchedule::At { .. }) => 60, // placeholder, not used for one-shot
         Some(CronSchedule::Cron { .. }) => 60, // placeholder, calculated by cron expression
+        Some(CronSchedule::Loop) => 0, // not used, Loop is completion-triggered
         None => req.interval_minutes.unwrap_or(30),
     };
 

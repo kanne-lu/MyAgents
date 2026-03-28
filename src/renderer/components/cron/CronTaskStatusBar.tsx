@@ -18,6 +18,8 @@ function formatStatusBarSchedule(schedule: CronSchedule | null | undefined, inte
         return `每 ${formatCronInterval(schedule.minutes)} 执行一次`;
       case 'cron':
         return `Cron: ${schedule.expr}`;
+      case 'loop':
+        return 'Ralph Loop 无限循环';
     }
   }
   return `每 ${formatCronInterval(intervalMinutes)} 执行一次`;

@@ -5,6 +5,8 @@ import { useState, useCallback, useMemo, useRef } from 'react';
 import type { CronEndConditions, CronRunMode, CronTaskConfig, CronSchedule } from '@/types/cronTask';
 import { MIN_CRON_INTERVAL } from '@/types/cronTask';
 import ScheduleTypeTabs from '@/components/scheduled-tasks/ScheduleTypeTabs';
+import CustomSelect from '@/components/CustomSelect';
+import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 
 /** Toggle Switch */
 function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
@@ -73,6 +75,7 @@ type InitialConfig = {
   notifyEnabled: boolean;
   schedule?: CronSchedule;
   executionTarget?: ExecutionTarget;
+  delivery?: import('@/types/cronTask').CronDelivery;
 };
 
 interface CronTaskSettingsModalProps {
@@ -81,6 +84,8 @@ interface CronTaskSettingsModalProps {
   onConfirm: (config: CronSettingsResult) => void;
   initialPrompt?: string;
   initialConfig?: InitialConfig | null;
+  /** Current workspace path for delivery channel grouping */
+  workspacePath?: string;
 }
 
 function toLocalDateTimeString(d: Date): string {
@@ -94,6 +99,7 @@ function CronTaskSettingsForm({
   initialConfig,
   onClose,
   onConfirm,
+  workspacePath,
 }: Omit<CronTaskSettingsModalProps, 'isOpen'>) {
   // Execution target: current session (legacy behavior) or new standalone task
   const [executionTarget, setExecutionTarget] = useState<ExecutionTarget>(initialConfig?.executionTarget ?? 'current_session');
@@ -102,10 +108,12 @@ function CronTaskSettingsForm({
   const [schedule, setSchedule] = useState<CronSchedule | null>(initialConfig?.schedule ?? null);
   const [intervalMinutes, setIntervalMinutes] = useState(initialConfig?.intervalMinutes ?? 30);
 
-  // Run mode (only for current_session — new_task always uses new_session)
-  const runMode: CronRunMode = executionTarget === 'current_session' ? 'single_session' : 'new_session';
+  // Run mode: Loop forces single_session; otherwise current_session→single, new_task→new
+  const runMode: CronRunMode = schedule?.kind === 'loop' ? 'single_session' : (executionTarget === 'current_session' ? 'single_session' : 'new_session');
 
   const [notifyEnabled, setNotifyEnabled] = useState(initialConfig?.notifyEnabled ?? true);
+  const [deliveryBotId, setDeliveryBotId] = useState(initialConfig?.delivery?.botId ?? '');
+  const { options: deliveryOptions, hasChannels, resolveDelivery } = useDeliveryChannels(workspacePath);
 
   // End conditions — pre-compute initial values to avoid purity issues
   const [endCondInit] = useState(() => {
@@ -128,6 +136,7 @@ function CronTaskSettingsForm({
   const [aiCanExit, setAiCanExit] = useState(endCondInit.aiCanExit);
 
   const isAtSchedule = schedule?.kind === 'at';
+  const isLoopSchedule = schedule?.kind === 'loop';
 
   const handleScheduleChange = useCallback((s: CronSchedule | null, m: number) => {
     setSchedule(s);
@@ -177,6 +186,7 @@ function CronTaskSettingsForm({
             aiCanExit,
           };
 
+    const delivery = (notifyEnabled && deliveryBotId) ? resolveDelivery(deliveryBotId) : undefined;
     onConfirm({
       prompt: (initialPrompt ?? '').trim(),
       intervalMinutes: schedule?.kind === 'every' ? schedule.minutes : intervalMinutes,
@@ -185,8 +195,9 @@ function CronTaskSettingsForm({
       notifyEnabled,
       executionTarget,
       schedule: schedule ?? undefined,
+      delivery,
     });
-  }, [isValid, initialPrompt, schedule, intervalMinutes, runMode, notifyEnabled, endMode, aiCanExit, useDeadline, deadline, useMaxExecutions, maxExecutions, executionTarget, isAtSchedule, onConfirm]);
+  }, [isValid, initialPrompt, schedule, intervalMinutes, runMode, notifyEnabled, deliveryBotId, resolveDelivery, endMode, aiCanExit, useDeadline, deadline, useMaxExecutions, maxExecutions, executionTarget, isAtSchedule, onConfirm]);
 
   // Backdrop click handling
   const mouseDownOnBackdropRef = useRef(false);
@@ -219,15 +230,21 @@ function CronTaskSettingsForm({
           <div>
             <SectionHeader icon={MessageSquare}>执行模式</SectionHeader>
             <div className="mt-3">
+              {isLoopSchedule ? (
+                <p className="text-sm text-[var(--ink-muted)]">连续对话（保持上下文）— Ralph Loop 固定使用此模式</p>
+              ) : (
               <div className="flex gap-2">
                 <PillButton selected={executionTarget === 'current_session'} onClick={() => setExecutionTarget('current_session')}>当前对话</PillButton>
                 <PillButton selected={executionTarget === 'new_task'} onClick={() => setExecutionTarget('new_task')}>新开对话</PillButton>
               </div>
+              )}
+              {!isLoopSchedule && (
               <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
                 {executionTarget === 'current_session'
                   ? '在当前对话中定时执行，保持上下文'
                   : '创建独立定时任务，不占用当前对话'}
               </p>
+              )}
             </div>
           </div>
 
@@ -304,13 +321,21 @@ function CronTaskSettingsForm({
             </div>
           )}
 
-          {/* ── 通知 ── */}
-          <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
-            <div className="flex items-center gap-2.5">
-              <Bell className="h-4 w-4 text-[var(--ink-muted)]" />
-              <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+          {/* ── 任务通知 ── */}
+          <div>
+            <SectionHeader icon={Bell}>任务通知</SectionHeader>
+            <div className="mt-3 space-y-3">
+              <div className="flex items-center justify-between rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
+                <span className="text-sm text-[var(--ink)]">每次执行完即发送通知</span>
+                <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
+              </div>
+              {notifyEnabled && hasChannels && (
+                <div className="space-y-2">
+                  <label className="text-sm font-medium text-[var(--ink)]">投递渠道</label>
+                  <CustomSelect value={deliveryBotId} options={deliveryOptions} onChange={setDeliveryBotId} placeholder="桌面通知（默认）" />
+                </div>
+              )}
             </div>
-            <ToggleSwitch enabled={notifyEnabled} onChange={setNotifyEnabled} />
           </div>
 
           {/* Validation Errors */}
@@ -343,6 +368,7 @@ export default function CronTaskSettingsModal({
   onConfirm,
   initialPrompt = '',
   initialConfig = null,
+  workspacePath,
 }: CronTaskSettingsModalProps) {
   if (!isOpen) return null;
 
@@ -352,6 +378,7 @@ export default function CronTaskSettingsModal({
       initialConfig={initialConfig}
       onClose={onClose}
       onConfirm={onConfirm}
+      workspacePath={workspacePath}
     />
   );
 }

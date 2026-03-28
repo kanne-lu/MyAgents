@@ -409,8 +409,10 @@ export function resolveWorkspaceConfig(agentDir: string): WorkspaceResolvedConfi
   const mcpServers = getEffectiveMcpServers(agentDir);
 
   // --- Resolve Provider ---
+  // Priority: agent.providerId → config.defaultProviderId → persisted snapshot
   let providerEnv: ResolvedProviderEnv | undefined;
-  const providerId = agent?.providerId as string | undefined;
+  const providerId = (agent?.providerId as string | undefined)
+    || (config.defaultProviderId as string | undefined);
   if (providerId) {
     providerEnv = resolveProviderEnv(providerId, config);
   }
@@ -422,7 +424,14 @@ export function resolveWorkspaceConfig(agentDir: string): WorkspaceResolvedConfi
   }
 
   // --- Resolve Model ---
-  const model = (agent?.model as string | undefined) ?? undefined;
+  // Priority: agent.model → provider's primaryModel (if resolved)
+  let model = (agent?.model as string | undefined) ?? undefined;
+  if (!model && providerId) {
+    const provider = findProvider(providerId);
+    if (provider) {
+      model = (provider as Record<string, unknown>).primaryModel as string | undefined;
+    }
+  }
 
   if (mcpServers.length > 0 || providerEnv || model) {
     console.log(

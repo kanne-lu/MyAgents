@@ -138,9 +138,17 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             await ensureBundledWorkspace();
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
-                await invoke('cmd_sync_admin_agent');
+                const results = await Promise.allSettled([
+                    invoke('cmd_sync_admin_agent'),
+                    invoke('cmd_sync_cli'),
+                ]);
+                for (const r of results) {
+                    if (r.status === 'rejected') {
+                        console.warn('[ConfigProvider] Sync failed:', r.reason);
+                    }
+                }
             } catch (e) {
-                console.warn('[ConfigProvider] Admin agent sync failed:', e);
+                console.warn('[ConfigProvider] Agent/CLI sync failed:', e);
             }
 
             const [rawConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([

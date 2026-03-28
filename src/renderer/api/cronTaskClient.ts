@@ -2,7 +2,7 @@
 // Communicates with Rust CronTaskManager via Tauri commands
 
 import { isTauriEnvironment } from '@/utils/browserMock';
-import type { CronTask, CronTaskConfig, CronRunRecord, CronSchedule, CronEndConditions } from '@/types/cronTask';
+import type { CronTask, CronTaskConfig, CronRunRecord, CronSchedule, CronEndConditions, CronDelivery } from '@/types/cronTask';
 
 // Cached invoke function to avoid repeated dynamic imports
 let cachedInvoke: typeof import('@tauri-apps/api/core').invoke | null = null;
@@ -159,6 +159,8 @@ export const updateCronTaskFields = (
     notifyEnabled?: boolean;
     model?: string;
     permissionMode?: string;
+    delivery?: CronDelivery;
+    clearDelivery?: boolean;
   }
 ): Promise<CronTask> =>
   invokeCommand('cmd_update_cron_task_fields', { taskId, ...fields });

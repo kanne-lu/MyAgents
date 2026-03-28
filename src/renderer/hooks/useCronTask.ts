@@ -1,6 +1,6 @@
 // Hook for managing cron task state within a Tab
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { CronTask, CronTaskConfig, CronEndConditions, CronRunMode, CronTaskTriggerPayload, CronSchedule } from '@/types/cronTask';
+import type { CronTask, CronTaskConfig, CronDelivery, CronEndConditions, CronRunMode, CronTaskTriggerPayload, CronSchedule } from '@/types/cronTask';
 import {
   createCronTask,
   startCronTask,
@@ -36,6 +36,8 @@ export interface CronTaskState {
     schedule?: CronSchedule;
     /** Execution target: current_session (legacy) or new_task (standalone) */
     executionTarget?: 'current_session' | 'new_task';
+    /** Where to deliver execution results (IM channel) */
+    delivery?: CronDelivery;
   } | null;
   /** Active cron task (after creation) */
   task: CronTask | null;
@@ -109,6 +111,7 @@ export function useCronTask(options: UseCronTaskOptions) {
         providerEnv: config.providerEnv,
         schedule: config.schedule,
         executionTarget: config.executionTarget,
+        delivery: config.delivery,
       },
       task: null,
       isStarting: false,
@@ -187,6 +190,7 @@ export function useCronTask(options: UseCronTaskOptions) {
         permissionMode: currentConfig.permissionMode,
         providerEnv: currentConfig.providerEnv,
         schedule: currentConfig.schedule,
+        delivery: currentConfig.delivery,
       });
 
       // Start the task (updates status to 'running')
@@ -643,6 +647,7 @@ export function useCronTask(options: UseCronTaskOptions) {
           model: task.model,
           permissionMode: task.permissionMode,
           providerEnv: task.providerEnv,
+          delivery: task.delivery,
         },
         task,
         isStarting: false,

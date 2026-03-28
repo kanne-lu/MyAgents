@@ -98,6 +98,7 @@ function heartbeatChunk(): Uint8Array {
 const SILENT_EVENTS = new Set([
   'chat:message-chunk', 'chat:thinking-delta', 'chat:tool-input-delta',
   'chat:content-block-stop', 'chat:message-sdk-uuid', 'chat:log',
+  'workspace:files-changed', // File watcher fires frequently — skip console.log
 ]);
 
 export function broadcast(event: string, data: unknown): void {

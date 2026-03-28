@@ -2,7 +2,7 @@
   "name": "myagents",
   "description": "MyAgents - Desktop Claude Code for everyone. AI-powered productivity, not just for developers.",
   "type": "module",
-  "version": "0.1.53",
+  "version": "0.1.54",
   "license": "Apache-2.0",
   "packageManager": "bun@1.3.2",
   "author": "MyAgents Team <myagents.io@gmail.com>",
@@ -38,11 +38,12 @@
     "test": "bun test",
     "format": "prettier --experimental-cli --write .",
     "format:check": "prettier --experimental-cli --check --log-level warn .",
+    "generate:sdk-shims": "bun scripts/generate-sdk-shims.ts",
     "clean": "rm -rf node_modules dist .turbo .eslintcache *.tsbuildinfo src-tauri/target",
     "version": "node scripts/sync-version.js && git add src-tauri/tauri.conf.json src-tauri/Cargo.toml"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.2.80",
+    "@anthropic-ai/claude-agent-sdk": "0.2.84",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",

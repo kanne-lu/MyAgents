@@ -151,6 +151,33 @@ if (sdkMessage.uuid) {
 }
 ```
 
+### Session ID 前缀约定
+
+| 前缀 | 格式 | 用途 | 何时生成 |
+|------|------|------|---------|
+| 无 | UUID v4 | 标准 session | `createSessionMetadata()` / 首条消息 |
+| `pending-` | `pending-{tabId}` | 新 Tab 占位符 | Tab 创建时，等待首条消息产生真实 UUID |
+| `cron-standalone-` | `cron-standalone-{uuid}` | 独立定时任务 | 创建不绑定 Tab 的定时任务 |
+
+### currentSessionUuids 追踪机制
+
+每个 Sidecar 进程维护 `currentSessionUuids: Set<string>`，记录当前 SDK session 分配的所有消息 UUID。
+
+| 操作 | 时机 |
+|------|------|
+| 清空 | 非 resume 的新 session 启动时 |
+| 从磁盘 seed | `switchToSession` / `loadMessagesFromStorage` 时 |
+| 追加 | SDK 返回 assistant/user 消息时 |
+| 校验 | rewind/fork 时判断 UUID 是否属于当前 session |
+
+**UUID 新鲜度规则**：若 `lastAssistantUuid ∉ currentSessionUuids`（旧 UUID，来自其他 session），rewind 拒绝使用 `resumeSessionAt`，改为新建 session。
+
+### awaitSessionTermination 超时防护 (v0.1.53)
+
+所有等待 session 终止的操作通过 `awaitSessionTermination(10_000, label)` 执行，带 10 秒超时。超时后强制清理状态（`querySession = null`、`isProcessing = false`、`isStreamingMessage = false`），防止死锁。
+
+调用场景：`resetSession`、`switchToSession`、`rewindSession`、`enqueueUserMessage`（provider change）、`startStreamingSession`、`forceAbortCurrentTurnAndRecover`。
+
 ## 旧 Session 兼容
 
 旧版本创建的 session 无 `unifiedSession` 标记，系统自动兼容：

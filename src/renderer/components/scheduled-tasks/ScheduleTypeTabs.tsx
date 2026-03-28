@@ -4,7 +4,7 @@
  */
 
 import { useState, useCallback, useMemo } from 'react';
-import { Clock, Calendar, Timer } from 'lucide-react';
+import { Clock, Calendar, Timer, Repeat } from 'lucide-react';
 import type { CronSchedule } from '@/types/cronTask';
 import { CRON_INTERVAL_PRESETS, MIN_CRON_INTERVAL } from '@/types/cronTask';
 import CronExpressionInput from './CronExpressionInput';
@@ -15,7 +15,7 @@ function toLocalDateTimeString(d: Date): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-type ScheduleKind = 'every' | 'cron' | 'at';
+type ScheduleKind = 'every' | 'cron' | 'at' | 'loop';
 
 interface ScheduleTypeTabsProps {
   value: CronSchedule | null;
@@ -28,6 +28,7 @@ const TABS: { kind: ScheduleKind; label: string; icon: typeof Clock }[] = [
   { kind: 'every', label: '固定间隔', icon: Timer },
   { kind: 'cron', label: '定时执行', icon: Clock },
   { kind: 'at', label: '仅一次', icon: Calendar },
+  { kind: 'loop', label: '无限循环', icon: Repeat },
 ];
 
 export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, error }: ScheduleTypeTabsProps) {
@@ -74,6 +75,8 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
       onChange(buildEverySchedule(intervalMinutes), intervalMinutes);
     } else if (kind === 'cron') {
       onChange({ kind: 'cron', expr: cronExpr, tz: cronTz }, intervalMinutes);
+    } else if (kind === 'loop') {
+      onChange({ kind: 'loop' }, intervalMinutes);
     } else {
       onChange({ kind: 'at', at: new Date(atDateTime).toISOString() }, intervalMinutes);
     }
@@ -244,6 +247,16 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
             tz={cronTz}
             onChange={handleCronChange}
           />
+        )}
+
+        {activeKind === 'loop' && (
+          <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
+            <p className="text-sm font-medium text-[var(--ink)]">Ralph Loop 无限循环</p>
+            <p className="mt-1.5 text-xs leading-relaxed text-[var(--ink-muted)]">
+              让 AI 持续无限运行的模式。每次 AI 完成回复后，自动发起下一轮执行，不受时间调度约束。
+              适用于需要 AI 持续工作直到任务完成的场景。连续失败 10 次将自动停止。
+            </p>
+          </div>
         )}
 
         {activeKind === 'at' && (

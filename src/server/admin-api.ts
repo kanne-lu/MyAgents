@@ -132,7 +132,8 @@ export function handleMcpAdd(payload: {
     type: s.type,
     description: s.description,
     command: s.command,
-    args: s.args,
+    // Defensive: CLI may send non-array args (boolean, string) due to parsing edge cases
+    args: Array.isArray(s.args) ? s.args : undefined,
     env: s.env,
     url: s.url,
     headers: s.headers,

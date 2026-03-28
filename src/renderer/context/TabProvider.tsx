@@ -339,6 +339,11 @@ export default function TabProvider({
     const isLoadingSessionRef = useRef(false);
     // Ref for cron task exit handler (set by useCronTask hook via context)
     const onCronTaskExitRequestedRef = useRef<((taskId: string, reason: string) => void) | null>(null);
+    // Synchronous map: toolUseId → toolName. Updated outside React state updaters
+    // to avoid React 18 automatic batching timing issues (state updaters run during
+    // render, not during setState call — so reading a local variable set inside an
+    // updater is unreliable). This ref is always synchronously up-to-date.
+    const toolNameMapRef = useRef<Map<string, string>>(new Map());
     // Pending attachments to merge with next user message from SSE replay
     const pendingAttachmentsRef = useRef<{
         id: string;
@@ -379,6 +384,7 @@ export default function TabProvider({
         seenIdsRef.current.clear();
         isNewSessionRef.current = true;
         isStreamingRef.current = false;
+        toolNameMapRef.current.clear();
         setIsLoading(false);
         setSessionState('idle');  // Reset session state for new conversation
         setSystemStatus(null);
@@ -793,6 +799,10 @@ export default function TabProvider({
                 // Track tool_use event
                 track('tool_use', { tool: tool.name });
 
+                // Synchronously record toolUseId → toolName for file-modifying tool detection.
+                // This map is read in chat:tool-result-complete to trigger directory refresh.
+                toolNameMapRef.current.set(tool.id, tool.name);
+
                 // For Task tool, add taskStartTime and initial taskStats
                 const toolSimple: ToolUseSimple = (tool.name === 'Task' || tool.name === 'Agent')
                     ? { ...tool, inputJson: '', isLoading: true, taskStartTime: Date.now(), taskStats: { toolCount: 0, inputTokens: 0, outputTokens: 0 } }
@@ -925,8 +935,6 @@ export default function TabProvider({
             case 'chat:tool-result-delta':
             case 'chat:tool-result-complete': {
                 const payload = data as { toolUseId: string; content?: string; delta?: string; isError?: boolean };
-                // Track if we need to trigger workspace refresh (for file-modifying tools)
-                let shouldTriggerRefresh = false;
 
                 setStreamingMessage(prev => {
                     if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
@@ -955,20 +963,21 @@ export default function TabProvider({
                         };
                     }
 
-                    // Mark for workspace refresh when file-modifying tool completes
-                    if (eventName === 'chat:tool-result-complete' && block.tool.name) {
-                        if (FILE_MODIFYING_TOOLS.has(block.tool.name)) {
-                            shouldTriggerRefresh = true;
-                            console.log(`[TabProvider] File-modifying tool completed: ${block.tool.name}, triggering workspace refresh`);
-                        }
-                    }
-
                     return { ...prev, content: updated };
                 });
 
-                // Trigger workspace refresh after state update (outside setMessages callback)
-                if (shouldTriggerRefresh) {
-                    setToolCompleteCount(c => c + 1);
+                // Fast-path: trigger workspace refresh for file-modifying tools.
+                // Uses synchronous toolNameMapRef (NOT inside state updater) to avoid
+                // React 18 automatic batching timing bug — state updaters run during
+                // render, so a local variable set inside an updater would always be
+                // false when checked outside.
+                if (eventName === 'chat:tool-result-complete') {
+                    const toolName = toolNameMapRef.current.get(payload.toolUseId);
+                    if (toolName && FILE_MODIFYING_TOOLS.has(toolName)) {
+                        console.log(`[TabProvider] File-modifying tool completed: ${toolName}, triggering workspace refresh`);
+                        setToolCompleteCount(c => c + 1);
+                    }
+                    toolNameMapRef.current.delete(payload.toolUseId);
                 }
                 break;
             }
@@ -1500,6 +1509,14 @@ export default function TabProvider({
                 // Admin CLI modified config — notify global ConfigProvider to refresh
                 console.log('[TabProvider] config:changed via Admin CLI', data);
                 window.dispatchEvent(new CustomEvent('myagents:config-changed', { detail: data }));
+                break;
+            }
+
+            case 'workspace:files-changed': {
+                // File watcher detected workspace file changes — trigger directory tree refresh.
+                // This is the authoritative catch-all: covers sub-agent tools, external editors,
+                // terminal operations, and any other source of filesystem change.
+                setToolCompleteCount(c => c + 1);
                 break;
             }
 

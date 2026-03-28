@@ -12,6 +12,7 @@ import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
 import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
 import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils/socks-bridge';
+import { startFileWatcher } from './file-watcher';
 import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
 import './tools/gemini-image-tool';
@@ -33,6 +34,24 @@ const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'devel
 
 // Shared NO_PROXY value — comprehensive list of localhost addresses to bypass proxy
 const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
+
+// ===== Inherited Proxy Env Snapshot =====
+// Capture system proxy state at sidecar startup (before any setProxyConfig call).
+// When Rust spawns this sidecar WITHOUT explicit proxy config, the process inherits
+// system proxy env vars (e.g., from Clash TUN/global proxy). We snapshot them so
+// setProxyConfig(disabled) can restore the inherited state instead of force-clearing.
+const PROXY_VARS_LIST = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+                         'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'] as const;
+const proxyWasInjectedByRust = process.env.MYAGENTS_PROXY_INJECTED === '1';
+delete process.env.MYAGENTS_PROXY_INJECTED; // Don't leak to SDK subprocess
+
+// Only capture system state when NOT explicitly injected by Rust
+const inheritedProxySnapshot: Record<string, string | undefined> = {};
+if (!proxyWasInjectedByRust) {
+  for (const v of PROXY_VARS_LIST) {
+    inheritedProxySnapshot[v] = process.env[v];
+  }
+}
 
 // ===== OAuth Token Change Listener =====
 // Register once at module load. Token changes trigger session restart
@@ -531,12 +550,18 @@ let pendingResumeSessionAt: string | undefined;
 // 时间回溯进行中 — 阻止 enqueueUserMessage 并发写入
 let rewindPromise: Promise<unknown> | null = null;
 
-// 当前 SDK session 分配的 UUID 集合（区分「本 session 分配」vs「从磁盘加载的旧 UUID」）。
-// rewindSession 使用此集合校验 lastAssistantUuid 是否属于当前 session：
-// - 属于 → 可安全用于 resumeSessionAt（SDK 一定认识该 UUID）
-// - 不属于 → session 被重建过（如换机、No conversation found 恢复），旧 UUID 对 SDK 无意义，
-//   强行传 resumeSessionAt 会导致 SDK 报错、session 启动失败、用户消息丢失。
+// 当前 SDK session 的 UUID 集合（包含磁盘加载 + 运行时 SDK 输出）。
+// 用途：rewindFiles 前置校验 + resumeSessionAt 有效性判断（与 liveSessionUuids OR 联合）。
+// 过期防护（两层）：
+//   1. session 重建（!sessionRegistered）时在 startSession 清空
+//   2. SDK 拒绝 UUID（"No message found"）时逐条驱逐（见 error recovery）
 const currentSessionUuids = new Set<string>();
+
+// 仅由当前 SDK subprocess stdout 事件填充的 UUID 集合。
+// 注意：resume 场景下 SDK 不重新输出旧历史 UUID，因此此集合是运行时子集而非完整集合。
+// resumeSessionAt 校验采用 OR 逻辑（liveSessionUuids || currentSessionUuids），
+// 不以任一集合为排他权威。
+const liveSessionUuids = new Set<string>();
 
 // ===== 持久 Session 门控 =====
 // 消息交付：事件驱动替代轮询，generator 阻塞在 waitForMessage 直到新消息到达
@@ -760,7 +785,7 @@ export function setProxyConfig(proxySettings: {
   host?: string;
   port?: number;
 } | null): void {
-  const PROXY_VARS = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'];
+  const PROXY_VARS = [...PROXY_VARS_LIST];
 
   // Bump generation to invalidate in-flight SOCKS5 bridge callbacks
   const generation = ++proxyConfigGeneration;
@@ -808,12 +833,26 @@ export function setProxyConfig(proxySettings: {
     applyProxyEnvVars(rawProxyUrl, PROXY_NO_PROXY_VAL);
     console.log(`[agent] Proxy hot-reloaded: ${rawProxyUrl}`);
   } else {
-    // Disabled: stop bridge, clear env vars
+    // Disabled: stop bridge, restore inherited system proxy state
     if (isSocksBridgeRunning()) {
       stopSocksBridge().catch(() => { /* ignore */ });
     }
-    for (const v of PROXY_VARS) delete process.env[v];
-    console.log('[agent] Proxy cleared (direct connection)');
+    if (proxyWasInjectedByRust) {
+      // Sidecar started with explicit proxy — can't restore unknown system state, just clear
+      for (const v of PROXY_VARS) delete process.env[v];
+      console.log('[agent] Proxy cleared (was explicitly injected, falling back to direct)');
+    } else {
+      // Sidecar started with inherited system env — restore snapshot
+      for (const v of PROXY_VARS) {
+        if (inheritedProxySnapshot[v] !== undefined) {
+          process.env[v] = inheritedProxySnapshot[v]!;
+        } else {
+          delete process.env[v];
+        }
+      }
+      const restoredProxy = inheritedProxySnapshot.HTTP_PROXY || inheritedProxySnapshot.http_proxy || '';
+      console.log(`[agent] Proxy disabled, restored inherited system state${restoredProxy ? ` (${restoredProxy})` : ' (no system proxy)'}`);
+    }
   }
 
   const newProxyUrl = process.env.HTTP_PROXY || '';
@@ -1323,6 +1362,7 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
   }
 
   for (const server of externalServers) {
+    try {
     // Log server env for debugging
     if (isDebugMode && server.env && Object.keys(server.env).length > 0) {
       console.log(`[agent] MCP ${server.id}: Custom env vars: ${Object.keys(server.env).join(', ')}`);
@@ -1330,7 +1370,8 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
 
     if (server.type === 'stdio' && server.command) {
       let command = server.command;
-      let args = [...(server.args || [])];
+      // Defensive: args may be non-array (e.g. boolean `true`) due to CLI parsing bugs or manual config edits
+      let args = [...(Array.isArray(server.args) ? server.args : [])];
 
       // For npx commands: prefer system npx → bundled Node.js npx → bun x
       // System Node.js is maintained by the user's package manager, more reliable than our bundled npm.
@@ -1465,6 +1506,11 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
       console.log(`[agent] MCP ${server.id}: ${server.type} → ${maskedUrl}`);
     } else if (server.type === 'sse' || server.type === 'http') {
       console.warn(`[agent] MCP ${server.id}: Missing url for ${server.type} server, skipping`);
+    }
+    } catch (err) {
+      // Isolate individual MCP errors — one bad config must not take down all MCPs
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[agent] MCP ${server.id}: initialization failed, skipping: ${msg}`);
     }
   }
 
@@ -2352,6 +2398,10 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // that survives session restarts, supports IM delivery, and uses wall-clock scheduling.
   // The SDK's cron is session-scoped/in-memory, would conflict and confuse users.
   env.CLAUDE_CODE_DISABLE_CRON = '1';
+  // SDK 0.2.83+: Emit session_state_changed events (idle/running/requires_action).
+  // Currently used for diagnostic logging only (parallel data collection).
+  // Future: may replace self-built sessionState tracking for more accurate turn boundary detection.
+  env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = '1';
   // DO NOT set CLAUDE_CONFIG_DIR here — it would change the Keychain service name
   // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
   // into project .claude/skills/ by syncProjectUserConfig() instead.
@@ -2399,9 +2449,18 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // Hoisted above the OpenAI early return so both protocol paths benefit.
   const aliases = effectiveProviderEnv?.modelAliases;
   if (aliases) {
-    if (aliases.sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = aliases.sonnet;
-    if (aliases.opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = aliases.opus;
-    if (aliases.haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = aliases.haiku;
+    if (aliases.sonnet) {
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL = aliases.sonnet;
+      env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = aliases.sonnet; // SDK 0.2.84: display name in supportedModels()
+    }
+    if (aliases.opus) {
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL = aliases.opus;
+      env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME = aliases.opus;
+    }
+    if (aliases.haiku) {
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL = aliases.haiku;
+      env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = aliases.haiku;
+    }
     console.log(`[env] Model aliases set: sonnet=${aliases.sonnet ?? '(none)'}, opus=${aliases.opus ?? '(none)'}, haiku=${aliases.haiku ?? '(none)'}`);
   }
 
@@ -3361,6 +3420,7 @@ function clearMessageState(): void {
 
   strippedToolResultIds.clear();
   currentSessionUuids.clear();
+  liveSessionUuids.clear();
   isStreamingMessage = false;
   messageSequence = 0;
   pendingConfigRestart = false;
@@ -3593,6 +3653,11 @@ export async function initializeAgent(
   // Initialize logger for new session (lazy file creation)
   initLogger(sessionId);
   console.log(`[agent] init dir=${agentDir} initialPrompt=${hasInitialPrompt ? 'yes' : 'no'} sessionId=${sessionId} resume=${sessionRegistered}`);
+
+  // Start file watcher for workspace directory changes → SSE push to frontend.
+  // Watcher is workspace-scoped (survives session restarts). startFileWatcher()
+  // deduplicates if already watching the same path.
+  startFileWatcher(agentDir);
 
   // Self-resolve workspace config from disk (MCP/provider/model).
   // Eliminates dependency on pre-serialized snapshots (providerEnvJson, mcpServersJson)
@@ -4374,11 +4439,10 @@ export async function rewindSession(userMessageId: string): Promise<{
     if (targetIndex < 0) return { success: false as const, error: 'Message not found' };
     const targetMessage = messages[targetIndex];
 
-    // 2. 找到目标前的最后一个 assistant UUID
-    //    持久 session 模式下，user 消息不会通过 SDK stdout 回传（无 resume 重放），
-    //    因此 user 消息没有 sdkUuid。使用前一个 assistant 的 UUID 替代：
-    //    - rewindFiles(assistantUuid) → 回退该 assistant 之后的文件变更
-    //    - pendingResumeSessionAt = assistantUuid → 下次 resume 从该 assistant 截断
+    // 2. 两个 UUID 分离：
+    //    - lastAssistantUuid → 用于 resumeSessionAt（截断 SDK 会话历史到目标前的 assistant）
+    //    - targetMessage.sdkUuid → 用于 rewindFiles（文件检查点按 user message 打点）
+    //    SDK 文档：rewindFiles(userMessageUuid) — 检查点关联用户消息，非 assistant 消息
     let lastAssistantUuid: string | undefined;
     for (let i = targetIndex - 1; i >= 0; i--) {
       if (messages[i].role === 'assistant' && messages[i].sdkUuid) {
@@ -4387,14 +4451,16 @@ export async function rewindSession(userMessageId: string): Promise<{
       }
     }
 
-    // 3. 在活跃 session 上直接执行 rewindFiles（subprocess 存活，即时调用！）
+    // 3. 在活跃 session 上执行 rewindFiles（文件检查点关联 user message UUID）
     //    跳过已被 force-abort 的 session：subprocess 正在死亡，发 IPC 会阻塞到超时（~100s）。
     //    跳过不属于当前 session 的 UUID：SDK 不认识，调用必定失败且日志噪声。
-    if (querySession && lastAssistantUuid && !shouldAbortSession && currentSessionUuids.has(lastAssistantUuid)) {
+    //    跳过无 sdkUuid 的用户消息：旧存储加载或 SDK 尚未回传 UUID。
+    const targetUserUuid = targetMessage.sdkUuid;
+    if (querySession && targetUserUuid && !shouldAbortSession && currentSessionUuids.has(targetUserUuid)) {
       try {
         const REWIND_FILES_TIMEOUT_MS = 5_000;
         const result = await Promise.race([
-          querySession.rewindFiles(lastAssistantUuid),
+          querySession.rewindFiles(targetUserUuid),
           new Promise<never>((_, reject) =>
             setTimeout(() => reject(new Error('rewindFiles timeout')), REWIND_FILES_TIMEOUT_MS)
           ),
@@ -4407,6 +4473,8 @@ export async function rewindSession(userMessageId: string): Promise<{
         console.error('[agent] rewindFiles error:', err);
         // 文件回溯失败不阻断消息截断
       }
+    } else if (!targetUserUuid) {
+      console.log('[agent] rewind: target user message has no sdkUuid, skipping rewindFiles');
     }
 
     // 4. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
@@ -4424,15 +4492,20 @@ export async function rewindSession(userMessageId: string): Promise<{
     persistMessagesToStorage();
 
     // 7. 设置下次 query 的对话截断点
-    //    仅当 UUID 属于当前 SDK session 时才使用 resumeSessionAt。
-    //    旧 UUID（从磁盘加载、来自其他机器/已重建的 session）对当前 SDK 无意义，
-    //    强行传入会导致 SDK 报错 → session 启动失败 → 用户消息丢失。
-    const uuidIsCurrentSession = lastAssistantUuid && currentSessionUuids.has(lastAssistantUuid);
-    if (uuidIsCurrentSession) {
+    //    UUID 有效性校验（OR 逻辑）：
+    //    - liveSessionUuids: SDK subprocess stdout 确认过的 UUID（权威但不完整 — resume 后
+    //      SDK 不会重新输出旧历史的 UUID）
+    //    - currentSessionUuids: 包含磁盘种子 + 运行时 UUID（覆盖 resume 前的历史）
+    //    - 任一集合包含即为有效。过期 UUID 安全性由 session 重建时清空
+    //      currentSessionUuids（!sessionRegistered → clear）保证。
+    //    - 两者都不包含 → session 被重建过，旧 UUID 无意义，创建新 session
+    const uuidIsLive = lastAssistantUuid
+      && (liveSessionUuids.has(lastAssistantUuid) || currentSessionUuids.has(lastAssistantUuid));
+    if (uuidIsLive) {
       pendingResumeSessionAt = lastAssistantUuid;
     } else {
       if (lastAssistantUuid) {
-        console.warn(`[agent] rewind: skipping resumeSessionAt — UUID ${lastAssistantUuid} not in current session (stale from disk/previous session)`);
+        console.warn(`[agent] rewind: skipping resumeSessionAt — UUID ${lastAssistantUuid} not in live(${liveSessionUuids.size}) or current(${currentSessionUuids.size}) session (stale/rebuilt)`);
       }
       pendingResumeSessionAt = undefined;
       sessionRegistered = false;
@@ -4593,6 +4666,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   if (!sessionRegistered) {
     currentSessionUuids.clear();
   }
+  // liveSessionUuids 始终清除 — 新的 subprocess 尚未输出任何消息，
+  // 直到 SDK stdout 事件重新填充后才能作为 resumeSessionAt 的权威来源。
+  liveSessionUuids.clear();
   let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
   let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
   let detectedAlreadyInUse = false; // stderr reported "Session ID already in use"
@@ -4647,11 +4723,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     }
     // sessionRegistered 不在此处修改 — 等待 system_init 确认
 
-    // 消费 rewind 设置的对话截断点
+    // 读取 rewind 设置的对话截断点（不立即消费 — 等 system_init 确认后再清除）
     // 持久 session 模式下，pre-warm 即最终 session（用户消息通过 wakeGenerator 投递），
     // 必须在 pre-warm 时就传 resumeSessionAt，否则 SDK 会加载完整历史不截断
+    // 延迟消费原因：如果 query 因 UUID 无效而启动失败，重试时仍需要 anchor；
+    // catch block 的 "No message found" 恢复会主动清除无效 anchor 防止无限重试。
     const rewindResumeAt = pendingResumeSessionAt;
-    if (rewindResumeAt) pendingResumeSessionAt = undefined;
 
     // Fork detection: if this session was created via fork, override resume/sessionId
     // to use SDK's forkSession option (load source history + branch to new session).
@@ -5027,6 +5104,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log('[agent] pre-warm: system_init buffered (will replay on first message)');
         }
 
+        // system_init confirms SDK session started — consume the rewind anchor.
+        // This is the success signal: the UUID was accepted (or wasn't needed).
+        // If the UUID had been invalid, the SDK would have exited with error BEFORE system_init.
+        if (pendingResumeSessionAt) {
+          console.log(`[agent] system_init received — rewind anchor consumed: ${pendingResumeSessionAt}`);
+          pendingResumeSessionAt = undefined;
+        }
+
         // Save SDK session_id and verify unified session status
         if (nextSystemInit.session_id) {
           const isUnified = nextSystemInit.session_id === sessionId;
@@ -5061,6 +5146,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           prePlanPermissionMode = null;
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
         }
+      }
+
+      // SDK 0.2.83+: session_state_changed — authoritative turn boundary signal.
+      // Currently logged for diagnostic comparison with self-built sessionState.
+      if (sdkMessage.type === 'system' && (sdkMessage as { subtype?: string }).subtype === 'session_state_changed') {
+        const state = (sdkMessage as { state?: string }).state;
+        console.log(`[agent] SDK session_state_changed: ${state} (our sessionState: ${sessionState})`);
       }
 
       // Handle background task lifecycle (SDK Task tool with run_in_background)
@@ -5361,6 +5453,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Track SDK user UUID — only for non-synthetic messages
         if (!(sdkMessage as { isSynthetic?: boolean }).isSynthetic && sdkMessage.uuid) {
           currentSessionUuids.add(sdkMessage.uuid);
+          liveSessionUuids.add(sdkMessage.uuid);
           for (let i = messages.length - 1; i >= 0; i--) {
             if (messages[i].role === 'user' && !messages[i].sdkUuid) {
               messages[i].sdkUuid = sdkMessage.uuid;
@@ -5449,6 +5542,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // （thinking → text），resumeSessionAt 需要最后一条的 UUID 才能保留完整回答
         if (sdkMessage.uuid) {
           currentSessionUuids.add(sdkMessage.uuid);
+          liveSessionUuids.add(sdkMessage.uuid);
           currentAssistant.sdkUuid = sdkMessage.uuid;
           // Broadcast to frontend so fork button appears during streaming
           // (user messages already broadcast this; assistant messages were missing it)
@@ -5850,6 +5944,29 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         schedulePreWarm(); // Establish resumed session so next user message works
       }
       return; // Skip error broadcast, let finally handle cleanup + pre-warm retry
+    }
+
+    // "No message found with message.uuid" recovery: resumeSessionAt pointed to a UUID
+    // that doesn't exist in the SDK's session JSONL. This happens when:
+    //   - Session was rebuilt (No conversation found → new session, old UUIDs stale)
+    //   - SDK's async JSONL save didn't flush before subprocess was interrupted
+    //   - currentSessionUuids (seeded from disk) included UUIDs from a previous SDK session
+    // Fix: clear the invalid rewind anchor so retry resumes with full history intact.
+    // Keep sessionRegistered=true — the session itself exists, only the UUID is wrong.
+    // The retry will use `resume: sessionId` without resumeSessionAt, loading all messages.
+    if (errorMessage.includes('No message found with message.uuid') && sessionRegistered) {
+      const rejectedUuid = pendingResumeSessionAt;
+      console.warn(`[agent] resumeSessionAt UUID rejected by SDK — clearing rewind anchor, retry will resume with full history`);
+      pendingResumeSessionAt = undefined;
+      // Evict the rejected UUID from currentSessionUuids so subsequent rewinds don't
+      // re-accept it via the OR logic. Without this, the stale UUID stays in the cache
+      // and a future rewind to the same point would re-trigger the same SDK error.
+      if (rejectedUuid) {
+        currentSessionUuids.delete(rejectedUuid);
+      }
+      // Don't modify sessionRegistered — session exists, just the UUID is invalid.
+      // Don't return — let pre-warm retry (finally block) handle recovery.
+      // For non-pre-warm (user message triggered): fall through to error broadcast.
     }
 
     // "No conversation found" recovery: our metadata has sessionRegistered=true but
