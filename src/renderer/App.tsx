@@ -398,6 +398,11 @@ export default function App() {
             console.log('[App] Global sidecar auto-restarted by health monitor:', newUrl);
             updateGlobalServerUrl(newUrl);
             setLogServerUrl(newUrl);
+            // Safety net: if the initial startGlobalSidecar() invoke is still blocked
+            // (e.g., monitor killed the first sidecar during its TCP health check),
+            // the ready promise would never resolve. Resolve it here so that components
+            // waiting on waitForGlobalSidecar() can proceed with the new sidecar. (#58)
+            markGlobalSidecarReady();
           }
         });
       } catch (error) {

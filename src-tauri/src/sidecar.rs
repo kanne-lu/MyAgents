@@ -87,8 +87,14 @@ const BASE_PORT: u16 = 31415;
 const HEALTH_CHECK_MAX_ATTEMPTS: u32 = 600;
 const HEALTH_CHECK_DELAY_MS: u64 = 500;
 const HEALTH_CHECK_TIMEOUT_MS: u64 = 100;
-// HTTP health check for existing sidecar - shorter timeout since sidecar should respond immediately
-const HTTP_HEALTH_CHECK_TIMEOUT_MS: u64 = 500;
+// HTTP health check for existing sidecar.
+// 2000ms accommodates Windows systems under startup load (Defender, proxy, Plugin Bridge init).
+// Previously 500ms which caused false "unhealthy" during busy startup windows.
+const HTTP_HEALTH_CHECK_TIMEOUT_MS: u64 = 2000;
+// Grace period after sidecar creation during which the health monitor skips checks.
+// Prevents the monitor from killing a sidecar that's still completing its initial startup
+// (TCP health check, Bun init, Plugin Bridge, etc.), especially on Windows with Defender.
+const STARTUP_GRACE_SECS: u64 = 45;
 #[cfg(unix)]
 const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 // Port range: 500 ports (31415-31914)
@@ -424,6 +430,10 @@ pub struct SidecarInstance {
     pub healthy: bool,
     /// Whether this is a global sidecar (uses temp directory)
     pub is_global: bool,
+    /// When this instance was created — used by health monitor to apply startup grace period.
+    /// During the grace window the monitor skips health checks, preventing false "unhealthy"
+    /// verdicts while the sidecar is still initialising (TCP check, Bun startup, Plugin Bridge…).
+    pub created_at: std::time::Instant,
 }
 
 impl SidecarInstance {
@@ -1664,6 +1674,7 @@ pub fn start_tab_sidecar<R: Runtime>(
         agent_dir: effective_agent_dir,
         healthy: false,
         is_global,
+        created_at: std::time::Instant::now(),
     };
 
     manager_guard.insert_instance(tab_id.to_string(), instance);
@@ -1674,11 +1685,22 @@ pub fn start_tab_sidecar<R: Runtime>(
     // Build liveness check closure — detects process death during health check.
     // Critical for Windows VMs where Defender delays bun.exe execution by 20-30s,
     // causing the crash to happen well after the 50ms early exit check above.
+    //
+    // Also detects instance replacement: if the health monitor restarts the sidecar
+    // while we're waiting, the old port is dead and a new instance sits at a different
+    // port under the same tab_id. Checking `instance.port == expected_port` prevents
+    // this closure from silently accepting the replacement and looping forever on a
+    // dead port.
     let liveness_manager = manager.clone();
     let liveness_tab_id = tab_id.to_string();
+    let expected_port = port;
     let alive_check: Box<dyn Fn() -> bool> = Box::new(move || {
         if let Ok(mut guard) = liveness_manager.lock() {
             if let Some(instance) = guard.get_instance_mut(&liveness_tab_id) {
+                // Reject if the instance was replaced (different port = different process)
+                if instance.port != expected_port {
+                    return false;
+                }
                 matches!(instance.process.try_wait(), Ok(None))
             } else {
                 false
@@ -1851,12 +1873,13 @@ pub fn start_global_sidecar<R: Runtime>(
 /// Check Global Sidecar status.
 /// Returns:
 /// - None: sidecar was never started (no instance in manager) → skip
-/// - Some((port, true)):  process alive → do HTTP health check
-/// - Some((port, false)): process dead → needs restart immediately
-fn check_global_sidecar_status(manager: &ManagedSidecarManager) -> Option<(u16, bool)> {
+/// - Some((port, true, created_at)):  process alive → do HTTP health check (if past grace)
+/// - Some((port, false, created_at)): process dead → needs restart immediately
+fn check_global_sidecar_status(manager: &ManagedSidecarManager) -> Option<(u16, bool, std::time::Instant)> {
     let mut guard = manager.lock().ok()?;
     let instance = guard.get_instance_mut(GLOBAL_SIDECAR_ID)?;
-    Some((instance.port, instance.is_running()))
+    let created_at = instance.created_at;
+    Some((instance.port, instance.is_running(), created_at))
 }
 
 /// Background health monitor for the Global Sidecar.
@@ -1902,10 +1925,28 @@ pub async fn monitor_global_sidecar(
         }
 
         // Check process status (cheap, no HTTP)
-        let (port, process_alive) = match check_global_sidecar_status(&manager) {
+        let (port, process_alive, created_at) = match check_global_sidecar_status(&manager) {
             Some(status) => status,
             None => continue, // Not started yet — skip
         };
+
+        // Startup grace period: skip health checks for recently-created instances.
+        // During startup the sidecar may be busy with TCP check, Bun init, Plugin Bridge
+        // loading, etc. — an aggressive health check during this window false-fires and
+        // triggers an unnecessary restart that cascades into frontend timeout (#58).
+        let age = created_at.elapsed();
+        if age < Duration::from_secs(STARTUP_GRACE_SECS) {
+            if !process_alive {
+                // Process died during startup — still worth restarting, but log clearly
+                log::warn!(
+                    "[sidecar] Global sidecar on port {} died during startup (age {:?}), restarting",
+                    port, age
+                );
+                // Fall through to restart below
+            } else {
+                continue; // Within grace period and process alive — skip check
+            }
+        }
 
         let needs_restart = if process_alive {
             // Process alive → verify with HTTP health check (blocking)
