@@ -4524,6 +4524,7 @@ export async function rewindSession(userMessageId: string): Promise<{
       pendingResumeSessionAt = undefined;
       sessionRegistered = false;
       sessionId = randomUUID();
+      hasInitialPrompt = false; // Reset so next message creates metadata for the new session
     }
 
     // 8. 预热下次 session

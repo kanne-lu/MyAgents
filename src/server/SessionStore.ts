@@ -14,7 +14,7 @@
  * - Concurrent safety: append is atomic on most filesystems
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, statSync, rmdirSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, statSync, rmdirSync, renameSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -25,6 +25,7 @@ const MYAGENTS_DIR = join(homedir(), '.myagents');
 const SESSIONS_FILE = join(MYAGENTS_DIR, 'sessions.json');
 const SESSIONS_DIR = join(MYAGENTS_DIR, 'sessions');
 const ATTACHMENTS_DIR = join(MYAGENTS_DIR, 'attachments');
+const SESSIONS_TMP_FILE = join(MYAGENTS_DIR, 'sessions.json.tmp');
 
 /**
  * Line count cache for JSONL files
@@ -145,6 +146,16 @@ function withSessionsLock<T>(fn: () => T): T {
     } finally {
         releaseSessionsLock();
     }
+}
+
+/**
+ * Atomic write: write to tmp file then rename.
+ * Prevents data loss from partial writes (process crash / power loss during writeFileSync).
+ * rename() is atomic on POSIX (macOS/Linux) and near-atomic on Windows (NTFS MoveFileEx).
+ */
+function atomicWriteSessionsFile(content: string): void {
+    writeFileSync(SESSIONS_TMP_FILE, content, 'utf-8');
+    renameSync(SESSIONS_TMP_FILE, SESSIONS_FILE);
 }
 
 /**
@@ -327,6 +338,20 @@ export function saveSessionMetadata(session: SessionMetadata): void {
 
     withSessionsLock(() => {
         const all = getAllSessionMetadata();
+
+        // Safety check: if the file exists on disk but getAllSessionMetadata returned [],
+        // a read error (corrupt file, partial write) occurred. Refuse to write to avoid
+        // wiping all existing entries. The current session will be retried on next persist.
+        if (all.length === 0 && existsSync(SESSIONS_FILE)) {
+            try {
+                const size = statSync(SESSIONS_FILE).size;
+                if (size > 2) { // >2 bytes = not just "[]"
+                    console.error(`[SessionStore] Refusing to write: sessions.json has ${size} bytes on disk but read returned []. Possible corruption.`);
+                    return;
+                }
+            } catch { /* stat failed, proceed normally */ }
+        }
+
         const index = all.findIndex(s => s.id === session.id);
 
         if (index >= 0) {
@@ -336,7 +361,7 @@ export function saveSessionMetadata(session: SessionMetadata): void {
         }
 
         try {
-            writeFileSync(SESSIONS_FILE, JSON.stringify(all, null, 2), 'utf-8');
+            atomicWriteSessionsFile(JSON.stringify(all, null, 2));
         } catch (error) {
             console.error('[SessionStore] Failed to write sessions.json:', error);
         }
@@ -359,7 +384,7 @@ export function deleteSession(sessionId: string): boolean {
         }
 
         try {
-            writeFileSync(SESSIONS_FILE, JSON.stringify(filtered, null, 2), 'utf-8');
+            atomicWriteSessionsFile(JSON.stringify(filtered, null, 2));
 
             // Remove session data file (both formats)
             const jsonlFile = getSessionFilePath(sessionId);
@@ -500,7 +525,7 @@ export function saveSessionMessages(sessionId: string, messages: SessionMessage[
                 const index = all.findIndex(s => s.id === sessionId);
                 if (index >= 0) {
                     all[index] = { ...session, stats: fullStats };
-                    writeFileSync(SESSIONS_FILE, JSON.stringify(all, null, 2), 'utf-8');
+                    atomicWriteSessionsFile(JSON.stringify(all, null, 2));
                 }
             });
             return;
@@ -541,7 +566,7 @@ export function saveSessionMessages(sessionId: string, messages: SessionMessage[
                 const index = all.findIndex(s => s.id === sessionId);
                 if (index >= 0) {
                     all[index] = { ...session, stats: updatedStats };
-                    writeFileSync(SESSIONS_FILE, JSON.stringify(all, null, 2), 'utf-8');
+                    atomicWriteSessionsFile(JSON.stringify(all, null, 2));
                 }
             });
         }
