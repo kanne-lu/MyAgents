@@ -343,6 +343,17 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const handleOpenCronDetail = useCallback((task: CronTask) => setSelectedCronTask(task), []);
     const handleCloseCronDetail = useCallback(() => setSelectedCronTask(null), []);
 
+    const handleCronOpenSession = useCallback((sessionId: string) => {
+        const task = selectedCronTask;
+        if (!task) return;
+        const project = projects.find(p => p.path === task.workspacePath);
+        if (project) {
+            handleLaunch(project, sessionId);
+        } else {
+            toastRef.current.error('工作区已移除，无法打开会话');
+        }
+    }, [selectedCronTask, projects, handleLaunch]);
+
     // Derive bot info for selected cron task from agents[].channels[]
     const selectedTaskBotInfo = useMemo(() => {
         if (!selectedCronTask?.sourceBotId || !config.agents) return undefined;
@@ -675,6 +686,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     onDelete={handleCronDelete}
                     onResume={handleCronResume}
                     onStop={handleCronStop}
+                    onOpenSession={handleCronOpenSession}
                 />
             )}
 
