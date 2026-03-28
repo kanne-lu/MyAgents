@@ -391,6 +391,9 @@ export function getToolMainLabel(tool: ToolUseSimple): string {
     const subagentType = getStringProp(tool.parsedInput, 'subagent_type');
     return subagentType || tool.name;
   }
+  if (tool.name === 'mcp__generative-ui__widget_read_me') {
+    return '加载设计指南';
+  }
   if (tool.name.startsWith('mcp__generative-ui__')) {
     return '可视化';
   }
@@ -589,6 +592,11 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
     case 'KillShell':
       return 'Kill Shell';
     default:
+      if (tool.name === 'mcp__generative-ui__widget_read_me') {
+        const modules = (tool.parsedInput as Record<string, unknown> | undefined)?.modules;
+        const modList = Array.isArray(modules) ? modules.join(', ') : '';
+        return modList ? `加载设计指南 (${modList})` : '加载设计指南';
+      }
       if (tool.name.startsWith('mcp__generative-ui__')) {
         const widgetTitle = getStringProp(tool.parsedInput, 'title');
         return widgetTitle ? widgetTitle.replace(/_/g, ' ') : '可视化';
