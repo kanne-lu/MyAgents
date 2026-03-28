@@ -1213,6 +1213,12 @@ function checkMcpToolPermission(toolName: string): { allowed: true } | { allowed
     return { allowed: false, reason: '定时任务管理 API 不可用' };
   }
 
+  // Special case: generative-ui is a built-in MCP server for desktop sessions
+  // Context-injected (not in user's MCP list), always allowed when injected
+  if (serverId === 'generative-ui') {
+    return { allowed: true };
+  }
+
   // Case 1: MCP not set (null) - allow all (backward compatible)
   if (currentMcpServers === null) {
     return { allowed: true };

@@ -15,11 +15,22 @@ import { buildWidgetCssVars } from './widgetCssVars';
 import { buildSandboxHtml } from './widgetSandboxHtml';
 
 // ===== Module-level height cache (survives component lifecycle) =====
-// Key: first 200 chars of widget_code. Prevents height jump on streaming→final remount.
+// Key: first 300 chars of widget_code (past the common <style> prefix).
+// Prevents height jump on streaming→final remount. Capped at 100 entries.
+const HEIGHT_CACHE_MAX = 100;
 const heightCache = new Map<string, number>();
 
 function getCacheKey(widgetCode: string): string {
-  return widgetCode.slice(0, 200);
+  return widgetCode.slice(0, 300);
+}
+
+function setCacheHeight(key: string, height: number): void {
+  if (heightCache.size >= HEIGHT_CACHE_MAX && !heightCache.has(key)) {
+    // Evict oldest entry (first inserted)
+    const firstKey = heightCache.keys().next().value;
+    if (firstKey !== undefined) heightCache.delete(firstKey);
+  }
+  heightCache.set(key, height);
 }
 
 // ===== Script sanitization for streaming preview =====
@@ -35,10 +46,13 @@ function sanitizeForStreaming(html: string): string {
       cleaned = cleaned.substring(0, lastScriptOpen);
     }
   }
-  // Remove all on* event handler attributes (quoted and unquoted)
+  // Remove all on* event handler attributes (quoted, single-quoted, unquoted, backtick)
   cleaned = cleaned.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
   cleaned = cleaned.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
-  cleaned = cleaned.replace(/\s+on\w+\s*=\s*[^\s>"'][^\s>]*/gi, '');
+  cleaned = cleaned.replace(/\s+on\w+\s*=\s*`[^`]*`/gi, '');
+  cleaned = cleaned.replace(/\s+on\w+\s*=\s*[^\s>"'`][^\s>]*/gi, '');
+  // Remove javascript: URLs in href/src/action attributes
+  cleaned = cleaned.replace(/\s+(href|src|action)\s*=\s*["']?\s*javascript\s*:[^"'>]*/gi, '');
   return cleaned;
 }
 
@@ -98,7 +112,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
         case 'widget:resize': {
           const h = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, e.data.height));
           setHeight(h);
-          heightCache.set(cacheKey, h);
+          setCacheHeight(cacheKey, h);
           if (e.data.first) setFirstResize(false);
           break;
         }
