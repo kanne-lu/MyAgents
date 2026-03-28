@@ -1067,8 +1067,25 @@ impl CronTaskManager {
                             }
                         }
 
-                        // Ralph Loop: reset failure counter on success
-                        if is_loop { loop_consecutive_failures = 0; }
+                        // Ralph Loop: reset failure counter on success, increment on logical failure
+                        if is_loop {
+                            if success {
+                                loop_consecutive_failures = 0;
+                            } else {
+                                loop_consecutive_failures += 1;
+                                if loop_consecutive_failures >= 10 {
+                                    log::error!("[CronTask] Task {} Ralph Loop: 10 consecutive failures (logical), stopping", task_id_owned);
+                                    stop_task_internal(&handle, &tasks, &task_id_owned,
+                                        Some("Ralph Loop: 10 consecutive failures".to_string())).await;
+                                    break;
+                                }
+                                let backoff_secs = match loop_consecutive_failures {
+                                    1 => 3, 2 => 10, 3 => 30, 4 => 60, 5 => 120, _ => 300,
+                                };
+                                log::warn!("[CronTask] Task {} Ralph Loop: logical failure #{}, backoff {}s",
+                                    task_id_owned, loop_consecutive_failures, backoff_secs);
+                            }
+                        }
 
                         // Emit execution-complete for ALL success paths
                         // (one-shot, AI exit, end condition, and normal continue)
