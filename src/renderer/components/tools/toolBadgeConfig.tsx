@@ -713,10 +713,6 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
           const modList = Array.isArray(modules) ? modules.join(', ') : '';
           return modList ? `加载设计指南 (${modList})` : '加载设计指南';
         }
-        if (serverId === 'generative-ui') {
-          const widgetTitle = getStringProp(tool.parsedInput, 'title');
-          return widgetTitle ? widgetTitle.replace(/_/g, ' ') : serverName;
-        }
         if (serverId === 'gemini-image') {
           return toolAction === 'edit_image' ? '编辑图片' : '生成图片';
         }

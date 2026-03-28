@@ -5,7 +5,8 @@ import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
 import BlockGroup from '@/components/BlockGroup';
 import Markdown from '@/components/Markdown';
-import WidgetTool from '@/components/tools/WidgetTool';
+import WidgetRenderer from '@/components/tools/WidgetRenderer';
+import { parseWidgetTags, hasWidgetTags } from '@/components/tools/widgetTagParser';
 import Tip from '@/components/Tip';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
@@ -400,14 +401,6 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       } else {
         groupedBlocks.push(block);
       }
-    } else if (block.type === 'tool_use' && block.tool?.name === 'mcp__generative-ui__show_widget') {
-      // Generative UI show_widget: promote to inline block (not inside tool group)
-      // so it renders seamlessly in the message flow like Claude Desktop
-      if (currentGroup.length > 0) {
-        groupedBlocks.push([...currentGroup]);
-        currentGroup = [];
-      }
-      groupedBlocks.push(block);
     } else if (block.type === 'thinking' || block.type === 'tool_use' || block.type === 'server_tool_use') {
       // Add to current group (server_tool_use is treated like tool_use for display)
       currentGroup.push(block);
@@ -457,9 +450,44 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
         <article className="w-full px-3 py-2">
           <div className="space-y-3">
             {groupedBlocks.map((item, index) => {
-              // Single block (text or inline widget)
+              // Single text block — may contain <widget> tags for inline rendering
               if (!Array.isArray(item)) {
                 if (item.type === 'text' && item.text) {
+                  // Check for <widget> tags in the text
+                  if (hasWidgetTags(item.text)) {
+                    const segments = parseWidgetTags(item.text);
+                    return (
+                      <div key={index} className="w-full space-y-3">
+                        {segments.map((seg, si) => {
+                          if (seg.type === 'text') {
+                            return (
+                              <div key={`t-${si}`} className="flex justify-start w-full px-1 py-1 select-none">
+                                <div className="w-full max-w-none text-[var(--ink)] select-text">
+                                  <Markdown>{seg.content}</Markdown>
+                                </div>
+                              </div>
+                            );
+                          }
+                          // Widget segment — render inline via WidgetRenderer
+                          return (
+                            <div key={`w-${si}`} className="w-full px-1 my-1.5">
+                              <div className="mb-1 flex items-center gap-1.5">
+                                <span className="text-[13px] font-medium text-[var(--ink-muted)]">
+                                  {seg.title.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                                </span>
+                              </div>
+                              <WidgetRenderer
+                                widgetCode={seg.code}
+                                isStreaming={!seg.isComplete}
+                                title={seg.title}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  }
+                  // Plain text — no widget tags
                   return (
                     <div
                       key={index}
@@ -468,14 +496,6 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                       <div className="w-full max-w-none text-[var(--ink)] select-text">
                         <Markdown>{item.text}</Markdown>
                       </div>
-                    </div>
-                  );
-                }
-                // Inline show_widget — render directly in message flow (no tool UI wrapper)
-                if (item.type === 'tool_use' && item.tool?.name === 'mcp__generative-ui__show_widget') {
-                  return (
-                    <div key={`widget-${item.tool.id}`} className="w-full px-1">
-                      <WidgetTool tool={item.tool} />
                     </div>
                   );
                 }

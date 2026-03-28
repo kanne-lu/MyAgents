@@ -1,13 +1,15 @@
 // Generative UI MCP Tool — AI generates interactive HTML widgets inline in chat
 // Context-injected MCP server (same pattern as im-cron: always present for desktop sessions)
-// Frontend renders widget_code in a sandboxed iframe with streaming preview
 //
-// Two tools:
-//   1. widget_read_me — Progressive design guideline loader (lazy, per-module)
-//   2. show_widget   — Generate and render an interactive widget
+// Architecture:
+//   1. widget_read_me MCP tool — On-demand design guideline loader (per-module)
+//      Returns design system + instructions to output <widget> tags in text
+//   2. AI outputs <widget title="...">HTML</widget> tags in regular text response
+//   3. Frontend parses tags from chat:message-chunk stream → renders in sandbox iframe
 //
-// Design: claude.ai's Generative UI uses read_me + show_widget. We replicate the pattern
-// with a design system derived from MyAgents design_guide.md (warm paper aesthetic).
+// Why text tags instead of MCP tool_use:
+//   Agent SDK buffers MCP tool input_json_delta until tool execution completes,
+//   preventing real-time streaming. Text output (chat:message-chunk) streams token-by-token.
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod/v4';
@@ -23,7 +25,7 @@ Widgets render inline in the chat message flow. They must feel like a natural pa
 - **Seamless**: background transparent, typography matches surrounding text
 - **Flat**: no gradients, mesh backgrounds, noise textures, drop shadows, blur, glow
 - **Compact**: show essential content inline, explain the rest in your text response
-- **Text goes in response, visuals go in tool**: all explanatory text must be OUTSIDE the tool call
+- **Text goes in response, visuals go in \`<widget>\` tags**: all explanatory text must be OUTSIDE the widget tags
 
 ## Streaming rules
 HTML streams token by token. Structure for progressive rendering:
@@ -256,15 +258,67 @@ function buildReadMeContent(modules: string[]): string {
   if (parts.length === 0) {
     return 'Unknown module(s). Available: chart, diagram, interactive, dashboard, art.';
   }
-  return parts.join('\n\n---\n\n');
+  // Always prepend output format instructions
+  return SECTION_OUTPUT_FORMAT + '\n\n---\n\n' + parts.join('\n\n---\n\n');
 }
 
 // ===================================================================
-// Tool Descriptions
+// Output Format Section (prepended to all widget_read_me responses)
+// Teaches the AI to output <widget> tags in text instead of tool calls
 // ===================================================================
 
-const READ_ME_DESCRIPTION = `Load the design guidelines for the type of widget you want to create.
-You MUST call this before calling show_widget. It returns the design system (color palette, component specs, layout rules) for the requested module(s).
+const SECTION_OUTPUT_FORMAT = `# How to Output Widgets
+
+## Output format
+To create a widget, output a \`<widget>\` tag directly in your text response (NOT as a tool call).
+The frontend will detect the tag, extract the HTML, and render it in a sandboxed iframe inline in the conversation.
+
+\`\`\`
+Your explanatory text here...
+
+<widget title="snake_case_title">
+<style>
+  .widget { font-family: system-ui, sans-serif; color: var(--widget-text); padding: 16px; }
+</style>
+<div class="widget">
+  <!-- SVG, canvas, or HTML content -->
+</div>
+<script>
+  // Interactive logic. Runs after all HTML is rendered.
+</script>
+</widget>
+
+More explanatory text here...
+\`\`\`
+
+## Rules
+- The \`<widget>\` tag MUST have a \`title\` attribute (snake_case identifier)
+- Content inside is a self-contained HTML fragment — NO <!DOCTYPE>, <html>, <head>, <body>
+- Structure for streaming: <style> first (short) → content HTML → <script> last
+- All explanatory text goes OUTSIDE the <widget> tags (in normal markdown)
+- You can output multiple widgets in a single response
+- The widget tag renders inline with your text — like an embedded figure
+
+## When to use — route on the verb, not the noun
+- "Show me / visualize / chart / graph / plot" → use <widget>
+- Data visualization: charts, graphs, trend lines, comparisons (Chart.js)
+- Architecture/flow diagrams: system architecture, data flow, process flows (SVG)
+- Interactive explainers: calculators, converters, sliders, live demos
+- Structured displays: timelines, org charts, cards, dashboards
+
+## When NOT to use
+- Simple text answers → regular text
+- Code snippets → code blocks
+- Static tables → Markdown tables
+- "Show me the ERD / database schema" → Mermaid in code block
+- Content the user explicitly asks as text/code`;
+
+// ===================================================================
+// Tool Description
+// ===================================================================
+
+const READ_ME_DESCRIPTION = `Load the design guidelines for creating interactive visual widgets.
+You MUST call this before outputting any <widget> tags. It returns the design system (color palette, component specs, layout rules) and output format instructions.
 
 Available modules:
 - chart: Chart.js patterns, data colors, legends, dashboard layouts
@@ -274,38 +328,6 @@ Available modules:
 - art: SVG illustration, visual metaphors
 
 Call with the module(s) most relevant to your planned widget. You can request multiple at once.`;
-
-const SHOW_WIDGET_DESCRIPTION = `Generate an interactive visualization widget that renders inline in the conversation.
-You MUST call widget_read_me first to load the design guidelines before using this tool.
-Text goes in your response, visuals go in this tool. All explanatory text must be OUTSIDE this tool call.
-
-## When to use — route on the verb, not the noun
-- "Show me / visualize / chart / graph / plot" → show_widget
-- Data visualization: charts, graphs, trend lines, comparisons
-- Architecture/flow diagrams: system architecture, data flow, process flows
-- Interactive explainers: calculators, converters, sliders, live demos
-- Structured displays: timelines, org charts, cards, dashboards
-- Illustrative diagrams: visual metaphors, concept maps
-
-## When NOT to use
-- Simple text answers → regular text
-- Code snippets → code blocks
-- Static tables → Markdown tables
-- "Show me the ERD / database schema" → Mermaid in code block
-- Lists, bullet points → Markdown
-- Content the user explicitly asks as text/code
-- Deliverables to save/download → suggest writing a file instead
-
-## Structure template
-<style>
-  .widget { font-family: system-ui, sans-serif; color: var(--widget-text); padding: 16px; }
-</style>
-<div class="widget">
-  <!-- SVG, canvas, or HTML content. Follow the design guidelines from widget_read_me. -->
-</div>
-<script>
-  // Runs after streaming completes. Use requestAnimationFrame for animations.
-</script>`;
 
 // ===================================================================
 // MCP Server
@@ -328,25 +350,6 @@ export function createGenerativeUiServer() {
           const content = buildReadMeContent(args.modules);
           return {
             content: [{ type: 'text', text: content }],
-          };
-        }
-      ),
-      tool(
-        'show_widget',
-        SHOW_WIDGET_DESCRIPTION,
-        {
-          title: z.string().describe(
-            'Widget identifier in snake_case format. Used for header display and logging.'
-          ),
-          widget_code: z.string().describe(
-            'Self-contained HTML fragment (<style> → content → <script>). ' +
-            'No <html>/<head>/<body>. Use CSS variables from the design guidelines. ' +
-            'Use CDN libraries: Chart.js, D3.js, Mermaid, Lucide.'
-          ),
-        },
-        async (args) => {
-          return {
-            content: [{ type: 'text', text: `Widget "${args.title}" rendered successfully.` }],
           };
         }
       ),

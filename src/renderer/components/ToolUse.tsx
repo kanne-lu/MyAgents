@@ -16,7 +16,6 @@ import TaskTool from './tools/TaskTool';
 import TodoWriteTool from './tools/TodoWriteTool';
 import WebFetchTool from './tools/WebFetchTool';
 import WebSearchTool from './tools/WebSearchTool';
-import WidgetTool from './tools/WidgetTool';
 import WriteTool from './tools/WriteTool';
 import CronTaskCard from './scheduled-tasks/CronTaskCard';
 
@@ -92,7 +91,7 @@ export default function ToolUse({ tool: rawTool }: ToolUseProps) {
     case 'NotebookEdit':
       return <NotebookEditTool tool={tool} />;
     default: {
-      // Generative UI: widget_read_me shows a brief summary (show_widget is rendered inline by Message.tsx)
+      // Generative UI: widget_read_me shows a brief summary
       if (tool.name === 'mcp__generative-ui__widget_read_me') {
         const modules = (tool.parsedInput as Record<string, unknown> | undefined)?.modules;
         const modList = Array.isArray(modules) ? (modules as string[]).join(', ') : '';
@@ -105,10 +104,6 @@ export default function ToolUse({ tool: rawTool }: ToolUseProps) {
           </div>
         );
         return <CollapsibleTool collapsedContent={collapsedContent} expandedContent={null} />;
-      }
-      // show_widget is rendered inline by Message.tsx, but keep fallback just in case
-      if (tool.name === 'mcp__generative-ui__show_widget') {
-        return <WidgetTool tool={tool} />;
       }
       // Route gemini-image MCP tools to custom component
       if (tool.name.startsWith('mcp__gemini-image__')) {

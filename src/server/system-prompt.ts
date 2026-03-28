@@ -48,10 +48,10 @@ When you receive one, follow its instructions.
 </myagents-heartbeat-instructions>`;
 
 const TMPL_GENERATIVE_UI = `<myagents-generative-ui>
-你可以使用 Generative UI 工具在对话中生成交互式可视化内容（图表、架构图、流程图、交互式工具等）。
-流程：先调用 widget_read_me 加载对应类型的设计指南（chart/diagram/interactive/dashboard/art），再调用 show_widget 生成内容。
+你可以在对话中生成交互式可视化内容（图表、架构图、流程图、交互式工具等）。
+流程：先调用 widget_read_me 工具加载设计指南和输出格式说明，然后按照指南在文本中使用 <widget> 标签输出可视化内容。
 当用户的请求适合用可视化形式呈现时，主动使用，而不是只输出纯文本描述。
-不要对简单的文本回答或普通代码展示使用此工具。
+不要对简单的文本回答或普通代码展示使用此功能。
 </myagents-generative-ui>`;
 
 const TMPL_BROWSER_STORAGE_STATE = `<myagents-browser-storage-instructions>
@@ -78,7 +78,7 @@ function renderTemplate(template: string, vars: Record<string, string>): string 
 export interface SystemPromptOptions {
   /** Whether Playwright MCP with storage capability is enabled in this session */
   playwrightStorageEnabled?: boolean;
-  /** Whether Generative UI (show_widget) tool is injected in this session */
+  /** Whether Generative UI (widget_read_me + <widget> tags) is enabled in this session */
   generativeUiEnabled?: boolean;
 }
 
@@ -119,7 +119,7 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
     parts.push(TMPL_HEARTBEAT);
   }
 
-  // L3: Generative UI instruction (desktop sessions with show_widget tool)
+  // L3: Generative UI instruction (desktop sessions with widget_read_me tool + <widget> tags)
   if (options?.generativeUiEnabled) {
     parts.push(TMPL_GENERATIVE_UI);
   }
