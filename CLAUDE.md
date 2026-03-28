@@ -17,6 +17,7 @@
 - `src/renderer/` — React 前端（api/、context/、hooks/、components/、pages/）
 - `src/server/` — Bun 后端 Sidecar
 - `src/server/plugin-bridge/` — OpenClaw Plugin Bridge（独立 Bun 进程，加载社区 Channel 插件）
+- `src/cli/` — 自配置 CLI（`myagents` 命令，同步到 `~/.myagents/bin/`，详见下方说明）
 - `src/shared/` — 前后端共享类型
 - `src-tauri/` — Tauri Rust 层
 - `specs/` — 设计文档（tech_docs/、guides/、prd/、research/）
@@ -206,6 +207,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 修改相关模块前建议先阅读：
 
 - 整体架构：@specs/tech_docs/architecture.md
+- 自配置 CLI（myagents 命令、Admin API、版本门控）：@specs/tech_docs/cli_architecture.md
 - React 稳定性规范（Context/useEffect/memo 等 5 条规则）：@specs/tech_docs/react_stability_rules.md
 - IM Bot 集成：@specs/tech_docs/im_integration_architecture.md
 - Plugin Bridge（OpenClaw 插件加载、SDK shim、消息流转）：@specs/tech_docs/plugin_bridge_architecture.md
