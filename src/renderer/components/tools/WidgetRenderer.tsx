@@ -99,6 +99,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
 
       switch (e.data.type) {
         case 'widget:ready':
+          console.log(`[WidgetRenderer] widget:ready received, source match=${e.source === iframeRef.current?.contentWindow}`);
           iframeReady.current = true;
           // If we already have content, send it immediately
           if (widgetCode && !hasFinalized.current) {
@@ -141,6 +142,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
 
   // iframe onLoad fallback for ready race condition (CodePilot Bug #6)
   const onIframeLoad = useCallback(() => {
+    console.log(`[WidgetRenderer] onIframeLoad fired, iframeReady was=${iframeReady.current}`);
     if (!iframeReady.current) {
       iframeReady.current = true;
       if (widgetCode) {
@@ -153,7 +155,11 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
 
   // Streaming update: debounced, script-stripped
   useEffect(() => {
-    if (!isStreaming || !iframeReady.current || hasFinalized.current) return;
+    if (!isStreaming || hasFinalized.current) return;
+    if (!iframeReady.current) {
+      console.log(`[WidgetRenderer] streaming update skipped: iframeReady=${iframeReady.current}, widgetCodeLen=${widgetCode.length}`);
+      return;
+    }
 
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
     debounceTimer.current = setTimeout(() => {

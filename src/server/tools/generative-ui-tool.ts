@@ -42,6 +42,7 @@ HTML streams token by token. Structure for progressive rendering:
 - No emoji — use CSS shapes or SVG paths
 - No position:fixed (iframe viewport auto-sizes to content height)
 - No tabs, carousels, display:none during streaming
+- No fetch() / XMLHttpRequest / WebSocket — all data must be inline in widget_code (network is blocked by CSP)
 - Responsive: percentage widths, viewBox for SVG. Min width 300px.
 - Match the conversation language for all text content.
 
