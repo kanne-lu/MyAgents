@@ -1,12 +1,15 @@
 import {
   BookOpen,
   Brain,
+  Clock,
   FileEdit,
   FilePen,
   FileText,
   Globe,
+  ImageIcon,
   ListTodo,
   Palette,
+  Plug,
   Search,
   SearchCode,
   Sparkles,
@@ -19,6 +22,41 @@ import {
 import type { ReactNode } from 'react';
 
 import type { SubagentToolCall, ToolInput, ToolUseSimple } from '@/types/chat';
+
+// ===== MCP Server Name Registry =====
+// Module-level map updated by Chat.tsx when MCP config changes.
+// Enables tool display to show user-configured server names instead of raw IDs.
+
+const mcpServerNames = new Map<string, string>();
+
+// Internal MCP servers (Context-injected, not in user config) — fallback names
+const INTERNAL_MCP_NAMES: Record<string, string> = {
+  'im-cron': '定时任务',
+  'cron-tools': '定时任务',
+  'im-media': 'IM 媒体',
+  'im-bridge-tools': '插件工具',
+  'generative-ui': '可视化',
+};
+
+/** Called by Chat.tsx when MCP server list changes */
+export function syncMcpServerNames(servers: Array<{ id: string; name: string }>): void {
+  mcpServerNames.clear();
+  for (const s of servers) {
+    mcpServerNames.set(s.id, s.name);
+  }
+}
+
+/** Get display name for an MCP server ID */
+function getMcpServerDisplayName(serverId: string): string {
+  return mcpServerNames.get(serverId) || INTERNAL_MCP_NAMES[serverId] || serverId;
+}
+
+/** Extract server ID from MCP tool name: mcp__<server-id>__<tool-name> → server-id */
+function extractMcpServerId(toolName: string): string | null {
+  if (!toolName.startsWith('mcp__')) return null;
+  const parts = toolName.split('__');
+  return parts.length >= 3 ? parts[1] : null;
+}
 
 // 格式化时间 - 共享函数
 export function formatDuration(ms: number): string {
@@ -369,6 +407,82 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
         };
       }
 
+      // Cron/Scheduled task tools - Teal
+      if (toolName.startsWith('mcp__im-cron__') || toolName.startsWith('mcp__cron-tools__')) {
+        return {
+          icon: <Clock className="size-2.5" />,
+          colors: {
+            border: 'border-teal-200/60 dark:border-teal-500/30',
+            bg: 'bg-teal-50/80 dark:bg-teal-500/10',
+            text: 'text-teal-600 dark:text-teal-400',
+            hoverBg: 'hover:bg-teal-100/80 dark:hover:bg-teal-500/20',
+            chevron: 'text-teal-400 dark:text-teal-500',
+            iconColor: 'text-teal-500 dark:text-teal-400'
+          }
+        };
+      }
+
+      // IM Media tools - Indigo
+      if (toolName.startsWith('mcp__im-media__')) {
+        return {
+          icon: <ImageIcon className="size-2.5" />,
+          colors: {
+            border: 'border-indigo-200/60 dark:border-indigo-500/30',
+            bg: 'bg-indigo-50/80 dark:bg-indigo-500/10',
+            text: 'text-indigo-600 dark:text-indigo-400',
+            hoverBg: 'hover:bg-indigo-100/80 dark:hover:bg-indigo-500/20',
+            chevron: 'text-indigo-400 dark:text-indigo-500',
+            iconColor: 'text-indigo-500 dark:text-indigo-400'
+          }
+        };
+      }
+
+      // IM Bridge (OpenClaw plugin) tools - Cyan
+      if (toolName.startsWith('mcp__im-bridge-tools__')) {
+        return {
+          icon: <Plug className="size-2.5" />,
+          colors: {
+            border: 'border-cyan-200/60 dark:border-cyan-500/30',
+            bg: 'bg-cyan-50/80 dark:bg-cyan-500/10',
+            text: 'text-cyan-600 dark:text-cyan-400',
+            hoverBg: 'hover:bg-cyan-100/80 dark:hover:bg-cyan-500/20',
+            chevron: 'text-cyan-400 dark:text-cyan-500',
+            iconColor: 'text-cyan-500 dark:text-cyan-400'
+          }
+        };
+      }
+
+      // Playwright browser tools - Sky blue
+      if (toolName.startsWith('mcp__playwright__')) {
+        return {
+          icon: <Globe className="size-2.5" />,
+          colors: {
+            border: 'border-sky-200/60 dark:border-sky-500/30',
+            bg: 'bg-sky-50/80 dark:bg-sky-500/10',
+            text: 'text-sky-600 dark:text-sky-400',
+            hoverBg: 'hover:bg-sky-100/80 dark:hover:bg-sky-500/20',
+            chevron: 'text-sky-400 dark:text-sky-500',
+            iconColor: 'text-sky-500 dark:text-sky-400'
+          }
+        };
+      }
+
+      // Search tools (DuckDuckGo, Tavily, etc.) - Emerald
+      if (toolName.startsWith('mcp__ddg-search__') || toolName.startsWith('mcp__tavily-search__')) {
+        return {
+          icon: <Search className="size-2.5" />,
+          colors: {
+            border: 'border-emerald-200/60 dark:border-emerald-500/30',
+            bg: 'bg-emerald-50/80 dark:bg-emerald-500/10',
+            text: 'text-emerald-600 dark:text-emerald-400',
+            hoverBg: 'hover:bg-emerald-100/80 dark:hover:bg-emerald-500/20',
+            chevron: 'text-emerald-400 dark:text-emerald-500',
+            iconColor: 'text-emerald-500 dark:text-emerald-400'
+          }
+        };
+      }
+
+      // Default fallback for unknown MCP and other tools
       return {
         icon: <Wrench className="size-2.5" />,
         colors: {
@@ -384,24 +498,17 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
 }
 
 // Get main label for tool (displayed as primary text in ProcessRow)
-// For Task tool, returns the subagent_type (e.g., "Explore", "Plan")
-// For other tools, returns the tool name
+// For MCP tools: uses server display name from config (e.g., "Playwright 浏览器", "天眼查")
+// For Task tool: returns the subagent_type (e.g., "Explore", "Plan")
 export function getToolMainLabel(tool: ToolUseSimple): string {
   if (tool.name === 'Task' || tool.name === 'Agent') {
     const subagentType = getStringProp(tool.parsedInput, 'subagent_type');
     return subagentType || tool.name;
   }
-  if (tool.name === 'mcp__generative-ui__widget_read_me') {
-    return '加载设计指南';
-  }
-  if (tool.name.startsWith('mcp__generative-ui__')) {
-    return '可视化';
-  }
-  if (tool.name.startsWith('mcp__gemini-image__')) {
-    return tool.name.includes('edit_image') ? '编辑图片' : '生成图片';
-  }
-  if (tool.name.startsWith('mcp__edge-tts__')) {
-    return tool.name.includes('list_voices') ? '查询语音' : '语音合成';
+  // MCP tools: use server display name
+  const serverId = extractMcpServerId(tool.name);
+  if (serverId) {
+    return getMcpServerDisplayName(serverId);
   }
   return tool.name;
 }
@@ -591,23 +698,39 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
     }
     case 'KillShell':
       return 'Kill Shell';
-    default:
-      if (tool.name === 'mcp__generative-ui__widget_read_me') {
-        const modules = (tool.parsedInput as Record<string, unknown> | undefined)?.modules;
-        const modList = Array.isArray(modules) ? modules.join(', ') : '';
-        return modList ? `加载设计指南 (${modList})` : '加载设计指南';
-      }
-      if (tool.name.startsWith('mcp__generative-ui__')) {
-        const widgetTitle = getStringProp(tool.parsedInput, 'title');
-        return widgetTitle ? widgetTitle.replace(/_/g, ' ') : '可视化';
-      }
-      if (tool.name.startsWith('mcp__gemini-image__')) {
-        return tool.name.includes('edit_image') ? '编辑图片' : '生成图片';
-      }
-      if (tool.name.startsWith('mcp__edge-tts__')) {
-        return tool.name.includes('list_voices') ? '查询语音' : '语音合成';
+    default: {
+      // MCP tools: show "ServerName: tool_action" or just ServerName
+      const serverId = extractMcpServerId(tool.name);
+      if (serverId) {
+        const serverName = getMcpServerDisplayName(serverId);
+        // Extract tool action name (after the last __)
+        const parts = tool.name.split('__');
+        const toolAction = parts.length >= 3 ? parts.slice(2).join('__') : '';
+
+        // Special cases with richer labels
+        if (tool.name === 'mcp__generative-ui__widget_read_me') {
+          const modules = (tool.parsedInput as Record<string, unknown> | undefined)?.modules;
+          const modList = Array.isArray(modules) ? modules.join(', ') : '';
+          return modList ? `加载设计指南 (${modList})` : '加载设计指南';
+        }
+        if (serverId === 'generative-ui') {
+          const widgetTitle = getStringProp(tool.parsedInput, 'title');
+          return widgetTitle ? widgetTitle.replace(/_/g, ' ') : serverName;
+        }
+        if (serverId === 'gemini-image') {
+          return toolAction === 'edit_image' ? '编辑图片' : '生成图片';
+        }
+        if (serverId === 'edge-tts') {
+          return toolAction === 'list_voices' ? '查询语音' : '语音合成';
+        }
+        // Generic MCP: show action if distinct from server name
+        if (toolAction && toolAction !== 'search' && toolAction !== 'cron') {
+          return `${serverName}: ${toolAction.replace(/_/g, ' ')}`;
+        }
+        return serverName;
       }
       return tool.name;
+    }
   }
 }
 

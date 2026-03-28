@@ -31,6 +31,7 @@ import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
+import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
   getAllMcpServers,
   getEnabledMcpServerIds,
@@ -620,6 +621,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         const servers = await getAllMcpServers();
         const enabledIds = await getEnabledMcpServerIds();
         setMcpServers(servers);
+        syncMcpServerNames(servers);
         setGlobalMcpEnabled(enabledIds);
 
         if (joinedExistingSidecarRef.current) {
@@ -890,6 +892,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         const servers = await getAllMcpServers();
         const enabledIds = await getEnabledMcpServerIds();
         setMcpServers(servers);
+        syncMcpServerNames(servers);
         setGlobalMcpEnabled(enabledIds);
 
         // Skip MCP push when still in the adoption window (joined existing sidecar)
