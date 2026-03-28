@@ -57,26 +57,28 @@ export default function WidgetTool({ tool }: WidgetToolProps) {
   const displayTitle = formatTitle(title);
   const icon = pickIcon(title);
 
-  // DEBUG: trace streaming data flow
-  if (tool.name === 'mcp__generative-ui__show_widget') {
-    const inputJsonLen = tool.inputJson?.length ?? 0;
-    const parsedKeys = tool.parsedInput ? Object.keys(tool.parsedInput as unknown as Record<string, unknown>) : [];
-    console.log(`[WidgetTool] render: isLoading=${tool.isLoading}, hasResult=${!!tool.result}, inputJsonLen=${inputJsonLen}, parsedKeys=[${parsedKeys}], widgetCodeLen=${widgetCode.length}, isStreaming=${isStreaming}`);
-  }
-
-  // No widget_code yet — show skeleton
+  // No widget_code yet — show skeleton with shimmer
   if (!widgetCode && isStreaming) {
     return (
       <div className="my-1.5 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)]">
-        <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-3 py-2">
-          <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--ink-muted)]" />
+        <div className="flex items-center gap-2 px-4 pt-3 pb-2">
+          <span className="text-[var(--accent)]">{icon}</span>
           <span className="text-[13px] font-medium text-[var(--ink-muted)]">
             {displayTitle}
           </span>
-          <span className="text-[11px] text-[var(--ink-subtle)]">生成中...</span>
+          <Loader2 className="h-3 w-3 animate-spin text-[var(--ink-subtle)]" />
+          <span className="text-[11px] text-[var(--ink-subtle)]">AI 正在设计可视化方案…</span>
         </div>
-        <div className="flex h-[120px] items-center justify-center">
-          <div className="h-2 w-32 animate-pulse rounded-full bg-[var(--paper-inset)]" />
+        <div className="space-y-3 px-4 pb-4">
+          {/* Shimmer skeleton lines */}
+          <div className="h-3 w-3/4 animate-[shimmer-slide_2s_ease-in-out_infinite] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper-elevated)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
+          <div className="h-3 w-full animate-[shimmer-slide_2s_ease-in-out_infinite_0.15s] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper-elevated)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
+          <div className="h-3 w-5/6 animate-[shimmer-slide_2s_ease-in-out_infinite_0.3s] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper-elevated)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
+          <div className="mt-2 h-20 w-full animate-[shimmer-slide_2s_ease-in-out_infinite_0.45s] rounded-[8px] bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper-elevated)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
+          <div className="flex gap-3">
+            <div className="h-3 w-1/3 animate-[shimmer-slide_2s_ease-in-out_infinite_0.6s] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper-elevated)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
+            <div className="h-3 w-1/4 animate-[shimmer-slide_2s_ease-in-out_infinite_0.75s] rounded bg-gradient-to-r from-[var(--paper-inset)] via-[var(--paper-elevated)] to-[var(--paper-inset)] bg-[length:200%_100%]" />
+          </div>
         </div>
       </div>
     );

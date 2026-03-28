@@ -20,7 +20,7 @@ export function buildSandboxHtml(cssVarsBlock: string): string {
 ${cssVarsBlock}
 *, *::before, *::after { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-body { font-family: system-ui, -apple-system, sans-serif; color: var(--widget-text); }
+body { font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 16px; line-height: 1.6; color: var(--widget-text); }
 #root { min-height: 20px; }
 </style>
 </head>

@@ -566,6 +566,11 @@ button:disabled {
   animation: shimmer 2s ease-in-out infinite;
 }
 
+@keyframes shimmer-slide {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 
 /* Override Tailwind's font-mono to use our CSS variable with Chinese fallback */
 .font-mono {

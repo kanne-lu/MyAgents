@@ -65,7 +65,6 @@ interface WidgetRendererProps {
 }
 
 const DEBOUNCE_MS = 120;
-const MAX_HEIGHT = 600;
 const MIN_HEIGHT = 60;
 
 export default function WidgetRenderer({ widgetCode, isStreaming, title }: WidgetRendererProps) {
@@ -110,7 +109,7 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
           break;
 
         case 'widget:resize': {
-          const h = Math.max(MIN_HEIGHT, Math.min(MAX_HEIGHT, e.data.height));
+          const h = Math.max(MIN_HEIGHT, e.data.height as number);
           setHeight(h);
           setCacheHeight(cacheKey, h);
           if (e.data.first) setFirstResize(false);
