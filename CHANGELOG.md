@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.54] - 2026-03-28
+
+### Added
+- **Cron 定时任务跨 Channel 投递 (Phase 2 UI)**：定时任务执行结果可投递到 IM Channel，详情页拆分「结束条件」与「任务通知」为独立 Section，投递渠道选择器按工作区分组
+- **Ralph Loop 无限循环模式**：完成触发的持续执行调度，自动指数退避（失败 5→10→20→40 分钟），区分逻辑失败与基础设施错误
+- **文本选中浮动菜单 + Session 导出**：选中 AI 回复文本弹出「引用」「深入讲讲」操作；Session 历史列表支持导出为 Markdown 文件（含完整路径提示）
+- **SDK shim 全量覆盖**：auto-stub generator 读取 OpenClaw 源码自动生成 129 个 stub，`_handwritten.json` 清单保护 26 个手写模块，消除 `Cannot find module` 崩溃
+- **IM Bot「思考中…」占位消息**：AI 首个非文本块（thinking/tool_use）触发即时反馈，支持 stream 和非 stream 两条路径
+- **系统注入消息标签**：Cron prompt 包装 `<system-reminder><CRON_TASK>`，用户气泡显示「心跳感知」「定时任务」badge，AI 可区分系统触发 vs 真实用户消息
+- **用户气泡折叠**：超长用户消息（>50vh）自动折叠 + 渐变展开按钮，气泡最大宽度 66%→85%
+- **CLI 架构分离**：CLI 脚本从 bundled-agents 独立到 `src/cli/`，Rust 侧新增 `CLI_VERSION` 版本门控同步到 `~/.myagents/bin/`
+
+### Improved
+- **Claude Agent SDK 0.2.80 → 0.2.84**：支持 `session_state_changed` 事件 + `MODEL_NAME` 别名环境变量
+- **网络代理策略重构**：从「强制直连」改为「继承系统行为」，`proxy_config::apply_to_subprocess()` 集中化（pit-of-success），Sidecar/Bridge 调用点从内联 50 行→1 行
+- **目录树刷新架构**：`fs.watch({ recursive: true })` + SSE 推送替代前端 120s 轮询，500ms 防抖
+- **Tip 组件**：支持 `position="bottom"`，解决历史记录下拉框 tooltip 顶部遮挡
+- **MCP 环境变量交互**：从单 key 输入改为 key+value 双输入框一步添加，增加 trim + 重复 key 校验
+
+### Fixed
+- **Rewind SDK 合规**：`rewindFiles` 改传 user UUID + `liveSessionUuids` 双层校验 + 前端失败回滚
+- **IM Bot self-resolve 缺少 defaultProviderId fallback**：新建 Bot 首次启动报「模型不可用」
+- **Agent 设置页定时任务列表**：按 workspacePath 匹配修复桌面任务不显示
+- **Tool 行视觉优化**：绿色活跃圆点 + CSS 截断 + 去重后台标签
+- **Global skills sync**：generation counter + lazy validation 防止同步风暴
+- **CLI --args 参数解析**：`buildSdkMcpServers` 防御 non-array args + 单个 MCP 初始化失败 try/catch 隔离
+- **AI 时间感知**：系统提示词引导主动获取当前时间
+- **引用选中文本交互**：空输入框去除前缀换行 + 追加后自动滚动到底部
+
+### Refactored
+- **Phase 0 技术债清理**：删除 998 行死代码（`useClaudeChat.ts`、`browserMock.ts`）
+
+### Docs
+- 新增 CLI 架构文档 + Plugin Bridge 架构文档
+- 架构文档全面更新至 v0.1.54（20+ 处审计差异修正）
+- 7 个深度技术文档全面审计 + CLAUDE.md 增加「第一原则：架构延续性」
+- 小助理 CLAUDE.md 审计修正 + ADMIN_AGENT_VERSION 6→8
+
+---
+
 ## [0.1.53] - 2026-03-26
 
 ### Added
