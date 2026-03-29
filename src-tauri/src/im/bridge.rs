@@ -81,6 +81,9 @@ pub struct BridgeAdapter {
     /// When false, streaming skips draft creation and edit calls entirely.
     supports_edit: bool,
     enabled_tool_groups: Vec<String>,
+    /// All tool groups discovered from plugin (before user filtering).
+    /// Used to auto-merge new groups into user config.
+    all_tool_groups: Vec<String>,
     /// Plugin-registered slash commands (name → description)
     commands: Vec<(String, String)>,
 }
@@ -97,6 +100,7 @@ impl BridgeAdapter {
             supports_cardkit: false,
             supports_edit: true, // assume yes until sync_capabilities proves otherwise
             enabled_tool_groups: Vec::new(),
+            all_tool_groups: Vec::new(),
             commands: Vec::new(),
         }
     }
@@ -141,12 +145,14 @@ impl BridgeAdapter {
                     }
                     // Tool groups
                     if let Some(groups) = caps["toolGroups"].as_array() {
-                        self.enabled_tool_groups = groups.iter()
+                        let parsed: Vec<String> = groups.iter()
                             .filter_map(|g| g.as_str().map(String::from))
                             .collect();
-                        if !self.enabled_tool_groups.is_empty() {
-                            ulog_info!("[bridge:{}] tool groups: {:?}", self.plugin_id, self.enabled_tool_groups);
+                        if !parsed.is_empty() {
+                            ulog_info!("[bridge:{}] tool groups: {:?}", self.plugin_id, parsed);
                         }
+                        self.all_tool_groups = parsed.clone();
+                        self.enabled_tool_groups = parsed;
                     }
                 }
             }
@@ -154,6 +160,11 @@ impl BridgeAdapter {
                 ulog_debug!("[bridge:{}] Could not fetch capabilities, using defaults", self.plugin_id);
             }
         }
+    }
+
+    /// All tool groups discovered from plugin (before user filtering).
+    pub fn all_tool_groups(&self) -> &[String] {
+        &self.all_tool_groups
     }
 
     /// Override enabled tool groups with user-configured selection.

@@ -349,9 +349,9 @@ export default function ChannelWizard({
             // Merge promoted plugin defaults (e.g. dmPolicy: 'open') under user values
             const mergedConfig = { ...(promoted?.defaultConfig ?? {}), ...pluginConfig };
             const pluginName = promoted?.name || installedPlugin?.manifest?.name || openclawPluginId || 'Plugin Bot';
-            // Don't set openclawEnabledToolGroups — undefined means "all groups enabled".
-            // Rust won't override Bridge's sync_capabilities() result, so ALL plugin
-            // tool groups are available out-of-the-box. Users can customize in settings.
+            // Enable all known tool groups by default.
+            // Rust auto-merges new groups from plugin updates at channel startup.
+            const allToolGroups = ['doc', 'chat', 'wiki_drive', 'bitable', 'calendar', 'task', 'sheet', 'search', 'common', 'im', 'perm'];
             return {
                 id: channelId,
                 type: platform,
@@ -362,6 +362,7 @@ export default function ChannelWizard({
                 openclawPluginId: openclawPluginId,
                 openclawNpmSpec: installedPlugin?.npmSpec,
                 openclawPluginConfig: Object.keys(mergedConfig).length > 0 ? mergedConfig : undefined,
+                openclawEnabledToolGroups: allToolGroups,
             };
         }
         return {

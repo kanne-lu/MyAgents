@@ -60,12 +60,13 @@ function normalizeAgents(config: AppConfig): boolean {
 }
 
 /**
- * Migrate old hardcoded openclawEnabledToolGroups to undefined (= all groups).
+ * Migrate old hardcoded openclawEnabledToolGroups to the full set.
  * Before v0.1.56, ChannelWizard wrote a fixed subset ['doc','chat','wiki_drive','bitable']
  * which silently hid calendar/task/sheet/search/common/im tools.
- * Clear it so all plugin tool groups are enabled by default.
+ * Expand to all known groups so everything is enabled.
  */
 const LEGACY_TOOL_GROUPS = new Set(['doc', 'chat', 'wiki_drive', 'bitable']);
+const ALL_KNOWN_TOOL_GROUPS = ['doc', 'chat', 'wiki_drive', 'bitable', 'calendar', 'task', 'sheet', 'search', 'common', 'im', 'perm'];
 function migrateToolGroups(config: AppConfig): boolean {
     if (!config.agents) return false;
     let changed = false;
@@ -73,15 +74,15 @@ function migrateToolGroups(config: AppConfig): boolean {
         for (const ch of (agent.channels ?? [])) {
             const groups = ch.openclawEnabledToolGroups;
             if (!groups || groups.length === 0) continue;
-            // Only clear if it's the exact old default (user didn't customize)
+            // Only expand if it's the exact old default (user didn't customize)
             if (groups.length === LEGACY_TOOL_GROUPS.size && groups.every(g => LEGACY_TOOL_GROUPS.has(g))) {
-                ch.openclawEnabledToolGroups = undefined;
+                ch.openclawEnabledToolGroups = [...ALL_KNOWN_TOOL_GROUPS];
                 changed = true;
             }
         }
     }
     if (changed) {
-        console.log('[ConfigProvider] Migrated legacy openclawEnabledToolGroups → undefined (all groups enabled)');
+        console.log('[ConfigProvider] Migrated legacy openclawEnabledToolGroups → all groups enabled');
     }
     return changed;
 }

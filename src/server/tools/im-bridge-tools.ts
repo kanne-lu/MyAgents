@@ -87,11 +87,8 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
 
   // Fetch tools from Bridge and build dynamic MCP server
   try {
-    // When enabledToolGroups is empty → no filtering (all tools available).
-    // When non-empty → always inject 'interaction' group for auth recovery.
-    const allGroups = ctx.enabledToolGroups.length > 0
-      ? [...new Set([...ctx.enabledToolGroups, 'interaction'])]
-      : []; // empty = no group filter, Bridge returns all tools
+    // Always inject 'interaction' group for auth recovery (oauth, ask_user_question).
+    const allGroups = [...new Set([...ctx.enabledToolGroups, 'interaction'])];
     const groups = allGroups.join(',');
     const url = `http://127.0.0.1:${ctx.bridgePort}/mcp/tools${groups ? `?groups=${groups}` : ''}`;
     const resp = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
@@ -142,9 +139,7 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
                 args: params.args,
                 userId: bridgeToolsContext.senderId,
                 isOwner: bridgeToolsContext.isOwner ?? false,
-                enabledGroups: bridgeToolsContext.enabledToolGroups.length > 0
-                  ? [...new Set([...bridgeToolsContext.enabledToolGroups, 'interaction'])]
-                  : undefined, // undefined = no restriction
+                enabledGroups: [...new Set([...bridgeToolsContext.enabledToolGroups, 'interaction'])],
                 // Ticket context for LarkTicket injection (Feishu OAuth auto-auth)
                 chatId: bridgeToolsContext.chatId,
                 chatType: bridgeToolsContext.sourceType === 'group' ? 'group' : 'p2p',
