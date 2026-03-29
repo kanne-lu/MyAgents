@@ -1562,8 +1562,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     <div className="relative flex h-full flex-row overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)]">
       {/* Left side: chat area (+ side workspace when wide & no split) */}
       <div
-        className={`relative flex min-w-0 flex-row overflow-hidden ${!isDraggingSplit ? 'transition-all duration-300 ease-in-out' : ''}`}
-        style={splitFile ? { width: `${splitRatio * 100}%`, flexShrink: 0 } : { flex: 1 }}
+        className={`relative flex min-w-0 flex-row overflow-hidden ${!isDraggingSplit ? 'transition-[width] duration-300 ease-in-out' : ''}`}
+        style={{ width: splitFile ? `${splitRatio * 100}%` : '100%' }}
       >
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${showWorkspace && !shouldUseWorkspaceOverlay ? 'border-r border-[var(--line-subtle)]' : ''}`}>
         {/* Compact header - single row */}
