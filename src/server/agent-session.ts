@@ -652,7 +652,19 @@ async function forceAbortCurrentTurnAndRecover(): Promise<void> {
   console.warn('[agent] force-aborting session after interrupt timeout');
   abortPersistentSession();
 
-  await awaitSessionTermination(10_000, 'forceAbort');
+  try {
+    await awaitSessionTermination(10_000, 'forceAbort');
+  } catch {
+    // Termination timed out — the for-await loop is stuck (likely blocked on hung MCP).
+    // Force-close the SDK session to kill the subprocess + MCP transports. (#60)
+    // close() is the nuclear option: terminates process, cleans up MCP transports, releases pipes.
+    if (querySession) {
+      console.warn('[agent] forceAbort: session termination timed out, force-closing SDK session');
+      const session = querySession;
+      querySession = null;
+      try { session.close(); } catch { /* already dead */ }
+    }
+  }
 
   // Another control flow (reset/switch session) already took over.
   if (!shouldAbortSession) {
@@ -5060,35 +5072,52 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     let messageCount = 0;
 
     // ── API response watchdog ──────────────────────────────────────────
-    // Detects hung API connections that produce no SDK events.
+    // Detects hung API connections AND hung MCP tool calls.
     // Heartbeat (15s ping) keeps the SSE alive, so Rust's 60s read_timeout
     // never fires. Without this watchdog, the session hangs indefinitely.
     //
-    // Only active when isStreamingMessage is true (an active turn is in progress).
-    // pendingTools > 0 means a local tool or subagent is executing (no API
-    // call in flight), so we skip. pendingTools === 0 means we're waiting
-    // for the API — if no SDK event arrives for 15 minutes, abort.
+    // Two detection modes:
+    // 1. API hang: pendingTools === 0, no SDK events for 15 minutes → abort
+    // 2. MCP tool hang: pendingTools > 0, no SDK events for 2 minutes → abort (#60)
+    //    MCP tools communicate with external server processes that can hang indefinitely
+    //    (e.g., Playwright screenshot on a heavy page). The 2-minute timeout is generous
+    //    enough for legitimate long-running tools but catches truly hung processes.
     let pendingTools = 0;
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const API_WATCHDOG_TIMEOUT_MS = 15 * 60 * 1000;
+    const MCP_TOOL_HANG_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes for hung MCP tools
     let watchdogFired = false;
     apiWatchdogId = setInterval(() => {
       // Only check during active turns (not pre-warm, not idle between turns)
       if (!isStreamingMessage || isPreWarming) return;
-      // Also require the current turn to have been running for > timeout duration.
-      // This prevents false positives when a new turn just started but lastSdkEventAt
-      // is stale from the previous turn (idle gap between turns).
       const now = Date.now();
       const turnRunningLongEnough = currentTurnStartTime && now - currentTurnStartTime > API_WATCHDOG_TIMEOUT_MS;
       const noRecentSdkEvents = now - lastSdkEventAt > API_WATCHDOG_TIMEOUT_MS;
-      if (!watchdogFired && turnRunningLongEnough && pendingTools === 0 && noRecentSdkEvents) {
+      const toolHangDetected = pendingTools > 0 && (now - lastSdkEventAt > MCP_TOOL_HANG_TIMEOUT_MS);
+
+      if (watchdogFired) return;
+
+      // Mode 1: API hang — no pending tools, no SDK events for 15 minutes
+      if (turnRunningLongEnough && pendingTools === 0 && noRecentSdkEvents) {
         watchdogFired = true;
         console.error(`[agent] API watchdog: no SDK event for ${API_WATCHDOG_TIMEOUT_MS / 1000}s with no pending tools — aborting`);
         broadcast('chat:agent-error', {
           message: 'API 响应超时（15 分钟无活动），已自动终止。请重试。'
         });
         broadcast('chat:message-error', 'API 响应超时');
+        abortPersistentSession();
+        return;
+      }
+
+      // Mode 2: MCP tool hang — tools pending but no SDK events for 2 minutes
+      if (toolHangDetected) {
+        watchdogFired = true;
+        console.error(`[agent] MCP tool watchdog: ${pendingTools} tool(s) pending, no SDK event for ${MCP_TOOL_HANG_TIMEOUT_MS / 1000}s — aborting (#60)`);
+        broadcast('chat:agent-error', {
+          message: `MCP 工具调用超时（${pendingTools} 个工具执行超过 2 分钟无响应），已自动终止。请重试或检查 MCP 工具配置。`
+        });
+        broadcast('chat:message-error', 'MCP 工具调用超时');
         abortPersistentSession();
       }
     }, API_WATCHDOG_INTERVAL_MS);
