@@ -12,22 +12,42 @@ type CallToolResult = {
 
 // ===== Auto-auth helper =====
 
-/** Trigger the plugin's "feishu auth" command to send an OAuth card to the user. */
+/** Trigger the plugin's "feishu_auth" command to send an OAuth card to the user. */
 async function triggerAutoAuth(ctx: ImBridgeToolsContext): Promise<CallToolResult> {
-  console.log('[im-bridge-tools] need_user_authorization detected, triggering auto-auth');
+  console.log('[im-bridge-tools] need_user_authorization detected, triggering auto-auth via feishu_auth command');
   try {
-    await fetch(`http://127.0.0.1:${ctx.bridgePort}/execute-command`, {
+    const resp = await fetch(`http://127.0.0.1:${ctx.bridgePort}/execute-command`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        command: 'feishu auth',
+        command: 'feishu_auth',
         args: '',
         userId: ctx.senderId || '',
         chatId: ctx.chatId || '',
       }),
     });
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => '');
+      console.warn(`[im-bridge-tools] Auto-auth command failed (${resp.status}): ${errText}`);
+      return {
+        content: [{ type: 'text', text: `该操作需要用户授权飞书权限。自动发送授权卡片失败 (${resp.status})，请用户使用 /feishu_auth 命令手动授权后重试。` }],
+        isError: true,
+      };
+    }
+    const result = await resp.json().catch(() => null) as { ok?: boolean; error?: string } | null;
+    if (result && !result.ok) {
+      console.warn(`[im-bridge-tools] Auto-auth command returned error: ${result.error}`);
+      return {
+        content: [{ type: 'text', text: `该操作需要用户授权飞书权限。授权流程出错: ${result.error || 'unknown'}，请用户使用 /feishu_auth 命令手动授权后重试。` }],
+        isError: true,
+      };
+    }
   } catch (e) {
-    console.warn('[im-bridge-tools] Auto-auth failed:', e);
+    console.warn('[im-bridge-tools] Auto-auth request failed:', e);
+    return {
+      content: [{ type: 'text', text: '该操作需要用户授权飞书权限。自动授权请求失败，请用户使用 /feishu_auth 命令手动授权后重试。' }],
+      isError: true,
+    };
   }
   return {
     content: [{ type: 'text', text: '该操作需要用户授权飞书权限。已自动发送授权卡片，请用户在飞书中点击"前往授权"完成授权后重试。' }],
@@ -46,6 +66,10 @@ interface ImBridgeToolsContext {
   chatId?: string;
   /** Whether the sender is in the allowed_users whitelist (owner) */
   isOwner?: boolean;
+  /** Chat type: 'private' (p2p) or 'group' */
+  sourceType?: string;
+  /** Feishu account ID for multi-account routing (default: 'default') */
+  accountId?: string;
 }
 
 let bridgeToolsContext: ImBridgeToolsContext | null = null;
@@ -63,7 +87,12 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
 
   // Fetch tools from Bridge and build dynamic MCP server
   try {
-    const groups = ctx.enabledToolGroups.join(',');
+    // When enabledToolGroups is empty → no filtering (all tools available).
+    // When non-empty → always inject 'interaction' group for auth recovery.
+    const allGroups = ctx.enabledToolGroups.length > 0
+      ? [...new Set([...ctx.enabledToolGroups, 'interaction'])]
+      : []; // empty = no group filter, Bridge returns all tools
+    const groups = allGroups.join(',');
     const url = `http://127.0.0.1:${ctx.bridgePort}/mcp/tools${groups ? `?groups=${groups}` : ''}`;
     const resp = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
     if (!resp.ok) {
@@ -113,7 +142,13 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
                 args: params.args,
                 userId: bridgeToolsContext.senderId,
                 isOwner: bridgeToolsContext.isOwner ?? false,
-                enabledGroups: bridgeToolsContext.enabledToolGroups,
+                enabledGroups: bridgeToolsContext.enabledToolGroups.length > 0
+                  ? [...new Set([...bridgeToolsContext.enabledToolGroups, 'interaction'])]
+                  : undefined, // undefined = no restriction
+                // Ticket context for LarkTicket injection (Feishu OAuth auto-auth)
+                chatId: bridgeToolsContext.chatId,
+                chatType: bridgeToolsContext.sourceType === 'group' ? 'group' : 'p2p',
+                accountId: bridgeToolsContext.accountId,
               }),
             });
 

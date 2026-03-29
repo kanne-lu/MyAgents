@@ -65,6 +65,13 @@ let getCapturedCommandsFn: (() => import('./compat-api').CapturedCommand[]) | nu
 let loadedOpenclawConfig: Record<string, unknown> = {};
 /** Current resolved account — shared by sendText/sendMedia closures, updated by /restart-gateway */
 let currentAccount: Record<string, unknown> = {};
+/**
+ * Plugin's withTicket() function for AsyncLocalStorage context injection.
+ * Discovered after plugin loads — allows MCP tool calls to access the
+ * request-level ticket (senderOpenId, chatId, accountId) needed for
+ * OAuth Device Flow auto-auth and account routing.
+ */
+let pluginWithTicket: ((ticket: Record<string, unknown>, fn: () => Promise<unknown>) => Promise<unknown>) | null = null;
 
 async function loadPlugin() {
   // Find the plugin entry point FIRST — we need the module name to infer the channel brand
@@ -188,6 +195,24 @@ async function loadPlugin() {
   const toolCount = compatApi.getCapturedTools().length;
   if (toolCount > 0) {
     console.log(`[plugin-bridge] MCP handler initialized with ${toolCount} captured tool factories`);
+  }
+
+  // Discover plugin's withTicket() for AsyncLocalStorage context injection.
+  // The Feishu plugin uses LarkTicket (via AsyncLocalStorage) to propagate
+  // message context (senderOpenId, chatId, accountId) through async call chains.
+  // MCP tool calls arrive as separate HTTP requests — outside the original
+  // withTicket() scope — so we must re-inject the ticket before tool.execute().
+  if (entryModule && /lark|feishu/i.test(entryModule)) {
+    try {
+      const ticketModPath = require.resolve(`${entryModule}/src/core/lark-ticket.js`, { paths: [pluginDir!] });
+      const ticketMod = require(ticketModPath);
+      if (typeof ticketMod.withTicket === 'function') {
+        pluginWithTicket = ticketMod.withTicket;
+        console.log('[plugin-bridge] Discovered withTicket() for LarkTicket context injection');
+      }
+    } catch {
+      console.log('[plugin-bridge] No LarkTicket module found (withTicket injection unavailable)');
+    }
   }
 
   // Add plugin ID as additional channel key if it differs from inferred brand
@@ -663,7 +688,17 @@ const server = Bun.serve({
         return Response.json({ ok: false, error: 'MCP handler not initialized (no tools captured)' }, { status: 503 });
       }
 
-      const body = await req.json() as { toolName: string; args: Record<string, unknown>; userId?: string; isOwner?: boolean; enabledGroups?: string[] };
+      const body = await req.json() as {
+        toolName: string;
+        args: Record<string, unknown>;
+        userId?: string;
+        isOwner?: boolean;
+        enabledGroups?: string[];
+        // Ticket context for AsyncLocalStorage injection (Feishu OAuth auto-auth)
+        chatId?: string;
+        chatType?: string;
+        accountId?: string;
+      };
 
       if (!body.toolName) {
         return Response.json({ ok: false, error: 'Missing required field: toolName' }, { status: 400 });
@@ -679,7 +714,27 @@ const server = Bun.serve({
       }
 
       try {
-        const result = await mcpHandler.callTool(body.toolName, body.args || {}, body.userId, body.isOwner);
+        // Wrap tool execution in plugin's withTicket() if available.
+        // This injects the LarkTicket context so the plugin's auto-auth
+        // (handleInvokeErrorWithAutoAuth) can find the sender and chat to
+        // send OAuth Device Flow cards. Without this, getTicket() returns
+        // undefined and auto-auth silently falls back to error propagation.
+        const doCall = () => mcpHandler!.callTool(body.toolName, body.args || {}, body.userId, body.isOwner);
+
+        let result: unknown;
+        if (pluginWithTicket && body.userId) {
+          const ticket = {
+            senderOpenId: body.userId,
+            chatId: body.chatId || body.userId,
+            chatType: body.chatType || 'p2p',
+            accountId: body.accountId || 'default',
+            messageId: `bridge-mcp-${Date.now()}`,
+            startTime: Date.now(),
+          };
+          result = await pluginWithTicket(ticket, doCall);
+        } else {
+          result = await doCall();
+        }
         // Ensure result is never undefined — JSON.stringify omits undefined keys,
         // causing downstream MCP SDK validation to fail (text: undefined)
         return Response.json({ ok: true, result: result ?? null });

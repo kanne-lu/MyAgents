@@ -6755,6 +6755,8 @@ async function main() {
             // Set Bridge tools context if this is an OpenClaw plugin session with tools
             // Async: fetches tool definitions from Bridge and creates dynamic MCP server
             if (payload.bridgePort && payload.bridgePluginId) {
+              // Derive sourceType from source string (e.g. "feishu_private" → "private")
+              const bridgeSourceType = payload.source?.split('_')[1] as string | undefined;
               await setImBridgeToolsContext({
                 bridgePort: payload.bridgePort,
                 pluginId: payload.bridgePluginId,
@@ -6762,6 +6764,7 @@ async function main() {
                 senderId: payload.senderId,
                 chatId: payload.sourceId,
                 isOwner: payload.senderIsOwner ?? false,
+                sourceType: bridgeSourceType,
               });
             }
           }
