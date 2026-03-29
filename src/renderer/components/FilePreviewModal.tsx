@@ -12,7 +12,8 @@
  * 1. Tab API (useTabApiOptional) — when rendered inside a Tab context
  * 2. Explicit onSave/onRevealFile props — when caller provides save logic directly
  */
-import { Edit2, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
+import { Edit2, Expand, FileText, FolderOpen, Loader2, Save, X } from 'lucide-react';
+import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -53,6 +54,8 @@ interface FilePreviewModalProps {
     onRevealFile?: () => Promise<void>;
     /** When true, render inline (no portal/backdrop) for use in split-view panel */
     embedded?: boolean;
+    /** Callback to open the fullscreen modal from embedded mode */
+    onFullscreen?: () => void;
 }
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
@@ -76,6 +79,7 @@ export default function FilePreviewModal({
     onSave,
     onRevealFile,
     embedded = false,
+    onFullscreen,
 }: FilePreviewModalProps) {
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -358,12 +362,22 @@ export default function FilePreviewModal({
                         <span className="truncate text-[13px] font-medium text-[var(--ink)]">{name}</span>
                         <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
                     </div>
-                    <div className="flex flex-shrink-0 items-center gap-1.5">
+                    <div className="flex flex-shrink-0 items-center gap-1">
+                        {onFullscreen && !isEditing && (
+                            <Tip label="全屏预览">
+                                <button type="button" onClick={onFullscreen}
+                                    className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                    <Expand className="h-3.5 w-3.5" />
+                                </button>
+                            </Tip>
+                        )}
                         {canEdit && !isEditing && (
-                            <button type="button" onClick={handleEdit} disabled={isLoading || !!error}
-                                className="rounded-md px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
-                                <Edit2 className="h-3.5 w-3.5" />
-                            </button>
+                            <Tip label="编辑">
+                                <button type="button" onClick={handleEdit} disabled={isLoading || !!error}
+                                    className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-40">
+                                    <Edit2 className="h-3.5 w-3.5" />
+                                </button>
+                            </Tip>
                         )}
                         {canEdit && isEditing && (
                             <>
@@ -377,11 +391,12 @@ export default function FilePreviewModal({
                                 </button>
                             </>
                         )}
-                        <button type="button" onClick={handleClose}
-                            className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                            title="关闭预览">
-                            <X className="h-3.5 w-3.5" />
-                        </button>
+                        <Tip label="关闭">
+                            <button type="button" onClick={handleClose}
+                                className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                <X className="h-3.5 w-3.5" />
+                            </button>
+                        </Tip>
                     </div>
                 </div>
                 {/* Content */}
@@ -410,14 +425,14 @@ export default function FilePreviewModal({
             {/* Modal backdrop */}
             <div
                 className="fixed inset-0 z-[210] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-                style={{ padding: '2vh 2vw' }}
+                style={{ padding: '2vh 1vw' }}
                 onMouseDown={handleBackdropMouseDown}
                 onClick={handleBackdropClick}
                 onWheel={(e) => e.stopPropagation()}
             >
                 {/* Modal content */}
                 <div
-                    className="glass-panel flex h-full w-full max-w-5xl flex-col overflow-hidden"
+                    className="glass-panel flex h-full w-full max-w-7xl flex-col overflow-hidden"
                     onClick={(e) => e.stopPropagation()}
                 >
                     {/* Header */}

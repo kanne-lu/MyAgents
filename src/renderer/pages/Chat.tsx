@@ -233,6 +233,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // When split view is active, workspace should use overlay mode (like narrow layout)
   const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitFile !== null);
 
+  // Fullscreen preview triggered from split panel's "全屏预览" button
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+
   const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }) => {
     setSplitFile(file);
     // Keep workspace open — user can dismiss it manually
@@ -1745,6 +1748,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           <FileActionProvider
             onInsertReference={handleInsertReference}
             refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
+            onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
           >
             <MessageList
               historyMessages={historyMessages}
@@ -1926,10 +1930,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 onClose={() => setSplitFile(null)}
                 onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
                 embedded
+                onFullscreen={() => setFullscreenPreviewFile(splitFile)}
               />
             </Suspense>
           </div>
         </>
+      )}
+
+      {/* Fullscreen preview from split panel */}
+      {fullscreenPreviewFile && (
+        <Suspense fallback={null}>
+          <FilePreviewModal
+            name={fullscreenPreviewFile.name}
+            content={fullscreenPreviewFile.content}
+            size={fullscreenPreviewFile.size}
+            path={fullscreenPreviewFile.path}
+            onClose={() => setFullscreenPreviewFile(null)}
+            onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+          />
+        </Suspense>
       )}
 
       {/* Workspace Config Panel */}

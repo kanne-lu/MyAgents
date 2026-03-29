@@ -52,6 +52,8 @@ interface FileActionProviderProps {
   onInsertReference?: (paths: string[]) => void;
   /** When this value changes, the path cache is cleared (e.g. toolCompleteCount). */
   refreshTrigger?: number;
+  /** When provided, "预览" routes to this callback (split-view) instead of fullscreen modal. */
+  onFilePreviewExternal?: (file: { name: string; content: string; size: number; path: string }) => void;
 }
 
 // ---------- Context ----------
@@ -66,13 +68,16 @@ export function useFileAction(): FileActionContextValue | null {
 
 const BATCH_DELAY_MS = 50;
 
-export function FileActionProvider({ children, onInsertReference, refreshTrigger }: FileActionProviderProps) {
+export function FileActionProvider({ children, onInsertReference, refreshTrigger, onFilePreviewExternal }: FileActionProviderProps) {
   const { tabId, apiPost, apiGet } = useTabApi();
   const { openPreview: openImagePreview } = useImagePreview();
 
   // Stabilise callbacks via refs
   const onInsertReferenceRef = useRef(onInsertReference);
   onInsertReferenceRef.current = onInsertReference;
+
+  const onFilePreviewExternalRef = useRef(onFilePreviewExternal);
+  onFilePreviewExternalRef.current = onFilePreviewExternal;
 
   const apiPostRef = useRef(apiPost);
   apiPostRef.current = apiPost;
@@ -212,7 +217,21 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
 
     if (!isPreviewable(fileName)) return;
 
-    // Show modal immediately in loading state
+    // Route to split-view if external handler provided
+    if (onFilePreviewExternalRef.current) {
+      void (async () => {
+        try {
+          const resp = await apiGetRef.current<{ content: string; name: string; size: number; error?: string }>(
+            `/agent/file?path=${encodeURIComponent(path)}`,
+          );
+          if (!isMountedRef.current || resp.error) return;
+          onFilePreviewExternalRef.current?.({ name: resp.name, content: resp.content, size: resp.size, path });
+        } catch { /* split-view fetch errors handled by DirectoryPanel toast */ }
+      })();
+      return;
+    }
+
+    // Fallback: show fullscreen modal immediately in loading state
     setPreviewFile({ name: fileName, content: '', size: 0, path, isLoading: true, error: null });
 
     void (async () => {
