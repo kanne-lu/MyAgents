@@ -9,7 +9,7 @@
  * we use decorations: false on Windows for custom title bar styling.
  */
 
-import { Bug, Minus, Square, X, RefreshCw, Settings, Copy } from 'lucide-react';
+import { BotMessageSquare, Minus, Square, X, RefreshCw, Settings, Copy } from 'lucide-react';
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { isTauri } from '@/api/tauriClient';
 import FeedbackPopover from './FeedbackPopover';
@@ -193,10 +193,10 @@ export default function CustomTitleBar({
                                 ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                                 : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]'
                         }`}
-                        title="帮助与反馈"
+                        title="小助理"
                     >
-                        <Bug className="h-4 w-4" />
-                        <span className="text-[13px] font-medium">反馈</span>
+                        <BotMessageSquare className="h-4 w-4" />
+                        <span className="text-[13px] font-medium">小助理</span>
                     </button>
                     {showFeedback && (
                         <FeedbackPopover
