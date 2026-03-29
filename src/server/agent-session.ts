@@ -5086,7 +5086,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const API_WATCHDOG_TIMEOUT_MS = 15 * 60 * 1000;
-    const MCP_TOOL_HANG_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes for hung MCP tools
+    const MCP_TOOL_HANG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for hung MCP tools
     let watchdogFired = false;
     apiWatchdogId = setInterval(() => {
       // Only check during active turns (not pre-warm, not idle between turns)
@@ -5115,7 +5115,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         watchdogFired = true;
         console.error(`[agent] MCP tool watchdog: ${pendingTools} tool(s) pending, no SDK event for ${MCP_TOOL_HANG_TIMEOUT_MS / 1000}s — aborting (#60)`);
         broadcast('chat:agent-error', {
-          message: `MCP 工具调用超时（${pendingTools} 个工具执行超过 2 分钟无响应），已自动终止。请重试或检查 MCP 工具配置。`
+          message: `MCP 工具调用超时（${pendingTools} 个工具执行超过 10 分钟无响应），已自动终止。请重试或检查 MCP 工具配置。`
         });
         broadcast('chat:message-error', 'MCP 工具调用超时');
         abortPersistentSession();
