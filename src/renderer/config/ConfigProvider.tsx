@@ -59,6 +59,35 @@ function normalizeAgents(config: AppConfig): boolean {
     return repaired;
 }
 
+/**
+ * Migrate old hardcoded openclawEnabledToolGroups to the full set.
+ * Before v0.1.56, ChannelWizard wrote a fixed subset ['doc','chat','wiki_drive','bitable']
+ * which silently hid calendar/task/sheet/search/common/im tools.
+ * Expand to all known groups so everything is enabled.
+ */
+const LEGACY_TOOL_GROUPS = new Set(['doc', 'chat', 'wiki_drive', 'bitable']);
+// Exclude sensitive groups (im, perm) from auto-migration — keep them opt-in
+const ALL_KNOWN_TOOL_GROUPS = ['doc', 'chat', 'wiki_drive', 'bitable', 'calendar', 'task', 'sheet', 'search', 'common'];
+function migrateToolGroups(config: AppConfig): boolean {
+    if (!config.agents) return false;
+    let changed = false;
+    for (const agent of config.agents) {
+        for (const ch of (agent.channels ?? [])) {
+            const groups = ch.openclawEnabledToolGroups;
+            if (!groups || groups.length === 0) continue;
+            // Only expand if it's the exact old default (user didn't customize)
+            if (groups.length === LEGACY_TOOL_GROUPS.size && groups.every(g => LEGACY_TOOL_GROUPS.has(g))) {
+                ch.openclawEnabledToolGroups = [...ALL_KNOWN_TOOL_GROUPS];
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        console.log('[ConfigProvider] Migrated legacy openclawEnabledToolGroups → all groups enabled');
+    }
+    return changed;
+}
+
 // ============= Context Types =============
 
 export interface ConfigDataValue {
@@ -221,6 +250,11 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             if (normalizeAgents(loadedConfig) && loadedConfig.agents) {
                 await persistAgents(loadedConfig.agents);
                 console.log('[ConfigProvider] Repaired agents with missing channels — persisted to disk');
+            }
+
+            // Migrate old hardcoded tool groups → undefined (= all groups enabled)
+            if (migrateToolGroups(loadedConfig) && loadedConfig.agents) {
+                await persistAgents(loadedConfig.agents);
             }
 
             // Ensure every project has a linked AgentConfig (basicAgent).

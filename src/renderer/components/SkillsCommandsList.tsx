@@ -161,16 +161,16 @@ export default function SkillsCommandsList({
                     } else {
                         toastRef.current.error(response.error || '导入失败');
                     }
-                } catch {
-                    toastRef.current.error('导入失败');
+                } catch (err) {
+                    toastRef.current.error(err instanceof Error ? err.message : '导入失败');
                 }
             };
             reader.onerror = () => {
                 toastRef.current.error('读取文件失败');
             };
             reader.readAsDataURL(file);
-        } catch {
-            toastRef.current.error('上传失败');
+        } catch (err) {
+            toastRef.current.error(err instanceof Error ? err.message : '上传失败');
         }
     }, [scope, loadData, onSelectSkill, api]);
 
@@ -200,8 +200,8 @@ export default function SkillsCommandsList({
             } else {
                 toastRef.current.error(response.error || '导入失败');
             }
-        } catch {
-            toastRef.current.error('导入失败');
+        } catch (err) {
+            toastRef.current.error(err instanceof Error ? err.message : '导入失败');
         }
     }, [scope, loadData, onSelectSkill, api]);
 

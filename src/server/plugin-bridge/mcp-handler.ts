@@ -28,6 +28,14 @@ function inferToolGroupFeishu(toolName: string): string {
   if (toolName.startsWith('feishu_wiki') || toolName.startsWith('feishu_drive')) return 'wiki_drive';
   if (toolName.startsWith('feishu_doc') || (toolName.startsWith('feishu_') && toolName.endsWith('_doc')) || toolName === 'feishu_app_scopes') return 'doc';
   if (toolName.startsWith('feishu_perm')) return 'perm';
+  if (toolName.startsWith('feishu_calendar_')) return 'calendar';
+  if (toolName.startsWith('feishu_task')) return 'task';
+  if (toolName === 'feishu_sheet') return 'sheet';
+  // Exact matches before prefix: feishu_search_user is 'common', feishu_search_* is 'search'
+  if (toolName === 'feishu_get_user' || toolName === 'feishu_search_user') return 'common';
+  if (toolName.startsWith('feishu_search')) return 'search';
+  if (toolName.startsWith('feishu_im_')) return 'im';
+  if (toolName.startsWith('feishu_oauth') || toolName === 'feishu_ask_user_question') return 'interaction';
   return 'other';
 }
 
@@ -45,6 +53,8 @@ interface ResolvedTool {
 export function createMcpHandler(
   getCapturedTools: () => CapturedTool[],
   pluginConfig: Record<string, unknown>,
+  /** Plugin brand (e.g. 'feishu', 'qqbot'). Used to select the correct group inference fallback. */
+  pluginBrand?: string,
 ) {
   // Cache resolved tools (resolved once from factories, reused across calls)
   let resolvedToolsCache: ResolvedTool[] | null = null;
@@ -76,12 +86,14 @@ export function createMcpHandler(
             : async () => ({ error: 'Tool has no execute method' });
 
           // Generic protocol: use plugin-declared group if present.
-          // Feishu fallback: infer group from tool name when plugin doesn't declare one.
+          // Fallback: Feishu → name-based inference; other plugins → 'default' group.
           const declaredGroup = typeof tool.group === 'string' ? tool.group.trim() : '';
+          const inferredGroup = declaredGroup
+            || (pluginBrand === 'feishu' ? inferToolGroupFeishu(name) : 'default');
           resolved.push({
             name,
             description,
-            group: declaredGroup || inferToolGroupFeishu(name),
+            group: inferredGroup,
             ownerOnly: !!(tool as Record<string, unknown>).ownerOnly,
             parameters,
             execute,

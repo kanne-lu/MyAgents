@@ -289,6 +289,7 @@ export interface AppConfig {
   theme: 'light' | 'dark' | 'system';
   minimizeToTray: boolean;
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
+  experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
   // General settings
   autoStart: boolean; // 开机启动
   cronNotifications: boolean; // 定时任务通知

@@ -349,8 +349,9 @@ export default function ChannelWizard({
             // Merge promoted plugin defaults (e.g. dmPolicy: 'open') under user values
             const mergedConfig = { ...(promoted?.defaultConfig ?? {}), ...pluginConfig };
             const pluginName = promoted?.name || installedPlugin?.manifest?.name || openclawPluginId || 'Plugin Bot';
-            // Default enabled tool groups: all except 'perm' (sensitive)
-            const defaultToolGroups = ['doc', 'chat', 'wiki_drive', 'bitable'];
+            // Enable all non-sensitive tool groups by default.
+            // Sensitive groups (im, perm) are opt-in. Rust auto-merges new plugin groups at startup.
+            const allToolGroups = ['doc', 'chat', 'wiki_drive', 'bitable', 'calendar', 'task', 'sheet', 'search', 'common'];
             return {
                 id: channelId,
                 type: platform,
@@ -361,7 +362,7 @@ export default function ChannelWizard({
                 openclawPluginId: openclawPluginId,
                 openclawNpmSpec: installedPlugin?.npmSpec,
                 openclawPluginConfig: Object.keys(mergedConfig).length > 0 ? mergedConfig : undefined,
-                openclawEnabledToolGroups: defaultToolGroups,
+                openclawEnabledToolGroups: allToolGroups,
             };
         }
         return {

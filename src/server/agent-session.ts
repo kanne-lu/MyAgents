@@ -645,39 +645,6 @@ function abortPersistentSession(): void {
   querySession?.interrupt().catch(() => {});
 }
 
-/**
- * Hard-abort the current session after an interrupt timeout and recover automatically.
- */
-async function forceAbortCurrentTurnAndRecover(): Promise<void> {
-  console.warn('[agent] force-aborting session after interrupt timeout');
-  abortPersistentSession();
-
-  await awaitSessionTermination(10_000, 'forceAbort');
-
-  // Another control flow (reset/switch session) already took over.
-  if (!shouldAbortSession) {
-    return;
-  }
-
-  if (messageQueue.length > 0) {
-    console.log('[agent] forced stop: restarting session to drain queued messages');
-    setTimeout(() => {
-      startStreamingSession().catch((error) => {
-        console.error('[agent] forced stop: failed to restart session', error);
-      });
-    }, 0);
-    return;
-  }
-
-  // Do NOT schedulePreWarm() here.
-  // After force-abort, if we eagerly pre-warm, a new sessionTerminationPromise is created.
-  // Any subsequent rewindSession() / resetSession() that awaits sessionTerminationPromise
-  // will block on the NEW pre-warm session — causing permanent deadlock.
-  // Instead, clean up and let the user's next action (rewind / new message) start the session.
-  console.log('[agent] forced stop: session terminated, awaiting user action');
-  shouldAbortSession = false;
-}
-
 // ===== Interaction Scenario (unified system prompt) =====
 import { buildSystemPromptAppend, type InteractionScenario } from './system-prompt';
 
@@ -4334,28 +4301,36 @@ export async function interruptCurrentResponse(): Promise<boolean> {
 
   isInterruptingResponse = true;
   try {
-    let shouldForceAbort = false;
-    // 使用 Promise.race 添加 5 秒超时
+    // Step 1: Try graceful interrupt (5 seconds).
+    // interrupt() is cooperative — the SDK subprocess must be responsive to process it.
+    // If a MCP tool is hung (e.g., Playwright screenshot on heavy page), the subprocess
+    // may be blocked on I/O and unable to handle the interrupt signal.
     const interruptPromise = querySession.interrupt();
-    // 15s timeout: SDK interrupt may be slow when the subprocess is mid-tool-execution,
-    // waiting for API response, or processing large MCP output. The previous 5s timeout
-    // caused cascading failures (force-abort → rewind error → MIME loss → subprocess crash).
     const timeoutPromise = new Promise<void>((_, reject) => {
-      setTimeout(() => reject(new Error('Interrupt timeout')), 15000);
+      setTimeout(() => reject(new Error('Interrupt timeout')), 5000);
     });
 
+    let interrupted = false;
     try {
       await Promise.race([interruptPromise, timeoutPromise]);
+      interrupted = true;
     } catch (error) {
-      console.error('[agent] Interrupt error or timeout:', error);
-      shouldForceAbort = true;
+      console.error('[agent] Interrupt failed or timed out (5s):', error);
+    }
+
+    // Step 2: If interrupt failed, force-close immediately.
+    // close() is the SDK's nuclear option: kills subprocess + MCP transports synchronously.
+    // Session history is preserved (JSONL persisted), next message triggers fresh subprocess
+    // with resumeSessionId (no data loss, no amnesia). (#60)
+    if (!interrupted && querySession) {
+      console.warn('[agent] Force-closing SDK session (interrupt unresponsive)');
+      const session = querySession;
+      querySession = null;
+      try { session.close(); } catch { /* already dead */ }
     }
 
     broadcast('chat:message-stopped', null);
     handleMessageStopped();
-    if (shouldForceAbort) {
-      void forceAbortCurrentTurnAndRecover();
-    }
     return true;
   } finally {
     isInterruptingResponse = false;
@@ -4786,10 +4761,27 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       disallowedToolsList.push('AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode');
     }
 
+    // SDK 0.2.84 bug: NA() returns "firstParty" for ANY non-bedrock/vertex/foundry provider,
+    // causing xd7() to enable thinking for all non-claude-3 models on third-party APIs.
+    // Third-party anthropic-protocol providers (SiliconFlow etc.) reject `thinking: {type:"adaptive"}`
+    // with "400 thinking type should be enabled or disabled".
+    // Fix: disable thinking for non-Claude models on third-party providers.
+    // Model name check (sonnet/opus) is URL-agnostic — Claude models through any proxy get thinking.
+    const modelLower = (currentModel ?? '').toLowerCase();
+    const isClaudeModel = modelLower.includes('sonnet-4') || modelLower.includes('sonnet-5')
+      || modelLower.includes('opus-4') || modelLower.includes('opus-5');
+    const isOfficialAnthropicApi = !currentProviderEnv?.baseUrl || (() => {
+      try { return new URL(currentProviderEnv.baseUrl!).host === 'api.anthropic.com'; }
+      catch { return false; }
+    })();
+    const thinkingConfig = (isOfficialAnthropicApi || isClaudeModel)
+      ? { type: 'adaptive' as const }
+      : { type: 'disabled' as const };
+
     // Build common query options (shared between normal start and "already in use" fallback)
     const commonQueryOptions = {
       enableFileCheckpointing: true,
-      thinking: { type: 'adaptive' as const },
+      thinking: thinkingConfig,
       effort: 'high' as const,
       // Load settings from project scope only (.claude/)
       // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
@@ -5043,35 +5035,52 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     let messageCount = 0;
 
     // ── API response watchdog ──────────────────────────────────────────
-    // Detects hung API connections that produce no SDK events.
+    // Detects hung API connections AND hung MCP tool calls.
     // Heartbeat (15s ping) keeps the SSE alive, so Rust's 60s read_timeout
     // never fires. Without this watchdog, the session hangs indefinitely.
     //
-    // Only active when isStreamingMessage is true (an active turn is in progress).
-    // pendingTools > 0 means a local tool or subagent is executing (no API
-    // call in flight), so we skip. pendingTools === 0 means we're waiting
-    // for the API — if no SDK event arrives for 15 minutes, abort.
+    // Two detection modes:
+    // 1. API hang: pendingTools === 0, no SDK events for 15 minutes → abort
+    // 2. MCP tool hang: pendingTools > 0, no SDK events for 2 minutes → abort (#60)
+    //    MCP tools communicate with external server processes that can hang indefinitely
+    //    (e.g., Playwright screenshot on a heavy page). The 2-minute timeout is generous
+    //    enough for legitimate long-running tools but catches truly hung processes.
     let pendingTools = 0;
     let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const API_WATCHDOG_TIMEOUT_MS = 15 * 60 * 1000;
+    const MCP_TOOL_HANG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes for hung MCP tools
     let watchdogFired = false;
     apiWatchdogId = setInterval(() => {
       // Only check during active turns (not pre-warm, not idle between turns)
       if (!isStreamingMessage || isPreWarming) return;
-      // Also require the current turn to have been running for > timeout duration.
-      // This prevents false positives when a new turn just started but lastSdkEventAt
-      // is stale from the previous turn (idle gap between turns).
       const now = Date.now();
       const turnRunningLongEnough = currentTurnStartTime && now - currentTurnStartTime > API_WATCHDOG_TIMEOUT_MS;
       const noRecentSdkEvents = now - lastSdkEventAt > API_WATCHDOG_TIMEOUT_MS;
-      if (!watchdogFired && turnRunningLongEnough && pendingTools === 0 && noRecentSdkEvents) {
+      const toolHangDetected = pendingTools > 0 && (now - lastSdkEventAt > MCP_TOOL_HANG_TIMEOUT_MS);
+
+      if (watchdogFired) return;
+
+      // Mode 1: API hang — no pending tools, no SDK events for 15 minutes
+      if (turnRunningLongEnough && pendingTools === 0 && noRecentSdkEvents) {
         watchdogFired = true;
         console.error(`[agent] API watchdog: no SDK event for ${API_WATCHDOG_TIMEOUT_MS / 1000}s with no pending tools — aborting`);
         broadcast('chat:agent-error', {
           message: 'API 响应超时（15 分钟无活动），已自动终止。请重试。'
         });
         broadcast('chat:message-error', 'API 响应超时');
+        abortPersistentSession();
+        return;
+      }
+
+      // Mode 2: MCP tool hang — tools pending but no SDK events for 2 minutes
+      if (toolHangDetected) {
+        watchdogFired = true;
+        console.error(`[agent] MCP tool watchdog: ${pendingTools} tool(s) pending, no SDK event for ${MCP_TOOL_HANG_TIMEOUT_MS / 1000}s — aborting (#60)`);
+        broadcast('chat:agent-error', {
+          message: `MCP 工具调用超时（${pendingTools} 个工具执行超过 10 分钟无响应），已自动终止。请重试或检查 MCP 工具配置。`
+        });
+        broadcast('chat:message-error', 'MCP 工具调用超时');
         abortPersistentSession();
       }
     }, API_WATCHDOG_INTERVAL_MS);

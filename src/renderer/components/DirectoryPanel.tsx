@@ -95,6 +95,9 @@ interface DirectoryPanelProps {
   onOpenSettings?: () => void;
   /** Copy a project skill to global skills */
   onSyncSkillToGlobal?: (folderName: string) => void;
+  /** When provided, file clicks route to this callback instead of opening the modal.
+   *  Used by split-view mode (experimentalSplitView) to open files in a side panel. */
+  onFilePreviewExternal?: (file: { name: string; content: string; size: number; path: string }) => void;
 }
 
 type FilePreview = {
@@ -232,6 +235,7 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
   onInsertSlashCommand,
   onOpenSettings,
   onSyncSkillToGlobal,
+  onFilePreviewExternal,
 }, ref) {
   const [directoryInfo, setDirectoryInfo] = useState<DirectoryTree | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -262,6 +266,41 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
   const internalDropTargetRef = useRef<string | null>(null);
   const autoExpandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const treeApiRef = useRef<TreeApi<DirectoryTreeNode> | undefined>(undefined);
+
+  // Sticky header: ancestor breadcrumbs for current scroll position
+  const [stickyAncestors, setStickyAncestors] = useState<{ id: string; name: string; depth: number }[]>([]);
+  const ROW_HEIGHT = 26;
+  const MAX_STICKY_DEPTH = 3;
+
+  const handleTreeScroll = useCallback(({ scrollOffset }: { scrollOffset: number }) => {
+    const tree = treeApiRef.current;
+    if (!tree || scrollOffset <= 0) {
+      setStickyAncestors(prev => prev.length > 0 ? [] : prev);
+      return;
+    }
+    const firstVisibleIndex = Math.floor(scrollOffset / ROW_HEIGHT);
+    const node = tree.visibleNodes[firstVisibleIndex];
+    if (!node) { setStickyAncestors(prev => prev.length > 0 ? [] : prev); return; }
+
+    // Walk up to collect open ancestor directories (skip root)
+    const ancestors: { id: string; name: string; depth: number }[] = [];
+    let cur = node.parent;
+    while (cur && cur.level >= 0 && ancestors.length < MAX_STICKY_DEPTH) {
+      const ancestorIndex = tree.idToIndex[cur.id];
+      if (ancestorIndex !== undefined && ancestorIndex < firstVisibleIndex) {
+        ancestors.unshift({ id: cur.id, name: (cur.data as DirectoryTreeNode).name, depth: cur.level });
+      }
+      cur = cur.parent;
+    }
+    // Only update if different (avoid re-renders on every scroll tick)
+    setStickyAncestors(prev => {
+      if (prev.length !== ancestors.length) return ancestors;
+      for (let i = 0; i < prev.length; i++) {
+        if (prev[i].id !== ancestors[i].id) return ancestors;
+      }
+      return prev;
+    });
+  }, []); // stable — no dependencies, uses functional updater throughout
 
   // Git branch state
   const [gitBranch, setGitBranch] = useState<string | null>(null);
@@ -501,17 +540,25 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
       return;
     }
 
-    // Batch state updates: only set loading, clear others on success/error
     setIsPreviewLoading(true);
 
     try {
       const payload = await apiGet<Omit<FilePreview, 'path'>>(`/agent/file?path=${encodeURIComponent(node.path)}`);
-      // Batch: set preview and clear loading/error together
-      setPreview({ ...payload, path: node.path });
-      setPreviewError(null);
+      const fileData = { ...payload, path: node.path };
+      // Route to external handler (split view) if provided, otherwise open modal
+      if (onFilePreviewExternal) {
+        onFilePreviewExternal(fileData);
+      } else {
+        setPreview(fileData);
+        setPreviewError(null);
+      }
     } catch (err) {
-      setPreview(null);
-      setPreviewError(err instanceof Error ? err.message : 'Failed to preview file.');
+      if (onFilePreviewExternal) {
+        toast.error('文件预览失败');
+      } else {
+        setPreview(null);
+        setPreviewError(err instanceof Error ? err.message : 'Failed to preview file.');
+      }
     } finally {
       setIsPreviewLoading(false);
     }
@@ -1309,7 +1356,7 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
             {/* Tree container */}
             <div
               ref={treeContainerRef}
-              className={`min-h-0 flex-1 overflow-hidden overscroll-none ${isExternalDrop || isTauriDragActive ? 'ring-2 ring-inset ring-[var(--accent)]/30' : ''}`}
+              className={`relative min-h-0 flex-1 overflow-hidden overscroll-none ${isExternalDrop || isTauriDragActive ? 'ring-2 ring-inset ring-[var(--accent)]/30' : ''}`}
               onContextMenu={handleTreeContainerContextMenu}
               onDragEnter={handleTreeDragEnter}
               onDragOver={handleTreeDragOver}
@@ -1326,6 +1373,31 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
               }}
               data-tree-root
             >
+              {/* Sticky ancestor breadcrumbs — floats above the virtualized tree */}
+              {stickyAncestors.length > 0 && (
+                <div className="absolute left-0 right-0 top-0 z-10 border-b border-[var(--line-subtle)] bg-[var(--paper-elevated)] shadow-xs">
+                  {stickyAncestors.map((ancestor) => (
+                    <button
+                      key={ancestor.id}
+                      type="button"
+                      className="flex w-full cursor-pointer items-center gap-2 px-3 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                      style={{ height: ROW_HEIGHT, paddingLeft: `${12 + ancestor.depth * 16}px` }}
+                      onClick={() => {
+                        const tree = treeApiRef.current;
+                        if (tree) {
+                          tree.close(ancestor.id);
+                        }
+                      }}
+                    >
+                      <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">
+                        <ChevronRight className="h-3 w-3 rotate-90 transition-transform" />
+                      </span>
+                      <FolderOpen className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent-warm)]/70" />
+                      <span className="min-w-0 flex-1 truncate">{ancestor.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               {error && <div className="px-4 py-3 text-xs text-[var(--error)]">{error}</div>}
               {!error && !directoryInfo && (
                 <div className="px-4 py-3 text-xs text-[var(--ink-muted)]">Loading...</div>
@@ -1346,11 +1418,13 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
                   disableEdit
                   disableDrag
                   disableDrop
-                  rowHeight={26}
+                  rowHeight={ROW_HEIGHT}
                   indent={16}
+                  paddingTop={stickyAncestors.length * ROW_HEIGHT}
                   height={treeHeight}
                   width="100%"
                   className="overscroll-none"
+                  onScroll={handleTreeScroll}
                 >
                 {({ node, style }) => {
                   const data = node.data as DirectoryTreeNode;
@@ -1590,8 +1664,8 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
         />
       )}
 
-      {/* Preview modal - lazy loaded, no fallback (modal appears after module loads) */}
-      {(preview || previewError || isPreviewLoading) && (
+      {/* Preview modal - lazy loaded. Skip when split-view handles previews externally. */}
+      {!onFilePreviewExternal && (preview || previewError || isPreviewLoading) && (
         <Suspense fallback={null}>
           <FilePreviewModal
             name={preview?.name ?? 'Preview'}

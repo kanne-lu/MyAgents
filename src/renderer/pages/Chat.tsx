@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
 import ConfirmDialog from '@/components/ConfirmDialog';
@@ -41,6 +41,9 @@ import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigSer
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
+
+// Lazy load FilePreviewModal for split view panel
+const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
 
 /** Inline-editable session title — click to edit, Enter/Blur to save, Esc to cancel */
 function SessionTitleEditor({ title, onRename }: { title: string; onRename: (newTitle: string) => void }) {
@@ -199,8 +202,98 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // to avoid re-rendering Chat (and MessageList) on every keystroke
   const [showLogs, setShowLogs] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [showWorkspace, setShowWorkspace] = useState(true); // Workspace panel visibility
+  // Narrow mode: workspace renders as overlay drawer instead of side panel
+  // Initialize from window.innerWidth to avoid layout flash (FOUC) on first render
+  const [isNarrowLayout, setIsNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  // In narrow mode, default workspace to hidden (overlay) — otherwise it blocks chat on startup
+  const [showWorkspace, setShowWorkspace] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
+  useEffect(() => {
+    const breakpoint = parseInt(getComputedStyle(document.documentElement)
+      .getPropertyValue('--breakpoint-mobile') || '768', 10);
+    const check = () => setIsNarrowLayout(window.innerWidth < breakpoint);
+    check(); // Re-check with actual CSS variable value
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+
+  // Split view: right-side file preview panel (experimental)
+  const isSplitViewEnabled = config.experimentalSplitView ?? true;
+  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+  // Clear split panel when feature is turned off (prevents stale split state)
+  useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
+  const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
+  const [isDraggingSplit, setIsDraggingSplit] = useState(false);
+  const isDraggingSplitRef = useRef(false);
+  const splitRatioRef = useRef(splitRatio);
+  splitRatioRef.current = splitRatio;
+  // Store drag listeners in refs so unmount cleanup can remove them
+  const dragMoveRef = useRef<((ev: MouseEvent) => void) | null>(null);
+  const dragUpRef = useRef<(() => void) | null>(null);
+  // When split view is active, workspace should use overlay mode (like narrow layout)
+  const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitFile !== null);
+
+  // Fullscreen preview triggered from split panel's "全屏预览" button
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+
+  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }) => {
+    setSplitFile(file);
+    // Keep workspace open — user can dismiss it manually
+  }, []);
+
+  // When split closes, restore workspace sidebar to visible (non-collapsed)
+  const prevSplitFileRef = useRef(splitFile);
+  useEffect(() => {
+    if (prevSplitFileRef.current && !splitFile) {
+      // Split just closed → show workspace sidebar
+      setShowWorkspace(true);
+    }
+    prevSplitFileRef.current = splitFile;
+  }, [splitFile]);
+
+  const handleSplitDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingSplitRef.current = true;
+    setIsDraggingSplit(true);
+    const startX = e.clientX;
+    const startRatio = splitRatioRef.current;
+    const containerWidth = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect().width;
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!isDraggingSplitRef.current) return;
+      const dx = ev.clientX - startX;
+      const newRatio = Math.max(0.25, Math.min(0.75, startRatio + dx / containerWidth));
+      setSplitRatio(newRatio);
+    };
+    const onMouseUp = () => {
+      isDraggingSplitRef.current = false;
+      setIsDraggingSplit(false);
+      dragMoveRef.current = null;
+      dragUpRef.current = null;
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    dragMoveRef.current = onMouseMove;
+    dragUpRef.current = onMouseUp;
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, []); // stable — uses ref for splitRatio
+
+  // Cleanup drag listeners on unmount (prevents leak if component unmounts mid-drag)
+  useEffect(() => {
+    return () => {
+      if (dragMoveRef.current) document.removeEventListener('mousemove', dragMoveRef.current);
+      if (dragUpRef.current) document.removeEventListener('mouseup', dragUpRef.current);
+      isDraggingSplitRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+  }, []);
+
   const [workspaceRefreshKey, _setWorkspaceRefreshKey] = useState(0); // Key to trigger workspace refresh
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(
     (currentAgent?.permissionMode as PermissionMode | undefined) ?? currentProject?.permissionMode ?? 'auto'
@@ -1469,8 +1562,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [onNewSession, resetSession]);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)] md:flex-row">
-      <div className={`flex min-w-0 flex-1 flex-col overflow-hidden border-b border-[var(--line-subtle)] md:border-r md:border-b-0 ${showWorkspace ? 'w-full md:w-3/4' : 'w-full'}`}>
+    <div className="relative flex h-full flex-row overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)]">
+      {/* Left side: chat area (+ side workspace when wide & no split) */}
+      <div
+        className={`relative flex min-w-0 flex-row overflow-hidden ${!isDraggingSplit ? 'transition-[width] duration-300 ease-in-out' : ''}`}
+        style={{ width: splitFile ? `${splitRatio * 100}%` : '100%' }}
+      >
+      <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${showWorkspace && !shouldUseWorkspaceOverlay ? 'border-r border-[var(--line-subtle)]' : ''}`}>
         {/* Compact header - single row */}
         <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-transparent">
           <div className="flex items-center gap-2">
@@ -1502,16 +1600,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               </>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-1">
             {/* New Session button - before History */}
             <button
               type="button"
               onClick={handleNewSession}
-              className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               title="新建对话"
             >
               <Plus className="h-3.5 w-3.5 flex-shrink-0" />
-              <span className="hidden sm:inline">新对话</span>
+              {!splitFile && <span>新对话</span>}
             </button>
             {/* History button */}
             <div className="relative">
@@ -1519,13 +1617,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 type="button"
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => setShowHistory((prev) => !prev)}
-                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors ${showHistory
+                className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${showHistory
                   ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                   : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
               >
                 <History className="h-3.5 w-3.5 flex-shrink-0" />
-                <span className="hidden sm:inline">历史</span>
+                {!splitFile && <span>历史</span>}
               </button>
               <SessionHistoryDropdown
                 agentDir={agentDir}
@@ -1551,12 +1649,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 </button>
                 </>
             )}
-            {/* Workspace toggle button - only show when workspace is hidden */}
+            {/* Workspace toggle button - always visible when workspace is hidden */}
             {!showWorkspace && (
               <button
                 type="button"
                 onClick={() => setShowWorkspace(true)}
-                className="hidden md:flex items-center gap-1 rounded-lg px-2 py-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="展开工作区"
               >
                 <PanelRightOpen className="h-4 w-4" />
@@ -1650,6 +1748,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           <FileActionProvider
             onInsertReference={handleInsertReference}
             refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
+            onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
           >
             <MessageList
               historyMessages={historyMessages}
@@ -1737,10 +1836,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         </div>
       </div>
 
-      {showWorkspace && (
+      {/* Workspace panel — side panel (wide) or overlay drawer (narrow) */}
+      {showWorkspace && !shouldUseWorkspaceOverlay && (
         <div
           ref={directoryPanelContainerRef}
-          className="flex w-full flex-col md:w-1/4"
+          className="flex w-1/4 flex-col"
           style={{ minWidth: 'var(--sidebar-min-width)' }}
         >
           <DirectoryPanel
@@ -1764,8 +1864,91 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onOpenSettings={handleOpenSettings}
             onSyncSkillToGlobal={handleSyncSkillToGlobal}
             onRefreshAll={triggerWorkspaceRefresh}
+            onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
           />
         </div>
+      )}
+      {/* Overlay workspace drawer — inside left-wrapper so it only covers the chat area */}
+      {showWorkspace && shouldUseWorkspaceOverlay && (
+        <>
+          {/* Transparent click-away layer (no blur, user can still see chat content) */}
+          <div
+            className="absolute inset-0 z-40"
+            onClick={handleCollapseWorkspace}
+          />
+          {/* Drawer */}
+          <div
+            ref={directoryPanelContainerRef}
+            className="absolute bottom-0 right-0 top-0 z-50 flex w-[340px] max-w-[85%] flex-col border-l border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg"
+          >
+            <DirectoryPanel
+              ref={directoryPanelRef}
+              agentDir={agentDir}
+              projectIcon={currentProject?.icon}
+              projectDisplayName={currentProject?.displayName}
+              provider={currentProvider}
+              providers={providers}
+              onProviderChange={handleProviderChange}
+              onCollapse={handleCollapseWorkspace}
+              onOpenConfig={handleOpenAgentSettings}
+              refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
+              isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
+              onInsertReference={handleInsertReference}
+              enabledAgents={enabledAgents}
+              enabledSkills={enabledSkills}
+              enabledCommands={enabledCommands}
+              globalSkillFolderNames={globalSkillFolderNames}
+              onInsertSlashCommand={handleInsertSlashCommand}
+              onOpenSettings={handleOpenSettings}
+              onSyncSkillToGlobal={handleSyncSkillToGlobal}
+              onRefreshAll={triggerWorkspaceRefresh}
+              onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
+            />
+          </div>
+        </>
+      )}
+      </div>{/* End left-side wrapper */}
+
+      {/* Split view: draggable divider + right panel */}
+      {splitFile && (
+        <>
+          {/* Draggable divider */}
+          <div
+            className="z-10 flex w-1 cursor-col-resize items-center justify-center bg-[var(--line)] transition-colors hover:bg-[var(--accent)]"
+            onMouseDown={handleSplitDividerMouseDown}
+          >
+            <div className="h-8 w-0.5 rounded-full bg-[var(--ink-subtle)]" />
+          </div>
+          {/* Right panel: file preview (embedded FilePreviewModal renders its own header) */}
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper-elevated)]">
+            <Suspense fallback={<div className="flex h-full items-center justify-center text-[var(--ink-muted)]"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
+              <FilePreviewModal
+                name={splitFile.name}
+                content={splitFile.content}
+                size={splitFile.size}
+                path={splitFile.path}
+                onClose={() => setSplitFile(null)}
+                onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+                embedded
+                onFullscreen={() => setFullscreenPreviewFile(splitFile)}
+              />
+            </Suspense>
+          </div>
+        </>
+      )}
+
+      {/* Fullscreen preview from split panel */}
+      {fullscreenPreviewFile && (
+        <Suspense fallback={null}>
+          <FilePreviewModal
+            name={fullscreenPreviewFile.name}
+            content={fullscreenPreviewFile.content}
+            size={fullscreenPreviewFile.size}
+            path={fullscreenPreviewFile.path}
+            onClose={() => setFullscreenPreviewFile(null)}
+            onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+          />
+        </Suspense>
       )}
 
       {/* Workspace Config Panel */}

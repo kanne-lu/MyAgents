@@ -743,10 +743,25 @@ async fn create_bot_instance<R: Runtime>(
                 bp.port,
             );
             bridge_adapter.sync_capabilities().await;
-            // Override with user-configured tool groups (if set in channel config)
+            // Override with user-configured tool groups (if set in channel config).
+            // Auto-merge: any new groups from the plugin that aren't in the user's
+            // list get appended so they're available during this channel session.
+            // The merge runs on every channel startup (idempotent, not persisted to disk).
             if let Some(ref groups) = config.openclaw_enabled_tool_groups {
                 if !groups.is_empty() {
-                    bridge_adapter.set_enabled_tool_groups(groups.clone());
+                    let plugin_groups = bridge_adapter.all_tool_groups();
+                    let mut merged = groups.clone();
+                    let mut new_count = 0usize;
+                    for g in plugin_groups {
+                        if !merged.contains(g) {
+                            merged.push(g.clone());
+                            new_count += 1;
+                        }
+                    }
+                    if new_count > 0 {
+                        ulog_info!("[im] Auto-merged {} new tool group(s) from plugin into enabled list", new_count);
+                    }
+                    bridge_adapter.set_enabled_tool_groups(merged);
                 }
             }
             let adapter = Arc::new(AnyAdapter::Bridge(Arc::new(bridge_adapter)));
