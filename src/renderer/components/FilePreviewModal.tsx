@@ -358,7 +358,7 @@ export default function FilePreviewModal({
                         <span className="truncate text-[13px] font-medium text-[var(--ink)]">{name}</span>
                         <span className="flex-shrink-0 text-[11px] text-[var(--ink-muted)]">{formatFileSize(size)}</span>
                     </div>
-                    <div className="flex flex-shrink-0 items-center gap-1">
+                    <div className="flex flex-shrink-0 items-center gap-1.5">
                         {canEdit && !isEditing && (
                             <button type="button" onClick={handleEdit} disabled={isLoading || !!error}
                                 className="rounded-md px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
@@ -377,6 +377,11 @@ export default function FilePreviewModal({
                                 </button>
                             </>
                         )}
+                        <button type="button" onClick={handleClose}
+                            className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            title="关闭预览">
+                            <X className="h-3.5 w-3.5" />
+                        </button>
                     </div>
                 </div>
                 {/* Content */}

@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -202,11 +202,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // to avoid re-rendering Chat (and MessageList) on every keystroke
   const [showLogs, setShowLogs] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [showWorkspace, setShowWorkspace] = useState(true); // Workspace panel visibility
-  const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
   // Narrow mode: workspace renders as overlay drawer instead of side panel
   // Initialize from window.innerWidth to avoid layout flash (FOUC) on first render
   const [isNarrowLayout, setIsNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  // In narrow mode, default workspace to hidden (overlay) — otherwise it blocks chat on startup
+  const [showWorkspace, setShowWorkspace] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
+  const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
   useEffect(() => {
     const breakpoint = parseInt(getComputedStyle(document.documentElement)
       .getPropertyValue('--breakpoint-mobile') || '768', 10);
@@ -219,6 +220,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Split view: right-side file preview panel (experimental)
   const isSplitViewEnabled = config.experimentalSplitView ?? false;
   const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
+  // Clear split panel when feature is turned off (prevents stale split state)
+  useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
   const isDraggingSplitRef = useRef(false);
   const splitRatioRef = useRef(splitRatio);
@@ -1890,39 +1893,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           >
             <div className="h-8 w-0.5 rounded-full bg-[var(--ink-subtle)]" />
           </div>
-          {/* Right panel: file preview */}
+          {/* Right panel: file preview (embedded FilePreviewModal renders its own header) */}
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper-elevated)]">
-            {/* Header */}
-            <div className="flex h-12 flex-shrink-0 items-center justify-between border-b border-[var(--line-subtle)] px-4">
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="truncate text-sm font-medium text-[var(--ink)]">{splitFile.name}</span>
-                <span className="text-xs text-[var(--ink-muted)]">
-                  {splitFile.size < 1024 ? `${splitFile.size} B` : `${(splitFile.size / 1024).toFixed(1)} KB`}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setSplitFile(null)}
-                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-                title="关闭预览"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            {/* File content */}
-            <div className="min-h-0 flex-1 overflow-auto">
-              <Suspense fallback={<div className="flex h-full items-center justify-center text-[var(--ink-muted)]"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
-                <FilePreviewModal
-                  name={splitFile.name}
-                  content={splitFile.content}
-                  size={splitFile.size}
-                  path={splitFile.path}
-                  onClose={() => setSplitFile(null)}
-                  onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
-                  embedded
-                />
-              </Suspense>
-            </div>
+            <Suspense fallback={<div className="flex h-full items-center justify-center text-[var(--ink-muted)]"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
+              <FilePreviewModal
+                name={splitFile.name}
+                content={splitFile.content}
+                size={splitFile.size}
+                path={splitFile.path}
+                onClose={() => setSplitFile(null)}
+                onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+                embedded
+              />
+            </Suspense>
           </div>
         </>
       )}

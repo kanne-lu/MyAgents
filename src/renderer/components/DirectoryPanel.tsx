@@ -553,7 +553,9 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
         setPreviewError(null);
       }
     } catch (err) {
-      if (!onFilePreviewExternal) {
+      if (onFilePreviewExternal) {
+        toast.error('文件预览失败');
+      } else {
         setPreview(null);
         setPreviewError(err instanceof Error ? err.message : 'Failed to preview file.');
       }
