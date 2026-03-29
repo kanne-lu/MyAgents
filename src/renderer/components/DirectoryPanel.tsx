@@ -1664,8 +1664,8 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
         />
       )}
 
-      {/* Preview modal - lazy loaded, no fallback (modal appears after module loads) */}
-      {(preview || previewError || isPreviewLoading) && (
+      {/* Preview modal - lazy loaded. Skip when split-view handles previews externally. */}
+      {!onFilePreviewExternal && (preview || previewError || isPreviewLoading) && (
         <Suspense fallback={null}>
           <FilePreviewModal
             name={preview?.name ?? 'Preview'}
