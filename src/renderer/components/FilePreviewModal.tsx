@@ -145,28 +145,26 @@ export default function FilePreviewModal({
     }, [size, monacoLanguage]);
 
     // Memoize the syntax highlighted content to avoid re-computation on every render
-    // Line props factory: wraps each line in a span with data-line-number for CSS ::before rendering.
-    // This replaces SyntaxHighlighter's broken showLineNumbers+wrapLongLines combo.
-    const linePropsFactory = useMemo(() => {
-        if (!showLineNumbers) return undefined;
-        return (lineNumber: number) => ({
-            className: 'preview-code-line',
-            'data-line-number': String(lineNumber),
-        });
-    }, [showLineNumbers]);
-
-    // SyntaxHighlighter is expensive - only recompute when content or language changes
+    // SyntaxHighlighter is expensive - only recompute when content or language changes.
+    // showLineNumbers is ALWAYS false to avoid the library's internal table layout (breaks wrapLongLines).
+    // Line numbers are rendered via CSS ::before on .preview-code-line using a self-incrementing counter.
     const syntaxHighlightedContent = useMemo(() => {
         if (isMarkdown || isEditing) return null; // Not used in these modes
+
+        // Counter resets each time this memo recomputes (content/language change).
+        let lineNum = 0;
+        const lineProps = showLineNumbers
+            ? () => ({ className: 'preview-code-line', 'data-line-number': String(++lineNum) })
+            : undefined;
+
         return (
             <SyntaxHighlighter
                 language={language}
                 style={oneLight}
-                className={showLineNumbers ? 'preview-has-custom-line-numbers' : undefined}
-                showLineNumbers={showLineNumbers}
+                showLineNumbers={false}
                 wrapLongLines
                 wrapLines={showLineNumbers}
-                lineProps={linePropsFactory}
+                lineProps={lineProps}
                 customStyle={{
                     margin: 0,
                     padding: '16px 16px 16px 8px',
@@ -185,7 +183,7 @@ export default function FilePreviewModal({
                 {previewContent}
             </SyntaxHighlighter>
         );
-    }, [previewContent, language, showLineNumbers, isMarkdown, isEditing, linePropsFactory]);
+    }, [previewContent, language, showLineNumbers, isMarkdown, isEditing]);
 
     // Handlers
     const handleEdit = useCallback(() => {
