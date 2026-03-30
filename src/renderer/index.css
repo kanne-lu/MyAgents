@@ -882,6 +882,11 @@ code {
   position: relative;
   padding-left: 5.5ch;
 }
+/* Hide SyntaxHighlighter's built-in line number spans (we use ::before instead) */
+.preview-code-line .react-syntax-highlighter-line-number,
+.preview-code-line .linenumber {
+  display: none !important;
+}
 .preview-code-line::before {
   content: attr(data-line-number);
   position: absolute;

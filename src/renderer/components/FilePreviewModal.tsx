@@ -162,7 +162,7 @@ export default function FilePreviewModal({
             <SyntaxHighlighter
                 language={language}
                 style={oneLight}
-                showLineNumbers={false}
+                showLineNumbers={showLineNumbers}
                 wrapLongLines
                 wrapLines={showLineNumbers}
                 lineProps={linePropsFactory}
