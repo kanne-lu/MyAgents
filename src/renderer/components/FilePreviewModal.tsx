@@ -169,7 +169,7 @@ export default function FilePreviewModal({
                 lineProps={linePropsFactory}
                 customStyle={{
                     margin: 0,
-                    padding: '16px 24px',
+                    padding: '16px 16px 16px 8px',
                     background: 'transparent',
                     fontSize: '13px',
                     lineHeight: '1.6',
