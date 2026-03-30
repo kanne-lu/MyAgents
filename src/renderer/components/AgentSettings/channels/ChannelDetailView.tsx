@@ -139,7 +139,7 @@ export default function ChannelDetailView({
     const isBindingExpanded = bindingExpanded ?? !hasUsers;
 
     useEffect(() => {
-        return () => { isMountedRef.current = false; };
+        return () => { isMountedRef.current = false; wecomQrAbortRef.current = true; };
     }, []);
 
     // Check if OpenClaw plugin is still installed
@@ -414,6 +414,63 @@ export default function ChannelDetailView({
     const isOpenClaw = channel ? isOpenClawPlatform(channel.type) : false;
     const promoted = isOpenClaw && channel ? findPromotedByPlatform(channel.type) : undefined;
     const isQrLoginPlugin = promoted?.authType === 'qrLogin' || installedPlugin?.supportsQrLogin === true;
+    const isDualConfigPlugin = promoted?.authType === 'dualConfig';
+
+    // WeCom dualConfig: inline QR re-scan state
+    const [dualDetailMode, setDualDetailMode] = useState<'view' | 'qr' | 'edit'>('view');
+    const [wecomQrImageUrl, setWecomQrImageUrl] = useState<string | null>(null);
+    const [wecomQrStatus, setWecomQrStatus] = useState<'idle' | 'loading' | 'waiting' | 'success' | 'error'>('idle');
+    const wecomQrAbortRef = useRef(false);
+
+    const startWecomQrRescan = useCallback(async () => {
+        if (!isTauriEnvironment()) return;
+        wecomQrAbortRef.current = false;
+        setWecomQrStatus('loading');
+        setDualDetailMode('qr');
+        try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            const result = await invoke<{ scode: string; auth_url: string }>('cmd_wecom_qr_generate');
+            if (!isMountedRef.current) return;
+            const dataUrl = await QRCode.toDataURL(result.auth_url, { width: 200, margin: 2, color: { dark: '#000000', light: '#ffffff' } });
+            if (!isMountedRef.current) return;
+            setWecomQrImageUrl(dataUrl);
+            setWecomQrStatus('waiting');
+
+            const POLL_INTERVAL = 3000;
+            const MAX_POLLS = 100;
+            for (let i = 0; i < MAX_POLLS; i++) {
+                if (!isMountedRef.current || wecomQrAbortRef.current) return;
+                await new Promise(r => setTimeout(r, POLL_INTERVAL));
+                if (!isMountedRef.current || wecomQrAbortRef.current) return;
+                const poll = await invoke<{ status: string; bot_id?: string; secret?: string }>('cmd_wecom_qr_poll', { scode: result.scode });
+                if (poll.status === 'success' && poll.bot_id && poll.secret) {
+                    if (!isMountedRef.current) return;
+                    // Re-read fresh config to avoid stale closure overwriting concurrent changes
+                    const freshConfig = await import('@/config/services/appConfigService').then(m => m.loadAppConfig());
+                    const freshAgent = freshConfig.agents?.find(a => a.id === agent.id);
+                    const freshChannel = freshAgent?.channels?.find(c => c.id === channelId);
+                    const freshPluginConfig = freshChannel?.openclawPluginConfig ?? {};
+                    const updatedPluginConfig = { ...freshPluginConfig, botId: poll.bot_id, secret: poll.secret };
+                    await patchChannel({ openclawPluginConfig: updatedPluginConfig });
+                    // Restart the channel so it reconnects with new credentials
+                    if (freshChannel) {
+                        try {
+                            const { invoke: inv } = await import('@tauri-apps/api/core');
+                            await inv('cmd_stop_agent_channel', { agentId: agent.id, channelId });
+                            await invokeStartAgentChannel(agent, { ...freshChannel, openclawPluginConfig: updatedPluginConfig });
+                        } catch { /* best-effort restart */ }
+                    }
+                    setWecomQrStatus('success');
+                    toastRef.current.success('扫码成功，凭证已更新，正在重连...');
+                    setDualDetailMode('view');
+                    return;
+                }
+            }
+            if (isMountedRef.current) setWecomQrStatus('error');
+        } catch {
+            if (isMountedRef.current) setWecomQrStatus('error');
+        }
+    }, [agent, channelId, patchChannel]);
 
     // QR Login state — must be declared before any early return (rules-of-hooks)
     const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
@@ -634,7 +691,79 @@ export default function ChannelDetailView({
                 </button>
                 {isCredentialsExpanded && (
                     <div className="px-5 pb-5">
-                        {isOpenClaw ? (
+                        {isOpenClaw && isDualConfigPlugin ? (
+                            /* WeCom dualConfig: summary view + rescan/edit actions */
+                            <div className="space-y-4">
+                                {dualDetailMode === 'view' && (
+                                    <>
+                                        <div className="space-y-2">
+                                            {(promoted?.requiredFields ?? ['botId', 'secret']).map((key) => {
+                                                const val = channel.openclawPluginConfig?.[key] ?? '';
+                                                const masked = /secret|token|password|key/i.test(key)
+                                                    ? (val ? '••••••••••••' : '未配置')
+                                                    : (val || '未配置');
+                                                return (
+                                                    <div key={key} className="flex items-center justify-between">
+                                                        <span className="text-sm text-[var(--ink-muted)]">{key}</span>
+                                                        <span className={`text-sm font-mono ${val ? 'text-[var(--ink)]' : 'text-[var(--ink-subtle)]'}`}>{masked}</span>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={startWecomQrRescan}
+                                                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                            >
+                                                重新扫码
+                                            </button>
+                                            <button
+                                                onClick={() => setDualDetailMode('edit')}
+                                                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                            >
+                                                编辑凭证
+                                            </button>
+                                        </div>
+                                    </>
+                                )}
+                                {dualDetailMode === 'qr' && (
+                                    <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)] p-4">
+                                        {wecomQrStatus === 'loading' && <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />}
+                                        {wecomQrStatus === 'waiting' && wecomQrImageUrl && (
+                                            <img src={wecomQrImageUrl} alt="企业微信扫码" className="h-[180px] w-[180px] rounded-xl border border-[var(--line)]" />
+                                        )}
+                                        {wecomQrStatus === 'error' && <p className="text-sm text-[var(--error)]">获取二维码失败</p>}
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            {wecomQrStatus === 'loading' ? '正在获取二维码...' : wecomQrStatus === 'waiting' ? '请使用企业微信 App 扫描' : ''}
+                                        </p>
+                                        <button
+                                            onClick={() => { wecomQrAbortRef.current = true; setDualDetailMode('view'); }}
+                                            className="text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] hover:underline"
+                                        >
+                                            取消
+                                        </button>
+                                    </div>
+                                )}
+                                {dualDetailMode === 'edit' && (
+                                    <div className="space-y-3">
+                                        <OpenClawConfigEditor
+                                            pluginConfig={channel.openclawPluginConfig ?? {}}
+                                            pluginId={channel.openclawPluginId ?? ''}
+                                            npmSpec={channel.openclawNpmSpec ?? ''}
+                                            onChange={async (newConfig) => {
+                                                await patchChannel({ openclawPluginConfig: newConfig as Record<string, string> });
+                                            }}
+                                        />
+                                        <button
+                                            onClick={() => setDualDetailMode('view')}
+                                            className="text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] hover:underline"
+                                        >
+                                            返回
+                                        </button>
+                                    </div>
+                                )}
+                            </div>
+                        ) : isOpenClaw ? (
                             <OpenClawConfigEditor
                                 pluginConfig={channel.openclawPluginConfig ?? {}}
                                 pluginId={channel.openclawPluginId ?? ''}

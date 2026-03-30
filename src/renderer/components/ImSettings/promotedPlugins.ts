@@ -14,6 +14,7 @@ import feishuStep2EventsImg from './assets/feishu_step2_events.png';
 import feishuStep2PermissionsImg from './assets/feishu_step2_permissions.png';
 import feishuStep2AddBotImg from './assets/feishu_step2_5_add_bot.png';
 import weixinIcon from './assets/weixin.png';
+import wecomIcon from './assets/wecom.jpeg';
 
 export interface PromotedPlugin {
     /** Plugin ID — must match InstalledPlugin.pluginId after installation */
@@ -38,9 +39,12 @@ export interface PromotedPlugin {
      * Authentication type:
      * - 'config' (default): user fills config fields (appId, appSecret, etc.)
      * - 'qrLogin': user scans QR code to login (e.g. WeChat)
+     * - 'dualConfig': user chooses QR scan OR manual config to obtain credentials (e.g. WeCom)
+     *   QR scan auto-creates a bot and retrieves credentials; manual lets user paste existing ones.
+     *   Both paths write to openclawPluginConfig and then start normally via config auth.
      * Auto-detected for custom plugins via Bridge /capabilities supportsQrLogin.
      */
-    authType?: 'config' | 'qrLogin';
+    authType?: 'config' | 'qrLogin' | 'dualConfig';
     /** Custom setup guidance for the wizard config step */
     setupGuide?: {
         /** Section title in config panel (e.g. "QQ Bot 应用凭证") */
@@ -133,6 +137,27 @@ export const PROMOTED_PLUGINS: PromotedPlugin[] = [
                     caption: '2. 在机器人管理页获取 AppID 和 AppSecret，填入上方',
                 },
             ],
+        },
+    },
+    {
+        pluginId: 'wecom-openclaw-plugin',
+        npmSpec: '@wecom/wecom-openclaw-plugin',
+        name: '企业微信 Bot（官方插件）',
+        description: '腾讯企业微信官方 OpenClaw 插件，WebSocket 长连接、流式回复',
+        icon: wecomIcon,
+        platformColor: '#1B66F5',
+        badge: 'official',
+        authType: 'dualConfig',
+        requiredFields: ['botId', 'secret'],
+        defaultConfig: {
+            dmPolicy: 'open',
+            groupPolicy: 'disabled',
+            sendThinkingMessage: 'true',
+        },
+        setupGuide: {
+            credentialTitle: '企业微信机器人凭证',
+            credentialHint: '前往企业微信管理后台创建智能机器人，获取 Bot ID 和 Secret',
+            credentialHintLink: 'https://work.weixin.qq.com/wework_admin/',
         },
     },
     {

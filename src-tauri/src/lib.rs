@@ -224,6 +224,9 @@ pub fn run() {
             im::cmd_update_agent_config,
             im::cmd_create_agent,
             im::cmd_delete_agent,
+            // WeCom QR code commands (public API, not plugin gateway)
+            commands::cmd_wecom_qr_generate,
+            commands::cmd_wecom_qr_poll,
             // File utility commands
             commands::cmd_read_workspace_file,
             commands::cmd_write_workspace_file,
