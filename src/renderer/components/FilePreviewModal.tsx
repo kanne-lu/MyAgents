@@ -162,6 +162,7 @@ export default function FilePreviewModal({
             <SyntaxHighlighter
                 language={language}
                 style={oneLight}
+                className={showLineNumbers ? 'preview-has-custom-line-numbers' : undefined}
                 showLineNumbers={showLineNumbers}
                 wrapLongLines
                 wrapLines={showLineNumbers}
