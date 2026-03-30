@@ -104,6 +104,17 @@ pub struct UpdateReadyInfo {
     pub version: String,
 }
 
+/// Download progress sent to the frontend during download
+#[derive(Clone, Serialize)]
+pub struct DownloadProgress {
+    /// Bytes downloaded so far
+    pub downloaded: u64,
+    /// Total file size (None if server didn't provide Content-Length)
+    pub total: Option<u64>,
+    /// Progress percentage 0-100 (None if total is unknown)
+    pub percent: Option<u32>,
+}
+
 /// Build an updater with user's proxy configuration applied.
 /// Reads proxy settings from ~/.myagents/config.json:
 /// - Proxy enabled → `.proxy(url)`
@@ -219,12 +230,12 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
         format!("[Updater] Found update v{}, starting silent download...", version),
     );
 
-    // Silent download - only log progress, no UI events
+    // Download with progress events to frontend
     let app_clone = app.clone();
     let downloaded = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let last_logged_percent = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let last_emitted_percent = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
     let downloaded_clone = downloaded.clone();
-    let last_logged_clone = last_logged_percent.clone();
+    let last_emitted_clone = last_emitted_percent.clone();
 
     let on_chunk = move |chunk_length: usize, content_length: Option<u64>| {
         let new_downloaded = downloaded_clone.fetch_add(
@@ -232,18 +243,38 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
             std::sync::atomic::Ordering::SeqCst,
         ) + chunk_length as u64;
 
-        // Log progress at 25% intervals (less verbose for silent download)
-        if let Some(total) = content_length {
-            let percent = (new_downloaded as f64 / total as f64 * 100.0) as u32;
-            let last_percent = last_logged_clone.load(std::sync::atomic::Ordering::SeqCst);
-            let current_bucket = percent / 25;
-            let last_bucket = last_percent / 25;
-            if current_bucket > last_bucket {
-                last_logged_clone.store(percent, std::sync::atomic::Ordering::SeqCst);
-                logger::info(
-                    &app_clone,
-                    format!("[Updater] Silent download progress: {}%", current_bucket * 25),
-                );
+        if let Some(total) = content_length.filter(|&t| t > 0) {
+            let percent = ((new_downloaded as f64 / total as f64 * 100.0) as u32).min(100);
+            let last = last_emitted_clone.load(std::sync::atomic::Ordering::SeqCst);
+
+            // Emit event every 2% and log every 25%
+            if percent >= last + 2 || (percent == 100 && last != 100) {
+                last_emitted_clone.store(percent, std::sync::atomic::Ordering::SeqCst);
+
+                let _ = app_clone.emit("updater:download-progress", DownloadProgress {
+                    downloaded: new_downloaded,
+                    total: Some(total),
+                    percent: Some(percent),
+                });
+
+                // Log at 25% intervals (less verbose)
+                if percent / 25 > last / 25 {
+                    logger::info(
+                        &app_clone,
+                        format!("[Updater] Download progress: {}%", percent),
+                    );
+                }
+            }
+        } else {
+            // No Content-Length: emit byte count every 5MB
+            let mb = new_downloaded / (5 * 1024 * 1024);
+            let prev_mb = (new_downloaded - chunk_length as u64) / (5 * 1024 * 1024);
+            if mb > prev_mb {
+                let _ = app_clone.emit("updater:download-progress", DownloadProgress {
+                    downloaded: new_downloaded,
+                    total: None,
+                    percent: None,
+                });
             }
         }
     };
