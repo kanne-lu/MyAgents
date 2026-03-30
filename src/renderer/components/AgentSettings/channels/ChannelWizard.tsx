@@ -230,6 +230,7 @@ export default function ChannelWizard({
     const [wecomQrSecret, setWecomQrSecret] = useState('');
     const wecomQrAbortRef = useRef(false);
     const wecomQrStartedRef = useRef(false);
+    const [wecomQrRetryTrigger, setWecomQrRetryTrigger] = useState(0);
     // Rendered QR image for WeCom (auth_url → QR code image)
     const [wecomQrImageUrl, setWecomQrImageUrl] = useState<string | null>(null);
 
@@ -297,7 +298,7 @@ export default function ChannelWizard({
         })();
 
         return () => { cancelled = true; };
-    }, [isDualConfig, dualConfigMode, step]);
+    }, [isDualConfig, dualConfigMode, step, wecomQrRetryTrigger]);
 
     // Reset QR state when switching to QR mode (always re-trigger, even after prior success)
     const handleDualModeSwitch = useCallback((mode: 'qr' | 'config') => {
@@ -1054,6 +1055,7 @@ export default function ChannelWizard({
                                                 wecomQrStartedRef.current = false;
                                                 wecomQrAbortRef.current = false;
                                                 setWecomQrStatus('idle');
+                                                setWecomQrRetryTrigger(n => n + 1);
                                             }}
                                             className="text-xs text-[var(--accent-warm)] hover:underline"
                                         >

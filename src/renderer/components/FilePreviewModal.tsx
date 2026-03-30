@@ -30,6 +30,13 @@ const MonacoEditor = lazy(() => import('./MonacoEditor'));
 // No-op change handler for read-only Monaco (stable reference avoids re-renders)
 const noop = () => {};
 
+// Static loading spinner (module-level to avoid allocation per render)
+const monacoLoading = (
+    <div className="flex h-full items-center justify-center bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
+        <Loader2 className="h-5 w-5 animate-spin" />
+    </div>
+);
+
 
 interface FilePreviewModalProps {
     /** File name to display */
@@ -203,13 +210,6 @@ export default function FilePreviewModal({
             toastRef.current.error('无法打开目录');
         }
     }, [canReveal, onRevealFile, apiPost, path]);
-
-    // Monaco loading fallback (shared between preview and edit)
-    const monacoLoading = (
-        <div className="flex h-full items-center justify-center bg-[var(--paper-elevated)] text-[var(--ink-muted)]">
-            <Loader2 className="h-5 w-5 animate-spin" />
-        </div>
-    );
 
     // Render preview content based on file type
     const renderPreviewContent = () => {

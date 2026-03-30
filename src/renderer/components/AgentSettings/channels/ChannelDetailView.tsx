@@ -430,9 +430,9 @@ export default function ChannelDetailView({
         try {
             const { invoke } = await import('@tauri-apps/api/core');
             const result = await invoke<{ scode: string; auth_url: string }>('cmd_wecom_qr_generate');
-            if (!isMountedRef.current) return;
+            if (!isMountedRef.current || wecomQrRunIdRef.current !== runId) return;
             const dataUrl = await QRCode.toDataURL(result.auth_url, { width: 200, margin: 2, color: { dark: '#000000', light: '#ffffff' } });
-            if (!isMountedRef.current) return;
+            if (!isMountedRef.current || wecomQrRunIdRef.current !== runId) return;
             setWecomQrImageUrl(dataUrl);
             setWecomQrStatus('waiting');
 
@@ -443,8 +443,13 @@ export default function ChannelDetailView({
                 await new Promise(r => setTimeout(r, POLL_INTERVAL));
                 if (!isMountedRef.current || wecomQrRunIdRef.current !== runId) return;
                 const poll = await invoke<{ status: string; bot_id?: string; secret?: string }>('cmd_wecom_qr_poll', { scode: result.scode });
+                // Terminal states — QR expired or user denied
+                if (poll.status === 'expired' || poll.status === 'cancelled' || poll.status === 'denied') {
+                    if (isMountedRef.current && wecomQrRunIdRef.current === runId) setWecomQrStatus('error');
+                    return;
+                }
                 if (poll.status === 'success' && poll.bot_id && poll.secret) {
-                    if (!isMountedRef.current) return;
+                    if (!isMountedRef.current || wecomQrRunIdRef.current !== runId) return;
                     // Re-read fresh config to avoid stale closure overwriting concurrent changes
                     const freshConfig = await import('@/config/services/appConfigService').then(m => m.loadAppConfig());
                     const freshAgent = freshConfig.agents?.find(a => a.id === agent.id);
