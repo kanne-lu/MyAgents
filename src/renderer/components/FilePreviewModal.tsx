@@ -151,6 +151,7 @@ export default function FilePreviewModal({
     const [autoSaveStatus, setAutoSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const isSavingRef = useRef(false); // guard against concurrent saves
+    const inFlightPromiseRef = useRef<Promise<void> | null>(null); // track in-flight save for close coordination
     const savedIndicatorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     // Sync content when prop changes (e.g., when file is reloaded externally)
@@ -211,7 +212,7 @@ export default function FilePreviewModal({
 
     /** Persist the given content to disk, update status indicator, and call onSaved.
      *  Includes retry-after-busy: if a save is already in-flight, reschedules after it finishes. */
-    const doAutoSave = useCallback(async (contentToSave: string) => {
+    const doAutoSave = useCallback((contentToSave: string) => {
         if (isSavingRef.current) {
             // Already saving — reschedule so this edit isn't lost
             if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
@@ -222,27 +223,32 @@ export default function FilePreviewModal({
         }
         isSavingRef.current = true;
         setAutoSaveStatus('saving');
-        try {
-            await executeSave(contentToSave);
-            setSavedContent(contentToSave);
-            savedContentRef.current = contentToSave;
-            setAutoSaveStatus('saved');
-            onSavedRef.current?.();
-            // Clear "saved" indicator after 2s
-            if (savedIndicatorTimerRef.current) clearTimeout(savedIndicatorTimerRef.current);
-            savedIndicatorTimerRef.current = setTimeout(() => setAutoSaveStatus('idle'), 2000);
-            // After save completes, check if content changed during the save (user kept typing)
-            if (editContentRef.current !== contentToSave) {
-                if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-                debounceTimerRef.current = setTimeout(() => {
-                    void doAutoSave(editContentRef.current);
-                }, AUTO_SAVE_DELAY);
+        const savePromise = (async () => {
+            try {
+                await executeSave(contentToSave);
+                setSavedContent(contentToSave);
+                savedContentRef.current = contentToSave;
+                setAutoSaveStatus('saved');
+                onSavedRef.current?.();
+                // Clear "saved" indicator after 2s
+                if (savedIndicatorTimerRef.current) clearTimeout(savedIndicatorTimerRef.current);
+                savedIndicatorTimerRef.current = setTimeout(() => setAutoSaveStatus('idle'), 2000);
+                // After save completes, check if content changed during the save (user kept typing)
+                if (editContentRef.current !== contentToSave) {
+                    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
+                    debounceTimerRef.current = setTimeout(() => {
+                        void doAutoSave(editContentRef.current);
+                    }, AUTO_SAVE_DELAY);
+                }
+            } catch {
+                setAutoSaveStatus('error');
+            } finally {
+                isSavingRef.current = false;
+                inFlightPromiseRef.current = null;
             }
-        } catch {
-            setAutoSaveStatus('error');
-        } finally {
-            isSavingRef.current = false;
-        }
+        })();
+        inFlightPromiseRef.current = savePromise;
+        void savePromise;
     }, [executeSave]);
 
     const handleDirectEditChange = useCallback((newValue: string) => {
@@ -264,7 +270,11 @@ export default function FilePreviewModal({
             clearTimeout(debounceTimerRef.current);
             debounceTimerRef.current = null;
         }
-        // If there are unsaved direct-edit changes, save now
+        // Wait for any in-flight save to finish before checking dirty state
+        if (inFlightPromiseRef.current) {
+            try { await inFlightPromiseRef.current; } catch { /* ignore — error already handled */ }
+        }
+        // If there are STILL unsaved direct-edit changes after in-flight completed, save now
         if (isDirectEdit && editContentRef.current !== savedContentRef.current) {
             try {
                 await executeSave(editContentRef.current);
@@ -287,12 +297,17 @@ export default function FilePreviewModal({
         void doAutoSave(editContentRef.current);
     }, [doAutoSave]);
 
-    // Cleanup timers on unmount
+    // Cleanup on unmount: clear timers and fire best-effort save if dirty
     useEffect(() => {
         return () => {
             if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
             if (savedIndicatorTimerRef.current) clearTimeout(savedIndicatorTimerRef.current);
+            // Best-effort flush: if there are unsaved edits, fire a save (async, not awaited)
+            if (editContentRef.current !== savedContentRef.current) {
+                void executeSave(editContentRef.current).catch(() => {});
+            }
         };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- refs + stable executeSave; cleanup must only run on unmount
     }, []);
 
     // ─── Markdown manual-edit handlers ────────────────────────────────────────
