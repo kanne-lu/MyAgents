@@ -222,16 +222,24 @@ export function TerminalPanel({
     };
   }, [handleResize]);
 
-  // 6. Re-fit when panel becomes visible (switching from file view back to terminal)
-  // Double-RAF ensures DOM has fully reflowed after `hidden` class removal.
+  // 6. Re-fit when panel becomes visible (switching from file/hidden back to terminal)
+  // Wait for layout to fully stabilize after `hidden` removal, then fit + resize PTY
+  // in one shot. Prevents the garbled prompt caused by fitting at intermediate dimensions.
   useEffect(() => {
-    if (isVisible) {
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          fitAddonRef.current?.fit();
-        });
-      });
-    }
+    if (!isVisible) return;
+    const timer = setTimeout(() => {
+      if (!fitAddonRef.current) return;
+      fitAddonRef.current.fit();
+      const dims = fitAddonRef.current.proposeDimensions();
+      if (dims && terminalIdRef.current) {
+        invoke('cmd_terminal_resize', {
+          terminalId: terminalIdRef.current,
+          rows: dims.rows,
+          cols: dims.cols,
+        }).catch(() => {});
+      }
+    }, 50); // 50ms — enough for CSS reflow, avoids premature fit at 0-width
+    return () => clearTimeout(timer);
   }, [isVisible]);
 
   return (

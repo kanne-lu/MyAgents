@@ -1968,7 +1968,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           >
             <div className="h-8 w-0.5 rounded-full bg-[var(--ink-subtle)]" />
           </div>
-          {/* Right panel: file preview OR terminal */}
+          {/* Right panel — single flex-1 container for tab bar + file + terminal.
+              Uses `hidden` when panel is not visible but terminal is alive in background. */}
           <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!splitPanelVisible ? 'hidden' : ''}`}>
             {/* Tab switcher — only when both file AND terminal are pinned */}
             {splitFile && terminalPinned && terminalAlive && (
@@ -2016,8 +2017,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     role="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      // Dismiss terminal from panel, switch to file view
-                      // Terminal keeps running in background
                       setTerminalPinned(false);
                       setSplitActiveView('file');
                     }}
@@ -2044,77 +2043,74 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     path={splitFile.path}
                     onClose={() => {
                       setSplitFile(null);
-                      // If terminal is pinned and alive, switch to it
                       if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
                     }}
                     onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
                     embedded
                     onFullscreen={(currentContent) => {
                       const file = currentContent !== undefined ? { ...splitFile!, content: currentContent } : splitFile!;
-                      setSplitFile(null);  // Close embedded to prevent dual-editor write conflicts
+                      setSplitFile(null);
                       setFullscreenPreviewFile(file);
                     }}
                   />
                 </Suspense>
               </div>
             )}
-          </div>
 
-          {/* Terminal container — OUTSIDE the visible panel div so it stays mounted
-              even when splitPanelVisible is false. Uses hidden CSS to preserve xterm state. */}
-          {terminalMounted && (
-            <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!(splitPanelVisible && splitActiveView === 'terminal') ? 'hidden' : ''}`}>
-              {/* Terminal header — only when tab switcher is NOT showing */}
-              {!(splitFile && terminalPinned && terminalAlive) && (
-                <div className="flex h-9 flex-shrink-0 items-center justify-between px-3" style={{ background: getTerminalTheme().background }}>
-                  <div className="flex items-center gap-1.5">
-                    <TerminalSquare className="h-3.5 w-3.5" style={{ color: getTerminalTheme().foreground }} />
-                    <span className="text-[12px] font-medium" style={{ color: getTerminalTheme().foreground }}>Terminal</span>
-                    <span className="text-[11px]" style={{ color: getTerminalTheme().brightBlack }}>
-                      {agentDir ? `~/${agentDir.split('/').pop()}` : ''}
-                    </span>
+            {/* Terminal — INSIDE the right panel div (same flex column).
+                Stays mounted while alive, uses `hidden` when not the active view. */}
+            {terminalMounted && (
+              <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'terminal' ? 'hidden' : ''}`}>
+                {/* Terminal header — only when tab switcher is NOT showing */}
+                {!(splitFile && terminalPinned && terminalAlive) && (
+                  <div className="flex h-9 flex-shrink-0 items-center justify-between px-3" style={{ background: getTerminalTheme().background }}>
+                    <div className="flex items-center gap-1.5">
+                      <TerminalSquare className="h-3.5 w-3.5" style={{ color: getTerminalTheme().foreground }} />
+                      <span className="text-[12px] font-medium" style={{ color: getTerminalTheme().foreground }}>Terminal</span>
+                      <span className="text-[11px]" style={{ color: getTerminalTheme().brightBlack }}>
+                        {agentDir ? `~/${agentDir.split('/').pop()}` : ''}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTerminalPinned(false);
+                        setSplitActiveView('file');
+                      }}
+                      className="flex h-5 w-5 items-center justify-center rounded transition-colors"
+                      style={{ color: getTerminalTheme().brightBlack }}
+                      title="隐藏终端"
+                    >
+                      <span className="text-sm leading-none">×</span>
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      // Dismiss terminal panel (terminal keeps running in background)
-                      setTerminalPinned(false);
-                      setSplitActiveView('file');
+                )}
+                <Suspense fallback={<div className="flex h-full items-center justify-center" style={{ background: getTerminalTheme().background }}><Loader2 className="h-5 w-5 animate-spin" style={{ color: getTerminalTheme().brightBlack }} /></div>}>
+                  <LazyTerminalPanel
+                    workspacePath={agentDir}
+                    terminalId={terminalId}
+                    sessionId={sessionId}
+                    isVisible={splitPanelVisible && splitActiveView === 'terminal'}
+                    onTerminalCreated={(id) => {
+                      setTerminalId(id);
+                      setTerminalAlive(true);
                     }}
-                    className="flex h-5 w-5 items-center justify-center rounded transition-colors"
-                    style={{ color: getTerminalTheme().brightBlack }}
-                    title="隐藏终端"
-                  >
-                    <span className="text-sm leading-none">×</span>
-                  </button>
-                </div>
-              )}
-              <Suspense fallback={<div className="flex h-full items-center justify-center" style={{ background: getTerminalTheme().background }}><Loader2 className="h-5 w-5 animate-spin" style={{ color: getTerminalTheme().brightBlack }} /></div>}>
-                <LazyTerminalPanel
-                  workspacePath={agentDir}
-                  terminalId={terminalId}
-                  sessionId={sessionId}
-                  isVisible={splitPanelVisible && splitActiveView === 'terminal'}
-                  onTerminalCreated={(id) => {
-                    setTerminalId(id);
-                    setTerminalAlive(true);
-                  }}
-                  onTerminalExited={() => {
-                    // Clean up dead session in Rust before clearing state
-                    const deadId = terminalId;
-                    setTerminalAlive(false);
-                    setTerminalPinned(false);
-                    setTerminalId(null);
-                    if (deadId) {
-                      import('@tauri-apps/api/core').then(({ invoke: inv }) => {
-                        inv('cmd_terminal_close', { terminalId: deadId }).catch(() => {});
-                      });
-                    }
-                  }}
-                />
-              </Suspense>
-            </div>
-          )}
+                    onTerminalExited={() => {
+                      const deadId = terminalId;
+                      setTerminalAlive(false);
+                      setTerminalPinned(false);
+                      setTerminalId(null);
+                      if (deadId) {
+                        import('@tauri-apps/api/core').then(({ invoke: inv }) => {
+                          inv('cmd_terminal_close', { terminalId: deadId }).catch(() => {});
+                        });
+                      }
+                    }}
+                  />
+                </Suspense>
+              </div>
+            )}
+          </div>
         </>
       )}
 
