@@ -14,6 +14,7 @@ mod proxy_config;
 pub mod system_binary;
 mod sidecar;
 mod sse_proxy;
+pub mod terminal;
 mod tray;
 mod updater;
 
@@ -91,6 +92,12 @@ pub fn run() {
     let cleanup_done_for_session_monitor = cleanup_done.clone();
     let cleanup_done_for_agent_monitor = cleanup_done.clone();
 
+    // Create terminal manager state
+    let terminal_state = terminal::TerminalManager::new();
+    let terminal_state_for_exit = terminal_state.clone();
+    let terminal_state_for_window = terminal_state.clone();
+    let terminal_state_for_tray_exit = terminal_state.clone();
+
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
 
@@ -116,6 +123,7 @@ pub fn run() {
         .manage(sse_proxy_state)
         .manage(im_bot_state)
         .manage(agent_state)
+        .manage(terminal_state)
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -227,6 +235,11 @@ pub fn run() {
             // WeCom QR code commands (public API, not plugin gateway)
             commands::cmd_wecom_qr_generate,
             commands::cmd_wecom_qr_poll,
+            // Terminal commands (embedded PTY)
+            terminal::cmd_terminal_create,
+            terminal::cmd_terminal_write,
+            terminal::cmd_terminal_resize,
+            terminal::cmd_terminal_close,
             // File utility commands
             commands::cmd_read_workspace_file,
             commands::cmd_write_workspace_file,
@@ -326,6 +339,9 @@ pub fn run() {
                     im::signal_all_agents_shutdown(&agent_state_for_tray_exit);
                     im::signal_all_bots_shutdown(&im_state_for_tray_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_tray_exit);
+                    // Clean up terminal PTY sessions
+                    let ts = terminal_state_for_tray_exit.clone();
+                    tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
                     app_dirs::release_lock();
                 }
                 app_handle_for_tray.exit(0);
@@ -444,6 +460,9 @@ pub fn run() {
                         im::signal_all_agents_shutdown(&agent_state_for_window);
                         im::signal_all_bots_shutdown(&im_state_for_window);
                         let _ = stop_all_sidecars(&sidecar_state_for_window);
+                        // Clean up terminal PTY sessions
+                        let ts = terminal_state_for_window.clone();
+                        tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
                         app_dirs::release_lock();
                     }
                 }
@@ -465,6 +484,9 @@ pub fn run() {
                     im::signal_all_agents_shutdown(&agent_state_for_exit);
                     im::signal_all_bots_shutdown(&im_state_for_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_exit);
+                    // Clean up terminal PTY sessions
+                    let ts = terminal_state_for_exit.clone();
+                    tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
                     app_dirs::release_lock();
                 }
             }

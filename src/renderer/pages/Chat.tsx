@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen, TerminalSquare } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -44,6 +44,16 @@ import type { InitialMessage } from '@/types/tab';
 
 // Lazy load FilePreviewModal for split view panel
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
+// Lazy load TerminalPanel for embedded terminal
+const LazyTerminalPanel = lazy(() => import('@/components/TerminalPanel').then(m => ({ default: m.TerminalPanel })));
+// Import terminal theme colors for chrome (header/fallback) — avoids hardcoded hex values
+const terminalThemePromise = import('@/components/TerminalPanel').then(m => m.TERMINAL_THEME);
+let _cachedTerminalTheme: { background: string; foreground: string; brightBlack: string } | null = null;
+terminalThemePromise.then(t => { _cachedTerminalTheme = t; });
+/** Terminal chrome colors — falls back to known values before lazy module loads */
+function getTerminalTheme() {
+  return _cachedTerminalTheme ?? { background: '#1a1614', foreground: '#d4c8bc', brightBlack: '#6f6156' };
+}
 
 /** Inline-editable session title — click to edit, Enter/Blur to save, Esc to cancel */
 function SessionTitleEditor({ title, onRename }: { title: string; onRename: (newTitle: string) => void }) {
@@ -230,26 +240,62 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Store drag listeners in refs so unmount cleanup can remove them
   const dragMoveRef = useRef<((ev: MouseEvent) => void) | null>(null);
   const dragUpRef = useRef<(() => void) | null>(null);
+
+  // ── Embedded terminal state ──
+  // Terminal lifecycle is tied to this Tab, not to the panel visibility.
+  // Hiding the panel keeps the PTY alive; only Tab close kills it.
+  const [terminalId, setTerminalId] = useState<string | null>(null);
+  const [terminalAlive, setTerminalAlive] = useState(false);
+  const terminalIdRef = useRef<string | null>(null);
+  terminalIdRef.current = terminalId;
+  // Which view is active in the right panel: 'file' or 'terminal'
+  const [splitActiveView, setSplitActiveView] = useState<'file' | 'terminal'>('file');
+
+  // Derived: is the right split panel visible?
+  // Must include `splitActiveView === 'terminal'` even when !terminalAlive,
+  // so the TerminalPanel can mount and trigger PTY creation.
+  const splitPanelVisible = splitFile !== null || splitActiveView === 'terminal';
+
   // When split view is active or layout is narrow, workspace uses overlay drawer
-  const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitFile !== null);
+  const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitPanelVisible);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
   const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
 
   const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }) => {
     setSplitFile(file);
+    setSplitActiveView('file');
     // Keep workspace open — user can dismiss it manually
   }, []);
 
-  // When split closes, restore workspace sidebar to visible (non-collapsed)
-  const prevSplitFileRef = useRef(splitFile);
+  // Open terminal in split panel (called from DirectoryPanel header button)
+  const handleOpenTerminal = useCallback(() => {
+    setSplitActiveView('terminal');
+    // If terminal was already created, just switch view; otherwise TerminalPanel will create it
+  }, []);
+
+  // When split panel closes entirely, restore workspace sidebar to visible
+  const prevSplitVisibleRef = useRef(splitPanelVisible);
   useEffect(() => {
-    if (prevSplitFileRef.current && !splitFile) {
+    if (prevSplitVisibleRef.current && !splitPanelVisible) {
       // Split just closed → show workspace sidebar
       setShowWorkspace(true);
     }
-    prevSplitFileRef.current = splitFile;
-  }, [splitFile]);
+    prevSplitVisibleRef.current = splitPanelVisible;
+  }, [splitPanelVisible]);
+
+  // Cleanup terminal PTY on unmount (Tab close)
+  useEffect(() => {
+    return () => {
+      const id = terminalIdRef.current;
+      if (id) {
+        // Fire-and-forget: Rust will clean up the PTY
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke('cmd_terminal_close', { terminalId: id }).catch(() => {});
+        });
+      }
+    };
+  }, []);
 
   const handleSplitDividerMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1566,7 +1612,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {/* Left side: chat area (+ side workspace when wide & no split) */}
       <div
         className={`relative flex min-w-0 flex-row overflow-hidden ${!isDraggingSplit ? 'transition-[width] duration-300 ease-in-out' : ''}`}
-        style={{ width: splitFile ? `${splitRatio * 100}%` : '100%' }}
+        style={{ width: splitPanelVisible ? `${splitRatio * 100}%` : '100%' }}
       >
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${showWorkspace && !shouldUseWorkspaceOverlay ? 'border-r border-[var(--line-subtle)]' : ''}`}>
         {/* Compact header - single row */}
@@ -1876,6 +1922,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onSyncSkillToGlobal={handleSyncSkillToGlobal}
               onRefreshAll={triggerWorkspaceRefresh}
               onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
+              onOpenTerminal={isSplitViewEnabled && !isNarrowLayout ? handleOpenTerminal : undefined}
+              terminalAlive={terminalAlive}
             />
           </div>
         </>
@@ -1883,7 +1931,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       </div>{/* End left-side wrapper */}
 
       {/* Split view: draggable divider + right panel */}
-      {splitFile && (
+      {splitPanelVisible && (
         <>
           {/* Draggable divider */}
           <div
@@ -1892,24 +1940,144 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           >
             <div className="h-8 w-0.5 rounded-full bg-[var(--ink-subtle)]" />
           </div>
-          {/* Right panel: file preview (embedded FilePreviewModal renders its own header) */}
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper-elevated)]">
-            <Suspense fallback={<div className="flex h-full items-center justify-center text-[var(--ink-muted)]"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
-              <FilePreviewModal
-                name={splitFile.name}
-                content={splitFile.content}
-                size={splitFile.size}
-                path={splitFile.path}
-                onClose={() => setSplitFile(null)}
-                onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
-                embedded
-                onFullscreen={(currentContent) => {
-                  const file = currentContent !== undefined ? { ...splitFile!, content: currentContent } : splitFile!;
-                  setSplitFile(null);  // Close embedded to prevent dual-editor write conflicts
-                  setFullscreenPreviewFile(file);
-                }}
-              />
-            </Suspense>
+          {/* Right panel: file preview OR terminal */}
+          <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            {/* Tab switcher — only when both file AND terminal are active */}
+            {splitFile && terminalAlive && (
+              <div className="flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-[var(--line)] bg-[var(--paper-elevated)] px-2">
+                <button
+                  type="button"
+                  onClick={() => setSplitActiveView('file')}
+                  className={`relative flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    splitActiveView === 'file'
+                      ? 'text-[var(--ink)]'
+                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                  }`}
+                >
+                  <span className="max-w-[120px] truncate">{splitFile.name}</span>
+                  {splitActiveView === 'file' && (
+                    <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSplitActiveView('terminal')}
+                  className={`relative flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    splitActiveView === 'terminal'
+                      ? 'text-[var(--ink)]'
+                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                  }`}
+                >
+                  <TerminalSquare className="h-3 w-3" />
+                  Terminal
+                  {splitActiveView === 'terminal' && (
+                    <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                  )}
+                </button>
+                <div className="flex-1" />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (splitActiveView === 'file') {
+                      setSplitFile(null);
+                      // If terminal is alive, switch to it; otherwise panel closes
+                      if (terminalAlive) setSplitActiveView('terminal');
+                    } else {
+                      // Hiding terminal view: switch to file if available
+                      if (splitFile) {
+                        setSplitActiveView('file');
+                      } else {
+                        // No file open — hide terminal panel (terminal keeps running in background)
+                        setSplitActiveView('file');
+                      }
+                    }
+                  }}
+                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                  title="关闭当前面板"
+                >
+                  <span className="text-sm leading-none">×</span>
+                </button>
+              </div>
+            )}
+
+            {/* File preview view */}
+            {splitFile && splitActiveView === 'file' && (
+              <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper-elevated)]">
+                <Suspense fallback={<div className="flex h-full items-center justify-center text-[var(--ink-muted)]"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
+                  <FilePreviewModal
+                    name={splitFile.name}
+                    content={splitFile.content}
+                    size={splitFile.size}
+                    path={splitFile.path}
+                    onClose={() => {
+                      setSplitFile(null);
+                      // If terminal is alive, switch to it
+                      if (terminalAlive) setSplitActiveView('terminal');
+                    }}
+                    onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+                    embedded
+                    onFullscreen={(currentContent) => {
+                      const file = currentContent !== undefined ? { ...splitFile!, content: currentContent } : splitFile!;
+                      setSplitFile(null);  // Close embedded to prevent dual-editor write conflicts
+                      setFullscreenPreviewFile(file);
+                    }}
+                  />
+                </Suspense>
+              </div>
+            )}
+
+            {/* Terminal view — SINGLE mount point to avoid xterm.js remount/state loss.
+                Uses `hidden` CSS when not active view to preserve terminal state. */}
+            {splitActiveView === 'terminal' && (
+              <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'terminal' ? 'hidden' : ''}`}>
+                {/* Terminal header — only when tab switcher is NOT showing */}
+                {!(splitFile && terminalAlive) && (
+                  <div className="flex h-9 flex-shrink-0 items-center justify-between px-3" style={{ background: getTerminalTheme().background }}>
+                    <div className="flex items-center gap-1.5">
+                      <TerminalSquare className="h-3.5 w-3.5" style={{ color: getTerminalTheme().foreground }} />
+                      <span className="text-[12px] font-medium" style={{ color: getTerminalTheme().foreground }}>Terminal</span>
+                      <span className="text-[11px]" style={{ color: getTerminalTheme().brightBlack }}>
+                        {agentDir ? `~/${agentDir.split('/').pop()}` : ''}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        // Hide terminal panel (terminal keeps running in background)
+                        setSplitActiveView('file');
+                      }}
+                      className="flex h-5 w-5 items-center justify-center rounded transition-colors"
+                      style={{ color: getTerminalTheme().brightBlack }}
+                      title="隐藏终端"
+                    >
+                      <span className="text-sm leading-none">×</span>
+                    </button>
+                  </div>
+                )}
+                <Suspense fallback={<div className="flex h-full items-center justify-center" style={{ background: getTerminalTheme().background }}><Loader2 className="h-5 w-5 animate-spin" style={{ color: getTerminalTheme().brightBlack }} /></div>}>
+                  <LazyTerminalPanel
+                    workspacePath={agentDir}
+                    terminalId={terminalId}
+                    isVisible={splitActiveView === 'terminal'}
+                    onTerminalCreated={(id) => {
+                      setTerminalId(id);
+                      setTerminalAlive(true);
+                    }}
+                    onTerminalExited={() => {
+                      // Clean up dead session in Rust before clearing state
+                      const deadId = terminalId;
+                      setTerminalAlive(false);
+                      setTerminalId(null);
+                      if (deadId) {
+                        import('@tauri-apps/api/core').then(({ invoke: inv }) => {
+                          inv('cmd_terminal_close', { terminalId: deadId }).catch(() => {});
+                        });
+                      }
+                    }}
+                  />
+                </Suspense>
+              </div>
+            )}
           </div>
         </>
       )}
