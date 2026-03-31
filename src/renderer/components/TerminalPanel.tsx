@@ -89,6 +89,14 @@ export function TerminalPanel({
       cursorStyle: 'bar',
       scrollback: 5000,
       allowProposedApi: true,
+      // macOS key handling
+      macOptionIsMeta: false,
+      macOptionClickForcesSelection: true,
+      // Right-click: select word + show native context menu (Copy/Paste)
+      rightClickSelectsWord: true,
+      // Visual
+      drawBoldTextInBrightColors: true,
+      customGlyphs: true,
     });
 
     const fitAddon = new FitAddon();
@@ -112,34 +120,83 @@ export function TerminalPanel({
     };
   }, []);
 
-  // 2. Create PTY when terminal is needed but not yet created
+  // 2. Create PTY — "listeners first" pattern to prevent exit event loss.
+  //    Frontend generates the terminal ID, registers listeners, THEN creates the PTY.
+  //    This closes the race where a fast-exiting shell beats listener registration.
+  const creatingRef = useRef(false); // In-flight guard prevents double creation
+
   useEffect(() => {
     if (terminalId !== null) return; // Already created
     if (!fitAddonRef.current) return; // xterm not ready yet
+    if (creatingRef.current) return; // Creation already in flight
+    creatingRef.current = true;
 
     const dims = fitAddonRef.current.proposeDimensions();
     const rows = dims?.rows ?? 24;
     const cols = dims?.cols ?? 80;
 
-    // Resolve sidecar port for MYAGENTS_PORT env var (lets `myagents` CLI work in terminal)
-    const portPromise = sessionIdProp
-      ? import('@/api/tauriClient').then(m => m.getSessionPort(sessionIdProp))
-      : Promise.resolve(null);
+    // Generate ID frontend-side so we can register listeners before PTY creation
+    const preId = crypto.randomUUID();
+    let cancelled = false;
+    let unlistenData: (() => void) | null = null;
+    let unlistenExit: (() => void) | null = null;
 
-    portPromise.then(port =>
-      invoke<string>('cmd_terminal_create', { workspacePath, rows, cols, sidecarPort: port ?? null })
-    ).then((id) => {
-        if (!isMountedRef.current) {
-          // Component unmounted during creation — clean up the orphaned PTY
-          invoke('cmd_terminal_close', { terminalId: id }).catch(() => {});
-          return;
+    const create = async () => {
+      // Step 1: Register listeners FIRST (before PTY exists)
+      unlistenData = await listen<number[]>(`terminal:data:${preId}`, (event) => {
+        if (xtermRef.current && event.payload) {
+          xtermRef.current.write(new Uint8Array(event.payload));
         }
-        onTerminalCreatedRef.current(id);
-      })
-      .catch((err) => {
-        console.error('[TerminalPanel] Failed to create terminal:', err);
-        xtermRef.current?.write(`\r\nFailed to create terminal: ${err}\r\n`);
       });
+      if (cancelled) { unlistenData(); creatingRef.current = false; return; }
+
+      unlistenExit = await listen(`terminal:exit:${preId}`, () => {
+        xtermRef.current?.write('\r\n\x1b[90m[Process exited]\x1b[0m\r\n');
+        onTerminalExitedRef.current();
+      });
+      if (cancelled) { unlistenExit(); unlistenData?.(); creatingRef.current = false; return; }
+
+      // Step 2: Resolve sidecar port
+      let port: number | null = null;
+      if (sessionIdProp) {
+        try {
+          const mod = await import('@/api/tauriClient');
+          port = await mod.getSessionPort(sessionIdProp);
+        } catch { /* port stays null */ }
+      }
+      if (cancelled) { unlistenData?.(); unlistenExit?.(); creatingRef.current = false; return; }
+
+      // Step 3: Create PTY with pre-generated ID
+      const id = await invoke<string>('cmd_terminal_create', {
+        workspacePath, rows, cols,
+        sidecarPort: port ?? null,
+        terminalId: preId,
+      });
+
+      creatingRef.current = false;
+
+      if (!isMountedRef.current || cancelled) {
+        invoke('cmd_terminal_close', { terminalId: id }).catch(() => {});
+        unlistenData?.();
+        unlistenExit?.();
+        return;
+      }
+      onTerminalCreatedRef.current(id);
+    };
+
+    create().catch((err) => {
+      creatingRef.current = false;
+      console.error('[TerminalPanel] Failed to create terminal:', err);
+      xtermRef.current?.write(`\r\nFailed to create terminal: ${err}\r\n`);
+    });
+
+    return () => {
+      cancelled = true;
+      // Listeners cleaned up inside create() on cancel, or will be cleaned up
+      // by the next effect cycle when terminalId becomes non-null
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- sessionIdProp intentionally excluded:
+  // port is a one-time env injection at creation; re-creating PTY on session change would kill the shell
   }, [terminalId, workspacePath]);
 
   // 3. User input → PTY write
@@ -156,91 +213,52 @@ export function TerminalPanel({
     return () => disposable.dispose();
   }, [terminalId]);
 
-  // 4. PTY output → xterm render
-  useEffect(() => {
-    if (!terminalId) return;
-
-    let cancelled = false;
-    let unlistenData: (() => void) | null = null;
-    let unlistenExit: (() => void) | null = null;
-
-    const setup = async () => {
-      unlistenData = await listen<number[]>(`terminal:data:${terminalId}`, (event) => {
-        if (xtermRef.current && event.payload) {
-          xtermRef.current.write(new Uint8Array(event.payload));
-        }
-      });
-      if (cancelled) { unlistenData(); return; }
-
-      unlistenExit = await listen(`terminal:exit:${terminalId}`, () => {
-        xtermRef.current?.write('\r\n\x1b[90m[Process exited]\x1b[0m\r\n');
-        onTerminalExitedRef.current();
-      });
-      if (cancelled) { unlistenExit(); }
-    };
-
-    setup();
-
-    return () => {
-      cancelled = true;
-      unlistenData?.();
-      unlistenExit?.();
-    };
-  }, [terminalId]);
-
-  // 5. Resize sync (container size changes → PTY resize)
+  // 5. Unified resize: single code path for both ResizeObserver and visibility changes.
+  // Prevents garbled prompt from multiple fit+SIGWINCH cycles racing each other.
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastColsRef = useRef<number>(0);
+  const lastRowsRef = useRef<number>(0);
 
-  const handleResize = useCallback(() => {
-    // Debounce resize to avoid excessive IPC calls during drag
-    if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
-    resizeTimerRef.current = setTimeout(() => {
-      if (!fitAddonRef.current) return;
-      fitAddonRef.current.fit();
-      const dims = fitAddonRef.current.proposeDimensions();
-      if (dims && terminalIdRef.current) {
-        invoke('cmd_terminal_resize', {
-          terminalId: terminalIdRef.current,
-          rows: dims.rows,
-          cols: dims.cols,
-        }).catch(() => {
-          // Resize failure is non-critical
-        });
-      }
-    }, 100);
+  const doFitAndResize = useCallback(() => {
+    if (!fitAddonRef.current) return;
+    fitAddonRef.current.fit();
+    const dims = fitAddonRef.current.proposeDimensions();
+    if (!dims || !terminalIdRef.current) return;
+    // Only send resize to PTY if dimensions actually changed — prevents
+    // duplicate SIGWINCH that causes shell to redraw prompt multiple times
+    if (dims.cols === lastColsRef.current && dims.rows === lastRowsRef.current) return;
+    lastColsRef.current = dims.cols;
+    lastRowsRef.current = dims.rows;
+    invoke('cmd_terminal_resize', {
+      terminalId: terminalIdRef.current,
+      rows: dims.rows,
+      cols: dims.cols,
+    }).catch(() => {});
   }, []);
 
+  // ResizeObserver — fires on container size changes (drag resize, window resize)
   useEffect(() => {
     if (!containerRef.current) return;
 
-    const observer = new ResizeObserver(handleResize);
+    const observer = new ResizeObserver(() => {
+      if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
+      resizeTimerRef.current = setTimeout(doFitAndResize, 100);
+    });
     observer.observe(containerRef.current);
 
     return () => {
       observer.disconnect();
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
     };
-  }, [handleResize]);
+  }, [doFitAndResize]);
 
-  // 6. Re-fit when panel becomes visible (switching from file/hidden back to terminal)
-  // Wait for layout to fully stabilize after `hidden` removal, then fit + resize PTY
-  // in one shot. Prevents the garbled prompt caused by fitting at intermediate dimensions.
+  // Visibility change — fires when switching from file view or hidden back to terminal.
+  // Uses 80ms delay (longer than the 0→real size CSS transition) to ensure layout is stable.
   useEffect(() => {
     if (!isVisible) return;
-    const timer = setTimeout(() => {
-      if (!fitAddonRef.current) return;
-      fitAddonRef.current.fit();
-      const dims = fitAddonRef.current.proposeDimensions();
-      if (dims && terminalIdRef.current) {
-        invoke('cmd_terminal_resize', {
-          terminalId: terminalIdRef.current,
-          rows: dims.rows,
-          cols: dims.cols,
-        }).catch(() => {});
-      }
-    }, 50); // 50ms — enough for CSS reflow, avoids premature fit at 0-width
+    const timer = setTimeout(doFitAndResize, 80);
     return () => clearTimeout(timer);
-  }, [isVisible]);
+  }, [isVisible, doFitAndResize]);
 
   return (
     <div

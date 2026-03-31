@@ -63,8 +63,11 @@ pub async fn cmd_terminal_create(
     rows: u16,
     cols: u16,
     sidecar_port: Option<u16>,
+    terminal_id: Option<String>,
 ) -> Result<String, String> {
-    let id = uuid::Uuid::new_v4().to_string();
+    // Use frontend-provided ID if given (allows pre-registering listeners before creation),
+    // otherwise generate one server-side.
+    let id = terminal_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let pty_system = native_pty_system();
 
@@ -111,11 +114,12 @@ pub async fn cmd_terminal_create(
     let child: Arc<std::sync::Mutex<Box<dyn portable_pty::Child + Send>>> =
         Arc::new(std::sync::Mutex::new(child));
 
-    // Spawn background reader task
+    // Spawn background reader task — passes manager Arc for self-cleanup on EOF
     let emit_id = id.clone();
     let app_clone = app.clone();
+    let manager_for_reader: Arc<TerminalManager> = state.inner().clone();
     let reader_task = tokio::task::spawn_blocking(move || {
-        terminal_read_loop(reader, &emit_id, &app_clone);
+        terminal_read_loop(reader, &emit_id, &app_clone, manager_for_reader);
     });
 
     let session = TerminalSession {
@@ -231,10 +235,13 @@ fn cleanup_session(session: TerminalSession, terminal_id: &str) {
 }
 
 /// Background loop: reads PTY output and emits Tauri events.
+/// Self-cleans the session from `TerminalManager` on EOF/error so dead sessions
+/// don't leak even if the frontend misses the exit event.
 fn terminal_read_loop(
     mut reader: Box<dyn Read + Send>,
     terminal_id: &str,
     app: &AppHandle,
+    manager: Arc<TerminalManager>,
 ) {
     let mut buf = [0u8; 4096];
     let event_data = format!("terminal:data:{}", terminal_id);
@@ -259,6 +266,20 @@ fn terminal_read_loop(
             }
         }
     }
+
+    // Self-clean: remove dead session from TerminalManager.
+    // This prevents leaked sessions when the frontend misses the exit event.
+    let id = terminal_id.to_string();
+    tokio::runtime::Handle::current().spawn(async move {
+        let mut map = manager.sessions.lock().await;
+        if let Some(session) = map.remove(&id) {
+            // Kill child process if still running
+            if let Ok(mut child) = session.child.lock() {
+                let _ = child.kill();
+            }
+            ulog_info!("[terminal] Self-cleaned dead session {}", id);
+        }
+    });
 }
 
 /// Select the default shell for the current platform.
@@ -366,6 +387,17 @@ fn inject_terminal_env(cmd: &mut CommandBuilder, app: &AppHandle, sidecar_port: 
         cmd.env("MYAGENTS_PORT", port.to_string());
     }
 
-    // 4. Terminal indicator (so scripts can detect they're in MyAgents terminal)
+    // 4. Terminal type — CRITICAL: without this, shell doesn't know terminal capabilities,
+    //    causing broken delete key, missing colors, and broken cursor movement.
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("TERM_PROGRAM", "MyAgents");
+
+    // 5. Locale — preserve system locale or default to UTF-8
+    if std::env::var("LANG").is_err() {
+        cmd.env("LANG", "en_US.UTF-8");
+    }
+
+    // 6. Terminal indicator (so scripts can detect they're in MyAgents terminal)
     cmd.env("MYAGENTS_TERMINAL", "1");
 }
