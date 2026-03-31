@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen, TerminalSquare } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Bot, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -1763,13 +1763,33 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     );
                   })()}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setAgentError(null)}
-                  className="flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]"
-                >
-                  Dismiss
-                </button>
+                <div className="flex flex-shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const providerName = currentProvider?.name || currentProvider?.id || '未知';
+                      const model = selectedModel || currentProvider?.primaryModel || '未知';
+                      const workspace = agentDir || '未知';
+                      const desc = `我在使用 AI 对话时遇到了报错，请帮我查询日志诊断问题并引导我解决：\n\n**报错信息**: ${agentError}\n**供应商**: ${providerName}\n**模型**: ${model}\n**工作区**: ${workspace}`;
+                      setAgentError(null);
+                      window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
+                        detail: { description: desc, appVersion: '' },
+                      }));
+                    }}
+                    className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                  >
+                    <Bot className="h-3 w-3" />
+                    召唤小助理
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAgentError(null)}
+                    className="flex-shrink-0 rounded p-0.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink-muted)]"
+                    title="关闭"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           )}
