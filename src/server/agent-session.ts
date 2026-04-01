@@ -5041,12 +5041,32 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     console.log('[agent] session started');
     console.log('[agent] starting for-await loop on querySession');
 
-    // Startup timeout: if no system_init arrives within 60s, abort.
+    // Startup timeout: if no system_init arrives, abort.
     // IMPORTANT: Only system_init clears this timeout, NOT other messages like rate_limit_event.
     // Otherwise a rate_limit_event arriving before system_init would cancel the timeout,
     // leaving the session as a zombie (stuck in for-await loop forever without system_init).
-    const STARTUP_TIMEOUT_MS = 60_000;
+    //
+    // Adaptive timeout strategy:
+    //   Phase 1 (initial): 60s — if SDK subprocess doesn't show signs of life, fail fast.
+    //   Phase 2 (extended): 600s — once session_state_changed:running arrives, the subprocess
+    //     is alive and initializing. First-time workspace init can take minutes on Windows NTFS
+    //     (SDK builds internal caches for large directories like ~/.myagents with 20k+ files).
+    //     After the first successful init, subsequent sessions complete in <1s.
+    const STARTUP_TIMEOUT_INITIAL_MS = 60_000;
+    const STARTUP_TIMEOUT_EXTENDED_MS = 600_000;
     let systemInitReceived = false;
+    let startupTimeoutExtended = false;
+
+    const fireStartupTimeout = (timeoutMs: number) => {
+      if (systemInitReceived || shouldAbortSession) return;
+      console.error(`[agent] Startup timeout: no system_init in ${timeoutMs / 1000}s`);
+      abortedByTimeout = true;
+      broadcast('chat:agent-error', {
+        message: 'Agent 启动超时，请重试。如果持续出现，请检查网络连接和 API 配置。'
+      });
+      broadcast('chat:message-error', 'Agent 启动超时');
+      abortPersistentSession();
+    };
 
     // Pre-warm sessions skip startup timeout because SDK CLI needs the first stdin message
     // before sending system_init. During pre-warm, messageGenerator() blocks at waitForMessage()
@@ -5054,19 +5074,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // (triggering pre-warm → active transition). If the subprocess crashes during pre-warm,
     // the for-await loop exits naturally and the finally block handles retry.
     if (!preWarm) {
-      startupTimeoutId = setTimeout(() => {
-          if (!systemInitReceived && !shouldAbortSession) {
-              console.error(`[agent] Startup timeout: no system_init in ${STARTUP_TIMEOUT_MS / 1000}s`);
-              abortedByTimeout = true;
-              broadcast('chat:agent-error', {
-                  message: 'Agent 启动超时，请重试。如果持续出现，请检查网络连接和 API 配置。'
-              });
-              broadcast('chat:message-error', 'Agent 启动超时');
-              // abortPersistentSession 统一处理：设置 shouldAbortSession、唤醒 generator
-              // 的 waitForMessage、调用 interrupt() 解除 for-await 阻塞
-              abortPersistentSession();
-          }
-      }, STARTUP_TIMEOUT_MS);
+      startupTimeoutId = setTimeout(() => fireStartupTimeout(STARTUP_TIMEOUT_INITIAL_MS), STARTUP_TIMEOUT_INITIAL_MS);
     }
 
     let messageCount = 0;
@@ -5215,6 +5223,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       if (sdkMessage.type === 'system' && (sdkMessage as { subtype?: string }).subtype === 'session_state_changed') {
         const state = (sdkMessage as { state?: string }).state;
         console.log(`[agent] SDK session_state_changed: ${state} (our sessionState: ${sessionState})`);
+
+        // Adaptive startup timeout: extend when subprocess proves alive.
+        // SDK emits session_state_changed:running early (before MCP handshake + system_init).
+        // First-time workspace initialization on Windows can take minutes (SDK builds caches
+        // for large directories). Extend the timeout so it doesn't kill a healthy subprocess.
+        if (state === 'running' && !systemInitReceived && !startupTimeoutExtended && startupTimeoutId) {
+          startupTimeoutExtended = true;
+          clearTimeout(startupTimeoutId);
+          startupTimeoutId = setTimeout(() => fireStartupTimeout(STARTUP_TIMEOUT_EXTENDED_MS), STARTUP_TIMEOUT_EXTENDED_MS);
+          console.log(`[agent] Startup timeout extended to ${STARTUP_TIMEOUT_EXTENDED_MS / 1000}s (subprocess alive, awaiting system_init)`);
+        }
       }
 
       // Handle background task lifecycle (SDK Task tool with run_in_background)
