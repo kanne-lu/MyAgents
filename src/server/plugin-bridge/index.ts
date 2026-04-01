@@ -159,8 +159,20 @@ async function loadPlugin() {
     // axios not installed in plugin dir — no patch needed
   }
 
-  // Import the plugin module
-  const pluginModule = await import(`${pluginDir}/node_modules/${entryModule}`);
+  // Import the plugin module.
+  // Prefer the `module` field (ESM entry) over `main` (CJS entry) when available.
+  // Some plugins ship both CJS and ESM, but their CJS bundles `require()` ESM-only
+  // dependencies (e.g. file-type v21+) which fails in Bun. Using the ESM entry
+  // avoids this CJS→ESM incompatibility.
+  let importPath = `${pluginDir}/node_modules/${entryModule}`;
+  try {
+    const pluginPkg = await Bun.file(`${pluginDir}/node_modules/${entryModule}/package.json`).json();
+    if (pluginPkg.module) {
+      importPath = `${pluginDir}/node_modules/${entryModule}/${pluginPkg.module}`;
+      console.log(`[plugin-bridge] Using ESM entry: ${pluginPkg.module}`);
+    }
+  } catch { /* use default resolution */ }
+  const pluginModule = await import(importPath);
 
   // Plugins can export their registration in several patterns:
   //   1. default export = { register(api) { ... } }  (OpenClaw standard)
