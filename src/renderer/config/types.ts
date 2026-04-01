@@ -569,6 +569,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     websiteUrl: 'https://cloud.siliconflow.cn/me/models',
     config: {
       baseUrl: 'https://api.siliconflow.cn/',
+      disableNonessential: true,
     },
     modelAliases: { sonnet: 'Pro/deepseek-ai/DeepSeek-V3.2', opus: 'Pro/moonshotai/Kimi-K2.5', haiku: 'stepfun-ai/Step-3.5-Flash' },
     models: [
