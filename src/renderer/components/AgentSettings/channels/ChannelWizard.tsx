@@ -144,6 +144,11 @@ interface ChannelWizardProps {
     onCancel: () => void;
 }
 
+// WeCom QR polling constants — shared between effect logic and render display
+const WECOM_MAX_QR_REFRESHES = 5; // Auto-refresh up to 5 times on QR expiry, then error
+const WECOM_POLL_INTERVAL = 3000;
+const WECOM_MAX_POLLS_PER_QR = 200; // Defensive ~10min ceiling per QR in case server never returns terminal status
+
 export default function ChannelWizard({
     agent,
     platform,
@@ -233,6 +238,8 @@ export default function ChannelWizard({
     const [wecomQrRetryTrigger, setWecomQrRetryTrigger] = useState(0);
     // Rendered QR image for WeCom (auth_url → QR code image)
     const [wecomQrImageUrl, setWecomQrImageUrl] = useState<string | null>(null);
+    // QR refresh count for display (e.g., "二维码已刷新 (2/5)")
+    const [wecomQrRefreshCount, setWecomQrRefreshCount] = useState(0);
 
     // Derived: QR login detection (from preset or installed plugin's detected capability)
     const isQrLogin = isQrLoginFromPreset || (!promoted && installedPlugin?.supportsQrLogin === true);
@@ -248,51 +255,101 @@ export default function ChannelWizard({
     }, []);
 
     // WeCom dualConfig: auto-start QR flow when in QR mode on step 1
+    // Design: polling lifecycle is tied to QR validity. When a QR expires,
+    // auto-generate a new one and continue polling (up to WECOM_MAX_QR_REFRESHES auto-refreshes).
+    // After all refreshes exhausted → error state. User can click retry to restart.
     useEffect(() => {
         if (!isDualConfig || dualConfigMode !== 'qr' || step !== 1 || wecomQrStartedRef.current) return;
         if (!isTauriEnvironment()) return;
         wecomQrStartedRef.current = true;
         let cancelled = false;
 
+        // Helper: generate QR and render as image
+        const generateQr = async (invoke: typeof import('@tauri-apps/api/core').invoke) => {
+            const result = await invoke<{ scode: string; auth_url: string }>('cmd_wecom_qr_generate');
+            if (cancelled || !isMountedRef.current) return null;
+            const dataUrl = await QRCode.toDataURL(result.auth_url, {
+                width: 200, margin: 2,
+                color: { dark: '#000000', light: '#ffffff' },
+            });
+            if (cancelled || !isMountedRef.current) return null;
+            setWecomQrImageUrl(dataUrl);
+            return result.scode;
+        };
+
         (async () => {
             try {
                 setWecomQrStatus('loading');
+                setWecomQrRefreshCount(0);
                 const { invoke } = await import('@tauri-apps/api/core');
-                const result = await invoke<{ scode: string; auth_url: string }>('cmd_wecom_qr_generate');
-                if (cancelled || !isMountedRef.current) return;
-                // Convert auth_url to QR code image
-                const dataUrl = await QRCode.toDataURL(result.auth_url, {
-                    width: 200, margin: 2,
-                    color: { dark: '#000000', light: '#ffffff' },
-                });
-                if (cancelled || !isMountedRef.current) return;
-                setWecomQrImageUrl(dataUrl);
+                let scode = await generateQr(invoke);
+                if (!scode) return;
                 setWecomQrStatus('waiting');
 
-                // Poll for scan result
-                const POLL_INTERVAL = 3000;
-                const MAX_POLLS = 100; // 5 minutes
-                for (let i = 0; i < MAX_POLLS; i++) {
-                    if (cancelled || !isMountedRef.current || wecomQrAbortRef.current) return;
-                    await new Promise(r => setTimeout(r, POLL_INTERVAL));
-                    if (cancelled || !isMountedRef.current || wecomQrAbortRef.current) return;
-                    const poll = await invoke<{ status: string; bot_id?: string; secret?: string }>('cmd_wecom_qr_poll', { scode: result.scode });
-                    if (poll.status === 'success' && poll.bot_id && poll.secret) {
-                        if (cancelled || !isMountedRef.current) return;
-                        setWecomQrBotId(poll.bot_id);
-                        setWecomQrSecret(poll.secret);
-                        setWecomQrStatus('success');
-                        return;
+                let qrRefreshCount = 0;
+                let globalPollIndex = 0;
+
+                // Outer loop: one iteration per QR code (initial + up to N refreshes)
+                while (qrRefreshCount <= WECOM_MAX_QR_REFRESHES) {
+                    let pollsThisQr = 0;
+                    // Inner loop: poll until success, terminal state, or per-QR ceiling
+                    while (pollsThisQr < WECOM_MAX_POLLS_PER_QR) {
+                        if (cancelled || !isMountedRef.current || wecomQrAbortRef.current) return;
+                        await new Promise(r => setTimeout(r, WECOM_POLL_INTERVAL));
+                        if (cancelled || !isMountedRef.current || wecomQrAbortRef.current) return;
+
+                        const poll = await invoke<{ status: string; bot_id?: string; secret?: string }>(
+                            'cmd_wecom_qr_poll', { scode, pollIndex: globalPollIndex }
+                        );
+                        globalPollIndex++;
+                        pollsThisQr++;
+
+                        if (poll.status === 'success' && poll.bot_id && poll.secret) {
+                            if (cancelled || !isMountedRef.current) return;
+                            setWecomQrBotId(poll.bot_id);
+                            setWecomQrSecret(poll.secret);
+                            setWecomQrStatus('success');
+                            return;
+                        }
+
+                        // QR expired → auto-refresh
+                        if (poll.status === 'expired') {
+                            qrRefreshCount++;
+                            if (qrRefreshCount > WECOM_MAX_QR_REFRESHES) break; // → error
+                            if (cancelled || !isMountedRef.current) return;
+                            setWecomQrRefreshCount(qrRefreshCount);
+                            setWecomQrStatus('loading');
+                            scode = await generateQr(invoke);
+                            if (!scode) return;
+                            setWecomQrStatus('waiting');
+                            break; // restart inner poll loop with new scode
+                        }
+
+                        // User cancelled or denied on WeCom side → error
+                        if (poll.status === 'cancelled' || poll.status === 'denied') {
+                            if (!cancelled && isMountedRef.current) setWecomQrStatus('error');
+                            return;
+                        }
+                        // Otherwise "waiting" — continue polling
                     }
-                    // Terminal states — QR expired or user denied
-                    if (poll.status === 'expired' || poll.status === 'cancelled' || poll.status === 'denied') {
-                        if (!cancelled && isMountedRef.current) setWecomQrStatus('error');
-                        return;
+                    // If inner loop hit the per-QR ceiling without a terminal status,
+                    // treat it as if the QR expired (auto-refresh)
+                    if (pollsThisQr >= WECOM_MAX_POLLS_PER_QR) {
+                        qrRefreshCount++;
+                        if (qrRefreshCount > WECOM_MAX_QR_REFRESHES) break;
+                        if (cancelled || !isMountedRef.current) return;
+                        setWecomQrRefreshCount(qrRefreshCount);
+                        setWecomQrStatus('loading');
+                        scode = await generateQr(invoke);
+                        if (!scode) return;
+                        setWecomQrStatus('waiting');
                     }
                 }
-                // Timeout
+
+                // Exhausted all QR refreshes
                 if (!cancelled && isMountedRef.current) setWecomQrStatus('error');
-            } catch {
+            } catch (err) {
+                console.error('[ChannelWizard] WeCom QR flow error:', err);
                 if (!cancelled && isMountedRef.current) setWecomQrStatus('error');
             }
         })();
@@ -310,6 +367,7 @@ export default function ChannelWizard({
             setWecomQrImageUrl(null);
             setWecomQrBotId('');
             setWecomQrSecret('');
+            setWecomQrRefreshCount(0);
         }
     }, []);
 
@@ -1049,12 +1107,15 @@ export default function ChannelWizard({
                                 )}
                                 {wecomQrStatus === 'error' && (
                                     <div className="flex h-[200px] w-[200px] flex-col items-center justify-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--paper-inset)]">
-                                        <p className="text-sm text-[var(--ink-muted)]">获取二维码失败</p>
+                                        <p className="text-sm text-[var(--ink-muted)]">
+                                            {wecomQrRefreshCount > 0 ? '二维码多次过期' : '获取二维码失败'}
+                                        </p>
                                         <button
                                             onClick={() => {
                                                 wecomQrStartedRef.current = false;
                                                 wecomQrAbortRef.current = false;
                                                 setWecomQrStatus('idle');
+                                                setWecomQrRefreshCount(0);
                                                 setWecomQrRetryTrigger(n => n + 1);
                                             }}
                                             className="text-xs text-[var(--accent-warm)] hover:underline"
@@ -1070,10 +1131,14 @@ export default function ChannelWizard({
                                 )}
 
                                 <p className="mt-3 text-xs text-[var(--ink-muted)]">
-                                    {wecomQrStatus === 'loading' && '正在获取二维码...'}
+                                    {wecomQrStatus === 'loading' && (wecomQrRefreshCount > 0
+                                        ? `二维码已过期，正在刷新 (${wecomQrRefreshCount}/${WECOM_MAX_QR_REFRESHES})...`
+                                        : '正在获取二维码...')}
                                     {wecomQrStatus === 'waiting' && '请使用企业微信 App 扫描二维码'}
                                     {wecomQrStatus === 'success' && '凭证已就绪，点击「下一步」继续'}
-                                    {wecomQrStatus === 'error' && '请检查网络后重试'}
+                                    {wecomQrStatus === 'error' && (wecomQrRefreshCount > 0
+                                        ? '二维码多次过期，请检查网络后重试'
+                                        : '请检查网络后重试')}
                                 </p>
                             </div>
 

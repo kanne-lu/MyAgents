@@ -17,7 +17,7 @@ use crate::sidecar::{
     shutdown_for_update,
 };
 use crate::logger;
-use crate::{ulog_info, ulog_warn};
+use crate::{ulog_error, ulog_info, ulog_warn};
 
 // ============= Legacy Commands (for backward compatibility) =============
 
@@ -988,8 +988,9 @@ pub struct WecomQrPollResult {
 }
 
 /// Poll the WeCom QR scan result. Call repeatedly until status is "success".
+/// `poll_index` is used for periodic logging (log every 10th poll to reduce noise).
 #[tauri::command]
-pub async fn cmd_wecom_qr_poll(scode: String) -> Result<WecomQrPollResult, String> {
+pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result<WecomQrPollResult, String> {
     // Sanitize scode: only allow alphanumeric (defense-in-depth against URL injection)
     let safe_scode: String = scode.chars().filter(|c| c.is_alphanumeric()).collect();
     let url = format!(
@@ -1014,28 +1015,37 @@ pub async fn cmd_wecom_qr_poll(scode: String) -> Result<WecomQrPollResult, Strin
     let errcode = resp["errcode"].as_i64().unwrap_or(0);
     if errcode != 0 {
         let errmsg = resp["errmsg"].as_str().unwrap_or("unknown error");
+        ulog_error!("[wecom-qr] Poll API error {}: {}", errcode, errmsg);
         return Err(format!("WeCom QR poll API error {}: {}", errcode, errmsg));
     }
 
     let status_str = resp["data"]["status"].as_str().unwrap_or("waiting");
+    let idx = poll_index.unwrap_or(0);
+
     match status_str {
         "success" => {
             let bot_info = &resp["data"]["bot_info"];
             let bot_id = bot_info["botid"].as_str().map(String::from);
             let secret = bot_info["secret"].as_str().map(String::from);
             if bot_id.is_some() && secret.is_some() {
-                ulog_info!("[wecom-qr] QR scan success, bot created");
+                ulog_info!("[wecom-qr] QR scan success, bot created (poll #{})", idx);
                 Ok(WecomQrPollResult { status: "success".into(), bot_id, secret })
             } else {
+                // Log raw response for debugging unexpected format
+                ulog_error!("[wecom-qr] Poll #{} status=success but bot_info incomplete: {}", idx, resp);
                 Err("WeCom QR scan succeeded but bot_info is incomplete".into())
             }
         }
         "expired" | "cancelled" | "denied" => {
-            // Terminal states — QR code is no longer valid
+            ulog_info!("[wecom-qr] Poll #{} terminal status: {}", idx, status_str);
             Ok(WecomQrPollResult { status: status_str.into(), bot_id: None, secret: None })
         }
         _ => {
-            // "waiting" or other pending states
+            // Periodic logging: first poll, then every 10th
+            if idx == 0 || idx % 10 == 0 {
+                let scode_preview: String = safe_scode.chars().take(8).collect();
+                ulog_info!("[wecom-qr] Poll #{} scode={} status={}", idx, scode_preview, status_str);
+            }
             Ok(WecomQrPollResult { status: "waiting".into(), bot_id: None, secret: None })
         }
     }
