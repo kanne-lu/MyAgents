@@ -596,9 +596,11 @@ transition: background var(--duration-fast),
             border-color var(--duration-fast),
             transform var(--duration-fast);
 
-/* 按钮点击反馈 (全局生效) */
-button:active:not(:disabled) {
-  transform: scale(0.97);
+/* 点击反馈 — 统一 scale(0.98)，全局生效 */
+button:active:not(:disabled),
+[role="button"]:active,
+[data-tree-row]:active {
+  transform: scale(0.98);
 }
 
 /* 下拉菜单出现 */
@@ -618,11 +620,11 @@ transition: opacity var(--duration-slow),
 | 状态 | 反馈方式 |
 |------|----------|
 | Hover | 背景色变化、文字颜色加深 |
-| Active/Press | 轻微缩放 `scale(0.97)` |
+| Active/Press | 统一缩放 `scale(0.98)` |
 | Focus | 边框高亮或轮廓 |
 | Disabled | 降低不透明度、禁用光标 |
 
-**按钮点击动效已全局配置**，无需在各组件中单独添加。
+**点击动效已全局配置**（`button`、`[role="button"]`、`[data-tree-row]`），无需在各组件中单独添加。
 
 ---
 

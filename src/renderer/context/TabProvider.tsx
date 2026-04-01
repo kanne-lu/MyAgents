@@ -635,8 +635,21 @@ export default function TabProvider({
                     pendingAttachmentsRef.current = null; // Clear after use
                 }
 
+                // Replayed assistant messages are completed — mark thinking blocks as isComplete
+                // so the UI doesn't show a spinner on them.
+                let replayContent = msg.content;
+                if (msg.role === 'assistant' && Array.isArray(replayContent)) {
+                    const needsPatch = replayContent.some(b => b.type === 'thinking' && !b.isComplete);
+                    if (needsPatch) {
+                        replayContent = replayContent.map(b =>
+                            b.type === 'thinking' && !b.isComplete ? { ...b, isComplete: true } : b
+                        );
+                    }
+                }
+
                 setHistoryMessages(prev => [...prev, {
                     ...msg,
+                    content: replayContent,
                     timestamp: new Date(msg.timestamp),
                     attachments,
                 }]);
@@ -763,6 +776,10 @@ export default function TabProvider({
                         const content = typeof prev.content === 'string'
                             ? [{ type: 'text' as const, text: prev.content }]
                             : prev.content;
+                        // Deduplicate: skip if a thinking block with this index already exists
+                        if (content.some(b => b.type === 'thinking' && b.thinkingStreamIndex === index)) {
+                            return prev;
+                        }
                         return { ...prev, content: [...content, thinkingBlock] };
                     }
                     isStreamingRef.current = true;

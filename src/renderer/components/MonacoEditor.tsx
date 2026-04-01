@@ -18,7 +18,7 @@ import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
 // CRITICAL: Must import Monaco CSS for styles to work in Vite bundled mode
 import 'monaco-editor/min/vs/editor/editor.main.css';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 // Configure Monaco Environment for bundled workers (required for Tauri CSP)
 self.MonacoEnvironment = {
@@ -57,6 +57,8 @@ interface MonacoEditorProps {
     className?: string;
     /** Auto focus the editor when mounted */
     autoFocus?: boolean;
+    /** Cmd/Ctrl+S handler — registered as Monaco keybinding */
+    onSave?: () => void;
 }
 
 export default function MonacoEditor({
@@ -65,7 +67,8 @@ export default function MonacoEditor({
     language = 'plaintext',
     readOnly = false,
     className = '',
-    autoFocus = false
+    autoFocus = false,
+    onSave,
 }: MonacoEditorProps) {
     const handleChange = useCallback((newValue: string | undefined) => {
         onChange(newValue ?? '');
@@ -198,11 +201,22 @@ export default function MonacoEditor({
         });
     }, []);
 
+    // Stable ref for onSave to avoid re-registering keybinding on every render
+    const onSaveRef = useRef(onSave);
+    useEffect(() => { onSaveRef.current = onSave; }, [onSave]);
+
     // Force apply theme after mount to ensure it takes effect
     // This handles the case where beforeMount's defineTheme might not sync immediately
-    // Also handles autoFocus if requested
+    // Also registers Cmd/Ctrl+S keybinding and handles autoFocus
     const handleOnMount = useCallback((editor: monaco.editor.IStandaloneCodeEditor, monacoInstance: Monaco) => {
         monacoInstance.editor.setTheme(activeTheme);
+
+        // Register Cmd/Ctrl+S keybinding
+        editor.addCommand(
+            monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyS,
+            () => { onSaveRef.current?.(); }
+        );
+
         if (autoFocus) {
             // Use setTimeout to ensure editor is fully ready
             setTimeout(() => editor.focus(), 0);

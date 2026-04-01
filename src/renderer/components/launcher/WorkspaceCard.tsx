@@ -14,24 +14,11 @@ import type { AgentStatusData } from '@/hooks/useAgentStatuses';
 import { getFolderName } from '@/types/tab';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import WorkspaceIcon from './WorkspaceIcon';
-import { findPromotedByPlatform } from '../ImSettings/promotedPlugins';
+import { getChannelTypeLabel } from '@/utils/taskCenterUtils';
 
 // ─── Proactive status helpers ─────────────────────────────────────
 
 type ProactiveState = 'basic' | 'pending' | 'active' | 'paused' | 'error';
-
-const CH_LABEL: Record<string, string> = {
-    telegram: 'Telegram', feishu: '飞书', dingtalk: '钉钉',
-    // OpenClaw plugins — concise labels matching PLATFORM_DISPLAY_NAMES in taskCenterUtils.ts
-    qqbot: 'QQ', 'openclaw-lark': '飞书', 'openclaw-weixin': '微信',
-};
-function chLabel(t: string) {
-    if (t.startsWith('openclaw:')) {
-        const pluginId = t.slice(9);
-        return CH_LABEL[pluginId] ?? findPromotedByPlatform(t)?.name ?? pluginId;
-    }
-    return CH_LABEL[t] || t;
-}
 
 function deriveState(p: Project, a?: AgentConfig, s?: AgentStatusData): ProactiveState {
     if (!p.isAgent || !a) return 'basic';
@@ -165,7 +152,7 @@ export default memo(function WorkspaceCard({
                                                     ? 'bg-[var(--success)]'
                                                     : 'bg-[var(--ink-faint)]'
                                         }`} />
-                                        {chLabel(ch.type)}
+                                        {getChannelTypeLabel(ch.type)}
                                     </span>
                                 );
                             })}

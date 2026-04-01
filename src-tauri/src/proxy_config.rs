@@ -31,7 +31,10 @@ const DEFAULT_PROXY_PORT: u16 = 7890;
 /// Comprehensive NO_PROXY list for all subprocess types.
 /// Bun's `fetch()` honors HTTP_PROXY env vars — without this, inherited system
 /// proxy would break internal localhost calls (admin-api, cron-tool, bridge, etc.).
-const LOCALHOST_NO_PROXY: &str = "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]";
+/// Public so that `terminal.rs` can reuse the same constant (portable-pty uses
+/// `CommandBuilder` instead of `std::process::Command`, so `apply_to_subprocess`
+/// can't be called directly).
+pub const LOCALHOST_NO_PROXY: &str = "localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]";
 
 /// Proxy settings from `~/.myagents/config.json`
 ///

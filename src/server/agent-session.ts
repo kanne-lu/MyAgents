@@ -36,6 +36,13 @@ const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'devel
 // Shared NO_PROXY value — comprehensive list of localhost addresses to bypass proxy
 const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
 
+/**
+ * Claude Agent SDK reserved MCP server names — using these causes the SDK to
+ * crash with exit code 1: "Invalid MCP configuration: X is a reserved MCP name."
+ * Source: claude-code/src/main.tsx (isClaudeInChromeMCPServer, isComputerUseMCPServer)
+ */
+export const SDK_RESERVED_MCP_NAMES = ['claude-in-chrome', 'computer-use'];
+
 // ===== Inherited Proxy Env Snapshot =====
 // Capture system proxy state at sidecar startup (before any setProxyConfig call).
 // When Rust spawns this sidecar WITHOUT explicit proxy config, the process inherits
@@ -587,8 +594,17 @@ function waitForMessage(): Promise<MessageQueueItem | null> {
 }
 
 /** 当前回合是否仍在进行中 */
-function isTurnInFlight(): boolean {
+export function isTurnInFlight(): boolean {
   return isStreamingMessage;
+}
+
+/** 当前正在流式传输的 assistant 消息 ID（未在流式传输时返回 null） */
+export function getStreamingAssistantId(): string | null {
+  if (!isStreamingMessage) return null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant') return messages[i].id;
+  }
+  return null;
 }
 
 // Mid-turn injection: messages yielded to SDK but not yet consumed by the AI.
@@ -1269,7 +1285,7 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * Execution strategy for external stdio:
  * - For npx commands: system npx → bundled Node.js npx → bun x
  * - For other commands: Uses user-specified command directly (node/python etc.)
- * - Strips proxy env vars to prevent MCP WebSocket breakage
+ * - Inherits proxy env + injects NO_PROXY to protect localhost (mirrors Rust proxy_config)
  */
 async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig | typeof cronToolsServer>> {
   // null = MCP not yet configured (e.g. Global sidecar, or Tab pre-warm before /api/mcp/set)
@@ -1277,7 +1293,17 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
   // [...]= user's enabled MCP servers
   // Never fall back to config file — the frontend's /api/mcp/set is the single source of truth.
   // Global sidecar never receives /api/mcp/set and correctly gets no MCP.
-  const servers: McpServerDefinition[] = currentMcpServers ?? [];
+  // Filter out SDK reserved names to prevent fatal crash:
+  // "Invalid MCP configuration: X is a reserved MCP name." → exit code 1
+  const allServers: McpServerDefinition[] = currentMcpServers ?? [];
+  const servers = allServers.filter(s => {
+    const normalized = s.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+    if (SDK_RESERVED_MCP_NAMES.includes(normalized)) {
+      console.warn(`[agent] MCP "${s.id}" skipped: conflicts with SDK reserved name. Rename to avoid this.`);
+      return false;
+    }
+    return true;
+  });
   if (isDebugMode) console.log(`[agent] MCP servers: ${servers.map(s => s.id).join(', ') || 'none'}`);
 
   const result: Record<string, SdkMcpServerConfig | typeof cronToolsServer> = {};
@@ -1358,79 +1384,90 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
       // System Node.js is maintained by the user's package manager, more reliable than our bundled npm.
       // Bundled Node.js serves as fallback for users who don't have Node.js installed.
       if (command === 'npx') {
+        // Pin @latest to known versions for builtin MCPs only (avoids npm registry check on startup)
         if (server.isBuiltin) {
-          // Pin @latest to known versions to avoid npm registry check on every startup
           args = pinMcpPackageVersions(args);
+        }
 
-          // Dual runtime strategy: MCP servers are community npm packages designed for
-          // Node.js. Running them under Bun causes compatibility issues (Playwright pipe
-          // transport, axios adapter, postinstall scripts, etc.).
-          // Priority: system npx → bundled Node.js npx → bun x
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
-          const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, isBunRuntime, getSystemNpxPaths, findExistingPath } = require('./utils/runtime');
-          const systemNpx = findExistingPath(getSystemNpxPaths());
+        // Resolve npx to full path for ALL MCPs (builtin + custom).
+        // Previously custom MCPs used bare 'npx' which relied on SDK's cross-spawn
+        // to find npx.cmd via filtered PATH — failed on Windows when PATH was incomplete
+        // or when the SDK's env whitelist (RK_) didn't propagate Node.js directories.
+        // Resolving to full path eliminates this class of issues (pit-of-success pattern).
+        // Priority: system npx → bundled Node.js npx → bun x
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, isBunRuntime, getSystemNpxPaths, findExistingPath } = require('./utils/runtime');
+        const systemNpx = findExistingPath(getSystemNpxPaths());
 
-          if (systemNpx) {
-            // 1. System npx available — most reliable, user-maintained
-            command = systemNpx;
-            args = ['-y', ...args];
-            console.log(`[agent] MCP ${server.id}: Using system npx (${systemNpx})`);
+        if (systemNpx) {
+          // 1. System npx available — most reliable, user-maintained
+          command = systemNpx;
+          if (!args.includes('-y')) args = ['-y', ...args];
+          console.log(`[agent] MCP ${server.id}: Using system npx (${systemNpx})`);
+        } else {
+          // 2. Fallback to bundled Node.js npx (use absolute path for deterministic resolution)
+          const nodeDir = getNodeDir();
+          if (nodeDir) {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { join: pathJoin } = require('path');
+            command = process.platform === 'win32' ? pathJoin(nodeDir, 'npx.cmd') : pathJoin(nodeDir, 'npx');
+            if (!args.includes('-y')) args = ['-y', ...args];
+            console.log(`[agent] MCP ${server.id}: System npx not found, using bundled Node.js npx (${command})`);
           } else {
-            // 2. Fallback to bundled Node.js npx (use absolute path for deterministic resolution)
-            const nodeDir = getNodeDir();
-            if (nodeDir) {
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { join: pathJoin } = require('path');
-              command = process.platform === 'win32' ? pathJoin(nodeDir, 'npx.cmd') : pathJoin(nodeDir, 'npx');
-              args = ['-y', ...args];
-              console.log(`[agent] MCP ${server.id}: System npx not found, using bundled Node.js npx (${command})`);
+            // 3. Last resort: bun x or derive npx from system node
+            const runtime = getBundledRuntimePath();
+            if (isBunRuntime(runtime)) {
+              command = runtime;
+              // bun x doesn't use -y flag — strip only the leading -y (npx auto-confirm)
+              const bunArgs = args[0] === '-y' ? args.slice(1) : args;
+              args = ['x', ...bunArgs];
+              console.log(`[agent] MCP ${server.id}: No Node.js found (system or bundled), falling back to bun x`);
             } else {
-              // 3. Last resort: bun x or derive npx from system node
-              const runtime = getBundledRuntimePath();
-              if (isBunRuntime(runtime)) {
-                command = runtime;
-                args = ['x', ...args];
-                console.log(`[agent] MCP ${server.id}: No Node.js found (system or bundled), falling back to bun x`);
-              } else {
-                // getBundledRuntimePath found a system node — derive npx from same dir
-                // eslint-disable-next-line @typescript-eslint/no-require-imports
-                const { dirname: pathDirname, resolve: pathResolve } = require('path');
-                const npxSibling = pathResolve(pathDirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
-                command = npxSibling;
-                args = ['-y', ...args];
-                console.log(`[agent] MCP ${server.id}: Derived npx from system node: ${npxSibling}`);
-              }
+              // getBundledRuntimePath found a system node — derive npx from same dir
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const { dirname: pathDirname, resolve: pathResolve } = require('path');
+              const npxSibling = pathResolve(pathDirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
+              command = npxSibling;
+              if (!args.includes('-y')) args = ['-y', ...args];
+              console.log(`[agent] MCP ${server.id}: Derived npx from system node: ${npxSibling}`);
             }
           }
-        } else {
-          // Custom MCP: use system npx with -y for auto-confirm
-          if (!args.includes('-y')) {
-            args = ['-y', ...args];
-          }
-          console.log(`[agent] MCP ${server.id}: Using system npx`);
         }
       }
 
-      // Build MCP config with isolated env to prevent proxy interference.
-      // The parent Sidecar may have HTTP_PROXY set (injected by Rust at spawn),
-      // which leaks into MCP child processes and breaks localhost WebSocket connections
-      // (e.g., playwright-core's ws transport to Chrome DevTools gets routed through proxy).
+      // Build MCP config with proxy env inherited from parent Sidecar.
+      // MCP subprocesses (ddg-search, edge-tts, etc.) need outbound proxy to reach
+      // external APIs when the user has VPN/proxy configured. Previous approach stripped
+      // ALL proxy vars to protect Playwright's localhost WebSocket — but that broke every
+      // MCP that needs internet access under proxy.
+      //
+      // New strategy (mirrors Rust proxy_config::apply_to_subprocess):
+      // - Inherit parent's proxy vars (HTTP_PROXY, HTTPS_PROXY) so outbound works
+      // - ALWAYS inject NO_PROXY to protect localhost (Playwright ws, Chrome DevTools)
+      // - User-defined server.env has highest priority (can override proxy)
       const mcpEnv: Record<string, string> = {};
 
-      // Copy user-defined env vars for this server
+      // Inherit proxy env from parent sidecar (if set)
+      for (const proxyVar of [
+        'HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy',
+        'ALL_PROXY', 'all_proxy',
+      ]) {
+        const val = process.env[proxyVar];
+        if (val) mcpEnv[proxyVar] = val;
+      }
+      // ALWAYS inject NO_PROXY to protect localhost — prevents proxy from intercepting
+      // MCP localhost WebSocket connections (e.g., playwright-core ↔ Chrome DevTools)
+      mcpEnv.NO_PROXY = PROXY_NO_PROXY_VAL;
+      mcpEnv.no_proxy = PROXY_NO_PROXY_VAL;
+
+      // Copy user-defined env vars for this server (can override outbound proxy vars)
       if (server.env && Object.keys(server.env).length > 0) {
         Object.assign(mcpEnv, server.env);
       }
-
-      // Strip proxy env vars from MCP subprocess
-      for (const proxyVar of [
-        'http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY',
-        'ALL_PROXY', 'all_proxy',
-      ]) {
-        if (!(proxyVar in mcpEnv)) {
-          mcpEnv[proxyVar] = '';
-        }
-      }
+      // Re-enforce NO_PROXY after user env merge — user env must NOT defeat localhost protection.
+      // Outbound proxy (HTTP_PROXY) can be overridden by user, but NO_PROXY is non-negotiable.
+      mcpEnv.NO_PROXY = PROXY_NO_PROXY_VAL;
+      mcpEnv.no_proxy = PROXY_NO_PROXY_VAL;
 
       // Playwright MCP: two user-selectable modes (configured in Settings UI):
       // - Isolated (--isolated): concurrent browser sessions, storage-state for login
@@ -1455,7 +1492,7 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
       const mcpConfig: SdkMcpServerConfig = {
         command,
         args,
-        env: mcpEnv,  // Always set: proxy vars are stripped above
+        env: mcpEnv,  // Always set: proxy inherited + NO_PROXY enforced
       };
 
       result[server.id] = mcpConfig;

@@ -15,8 +15,10 @@ import {
   Trash2,
   Upload,
   PanelRightClose,
-  ExternalLink
+  ExternalLink,
+  TerminalSquare
 } from 'lucide-react';
+import Tip from '@/components/Tip';
 import { forwardRef, lazy, memo, Suspense, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Tree, type TreeApi } from 'react-arborist';
 import {
@@ -98,6 +100,10 @@ interface DirectoryPanelProps {
   /** When provided, file clicks route to this callback instead of opening the modal.
    *  Used by split-view mode (experimentalSplitView) to open files in a side panel. */
   onFilePreviewExternal?: (file: { name: string; content: string; size: number; path: string }) => void;
+  /** Open embedded terminal in split panel */
+  onOpenTerminal?: () => void;
+  /** Whether an embedded terminal is currently alive (for indicator display) */
+  terminalAlive?: boolean;
 }
 
 type FilePreview = {
@@ -236,6 +242,8 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
   onOpenSettings,
   onSyncSkillToGlobal,
   onFilePreviewExternal,
+  onOpenTerminal,
+  terminalAlive,
 }, ref) {
   const [directoryInfo, setDirectoryInfo] = useState<DirectoryTree | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1276,6 +1284,29 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
             </button>
           )}
           <span className="text-base font-semibold text-[var(--ink)]">项目工作区</span>
+          {/* Terminal button — next to title */}
+          {onOpenTerminal && (
+            <Tip label={terminalAlive ? '显示终端' : '打开终端'} position="bottom">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenTerminal();
+                }}
+                className={`relative flex h-5 w-5 items-center justify-center rounded transition-colors ${
+                  terminalAlive
+                    ? 'text-[var(--accent-warm)] hover:bg-[var(--accent-warm-subtle)]'
+                    : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]'
+                }`}
+              >
+                <TerminalSquare className="h-3.5 w-3.5" />
+                {/* Alive indicator dot */}
+                {terminalAlive && (
+                  <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--success)]" />
+                )}
+              </button>
+            </Tip>
+          )}
         </div>
         {/* Right side buttons */}
         <div className="flex items-center gap-1">

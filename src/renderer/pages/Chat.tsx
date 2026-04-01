@@ -1,10 +1,11 @@
-import { AlertTriangle, ArrowLeft, History, Loader2, Plus, PanelRightOpen } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Bot, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useToast } from '@/components/Toast';
+import Tip from '@/components/Tip';
 import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/DirectoryPanel';
 import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
@@ -44,6 +45,10 @@ import type { InitialMessage } from '@/types/tab';
 
 // Lazy load FilePreviewModal for split view panel
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
+// Lazy load TerminalPanel for embedded terminal
+const LazyTerminalPanel = lazy(() => import('@/components/TerminalPanel').then(m => ({ default: m.TerminalPanel })));
+// Terminal chrome now uses CSS tokens that auto-switch with light/dark theme.
+// No need for cached theme constants — the header uses var(--paper), var(--ink), etc.
 
 /** Inline-editable session title — click to edit, Enter/Blur to save, Esc to cancel */
 function SessionTitleEditor({ title, onRename }: { title: string; onRename: (newTitle: string) => void }) {
@@ -64,7 +69,7 @@ function SessionTitleEditor({ title, onRename }: { title: string; onRename: (new
   };
 
   return (
-    <div className="min-w-0 w-[360px]">
+    <div className="min-w-0 max-w-[360px]">
       {editing ? (
         <input
           ref={inputRef}
@@ -230,26 +235,68 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Store drag listeners in refs so unmount cleanup can remove them
   const dragMoveRef = useRef<((ev: MouseEvent) => void) | null>(null);
   const dragUpRef = useRef<(() => void) | null>(null);
-  // When split view is active, workspace should use overlay mode (like narrow layout)
-  const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitFile !== null);
+
+  // ── Embedded terminal state ──
+  // Terminal lifecycle is tied to this Tab, not to the panel visibility.
+  // Hiding the panel keeps the PTY alive; only Tab close kills it.
+  const [terminalId, setTerminalId] = useState<string | null>(null);
+  const [terminalAlive, setTerminalAlive] = useState(false);
+  const terminalIdRef = useRef<string | null>(null);
+  terminalIdRef.current = terminalId;
+  // Whether the user has the terminal "pinned" to the split panel.
+  // true = terminal is shown in the panel (or being created).
+  // false = terminal may be alive in background but not displayed.
+  // Clicking terminal icon sets true; clicking terminal × sets false.
+  const [terminalPinned, setTerminalPinned] = useState(false);
+  // Which view is active in the right panel: 'file' or 'terminal'
+  const [splitActiveView, setSplitActiveView] = useState<'file' | 'terminal'>('file');
+
+  // Derived: is the right split panel visible?
+  const splitPanelVisible = splitFile !== null || (terminalPinned && (terminalAlive || splitActiveView === 'terminal'));
+  // Should the terminal component stay mounted? (for xterm.js state preservation)
+  const terminalMounted = terminalAlive || (terminalPinned && splitActiveView === 'terminal');
+
+  // When split view is active or layout is narrow, workspace uses overlay drawer
+  const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitPanelVisible);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
   const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
 
   const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }) => {
     setSplitFile(file);
+    setSplitActiveView('file');
     // Keep workspace open — user can dismiss it manually
   }, []);
 
-  // When split closes, restore workspace sidebar to visible (non-collapsed)
-  const prevSplitFileRef = useRef(splitFile);
+  // Open terminal in split panel (called from DirectoryPanel header button)
+  const handleOpenTerminal = useCallback(() => {
+    setTerminalPinned(true);
+    setSplitActiveView('terminal');
+    // If terminal was already created, just switch view; otherwise TerminalPanel will create it
+  }, []);
+
+  // When split panel closes entirely, restore workspace sidebar to visible
+  const prevSplitVisibleRef = useRef(splitPanelVisible);
   useEffect(() => {
-    if (prevSplitFileRef.current && !splitFile) {
+    if (prevSplitVisibleRef.current && !splitPanelVisible) {
       // Split just closed → show workspace sidebar
       setShowWorkspace(true);
     }
-    prevSplitFileRef.current = splitFile;
-  }, [splitFile]);
+    prevSplitVisibleRef.current = splitPanelVisible;
+  }, [splitPanelVisible]);
+
+  // Cleanup terminal PTY on unmount (Tab close)
+  useEffect(() => {
+    return () => {
+      const id = terminalIdRef.current;
+      if (id) {
+        // Fire-and-forget: Rust will clean up the PTY
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke('cmd_terminal_close', { terminalId: id }).catch(() => {});
+        });
+      }
+    };
+  }, []);
 
   const handleSplitDividerMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -1566,17 +1613,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {/* Left side: chat area (+ side workspace when wide & no split) */}
       <div
         className={`relative flex min-w-0 flex-row overflow-hidden ${!isDraggingSplit ? 'transition-[width] duration-300 ease-in-out' : ''}`}
-        style={{ width: splitFile ? `${splitRatio * 100}%` : '100%' }}
+        style={{ width: splitPanelVisible ? `${splitRatio * 100}%` : '100%' }}
       >
       <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${showWorkspace && !shouldUseWorkspaceOverlay ? 'border-r border-[var(--line-subtle)]' : ''}`}>
         {/* Compact header - single row */}
         <div className="relative z-10 flex h-12 flex-shrink-0 items-center justify-between bg-[var(--paper-elevated)] px-4 after:pointer-events-none after:absolute after:inset-x-0 after:top-full after:h-6 after:bg-gradient-to-b after:from-[var(--paper-elevated)] after:to-transparent">
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 items-center gap-2">
             {onBack && (
               <button
                 type="button"
                 onClick={onBack}
-                className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex-shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="Back to projects"
               >
                 <ArrowLeft className="h-4 w-4" />
@@ -1584,7 +1631,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             )}
             {/* Project name */}
             {agentDir && (
-              <span className="flex items-center gap-1.5 text-sm font-medium text-[var(--ink)]">
+              <span className="flex flex-shrink-0 items-center gap-1.5 text-sm font-medium text-[var(--ink)]">
                 <WorkspaceIcon icon={currentProject?.icon} size={16} />
                 {agentDir.split(/[/\\]/).filter(Boolean).pop()}
               </span>
@@ -1592,7 +1639,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             {/* Session title — click to rename */}
             {sessionTitle && sessionTitle !== 'New Tab' && sessionTitle !== 'New Chat' && (
               <>
-                <span className="text-[var(--ink-subtle)]">/</span>
+                <span className="flex-shrink-0 text-[var(--ink-subtle)]">/</span>
                 <SessionTitleEditor
                   title={sessionTitle}
                   onRename={(newTitle) => onRenameSession?.(newTitle)}
@@ -1717,13 +1764,33 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     );
                   })()}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setAgentError(null)}
-                  className="flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-medium text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]"
-                >
-                  Dismiss
-                </button>
+                <div className="flex flex-shrink-0 items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const providerName = currentProvider?.name || currentProvider?.id || '未知';
+                      const model = selectedModel || currentProvider?.primaryModel || '未知';
+                      const workspace = agentDir || '未知';
+                      const desc = `我在使用 AI 对话时遇到了报错，请帮我查询日志诊断问题并引导我解决：\n\n**报错信息**: ${agentError}\n**供应商**: ${providerName}\n**模型**: ${model}\n**工作区**: ${workspace}`;
+                      setAgentError(null);
+                      window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
+                        detail: { description: desc, appVersion: '' },
+                      }));
+                    }}
+                    className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                  >
+                    <Bot className="h-3 w-3" />
+                    召唤小助理
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAgentError(null)}
+                    className="flex-shrink-0 rounded p-0.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink-muted)]"
+                    title="关闭"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           )}
@@ -1836,50 +1903,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         </div>
       </div>
 
-      {/* Workspace panel — side panel (wide) or overlay drawer (narrow) */}
-      {showWorkspace && !shouldUseWorkspaceOverlay && (
-        <div
-          ref={directoryPanelContainerRef}
-          className="flex w-1/4 flex-col"
-          style={{ minWidth: 'var(--sidebar-min-width)' }}
-        >
-          <DirectoryPanel
-            ref={directoryPanelRef}
-            agentDir={agentDir}
-            projectIcon={currentProject?.icon}
-            projectDisplayName={currentProject?.displayName}
-            provider={currentProvider}
-            providers={providers}
-            onProviderChange={handleProviderChange}
-            onCollapse={handleCollapseWorkspace}
-            onOpenConfig={handleOpenAgentSettings}
-            refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
-            isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
-            onInsertReference={handleInsertReference}
-            enabledAgents={enabledAgents}
-            enabledSkills={enabledSkills}
-            enabledCommands={enabledCommands}
-            globalSkillFolderNames={globalSkillFolderNames}
-            onInsertSlashCommand={handleInsertSlashCommand}
-            onOpenSettings={handleOpenSettings}
-            onSyncSkillToGlobal={handleSyncSkillToGlobal}
-            onRefreshAll={triggerWorkspaceRefresh}
-            onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
-          />
-        </div>
-      )}
-      {/* Overlay workspace drawer — inside left-wrapper so it only covers the chat area */}
-      {showWorkspace && shouldUseWorkspaceOverlay && (
+      {/* Workspace panel — single instance, container style switches between side panel and overlay */}
+      {showWorkspace && (
         <>
-          {/* Transparent click-away layer (no blur, user can still see chat content) */}
-          <div
-            className="absolute inset-0 z-40"
-            onClick={handleCollapseWorkspace}
-          />
-          {/* Drawer */}
+          {/* Click-away layer for overlay mode */}
+          {shouldUseWorkspaceOverlay && (
+            <div
+              className="absolute inset-0 z-40"
+              onClick={handleCollapseWorkspace}
+            />
+          )}
           <div
             ref={directoryPanelContainerRef}
-            className="absolute bottom-0 right-0 top-0 z-50 flex w-[340px] max-w-[85%] flex-col border-l border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg"
+            className={shouldUseWorkspaceOverlay
+              ? 'absolute bottom-0 right-0 top-0 z-50 flex w-[340px] max-w-[85%] flex-col border-l border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg'
+              : 'flex w-1/4 flex-col'
+            }
+            style={shouldUseWorkspaceOverlay ? undefined : { minWidth: 'var(--sidebar-min-width)' }}
           >
             <DirectoryPanel
               ref={directoryPanelRef}
@@ -1903,36 +1943,168 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onSyncSkillToGlobal={handleSyncSkillToGlobal}
               onRefreshAll={triggerWorkspaceRefresh}
               onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
+              onOpenTerminal={isSplitViewEnabled && !isNarrowLayout ? handleOpenTerminal : undefined}
+              terminalAlive={terminalAlive}
             />
           </div>
         </>
       )}
       </div>{/* End left-side wrapper */}
 
-      {/* Split view: draggable divider + right panel */}
-      {splitFile && (
+      {/* Split view: draggable divider + right panel.
+          Rendered when panel is visible OR terminal is alive (to preserve xterm.js state).
+          Uses `hidden` CSS when panel is not visible but terminal is alive in background. */}
+      {(splitPanelVisible || terminalMounted) && (
         <>
-          {/* Draggable divider */}
+          {/* Draggable divider — hidden when panel is not visible */}
           <div
-            className="z-10 flex w-1 cursor-col-resize items-center justify-center bg-[var(--line)] transition-colors hover:bg-[var(--accent)]"
+            className={`z-10 flex w-1 cursor-col-resize items-center justify-center bg-[var(--line)] transition-colors hover:bg-[var(--accent)] ${!splitPanelVisible ? 'hidden' : ''}`}
             onMouseDown={handleSplitDividerMouseDown}
           >
             <div className="h-8 w-0.5 rounded-full bg-[var(--ink-subtle)]" />
           </div>
-          {/* Right panel: file preview (embedded FilePreviewModal renders its own header) */}
-          <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper-elevated)]">
-            <Suspense fallback={<div className="flex h-full items-center justify-center text-[var(--ink-muted)]"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
-              <FilePreviewModal
-                name={splitFile.name}
-                content={splitFile.content}
-                size={splitFile.size}
-                path={splitFile.path}
-                onClose={() => setSplitFile(null)}
-                onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
-                embedded
-                onFullscreen={() => setFullscreenPreviewFile(splitFile)}
-              />
-            </Suspense>
+          {/* Right panel — single flex-1 container for tab bar + file + terminal.
+              Uses `hidden` when panel is not visible but terminal is alive in background. */}
+          <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!splitPanelVisible ? 'hidden' : ''}`}>
+            {/* Tab switcher — only when both file AND terminal are pinned */}
+            {splitFile && terminalPinned && terminalAlive && (
+              <div className="flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-[var(--line)] bg-[var(--paper-elevated)] px-2">
+                {/* File tab + its own × */}
+                <button
+                  type="button"
+                  onClick={() => setSplitActiveView('file')}
+                  className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    splitActiveView === 'file'
+                      ? 'text-[var(--ink)]'
+                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                  }`}
+                >
+                  <span className="max-w-[120px] truncate">{splitFile.name}</span>
+                  <span
+                    role="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSplitFile(null);
+                      setSplitActiveView('terminal');
+                    }}
+                    className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                    title="关闭文件"
+                  >
+                    <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                  </span>
+                  {splitActiveView === 'file' && (
+                    <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                  )}
+                </button>
+                {/* Terminal tab + its own × */}
+                <button
+                  type="button"
+                  onClick={() => setSplitActiveView('terminal')}
+                  className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    splitActiveView === 'terminal'
+                      ? 'text-[var(--ink)]'
+                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                  }`}
+                >
+                  <TerminalSquare className="h-3 w-3" />
+                  终端
+                  <span
+                    role="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setTerminalPinned(false);
+                      setSplitActiveView('file');
+                    }}
+                    className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                    title="隐藏终端"
+                  >
+                    <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                  </span>
+                  {splitActiveView === 'terminal' && (
+                    <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                  )}
+                </button>
+              </div>
+            )}
+
+            {/* File preview view */}
+            {splitFile && splitActiveView === 'file' && (
+              <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper-elevated)]">
+                <Suspense fallback={<div className="flex h-full items-center justify-center text-[var(--ink-muted)]"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
+                  <FilePreviewModal
+                    name={splitFile.name}
+                    content={splitFile.content}
+                    size={splitFile.size}
+                    path={splitFile.path}
+                    onClose={() => {
+                      setSplitFile(null);
+                      if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+                    }}
+                    onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+                    embedded
+                    onFullscreen={(currentContent) => {
+                      const file = currentContent !== undefined ? { ...splitFile!, content: currentContent } : splitFile!;
+                      setSplitFile(null);
+                      setFullscreenPreviewFile(file);
+                    }}
+                  />
+                </Suspense>
+              </div>
+            )}
+
+            {/* Terminal — INSIDE the right panel div (same flex column).
+                Stays mounted while alive, uses `hidden` when not the active view. */}
+            {terminalMounted && (
+              <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'terminal' ? 'hidden' : ''}`}>
+                {/* Terminal header — only when tab switcher is NOT showing */}
+                {!(splitFile && terminalPinned && terminalAlive) && (
+                  <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
+                    <div className="flex items-center gap-1.5">
+                      <TerminalSquare className="h-3.5 w-3.5 text-[var(--ink)]" />
+                      <span className="text-[12px] font-medium text-[var(--ink)]">终端</span>
+                      <span className="text-[11px] text-[var(--ink-muted)]">
+                        {agentDir ? `~/${agentDir.split('/').pop()}` : ''}
+                      </span>
+                    </div>
+                    <Tip label="隐藏终端" position="bottom">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTerminalPinned(false);
+                          setSplitActiveView('file');
+                        }}
+                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </Tip>
+                  </div>
+                )}
+                <Suspense fallback={<div className="flex h-full items-center justify-center bg-[var(--paper)]"><Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]" /></div>}>
+                  <LazyTerminalPanel
+                    workspacePath={agentDir}
+                    terminalId={terminalId}
+                    sessionId={sessionId}
+                    isVisible={splitPanelVisible && splitActiveView === 'terminal'}
+                    onTerminalCreated={(id) => {
+                      setTerminalId(id);
+                      setTerminalAlive(true);
+                    }}
+                    onTerminalExited={() => {
+                      const deadId = terminalId;
+                      setTerminalAlive(false);
+                      setTerminalPinned(false);
+                      setTerminalId(null);
+                      if (deadId) {
+                        import('@tauri-apps/api/core').then(({ invoke: inv }) => {
+                          inv('cmd_terminal_close', { terminalId: deadId }).catch(() => {});
+                        });
+                      }
+                    }}
+                  />
+                </Suspense>
+              </div>
+            )}
           </div>
         </>
       )}

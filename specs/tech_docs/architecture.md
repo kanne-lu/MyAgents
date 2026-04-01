@@ -273,6 +273,39 @@ IM/Cron Session 的 Provider 和 Model 从磁盘自 resolve，不依赖前端 `/
 - 所有中止场景 MUST 使用 `abortPersistentSession()`
 - 所有 `await sessionTerminationPromise` 通过 `awaitSessionTermination(10_000, label)` 带 10 秒超时防护，防止死锁
 
+### 10. 内嵌终端 (`src-tauri/src/terminal.rs` + `src/renderer/components/TerminalPanel.tsx`) (v0.1.57)
+
+Chat 分屏右侧面板中的交互式终端（PTY），工作目录为当前工作区。
+
+**架构**：
+
+```
+用户按键 → xterm.onData → invoke('cmd_terminal_write') → PTY master write
+PTY master read → emit('terminal:data:{id}') → xterm.write → 屏幕渲染
+```
+
+- **Rust**: `TerminalManager` 管理 `HashMap<String, TerminalSession>`，每个 session 持有 PTY pair（`portable-pty`）、reader task（`spawn_blocking`）、writer
+- **前端**: `TerminalPanel.tsx` 封装 xterm.js + FitAddon + WebLinksAddon，通过 Tauri IPC 通信
+- **通信**: Tauri event（`terminal:data:{id}` / `terminal:exit:{id}`），不走 SSE Proxy
+
+**生命周期**：
+
+| 事件 | 行为 |
+|------|------|
+| 点击终端图标 | `terminalPinned=true` → PTY 创建（listeners-first 模式） |
+| 切换到文件视图 | 终端用 `hidden` CSS 隐藏，xterm.js 保持挂载 |
+| 关闭终端面板（×） | `terminalPinned=false`，PTY 后台存活 |
+| 再次点击终端图标 | `terminalPinned=true`，恢复显示，内容完好 |
+| Shell exit / Ctrl+D | reader loop 自行从 HashMap 清理 + 前端 `cmd_terminal_close` 双保险 |
+| Tab 关闭 | unmount cleanup → `cmd_terminal_close` |
+| App 退出 | `close_all_terminals()`（三个退出路径均注册） |
+
+**环境注入**（`inject_terminal_env`）：PATH（内置 Bun/Node.js + `~/.myagents/bin`）、`MYAGENTS_PORT`（当前 session sidecar 端口）、`TERM=xterm-256color`、`COLORTERM=truecolor`、`NO_PROXY`（localhost 保护）。Shell 以 login shell（`-l`）启动。
+
+**主题**: 日间/夜间双主题自动切换，MutationObserver 监听 `<html>.dark`（同 Monaco 模式）。
+
+**与 Pit-of-Success 模块关系**：不走 `process_cmd`（`portable-pty` 自管进程创建）、不走 `local_http`（不发 HTTP）、复用 `proxy_config` 常量和函数、使用 `system_binary::find()` 检测 Windows Shell。
+
 ## 通信流程
 
 ### SSE 流式事件
@@ -308,7 +341,10 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 | 定时任务结束 | `releaseSessionSidecar(sessionId, 'cron', taskId)` |
 | IM 消息到达 | `ensureSessionSidecar(sessionId, workspace, 'agent', sessionKey)` |
 | IM Session 空闲超时 | `releaseSessionSidecar(sessionId, 'agent', sessionKey)` |
-| 应用退出 | `stopAllSidecars()`，清理全部进程 |
+| 终端打开 | `cmd_terminal_create(workspace, rows, cols, port, id)` |
+| 终端关闭 / Tab 关闭 | `cmd_terminal_close(terminalId)` |
+| Shell 退出 | reader loop 自行从 `TerminalManager` 移除 |
+| 应用退出 | `stopAllSidecars()` + `close_all_terminals()`，清理全部进程 |
 
 **Owner 释放规则**：当一个 Session 的所有 Owner 都释放后，Sidecar 才停止。
 

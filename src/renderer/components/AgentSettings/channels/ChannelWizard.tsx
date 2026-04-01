@@ -144,6 +144,11 @@ interface ChannelWizardProps {
     onCancel: () => void;
 }
 
+// WeCom QR polling constants — shared between effect logic and render display
+const WECOM_MAX_QR_REFRESHES = 5; // Auto-refresh up to 5 times on QR expiry, then error
+const WECOM_POLL_INTERVAL = 3000;
+const WECOM_MAX_POLLS_PER_QR = 200; // Defensive ~10min ceiling per QR in case server never returns terminal status
+
 export default function ChannelWizard({
     agent,
     platform,
@@ -164,11 +169,13 @@ export default function ChannelWizard({
 
     // OpenClaw: config(1) → start(2) → binding(3)
     // OpenClaw QR: qrLogin(1) → binding(2)
+    // OpenClaw dualConfig: config-or-qr(1) → start(2) → binding(3)
     // Telegram: credentials(1) → binding(2)
     // Feishu:   credentials(1) → permissions(2) → binding(3)
     // DingTalk: credentials(1) → permissions(2) → binding(3)
     // isQrLogin is computed below after installedPlugin state is declared
     const isQrLoginFromPreset = promoted?.authType === 'qrLogin';
+    const isDualConfig = promoted?.authType === 'dualConfig';
     const totalStepsBase = isQrLoginFromPreset ? 2 : isOpenClaw ? 3 : (isFeishu || isDingtalk) ? 3 : 2;
 
     const [step, setStep] = useState(1);
@@ -221,6 +228,19 @@ export default function ChannelWizard({
         return () => { cancelled = true; };
     }, [qrDataUrl]);
 
+    // WeCom dualConfig state: QR scan OR manual config to obtain botId+secret
+    const [dualConfigMode, setDualConfigMode] = useState<'qr' | 'config'>('qr');
+    const [wecomQrStatus, setWecomQrStatus] = useState<'idle' | 'loading' | 'waiting' | 'success' | 'error'>('idle');
+    const [wecomQrBotId, setWecomQrBotId] = useState('');
+    const [wecomQrSecret, setWecomQrSecret] = useState('');
+    const wecomQrAbortRef = useRef(false);
+    const wecomQrStartedRef = useRef(false);
+    const [wecomQrRetryTrigger, setWecomQrRetryTrigger] = useState(0);
+    // Rendered QR image for WeCom (auth_url → QR code image)
+    const [wecomQrImageUrl, setWecomQrImageUrl] = useState<string | null>(null);
+    // QR refresh count for display (e.g., "二维码已刷新 (2/5)")
+    const [wecomQrRefreshCount, setWecomQrRefreshCount] = useState(0);
+
     // Derived: QR login detection (from preset or installed plugin's detected capability)
     const isQrLogin = isQrLoginFromPreset || (!promoted && installedPlugin?.supportsQrLogin === true);
     const totalSteps = isQrLogin ? 2 : totalStepsBase;
@@ -229,8 +249,126 @@ export default function ChannelWizard({
     useEffect(() => {
         return () => {
             isMountedRef.current = false;
+            wecomQrAbortRef.current = true;
             if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
         };
+    }, []);
+
+    // WeCom dualConfig: auto-start QR flow when in QR mode on step 1
+    // Design: polling lifecycle is tied to QR validity. When a QR expires,
+    // auto-generate a new one and continue polling (up to WECOM_MAX_QR_REFRESHES auto-refreshes).
+    // After all refreshes exhausted → error state. User can click retry to restart.
+    useEffect(() => {
+        if (!isDualConfig || dualConfigMode !== 'qr' || step !== 1 || wecomQrStartedRef.current) return;
+        if (!isTauriEnvironment()) return;
+        wecomQrStartedRef.current = true;
+        let cancelled = false;
+
+        // Helper: generate QR and render as image
+        const generateQr = async (invoke: typeof import('@tauri-apps/api/core').invoke) => {
+            const result = await invoke<{ scode: string; auth_url: string }>('cmd_wecom_qr_generate');
+            if (cancelled || !isMountedRef.current) return null;
+            const dataUrl = await QRCode.toDataURL(result.auth_url, {
+                width: 200, margin: 2,
+                color: { dark: '#000000', light: '#ffffff' },
+            });
+            if (cancelled || !isMountedRef.current) return null;
+            setWecomQrImageUrl(dataUrl);
+            return result.scode;
+        };
+
+        (async () => {
+            try {
+                setWecomQrStatus('loading');
+                setWecomQrRefreshCount(0);
+                const { invoke } = await import('@tauri-apps/api/core');
+                let scode = await generateQr(invoke);
+                if (!scode) return;
+                setWecomQrStatus('waiting');
+
+                let qrRefreshCount = 0;
+                let globalPollIndex = 0;
+
+                // Outer loop: one iteration per QR code (initial + up to N refreshes)
+                while (qrRefreshCount <= WECOM_MAX_QR_REFRESHES) {
+                    let pollsThisQr = 0;
+                    // Inner loop: poll until success, terminal state, or per-QR ceiling
+                    while (pollsThisQr < WECOM_MAX_POLLS_PER_QR) {
+                        if (cancelled || !isMountedRef.current || wecomQrAbortRef.current) return;
+                        await new Promise(r => setTimeout(r, WECOM_POLL_INTERVAL));
+                        if (cancelled || !isMountedRef.current || wecomQrAbortRef.current) return;
+
+                        const poll = await invoke<{ status: string; bot_id?: string; secret?: string }>(
+                            'cmd_wecom_qr_poll', { scode, pollIndex: globalPollIndex }
+                        );
+                        globalPollIndex++;
+                        pollsThisQr++;
+
+                        if (poll.status === 'success' && poll.bot_id && poll.secret) {
+                            if (cancelled || !isMountedRef.current) return;
+                            setWecomQrBotId(poll.bot_id);
+                            setWecomQrSecret(poll.secret);
+                            setWecomQrStatus('success');
+                            return;
+                        }
+
+                        // QR expired → auto-refresh
+                        if (poll.status === 'expired') {
+                            qrRefreshCount++;
+                            if (qrRefreshCount > WECOM_MAX_QR_REFRESHES) break; // → error
+                            if (cancelled || !isMountedRef.current) return;
+                            setWecomQrRefreshCount(qrRefreshCount);
+                            setWecomQrStatus('loading');
+                            scode = await generateQr(invoke);
+                            if (!scode) return;
+                            setWecomQrStatus('waiting');
+                            break; // restart inner poll loop with new scode
+                        }
+
+                        // User cancelled or denied on WeCom side → error
+                        if (poll.status === 'cancelled' || poll.status === 'denied') {
+                            if (!cancelled && isMountedRef.current) setWecomQrStatus('error');
+                            return;
+                        }
+                        // Otherwise "waiting" — continue polling
+                    }
+                    // If inner loop hit the per-QR ceiling without a terminal status,
+                    // treat it as if the QR expired (auto-refresh)
+                    if (pollsThisQr >= WECOM_MAX_POLLS_PER_QR) {
+                        qrRefreshCount++;
+                        if (qrRefreshCount > WECOM_MAX_QR_REFRESHES) break;
+                        if (cancelled || !isMountedRef.current) return;
+                        setWecomQrRefreshCount(qrRefreshCount);
+                        setWecomQrStatus('loading');
+                        scode = await generateQr(invoke);
+                        if (!scode) return;
+                        setWecomQrStatus('waiting');
+                    }
+                }
+
+                // Exhausted all QR refreshes
+                if (!cancelled && isMountedRef.current) setWecomQrStatus('error');
+            } catch (err) {
+                console.error('[ChannelWizard] WeCom QR flow error:', err);
+                if (!cancelled && isMountedRef.current) setWecomQrStatus('error');
+            }
+        })();
+
+        return () => { cancelled = true; };
+    }, [isDualConfig, dualConfigMode, step, wecomQrRetryTrigger]);
+
+    // Reset QR state when switching to QR mode (always re-trigger, even after prior success)
+    const handleDualModeSwitch = useCallback((mode: 'qr' | 'config') => {
+        setDualConfigMode(mode);
+        if (mode === 'qr') {
+            wecomQrStartedRef.current = false;
+            wecomQrAbortRef.current = false;
+            setWecomQrStatus('idle');
+            setWecomQrImageUrl(null);
+            setWecomQrBotId('');
+            setWecomQrSecret('');
+            setWecomQrRefreshCount(0);
+        }
     }, []);
 
     // Load OpenClaw plugin info for config schema
@@ -334,18 +472,27 @@ export default function ChannelWizard({
     }, [step, bindingStep, channelId]);
 
     // Check if credentials are filled
-    const hasCredentials = isOpenClaw
-        ? true // OpenClaw uses its own validation
-        : isFeishu
-            ? feishuAppId.trim() && feishuAppSecret.trim()
-            : isDingtalk
-                ? dingtalkClientId.trim() && dingtalkClientSecret.trim()
-                : botToken.trim();
+    const hasCredentials = isDualConfig
+        ? (dualConfigMode === 'qr'
+            ? wecomQrStatus === 'success' // QR scan returned botId+secret
+            : !!(openclawSchemaValues['botId']?.trim() && openclawSchemaValues['secret']?.trim()))
+        : isOpenClaw
+            ? true // OpenClaw uses its own validation
+            : isFeishu
+                ? feishuAppId.trim() && feishuAppSecret.trim()
+                : isDingtalk
+                    ? dingtalkClientId.trim() && dingtalkClientSecret.trim()
+                    : botToken.trim();
 
     // Build channel config from current wizard state
     const buildChannelConfig = useCallback((): ChannelConfig => {
         if (isOpenClaw) {
             const pluginConfig = buildOpenclawConfig();
+            // For dualConfig QR mode, inject the QR-obtained credentials
+            if (isDualConfig && dualConfigMode === 'qr' && wecomQrBotId && wecomQrSecret) {
+                pluginConfig.botId = wecomQrBotId;
+                pluginConfig.secret = wecomQrSecret;
+            }
             // Merge promoted plugin defaults (e.g. dmPolicy: 'open') under user values
             const mergedConfig = { ...(promoted?.defaultConfig ?? {}), ...pluginConfig };
             const pluginName = promoted?.name || installedPlugin?.manifest?.name || openclawPluginId || 'Plugin Bot';
@@ -378,7 +525,7 @@ export default function ChannelWizard({
             allowedUsers: [],
             setupCompleted: false,
         };
-    }, [channelId, platform, isFeishu, isDingtalk, isOpenClaw, botToken, feishuAppId, feishuAppSecret, dingtalkClientId, dingtalkClientSecret, openclawPluginId, promoted, installedPlugin, buildOpenclawConfig]);
+    }, [channelId, platform, isFeishu, isDingtalk, isOpenClaw, isDualConfig, dualConfigMode, wecomQrBotId, wecomQrSecret, botToken, feishuAppId, feishuAppSecret, dingtalkClientId, dingtalkClientSecret, openclawPluginId, promoted, installedPlugin, buildOpenclawConfig]);
 
     // Start channel via shared utility (resolves MCP + overrides)
     const startChannel = useCallback(async (channelCfg: ChannelConfig) => {
@@ -877,8 +1024,190 @@ export default function ChannelWizard({
                 </div>
             )}
 
+            {/* Step 1: DualConfig — QR scan OR manual config (WeCom) */}
+            {step === 1 && isDualConfig && (
+                <div className="space-y-6">
+                    {/* Action bar at top */}
+                    {renderActionBar({
+                        onNext: handleNext,
+                        nextLabel: '下一步',
+                        nextDisabled: !hasCredentials,
+                        nextIcon: <ArrowRight className="h-4 w-4" />,
+                    })}
+
+                    {/* Plugin info card */}
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                        <div className="flex items-start gap-4">
+                            {promoted && (
+                                <img src={promoted.icon} alt={promoted.name} className="h-10 w-10 shrink-0 rounded-xl" />
+                            )}
+                            <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                    <p className="text-sm font-semibold text-[var(--ink)]">{promoted?.name || openclawPluginName}</p>
+                                    {installedPlugin?.packageVersion && (
+                                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+                                            v{installedPlugin.packageVersion}
+                                        </span>
+                                    )}
+                                </div>
+                                {promoted?.description && (
+                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">{promoted.description}</p>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Mode switcher: pill tab */}
+                    <div className="flex gap-1 rounded-lg bg-[var(--paper-inset)] p-1">
+                        <button
+                            className={`flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                                dualConfigMode === 'qr'
+                                    ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
+                                    : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                            onClick={() => handleDualModeSwitch('qr')}
+                        >
+                            扫码添加
+                        </button>
+                        <button
+                            className={`flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                                dualConfigMode === 'config'
+                                    ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
+                                    : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                            }`}
+                            onClick={() => handleDualModeSwitch('config')}
+                        >
+                            手动配置
+                        </button>
+                    </div>
+
+                    {/* QR mode */}
+                    {dualConfigMode === 'qr' && (
+                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                            <p className="text-sm font-medium text-[var(--ink)]">扫码创建机器人</p>
+                            <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                                使用 {promoted?.name?.replace(/（.*）/, '') || '企业微信'} App 扫描下方二维码，一键创建机器人并自动获取凭证
+                            </p>
+
+                            <div className="mt-5 flex flex-col items-center py-4">
+                                {wecomQrStatus === 'loading' && (
+                                    <div className="flex h-[200px] w-[200px] items-center justify-center rounded-xl border border-[var(--line)] bg-white">
+                                        <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />
+                                    </div>
+                                )}
+                                {wecomQrStatus === 'waiting' && wecomQrImageUrl && (
+                                    <img src={wecomQrImageUrl} alt="企业微信扫码" className="h-[200px] w-[200px] rounded-xl border border-[var(--line)]" />
+                                )}
+                                {wecomQrStatus === 'success' && (
+                                    <div className="flex h-[200px] w-[200px] flex-col items-center justify-center rounded-xl border border-[var(--success)] bg-[var(--success-bg)]">
+                                        <Check className="h-8 w-8 text-[var(--success)]" />
+                                        <p className="mt-2 text-sm font-medium text-[var(--success)]">扫码成功</p>
+                                        <p className="mt-1 text-xs text-[var(--success)]">Bot ID 和 Secret 已自动获取</p>
+                                    </div>
+                                )}
+                                {wecomQrStatus === 'error' && (
+                                    <div className="flex h-[200px] w-[200px] flex-col items-center justify-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--paper-inset)]">
+                                        <p className="text-sm text-[var(--ink-muted)]">
+                                            {wecomQrRefreshCount > 0 ? '二维码多次过期' : '获取二维码失败'}
+                                        </p>
+                                        <button
+                                            onClick={() => {
+                                                wecomQrStartedRef.current = false;
+                                                wecomQrAbortRef.current = false;
+                                                setWecomQrStatus('idle');
+                                                setWecomQrRefreshCount(0);
+                                                setWecomQrRetryTrigger(n => n + 1);
+                                            }}
+                                            className="text-xs text-[var(--accent-warm)] hover:underline"
+                                        >
+                                            重试
+                                        </button>
+                                    </div>
+                                )}
+                                {wecomQrStatus === 'idle' && (
+                                    <div className="flex h-[200px] w-[200px] items-center justify-center rounded-xl border border-[var(--line)] bg-[var(--paper-inset)]">
+                                        <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />
+                                    </div>
+                                )}
+
+                                <p className="mt-3 text-xs text-[var(--ink-muted)]">
+                                    {wecomQrStatus === 'loading' && (wecomQrRefreshCount > 0
+                                        ? `二维码已过期，正在刷新 (${wecomQrRefreshCount}/${WECOM_MAX_QR_REFRESHES})...`
+                                        : '正在获取二维码...')}
+                                    {wecomQrStatus === 'waiting' && '请使用企业微信 App 扫描二维码'}
+                                    {wecomQrStatus === 'success' && '凭证已就绪，点击「下一步」继续'}
+                                    {wecomQrStatus === 'error' && (wecomQrRefreshCount > 0
+                                        ? '二维码多次过期，请检查网络后重试'
+                                        : '请检查网络后重试')}
+                                </p>
+                            </div>
+
+                            <p className="mt-2 text-xs text-[var(--ink-subtle)]">
+                                扫码后将创建新的智能机器人。如需关联已有机器人，请切换到「手动配置」
+                            </p>
+                        </div>
+                    )}
+
+                    {/* Manual config mode */}
+                    {dualConfigMode === 'config' && (
+                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                            <h3 className="text-sm font-medium text-[var(--ink)]">
+                                {promoted?.setupGuide?.credentialTitle || '插件配置'}
+                            </h3>
+                            <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
+                                {promoted?.setupGuide?.credentialHintLink ? (
+                                    <>
+                                        {'前往 '}
+                                        <a
+                                            href={promoted.setupGuide.credentialHintLink}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="inline-flex items-center gap-0.5 text-[var(--button-primary-bg)] hover:underline"
+                                            onClick={(e) => {
+                                                if (isTauriEnvironment()) {
+                                                    e.preventDefault();
+                                                    import('@tauri-apps/plugin-shell').then(({ open }) => open(promoted!.setupGuide!.credentialHintLink!));
+                                                }
+                                            }}
+                                        >
+                                            企业微信管理后台
+                                            <ExternalLink className="inline h-3 w-3" />
+                                        </a>
+                                        {' '}创建智能机器人，获取凭证
+                                    </>
+                                ) : (
+                                    promoted?.setupGuide?.credentialHint || '输入插件需要的配置参数'
+                                )}
+                            </p>
+
+                            <div className="mt-4 space-y-3">
+                                {(promoted?.requiredFields ?? []).map((key) => (
+                                    <div key={key}>
+                                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
+                                            {key}
+                                            <span className="ml-1 text-[var(--error)]">*</span>
+                                        </label>
+                                        <input
+                                            type={/secret|token|password|key/i.test(key) ? 'password' : 'text'}
+                                            value={openclawSchemaValues[key] || ''}
+                                            onChange={(e) => setOpenclawSchemaValues(prev => ({ ...prev, [key]: e.target.value }))}
+                                            placeholder={`输入 ${key}`}
+                                            className="w-full rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--button-primary-bg)] focus:outline-none transition-colors"
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+
+                            <p className="mt-4 text-xs text-[var(--ink-subtle)]">
+                                创建方法：企微客户端 → 工作台 → 智能机器人 → 创建机器人 → 手动创建 → API 模式创建 → 使用长连接
+                            </p>
+                        </div>
+                    )}
+                </div>
+            )}
+
             {/* Step 1: Credentials / OpenClaw Config */}
-            {step === 1 && isOpenClaw && !isQrLogin && (
+            {step === 1 && isOpenClaw && !isQrLogin && !isDualConfig && (
                 <div className="space-y-6">
                     {/* Action bar at top */}
                     {renderActionBar({

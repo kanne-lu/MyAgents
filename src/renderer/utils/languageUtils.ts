@@ -93,6 +93,7 @@ const EXTENSION_MAP: Record<string, LanguageConfig> = {
     sh: { prism: 'bash', monaco: 'shell', showLineNumbers: true },
     bash: { prism: 'bash', monaco: 'shell', showLineNumbers: true },
     zsh: { prism: 'bash', monaco: 'shell', showLineNumbers: true },
+    ps1: { prism: 'powershell', monaco: 'powershell', showLineNumbers: true },
 
     // Documentation - no line numbers
     md: { prism: 'markdown', monaco: 'markdown', showLineNumbers: false },

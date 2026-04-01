@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 interface RenameDialogProps {
     currentName: string;
@@ -51,8 +52,8 @@ export default function RenameDialog({
         onRename(trimmed);
     };
 
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
+    return createPortal(
+        <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
             <div className="glass-panel w-full max-w-sm">
                 <form onSubmit={handleSubmit}>
                     <div className="border-b border-[var(--line)] px-5 py-4">
@@ -91,6 +92,7 @@ export default function RenameDialog({
                     </div>
                 </form>
             </div>
-        </div>
+        </div>,
+        document.body
     );
 }

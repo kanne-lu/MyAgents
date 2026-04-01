@@ -16,6 +16,7 @@ import {
   type CommandFrontmatter
 } from '../shared/slashCommands';
 import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
+import { isPreviewable } from '../shared/fileTypes';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
@@ -109,6 +110,7 @@ import {
   getSystemInitInfo,
   initializeAgent,
   interruptCurrentResponse,
+  getStreamingAssistantId,
   switchToSession,
   setMcpServers,
   getMcpServers,
@@ -978,65 +980,19 @@ function resolveReadPath(root: string, inputPath: string): string | null {
 }
 
 
-const TEXT_EXTENSIONS = new Set([
-  'md',
-  'markdown',
-  'txt',
-  'json',
-  'yaml',
-  'yml',
-  'log',
-  'csv',
-  'ts',
-  'tsx',
-  'js',
-  'jsx',
-  'css',
-  'html',
-  'htm',
-  'xml',
-  'svg',
-  'env',
-  'toml',
-  'ini',
-  'conf',
-  'sh',
-  'py',
-  'java',
-  'go',
-  'rs',
-  'rb',
-  'php',
-  'c',
-  'cpp',
-  'h',
-  'hpp',
-  'sql',
-  'graphql',
-  'gql',
-  // Dotfiles - added for common dev files
-  'gitignore',
-  'gitattributes',
-  'editorconfig',
-  'npmrc',
-  'yarnrc',
-  'prettierrc',
-  'eslintrc',
-  'babelrc',
-  'dockerignore',
-]);
-
+/**
+ * Check if a file can be previewed as text.
+ * Uses the shared binary-blocklist from `fileTypes.ts` (same logic as frontend)
+ * plus MIME-type hints from Bun to cover extensionless files.
+ */
 function isPreviewableText(name: string, mimeType: string | undefined): boolean {
+  // MIME-type hint: trust Bun's detection for text/* and known structured types
   if (mimeType) {
-    if (mimeType.startsWith('text/')) {
-      return true;
-    }
-    if (['application/json', 'application/xml', 'application/x-yaml'].includes(mimeType)) {
-      return true;
-    }
+    if (mimeType.startsWith('text/')) return true;
+    if (['application/json', 'application/xml', 'application/x-yaml', 'image/svg+xml'].includes(mimeType)) return true;
   }
-  const extension = name.toLowerCase().split('.').pop() ?? '';
-  return TEXT_EXTENSIONS.has(extension);
+  // Fall back to shared binary-blocklist strategy (consistent with frontend)
+  return isPreviewable(name);
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -1504,7 +1460,16 @@ async function main() {
         const { client, response } = createSseClient(() => { });
         const state = getAgentState();
         client.send('chat:init', state);
-        getMessages().forEach((message) => {
+        const allMessages = getMessages();
+        // When a turn is in-flight, skip the streaming assistant message.
+        // Live SSE events (thinking-start, thinking-chunk, message-chunk) will build it from
+        // scratch. Replaying it here would create a duplicate in historyMessages alongside the
+        // streamingMessage being assembled from live events → duplicate thinking blocks.
+        // Filter by message ID (not array position) because mid-turn queued user messages
+        // can appear after the streaming assistant in messages[].
+        const streamingId = getStreamingAssistantId();
+        allMessages.forEach((message) => {
+          if (streamingId && message.id === streamingId) return; // skip streaming message
           // Strip Playwright tool results from replay to avoid sending large base64 data to frontend
           const stripped = typeof message.content !== 'string'
             ? { ...message, content: stripPlaywrightResults(message.content) }

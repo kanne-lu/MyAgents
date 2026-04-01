@@ -3,6 +3,7 @@ import { ExternalLink } from '@/components/ExternalLink';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { homeDir, join } from '@tauri-apps/api/path';
 
 import { track } from '@/analytics';
@@ -288,6 +289,25 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
     const [showWorkspaceSelect, setShowWorkspaceSelect] = useState(false);
 
+    // Download progress — listen directly for Tauri events to avoid re-render blast radius
+    // through the MemoizedTabContent tree (only Settings needs this value)
+    const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+    useEffect(() => {
+        if (!isTauriEnvironment()) return;
+        let cancelled = false;
+        const promise = listen<{ percent: number | null }>('updater:download-progress', (event) => {
+            if (!cancelled) setDownloadProgress(event.payload.percent);
+        });
+        return () => {
+            cancelled = true;
+            // If listen() already resolved, call the unlisten function; if still pending, clean up on resolve
+            void promise.then(unlisten => unlisten());
+        };
+    }, []);
+    // Reset progress when download completes (updateReady becomes true)
+    useEffect(() => {
+        if (propUpdateReady) setDownloadProgress(null);
+    }, [propUpdateReady]);
 
     const handleWorkspaceSelected = useCallback((project: import('@/config/types').Project) => {
         setShowWorkspaceSelect(false);
@@ -3007,9 +3027,22 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         Your Intent, Amplified
                                     </p>
                                     {updateDownloading && propUpdateVersion && (
-                                        <div className="mt-3 flex items-center gap-2 text-sm text-[var(--ink-secondary)]">
-                                            <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />
-                                            <span>发现新版本 v{propUpdateVersion}，正在下载...</span>
+                                        <div className="mt-3 space-y-2">
+                                            <div className="flex items-center gap-2 text-sm text-[var(--ink-secondary)]">
+                                                <Loader2 className="h-4 w-4 animate-spin text-[var(--accent)]" />
+                                                <span>
+                                                    发现新版本 v{propUpdateVersion}，正在下载
+                                                    {downloadProgress != null ? `… ${downloadProgress}%` : '…'}
+                                                </span>
+                                            </div>
+                                            {downloadProgress != null && (
+                                                <div className="h-1.5 w-48 overflow-hidden rounded-full bg-[var(--paper-inset)]">
+                                                    <div
+                                                        className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
+                                                        style={{ width: `${downloadProgress}%` }}
+                                                    />
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                     {propUpdateReady && propUpdateVersion && (

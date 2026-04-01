@@ -17,7 +17,7 @@ use crate::sidecar::{
     shutdown_for_update,
 };
 use crate::logger;
-use crate::{ulog_info, ulog_warn};
+use crate::{ulog_error, ulog_info, ulog_warn};
 
 // ============= Legacy Commands (for backward compatibility) =============
 
@@ -918,4 +918,135 @@ pub async fn cmd_open_file(path: String) -> Result<(), String> {
             .map_err(|e| format!("Failed to open {}: {}", safe_path, e))?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// WeCom QR Code — generate & poll for bot credentials
+// Uses the public WeCom QR API (same flow as @wecom/wecom-openclaw-cli).
+// These are external HTTPS requests — use proxy_config for outbound proxy.
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub struct WecomQrGenerateResult {
+    pub scode: String,
+    pub auth_url: String,
+}
+
+/// Generate a WeCom QR code for one-click bot creation.
+/// Returns scode (for polling) and auth_url (to render as QR image).
+#[tauri::command]
+pub async fn cmd_wecom_qr_generate() -> Result<WecomQrGenerateResult, String> {
+    let plat = if cfg!(target_os = "macos") { 1 }
+               else if cfg!(target_os = "windows") { 2 }
+               else { 3 };
+    let url = format!(
+        "https://work.weixin.qq.com/ai/qc/generate?source=myagents&plat={}",
+        plat
+    );
+
+    let builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15));
+    let client = crate::proxy_config::build_client_with_proxy(builder)?;
+
+    let resp: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("WeCom QR generate request failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("WeCom QR generate parse failed: {}", e))?;
+
+    // Check for API-level errors (same pattern as poll)
+    let errcode = resp["errcode"].as_i64().unwrap_or(0);
+    if errcode != 0 {
+        let errmsg = resp["errmsg"].as_str().unwrap_or("unknown error");
+        return Err(format!("WeCom QR generate API error {}: {}", errcode, errmsg));
+    }
+
+    let data = resp.get("data").ok_or("WeCom QR response missing 'data'")?;
+    let scode = data["scode"]
+        .as_str()
+        .ok_or("WeCom QR response missing 'scode'")?
+        .to_string();
+    let auth_url = data["auth_url"]
+        .as_str()
+        .ok_or("WeCom QR response missing 'auth_url'")?
+        .to_string();
+
+    let scode_preview: String = scode.chars().take(8).collect();
+    ulog_info!("[wecom-qr] Generated QR code, scode={}", scode_preview);
+    Ok(WecomQrGenerateResult { scode, auth_url })
+}
+
+#[derive(serde::Serialize)]
+pub struct WecomQrPollResult {
+    /// "waiting" — user hasn't scanned yet; "success" — bot created, credentials available
+    pub status: String,
+    pub bot_id: Option<String>,
+    pub secret: Option<String>,
+}
+
+/// Poll the WeCom QR scan result. Call repeatedly until status is "success".
+/// `poll_index` is used for periodic logging (log every 10th poll to reduce noise).
+#[tauri::command]
+pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result<WecomQrPollResult, String> {
+    // Sanitize scode: only allow alphanumeric (defense-in-depth against URL injection)
+    let safe_scode: String = scode.chars().filter(|c| c.is_alphanumeric()).collect();
+    let url = format!(
+        "https://work.weixin.qq.com/ai/qc/query_result?scode={}",
+        safe_scode
+    );
+
+    let builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10));
+    let client = crate::proxy_config::build_client_with_proxy(builder)?;
+
+    let resp: serde_json::Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("WeCom QR poll failed: {}", e))?
+        .json()
+        .await
+        .map_err(|e| format!("WeCom QR poll parse failed: {}", e))?;
+
+    // Check for API-level errors first
+    let errcode = resp["errcode"].as_i64().unwrap_or(0);
+    if errcode != 0 {
+        let errmsg = resp["errmsg"].as_str().unwrap_or("unknown error");
+        ulog_error!("[wecom-qr] Poll API error {}: {}", errcode, errmsg);
+        return Err(format!("WeCom QR poll API error {}: {}", errcode, errmsg));
+    }
+
+    let status_str = resp["data"]["status"].as_str().unwrap_or("waiting");
+    let idx = poll_index.unwrap_or(0);
+
+    match status_str {
+        "success" => {
+            let bot_info = &resp["data"]["bot_info"];
+            let bot_id = bot_info["botid"].as_str().map(String::from);
+            let secret = bot_info["secret"].as_str().map(String::from);
+            if bot_id.is_some() && secret.is_some() {
+                ulog_info!("[wecom-qr] QR scan success, bot created (poll #{})", idx);
+                Ok(WecomQrPollResult { status: "success".into(), bot_id, secret })
+            } else {
+                // Log raw response for debugging unexpected format
+                ulog_error!("[wecom-qr] Poll #{} status=success but bot_info incomplete: {}", idx, resp);
+                Err("WeCom QR scan succeeded but bot_info is incomplete".into())
+            }
+        }
+        "expired" | "cancelled" | "denied" => {
+            ulog_info!("[wecom-qr] Poll #{} terminal status: {}", idx, status_str);
+            Ok(WecomQrPollResult { status: status_str.into(), bot_id: None, secret: None })
+        }
+        _ => {
+            // Periodic logging: first poll, then every 10th
+            if idx == 0 || idx % 10 == 0 {
+                let scode_preview: String = safe_scode.chars().take(8).collect();
+                ulog_info!("[wecom-qr] Poll #{} scode={} status={}", idx, scode_preview, status_str);
+            }
+            Ok(WecomQrPollResult { status: "waiting".into(), bot_id: None, secret: None })
+        }
+    }
 }

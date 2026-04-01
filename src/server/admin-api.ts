@@ -11,6 +11,7 @@
  */
 
 import type { McpServerDefinition } from '../renderer/config/types';
+import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
   loadConfig,
   atomicModifyConfig,
@@ -119,6 +120,14 @@ export function handleMcpAdd(payload: {
   // Validate required fields
   if (!s.id) return { success: false, error: 'Missing required field: id' };
   if (!s.type) return { success: false, error: 'Missing required field: type' };
+
+  // Reject SDK reserved MCP names — these cause the Claude Agent SDK to crash (exit code 1)
+  // with "Invalid MCP configuration: X is a reserved MCP name."
+  const normalizedId = s.id.replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (SDK_RESERVED_MCP_NAMES.includes(normalizedId)) {
+    return { success: false, error: `MCP ID "${s.id}" 与 Claude SDK 内置保留名冲突，请使用其他名称（如 "my-${s.id}"）` };
+  }
+
   if (s.type === 'stdio' && !s.command) {
     return { success: false, error: 'stdio type requires "command" field' };
   }

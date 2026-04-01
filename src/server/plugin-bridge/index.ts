@@ -63,6 +63,8 @@ let getCapturedToolsFn: (() => CapturedTool[]) | null = null;
 let getCapturedCommandsFn: (() => import('./compat-api').CapturedCommand[]) | null = null;
 /** OpenClaw-format config (channels.{brand}.{...}), set during loadPlugin() */
 let loadedOpenclawConfig: Record<string, unknown> = {};
+/** Compat runtime — created in loadPlugin(), shared with gateway ctx for startAccount/restart */
+let loadedRuntime: unknown = null;
 /** Current resolved account — shared by sendText/sendMedia closures, updated by /restart-gateway */
 let currentAccount: Record<string, unknown> = {};
 /**
@@ -135,6 +137,7 @@ async function loadPlugin() {
   // Runtime must be created early — plugins call setRuntime(api.runtime) during register()
   const runtime = createCompatRuntime(rustPort, botId, 'unknown');
   compatApi.runtime = runtime;
+  loadedRuntime = runtime;
 
   // CRITICAL: Patch axios BEFORE importing the plugin.
   // @larksuiteoapi/node-sdk creates `defaultHttpInstance = axios.create()` at import time.
@@ -159,8 +162,20 @@ async function loadPlugin() {
     // axios not installed in plugin dir — no patch needed
   }
 
-  // Import the plugin module
-  const pluginModule = await import(`${pluginDir}/node_modules/${entryModule}`);
+  // Import the plugin module.
+  // Prefer the `module` field (ESM entry) over `main` (CJS entry) when available.
+  // Some plugins ship both CJS and ESM, but their CJS bundles `require()` ESM-only
+  // dependencies (e.g. file-type v21+) which fails in Bun. Using the ESM entry
+  // avoids this CJS→ESM incompatibility.
+  let importPath = `${pluginDir}/node_modules/${entryModule}`;
+  try {
+    const pluginPkg = await Bun.file(`${pluginDir}/node_modules/${entryModule}/package.json`).json();
+    if (pluginPkg.module) {
+      importPath = `${pluginDir}/node_modules/${entryModule}/${pluginPkg.module}`;
+      console.log(`[plugin-bridge] Using ESM entry: ${pluginPkg.module}`);
+    }
+  } catch { /* use default resolution */ }
+  const pluginModule = await import(importPath);
 
   // Plugins can export their registration in several patterns:
   //   1. default export = { register(api) { ... } }  (OpenClaw standard)
@@ -321,6 +336,7 @@ async function loadPlugin() {
       accountId: resolvedAccountId,
       abortSignal: abortController.signal,
       log: console,
+      runtime,
       cfg: openclawCfg,
       getStatus: () => status,
       setStatus: (s: Record<string, unknown>) => { status = s; },
@@ -871,6 +887,7 @@ const server = Bun.serve({
             accountId: restartAccountId,
             abortSignal: newAbort.signal,
             log: console,
+            runtime: loadedRuntime,
             cfg: loadedOpenclawConfig,
             getStatus: () => status,
             setStatus: (s: Record<string, unknown>) => { status = s; },

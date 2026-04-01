@@ -69,30 +69,37 @@ export function getSessionDisplayText(session: SessionMetadata): string {
  * Handles both legacy (`im:{platform}:{type}:{id}`) and
  * new agent format (`agent:{agentId}:{channelType}:{sourceType}:{id}`).
  */
+/**
+ * Resolve any platform/plugin ID to a concise tag label.
+ * Lookup chain: built-in names → promoted plugin (by pluginId or channelBrand) → capitalize.
+ */
+function resolveTagLabel(id: string): string {
+    if (BUILTIN_PLATFORM_NAMES[id]) return BUILTIN_PLATFORM_NAMES[id];
+    const promoted = findPromotedPlugin(id); // matches pluginId OR channelBrand
+    if (promoted) return promoted.name;
+    return id.charAt(0).toUpperCase() + id.slice(1);
+}
+
 export function extractPlatformDisplay(sessionKey: string): string {
     const parts = sessionKey.split(':');
     // New agent format: agent:{agentId}:{channelType}:{private|group}:{id}
+    // channelType may contain colons (e.g. "openclaw:wecom") which split into multiple parts
     if (parts[0] === 'agent' && parts.length >= 5) {
         const channelType = parts[2] ?? 'unknown';
         if (channelType.startsWith('openclaw:')) {
-            const pluginId = channelType.slice('openclaw:'.length);
-            // PLATFORM_DISPLAY_NAMES takes priority (concise labels like "QQ"),
-            // promoted plugin name is fallback (may be verbose like "QQ Bot")
-            return PLATFORM_DISPLAY_NAMES[pluginId] ?? findPromotedPlugin(pluginId)?.name ?? (pluginId.charAt(0).toUpperCase() + pluginId.slice(1));
+            return resolveTagLabel(channelType.slice('openclaw:'.length));
         }
         if (channelType === 'openclaw' && parts[3]) {
-            const pluginChannelId = parts[3];
-            return PLATFORM_DISPLAY_NAMES[pluginChannelId] ?? findPromotedPlugin(pluginChannelId)?.name ?? (pluginChannelId.charAt(0).toUpperCase() + pluginChannelId.slice(1));
+            return resolveTagLabel(parts[3]);
         }
-        return PLATFORM_DISPLAY_NAMES[channelType] ?? (channelType.charAt(0).toUpperCase() + channelType.slice(1));
+        return resolveTagLabel(channelType);
     }
     // Legacy format: im:{platform}:{type}:{id}
     const platform = parts[1] ?? 'unknown';
     if (platform === 'openclaw' && parts[2]) {
-        const channelId = parts[2];
-        return PLATFORM_DISPLAY_NAMES[channelId] ?? findPromotedPlugin(channelId)?.name ?? (channelId.charAt(0).toUpperCase() + channelId.slice(1));
+        return resolveTagLabel(parts[2]);
     }
-    return PLATFORM_DISPLAY_NAMES[platform] ?? (platform.charAt(0).toUpperCase() + platform.slice(1));
+    return resolveTagLabel(platform);
 }
 
 /**
@@ -101,19 +108,21 @@ export function extractPlatformDisplay(sessionKey: string): string {
  */
 export function getChannelTypeLabel(channelType: string): string {
     if (channelType.startsWith('openclaw:')) {
-        const pluginId = channelType.slice(9);
-        return PLATFORM_DISPLAY_NAMES[pluginId] ?? findPromotedPlugin(pluginId)?.name ?? (pluginId.charAt(0).toUpperCase() + pluginId.slice(1));
+        return resolveTagLabel(channelType.slice(9));
     }
-    return PLATFORM_DISPLAY_NAMES[channelType] ?? (channelType.charAt(0).toUpperCase() + channelType.slice(1));
+    return resolveTagLabel(channelType);
 }
 
-/** Platform display names — MUST match WorkspaceCard's CH_LABEL */
-const PLATFORM_DISPLAY_NAMES: Record<string, string> = {
-    feishu: '飞书',
+/**
+ * Built-in platform display names (non-OpenClaw).
+ * OpenClaw plugins are resolved via findPromotedPlugin() + getPromotedTagLabel() —
+ * no need to maintain a separate dict. Adding a new promoted plugin in
+ * promotedPlugins.ts (with channelBrand + tagLabel) makes all display paths work.
+ */
+const BUILTIN_PLATFORM_NAMES: Record<string, string> = {
     telegram: 'Telegram',
+    feishu: '飞书',
     dingtalk: '钉钉',
-    qqbot: 'QQ',
-    'openclaw-lark': '飞书',
 };
 
 /**

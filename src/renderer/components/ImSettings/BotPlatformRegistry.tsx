@@ -270,11 +270,7 @@ export default function BotPlatformRegistry() {
                 key={`promoted-${pp.pluginId}`}
                 className="group relative flex flex-col items-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5"
               >
-                {isInstalling ? (
-                  <Loader2 className="h-12 w-12 animate-spin text-[var(--ink-muted)]" />
-                ) : (
-                  <img src={pp.icon} alt={pp.name} className="h-12 w-12 rounded-xl" />
-                )}
+                <img src={pp.icon} alt={pp.name} className="h-12 w-12 rounded-xl" />
                 <div className="text-center">
                   <div className="flex items-center justify-center gap-1.5">
                     <p className="text-sm font-medium text-[var(--ink)]">{pp.name}</p>
@@ -306,10 +302,11 @@ export default function BotPlatformRegistry() {
                   <button
                     onClick={() => handlePromotedInstall(pp)}
                     disabled={isInstalling || loading}
-                    className="rounded-full px-3 py-1 text-[11px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:opacity-50"
+                    className="flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:opacity-50"
                     style={{ backgroundColor: 'color-mix(in srgb, var(--accent) 8%, transparent)' }}
                   >
-                    点击安装
+                    {isInstalling && <Loader2 className="h-3 w-3 animate-spin" />}
+                    {isInstalling ? '安装中' : '点击安装'}
                   </button>
                 )}
               </div>

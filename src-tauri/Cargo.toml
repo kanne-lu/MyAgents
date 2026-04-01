@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.1.56"
+version = "0.1.57"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -49,3 +49,4 @@ prost = "0.13"
 pulldown-cmark = "0.12"
 axum = { version = "0.8", default-features = false, features = ["json", "tokio", "query", "http1"] }
 cron = "0.15"
+portable-pty = "0.8"
