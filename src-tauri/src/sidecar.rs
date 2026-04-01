@@ -13,7 +13,7 @@ use std::sync::Once;
 use std::thread;
 use std::time::Duration;
 
-use crate::{ulog_info, ulog_error};
+use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -50,24 +50,24 @@ fn ensure_high_file_descriptor_limit() {
                     rlim.rlim_cur = target;
 
                     if setrlimit(RLIMIT_NOFILE, &rlim) == 0 {
-                        log::info!(
+                        ulog_info!(
                             "[sidecar] Increased file descriptor limit: {} -> {} (hard limit: {})",
                             old_soft, target, hard_limit
                         );
                     } else {
-                        log::warn!(
+                        ulog_warn!(
                             "[sidecar] Failed to increase file descriptor limit (current: {}, target: {})",
                             old_soft, target
                         );
                     }
                 } else {
-                    log::info!(
+                    ulog_info!(
                         "[sidecar] File descriptor limit already sufficient: {} (hard: {})",
                         old_soft, hard_limit
                     );
                 }
             } else {
-                log::warn!("[sidecar] Failed to get current file descriptor limit");
+                ulog_warn!("[sidecar] Failed to get current file descriptor limit");
             }
         }
     });
@@ -122,7 +122,7 @@ fn mark_bun_as_crashed(path: &std::path::Path) {
     let mut paths = CRASHED_BUN_PATHS.lock().unwrap_or_else(|e| e.into_inner());
     if !paths.iter().any(|p| p == &normalized) {
         paths.push(normalized.clone());
-        log::warn!(
+        ulog_warn!(
             "[sidecar] Marked bun as crashed (will try system fallback on next attempt): {:?}",
             normalized
         );
@@ -152,9 +152,9 @@ fn write_global_port_file(port: u16) {
     if let Some(home) = dirs::home_dir() {
         let port_file = home.join(".myagents").join(PORT_FILE_NAME);
         if let Err(e) = std::fs::write(&port_file, port.to_string()) {
-            log::warn!("[sidecar] Failed to write port file {:?}: {}", port_file, e);
+            ulog_warn!("[sidecar] Failed to write port file {:?}: {}", port_file, e);
         } else {
-            log::info!("[sidecar] Wrote CLI port file: {:?} = {}", port_file, port);
+            ulog_info!("[sidecar] Wrote CLI port file: {:?} = {}", port_file, port);
         }
     }
 }
@@ -237,11 +237,11 @@ pub fn cleanup_stale_sidecars() {
                 && !has_windows_processes("claude-agent-sdk")
                 && !has_windows_processes(".myagents\\mcp\\")
             {
-                log::info!("[sidecar] Windows cleanup verified in {:?}", start.elapsed());
+                ulog_info!("[sidecar] Windows cleanup verified in {:?}", start.elapsed());
                 break;
             }
             if start.elapsed() > max_wait {
-                log::warn!("[sidecar] Windows cleanup timeout after 1s, some processes may remain");
+                ulog_warn!("[sidecar] Windows cleanup timeout after 1s, some processes may remain");
                 break;
             }
             thread::sleep(Duration::from_millis(50));
@@ -344,6 +344,21 @@ pub enum SidecarOwner {
     Agent(String),
 }
 
+/// Explicit three-state lifecycle for a SessionSidecar.
+///
+/// Replaces the previous `healthy: bool` which conflated Starting (process alive,
+/// not yet healthy) with Dead (process exited), causing race conditions where
+/// health monitors would kill Starting sidecars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarState {
+    /// Process spawned, `wait_for_health` in progress — do not kill.
+    Starting,
+    /// TCP health check passed (`wait_for_health`), ready to serve requests.
+    Healthy,
+    /// Process exited or health check permanently failed.
+    Dead,
+}
+
 /// Session-centric Sidecar instance
 /// Each Session has at most one Sidecar, shared by multiple owners.
 pub struct SessionSidecar {
@@ -357,8 +372,8 @@ pub struct SessionSidecar {
     /// Reserved for future use (e.g., workspace-aware operations)
     #[allow(dead_code)]
     pub workspace_path: PathBuf,
-    /// Whether the sidecar passed initial health check
-    pub healthy: bool,
+    /// Lifecycle state: Starting → Healthy → Dead
+    pub state: SidecarState,
     /// Set of owners (Tabs and CronTasks) that are using this Sidecar
     pub owners: HashSet<SidecarOwner>,
     /// Creation timestamp
@@ -368,33 +383,33 @@ pub struct SessionSidecar {
 }
 
 impl SessionSidecar {
-    /// Check if the sidecar process is still running
-    pub fn is_running(&mut self) -> bool {
-        if !self.healthy {
-            return false;
-        }
-
-        match self.process.try_wait() {
-            Ok(Some(_)) => {
-                self.healthy = false;
-                false
-            }
-            Ok(None) => true,
-            Err(_) => {
-                self.healthy = false;
-                false
-            }
-        }
+    /// Is this sidecar healthy and ready to accept requests?
+    pub fn is_reusable(&self) -> bool {
+        matches!(self.state, SidecarState::Healthy)
     }
 
-    /// Check if the sidecar process is alive (regardless of healthy flag).
-    /// Used during generation-change detection: a replacement sidecar may still be
-    /// in `wait_for_health` (healthy=false) but its process is alive and should not be killed.
-    pub fn is_process_alive(&mut self) -> bool {
+    /// Is this sidecar still starting up? (process alive, `wait_for_health` in progress)
+    pub fn is_starting(&self) -> bool {
+        matches!(self.state, SidecarState::Starting)
+    }
+
+    /// Is this sidecar dead?
+    /// Also auto-detects process exit and transitions Starting/Healthy → Dead.
+    pub fn is_dead(&mut self) -> bool {
+        if self.state == SidecarState::Dead {
+            return true;
+        }
+        // Check if the process actually exited while we thought it was alive
         match self.process.try_wait() {
-            Ok(Some(_)) => false,  // Process exited
-            Ok(None) => true,      // Still running
-            Err(_) => false,       // Error checking = assume dead
+            Ok(Some(_)) => {
+                self.state = SidecarState::Dead;
+                true
+            }
+            Ok(None) => false, // Still running
+            Err(_) => {
+                self.state = SidecarState::Dead;
+                true
+            }
         }
     }
 
@@ -421,15 +436,17 @@ impl SessionSidecar {
 /// Ensure Sidecar process is killed when SessionSidecar is dropped
 impl Drop for SessionSidecar {
     fn drop(&mut self) {
-        log::info!(
-            "[sidecar] Drop: killing SessionSidecar for session {} on port {}",
-            self.session_id, self.port
+        ulog_info!(
+            "[sidecar] Drop: killing SessionSidecar for session {} on port {} (state: {:?})",
+            self.session_id, self.port, self.state
         );
         let _ = kill_process(&mut self.process);
     }
 }
 
-/// Single Sidecar instance (legacy - kept for backward compatibility)
+/// Single Sidecar instance (legacy - used only for Global Sidecar).
+/// Still uses `healthy: bool` since the Global Sidecar is a singleton
+/// without the multi-owner race conditions that motivated `SidecarState`.
 pub struct SidecarInstance {
     /// The child process handle
     pub process: Child,
@@ -474,13 +491,13 @@ impl SidecarInstance {
 /// Ensure Bun process is killed when SidecarInstance is dropped
 impl Drop for SidecarInstance {
     fn drop(&mut self) {
-        log::info!("[sidecar] Drop: killing process on port {}", self.port);
+        ulog_info!("[sidecar] Drop: killing process on port {}", self.port);
         let _ = kill_process(&mut self.process);
         
         // Clean up temp directory for global sidecar
         if self.is_global {
             if let Some(ref dir) = self.agent_dir {
-                log::info!("[sidecar] Cleaning up temp directory: {:?}", dir);
+                ulog_info!("[sidecar] Cleaning up temp directory: {:?}", dir);
                 let _ = std::fs::remove_dir_all(dir);
             }
         }
@@ -631,7 +648,7 @@ impl SidecarManager {
         let mut ports = Vec::new();
         // Session-centric sidecars (Tab/CronTask/BackgroundCompletion)
         for sc in self.sidecars.values_mut() {
-            if sc.is_running() {
+            if !sc.is_dead() {
                 ports.push(sc.port);
             }
         }
@@ -648,7 +665,7 @@ impl SidecarManager {
 
     /// Stop all instances (session sidecars and global sidecar)
     pub fn stop_all(&mut self) {
-        log::info!(
+        ulog_info!(
             "[sidecar] Stopping all instances (sessions: {}, global: {})",
             self.sidecars.len(),
             self.instances.len()
@@ -678,7 +695,7 @@ impl SidecarManager {
         workspace_path: String,
         is_cron_task: bool,
     ) {
-        log::info!(
+        ulog_info!(
             "[sidecar] Activating session {} on port {}, tab: {:?}, task: {:?}, cron: {}",
             session_id, port, tab_id, task_id, is_cron_task
         );
@@ -697,14 +714,14 @@ impl SidecarManager {
 
     /// Deactivate a session
     pub fn deactivate_session(&mut self, session_id: &str) -> Option<SessionActivation> {
-        log::info!("[sidecar] Deactivating session {}", session_id);
+        ulog_info!("[sidecar] Deactivating session {}", session_id);
         self.session_activations.remove(session_id)
     }
 
     /// Update session activation's tab_id (e.g., when a Tab connects to headless Sidecar)
     pub fn update_session_tab(&mut self, session_id: &str, tab_id: Option<String>) {
         if let Some(activation) = self.session_activations.get_mut(session_id) {
-            log::info!(
+            ulog_info!(
                 "[sidecar] Updating session {} tab: {:?} -> {:?}",
                 session_id, activation.tab_id, tab_id
             );
@@ -733,12 +750,12 @@ impl SidecarManager {
         self.sidecars.get(session_id).map(|s| s.port)
     }
 
-    /// Check if a Session has a healthy Sidecar
+    /// Check if a Session has an active Sidecar (Starting or Healthy)
     /// Reserved for future use (e.g., debugging, health checks)
     #[allow(dead_code)]
     pub fn has_session_sidecar(&mut self, session_id: &str) -> bool {
         if let Some(sidecar) = self.sidecars.get_mut(session_id) {
-            sidecar.is_running()
+            !sidecar.is_dead()
         } else {
             false
         }
@@ -767,23 +784,23 @@ impl SidecarManager {
             .collect()
     }
 
-    /// Insert a new SessionSidecar
-    /// Reserved for future use (currently used internally via ensure_session_sidecar)
-    #[allow(dead_code)]
-    pub fn insert_session_sidecar(&mut self, session_id: String, sidecar: SessionSidecar) {
-        log::info!(
-            "[sidecar] Inserting SessionSidecar for session {} on port {}, owners: {:?}",
-            session_id, sidecar.port, sidecar.owners
-        );
-        self.sidecars.insert(session_id, sidecar);
+    /// Insert a sidecar and auto-increment its generation counter.
+    /// This ensures every creation is tracked for lock-gap race detection.
+    fn insert_sidecar(&mut self, session_id: &str, sidecar: SessionSidecar) {
+        self.next_generation(session_id);
+        self.sidecars.insert(session_id.to_string(), sidecar);
     }
 
-    /// Remove and return a SessionSidecar (will be dropped, killing the process)
-    /// Reserved for future use (e.g., explicit session cleanup)
-    #[allow(dead_code)]
-    pub fn remove_session_sidecar(&mut self, session_id: &str) -> Option<SessionSidecar> {
-        log::info!("[sidecar] Removing SessionSidecar for session {}", session_id);
+    /// Remove a sidecar. Does NOT clear the generation counter — it must remain
+    /// queryable across lock gaps (e.g. during HTTP health check windows).
+    fn remove_sidecar(&mut self, session_id: &str) -> Option<SessionSidecar> {
         self.sidecars.remove(session_id)
+    }
+
+    /// Clear the generation counter for a session.
+    /// Call only when the session is permanently done (last owner released).
+    fn clear_generation(&mut self, session_id: &str) {
+        self.sidecar_generations.remove(session_id);
     }
 
     /// Add an owner to a Session's Sidecar
@@ -792,7 +809,7 @@ impl SidecarManager {
     #[allow(dead_code)]
     pub fn add_session_owner(&mut self, session_id: &str, owner: SidecarOwner) -> bool {
         if let Some(sidecar) = self.sidecars.get_mut(session_id) {
-            log::info!(
+            ulog_info!(
                 "[sidecar] Adding owner {:?} to session {} (port {})",
                 owner, session_id, sidecar.port
             );
@@ -808,7 +825,7 @@ impl SidecarManager {
     /// Returns (was_removed, sidecar_was_stopped)
     pub fn remove_session_owner(&mut self, session_id: &str, owner: &SidecarOwner) -> (bool, bool) {
         let should_stop = if let Some(sidecar) = self.sidecars.get_mut(session_id) {
-            log::info!(
+            ulog_info!(
                 "[sidecar] Removing owner {:?} from session {} (port {})",
                 owner, session_id, sidecar.port
             );
@@ -818,11 +835,11 @@ impl SidecarManager {
         };
 
         if should_stop {
-            log::info!(
+            ulog_info!(
                 "[sidecar] Last owner removed from session {}, stopping Sidecar",
                 session_id
             );
-            self.sidecars.remove(session_id);
+            self.remove_sidecar(session_id);
             (true, true)
         } else {
             (true, false)
@@ -835,7 +852,7 @@ impl SidecarManager {
     ///
     /// Returns true if the upgrade was successful.
     pub fn upgrade_session_id(&mut self, old_session_id: &str, new_session_id: &str) -> bool {
-        log::info!(
+        ulog_info!(
             "[sidecar] Upgrading session ID: {} -> {}",
             old_session_id, new_session_id
         );
@@ -843,11 +860,13 @@ impl SidecarManager {
         let mut upgraded = false;
 
         // 1. Upgrade in sidecars HashMap
+        // NOTE: Direct HashMap access (not insert_sidecar/remove_sidecar) because this is
+        // a key rename, not a creation. Generation is migrated separately in step 2.
         if let Some(mut sidecar) = self.sidecars.remove(old_session_id) {
             // Update the session_id field in the sidecar itself
             sidecar.session_id = new_session_id.to_string();
             self.sidecars.insert(new_session_id.to_string(), sidecar);
-            log::info!(
+            ulog_info!(
                 "[sidecar] Upgraded sidecars HashMap: {} -> {}",
                 old_session_id, new_session_id
             );
@@ -864,7 +883,7 @@ impl SidecarManager {
             // Update the session_id field in the activation itself
             activation.session_id = new_session_id.to_string();
             self.session_activations.insert(new_session_id.to_string(), activation);
-            log::info!(
+            ulog_info!(
                 "[sidecar] Upgraded session_activations HashMap: {} -> {}",
                 old_session_id, new_session_id
             );
@@ -872,7 +891,7 @@ impl SidecarManager {
         }
 
         if !upgraded {
-            log::debug!(
+            ulog_debug!(
                 "[sidecar] No entries found for session {} to upgrade",
                 old_session_id
             );
@@ -1020,19 +1039,19 @@ fn kill_process(child: &mut Child) -> std::io::Result<()> {
 
                 if result > 0 {
                     // Direct child exited; give group members a brief grace period then SIGKILL the group
-                    log::debug!("[sidecar] Process {} exited gracefully, cleaning up process group", pid);
+                    ulog_debug!("[sidecar] Process {} exited gracefully, cleaning up process group", pid);
                     std::thread::sleep(Duration::from_millis(500));
                     unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
                     return;
                 } else if result < 0 {
                     // Error (process might already be gone)
-                    log::debug!("[sidecar] Process {} already gone or error", pid);
+                    ulog_debug!("[sidecar] Process {} already gone or error", pid);
                     return;
                 }
                 // result == 0 means process still running
 
                 if start.elapsed() > timeout {
-                    log::warn!("[sidecar] Process {} didn't exit after SIGTERM, force killing process group", pid);
+                    ulog_warn!("[sidecar] Process {} didn't exit after SIGTERM, force killing process group", pid);
                     unsafe { libc::kill(-(pid as i32), libc::SIGKILL); }
                     return;
                 }
@@ -1108,7 +1127,7 @@ fn diagnose_bun_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> String {
          Workaround: install Bun manually from https://bun.sh",
         diag
     );
-    log::error!("[sidecar] {}", msg);
+    ulog_error!("[sidecar] {}", msg);
     msg
 }
 
@@ -1162,7 +1181,7 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::pa
                 status_str, code, hint, bun_path
             )
         };
-        log::error!("[sidecar] {}", msg);
+        ulog_error!("[sidecar] {}", msg);
         return msg;
     }
 
@@ -1172,7 +1191,7 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::pa
             "Bun process exited immediately with status: {}. bun_path: {:?}",
             status_str, bun_path
         );
-        log::error!("[sidecar] {}", msg);
+        ulog_error!("[sidecar] {}", msg);
         msg
     }
 }
@@ -1188,16 +1207,16 @@ fn check_bun_in_dir(dir: &std::path::Path, label: &str) -> Option<PathBuf> {
     let any_crashed = (win_bun.exists() && is_bun_crashed(&win_bun))
         || (win_bun_simple.exists() && is_bun_crashed(&win_bun_simple));
     if any_crashed {
-        log::warn!("[sidecar] Skipping all bun candidates from {} (crashed): {:?}", label, dir);
+        ulog_warn!("[sidecar] Skipping all bun candidates from {} (crashed): {:?}", label, dir);
         return None;
     }
 
     if win_bun.exists() {
-        log::info!("[sidecar] Using bundled bun from {} (platform): {:?}", label, win_bun);
+        ulog_info!("[sidecar] Using bundled bun from {} (platform): {:?}", label, win_bun);
         return Some(win_bun);
     }
     if win_bun_simple.exists() {
-        log::info!("[sidecar] Using bundled bun from {} (simple): {:?}", label, win_bun_simple);
+        ulog_info!("[sidecar] Using bundled bun from {} (simple): {:?}", label, win_bun_simple);
         return Some(win_bun_simple);
     }
     None
@@ -1218,7 +1237,7 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
     // First, try to find bundled bun via resource_dir
     match app_handle.path().resource_dir() {
         Ok(resource_dir) => {
-            log::info!("[sidecar] resource_dir resolved to: {:?}", resource_dir);
+            ulog_info!("[sidecar] resource_dir resolved to: {:?}", resource_dir);
 
             #[cfg(target_os = "macos")]
             {
@@ -1230,14 +1249,14 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
                     let macos_bun = contents_dir.join("MacOS").join("bun-x86_64-apple-darwin");
 
                     if macos_bun.exists() {
-                        log::info!("Using bundled bun from MacOS: {:?}", macos_bun);
+                        ulog_info!("Using bundled bun from MacOS: {:?}", macos_bun);
                         return Some(macos_bun);
                     }
 
                     // Also check without suffix (for backward compatibility)
                     let macos_bun_simple = contents_dir.join("MacOS").join("bun");
                     if macos_bun_simple.exists() {
-                        log::info!("Using bundled bun from MacOS (simple): {:?}", macos_bun_simple);
+                        ulog_info!("Using bundled bun from MacOS (simple): {:?}", macos_bun_simple);
                         return Some(macos_bun_simple);
                     }
                 }
@@ -1267,9 +1286,9 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
 
             if bundled_bun.exists() {
                 if is_bun_crashed(&bundled_bun) {
-                    log::warn!("Skipping crashed bundled bun: {:?}", bundled_bun);
+                    ulog_warn!("Skipping crashed bundled bun: {:?}", bundled_bun);
                 } else {
-                    log::info!("Using bundled bun: {:?}", bundled_bun);
+                    ulog_info!("Using bundled bun: {:?}", bundled_bun);
                     return Some(bundled_bun);
                 }
             }
@@ -1282,7 +1301,7 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
                 let platform_bun = resource_dir.join("binaries").join("bun-x86_64-apple-darwin");
 
                 if platform_bun.exists() {
-                    log::info!("Using bundled platform bun: {:?}", platform_bun);
+                    ulog_info!("Using bundled platform bun: {:?}", platform_bun);
                     return Some(platform_bun);
                 }
             }
@@ -1292,16 +1311,16 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
                 let platform_bun = resource_dir.join("binaries").join("bun-x86_64-pc-windows-msvc.exe");
                 if platform_bun.exists() {
                     if is_bun_crashed(&platform_bun) {
-                        log::warn!("Skipping crashed bundled platform bun: {:?}", platform_bun);
+                        ulog_warn!("Skipping crashed bundled platform bun: {:?}", platform_bun);
                     } else {
-                        log::info!("Using bundled platform bun: {:?}", platform_bun);
+                        ulog_info!("Using bundled platform bun: {:?}", platform_bun);
                         return Some(platform_bun);
                     }
                 }
             }
         }
         Err(e) => {
-            log::warn!("[sidecar] resource_dir() failed: {}, will try exe-relative fallback", e);
+            ulog_warn!("[sidecar] resource_dir() failed: {}, will try exe-relative fallback", e);
         }
     }
 
@@ -1310,7 +1329,7 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
     {
         match std::env::current_exe() {
             Ok(exe_path) => {
-                log::info!("[sidecar] current_exe: {:?}", exe_path);
+                ulog_info!("[sidecar] current_exe: {:?}", exe_path);
                 if let Some(exe_dir) = exe_path.parent() {
                     if let Some(found) = check_bun_in_dir(exe_dir, "exe_dir") {
                         return Some(found);
@@ -1318,7 +1337,7 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
                 }
             }
             Err(e) => {
-                log::warn!("[sidecar] current_exe() failed: {}", e);
+                ulog_warn!("[sidecar] current_exe() failed: {}", e);
             }
         }
     }
@@ -1344,7 +1363,7 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
         for candidate in &candidates {
             let path = PathBuf::from(candidate);
             if path.exists() {
-                log::info!("Using system bun: {:?}", path);
+                ulog_info!("Using system bun: {:?}", path);
                 return Some(path);
             }
         }
@@ -1353,11 +1372,11 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
         if let Some(path) = crate::system_binary::find("bun.exe")
             .or_else(|| crate::system_binary::find("bun"))
         {
-            log::info!("Using bun from PATH: {:?}", path);
+            ulog_info!("Using bun from PATH: {:?}", path);
             return Some(path);
         }
 
-        log::error!("[sidecar] Bun executable not found in any location. Checked: resource_dir, exe_dir, system locations, PATH");
+        ulog_error!("[sidecar] Bun executable not found in any location. Checked: resource_dir, exe_dir, system locations, PATH");
         return None;
     }
 
@@ -1374,14 +1393,14 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
         for candidate in explicit_paths {
             let path = PathBuf::from(candidate);
             if path.exists() {
-                log::info!("Using system bun: {:?}", path);
+                ulog_info!("Using system bun: {:?}", path);
                 return Some(path);
             }
         }
         // ~/.bun/bin/bun (user-local install)
         let user_bun = PathBuf::from(format!("{}/.bun/bin/bun", home));
         if user_bun.exists() {
-            log::info!("Using system bun: {:?}", user_bun);
+            ulog_info!("Using system bun: {:?}", user_bun);
             return Some(user_bun);
         }
 
@@ -1399,7 +1418,7 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
     // 1. First check for bundled server-dist.js (Production)
     // Modified: Only check bundled script in Release mode, so Dev mode uses source
     #[cfg(debug_assertions)]
-    log::info!("[sidecar] Debug mode detected, SKIPPING bundled script check (forcing source usage)");
+    ulog_info!("[sidecar] Debug mode detected, SKIPPING bundled script check (forcing source usage)");
 
     #[cfg(not(debug_assertions))]
     {
@@ -1407,19 +1426,19 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
             Ok(resource_dir) => {
                 let bundled_script = resource_dir.join("server-dist.js");
                 if bundled_script.exists() {
-                    log::info!("Using bundled server script (bundled): {:?}", bundled_script);
+                    ulog_info!("Using bundled server script (bundled): {:?}", bundled_script);
                     return Some(bundled_script);
                 }
 
                 // Legacy check: Check for server/index.ts (Development / Legacy)
                 let legacy_script = resource_dir.join("server").join("index.ts");
                 if legacy_script.exists() {
-                    log::info!("Using bundled server script (legacy): {:?}", legacy_script);
+                    ulog_info!("Using bundled server script (legacy): {:?}", legacy_script);
                     return Some(legacy_script);
                 }
             }
             Err(e) => {
-                log::warn!("[sidecar] resource_dir() failed for script search: {}", e);
+                ulog_warn!("[sidecar] resource_dir() failed for script search: {}", e);
             }
         }
 
@@ -1429,7 +1448,7 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
             if let Some(exe_dir) = exe_path.parent() {
                 let script = exe_dir.join("server-dist.js");
                 if script.exists() {
-                    log::info!("[sidecar] Using server script from exe_dir: {:?}", script);
+                    ulog_info!("[sidecar] Using server script from exe_dir: {:?}", script);
                     return Some(script);
                 }
             }
@@ -1443,7 +1462,7 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
 
         if let Some(ref path) = dev_path {
             if path.exists() {
-                log::info!("Using development server script: {:?}", path);
+                ulog_info!("Using development server script: {:?}", path);
                 return dev_path;
             }
         }
@@ -1451,13 +1470,13 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
         if let Ok(cwd) = std::env::current_dir() {
             let cwd_path = cwd.join("src").join("server").join("index.ts");
             if cwd_path.exists() {
-                log::info!("Using cwd server script: {:?}", cwd_path);
+                ulog_info!("Using cwd server script: {:?}", cwd_path);
                 return Some(cwd_path);
             }
         }
     }
 
-    log::error!("[sidecar] Server script not found in any location");
+    ulog_error!("[sidecar] Server script not found in any location");
     None
 }
 
@@ -1493,7 +1512,7 @@ fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Res
             Duration::from_millis(HEALTH_CHECK_TIMEOUT_MS),
         ) {
             Ok(_) => {
-                log::info!("[sidecar] TCP health check passed after {} attempts on port {}", attempt, port);
+                ulog_info!("[sidecar] TCP health check passed after {} attempts on port {}", attempt, port);
                 return Ok(());
             }
             Err(_) => {
@@ -1526,7 +1545,7 @@ fn check_sidecar_http_health(port: u16) -> bool {
     match client.get(&health_url).send() {
         Ok(response) => response.status().is_success(),
         Err(e) => {
-            log::warn!("[sidecar] HTTP health check failed on port {}: {}", port, e);
+            ulog_warn!("[sidecar] HTTP health check failed on port {}: {}", port, e);
             false
         }
     }
@@ -1550,7 +1569,7 @@ pub fn start_tab_sidecar<R: Runtime>(
     // Check if already running for this tab
     if let Some(instance) = manager_guard.get_instance_mut(tab_id) {
         if instance.is_running() {
-            log::info!("[sidecar] Tab {} already has running instance on port {}", tab_id, instance.port);
+            ulog_info!("[sidecar] Tab {} already has running instance on port {}", tab_id, instance.port);
             return Ok(instance.port);
         }
     }
@@ -1567,7 +1586,7 @@ pub fn start_tab_sidecar<R: Runtime>(
     // Allocate port
     let port = manager_guard.allocate_port()?;
 
-    log::info!(
+    ulog_info!(
         "[sidecar] Starting for tab {} on port {}, agent_dir: {:?}",
         tab_id, port, agent_dir
     );
@@ -1591,7 +1610,7 @@ pub fn start_tab_sidecar<R: Runtime>(
     } else {
         // Global sidecar: use temp directory
         let temp_dir = std::env::temp_dir().join(format!("myagents-global-{}", std::process::id()));
-        log::info!("[sidecar] Creating temp agent directory: {:?}", temp_dir);
+        ulog_info!("[sidecar] Creating temp agent directory: {:?}", temp_dir);
 
         // Create directory and fail early if unable to create
         std::fs::create_dir_all(&temp_dir).map_err(|e| {
@@ -1601,7 +1620,7 @@ pub fn start_tab_sidecar<R: Runtime>(
                  This directory is required for Global Sidecar to store runtime data.",
                 temp_dir, e, std::env::temp_dir().display()
             );
-            log::error!("{}", err);
+            ulog_error!("{}", err);
             err
         })?;
 
@@ -1613,7 +1632,7 @@ pub fn start_tab_sidecar<R: Runtime>(
     // This is crucial for bun to find relative imports
     if let Some(script_dir) = script_path.parent() {
         cmd.current_dir(script_dir);
-        log::info!("[sidecar] Working directory set to: {:?}", script_dir);
+        ulog_info!("[sidecar] Working directory set to: {:?}", script_dir);
     }
 
     // Apply proxy policy: user proxy / inherit system / protect localhost (pit-of-success)
@@ -1648,7 +1667,7 @@ pub fn start_tab_sidecar<R: Runtime>(
 
     // Spawn
     let mut child = cmd.spawn().map_err(|e| {
-        log::error!("[sidecar] Failed to spawn: {}", e);
+        ulog_error!("[sidecar] Failed to spawn: {}", e);
         format!("Failed to spawn sidecar: {}", e)
     })?;
 
@@ -1693,7 +1712,7 @@ pub fn start_tab_sidecar<R: Runtime>(
     if let Ok(Some(status)) = child.try_wait() {
         // Process exited immediately, wait a bit for stderr thread to capture output
         thread::sleep(Duration::from_millis(100));
-        log::error!("[sidecar] Process exited immediately with status: {:?}", status);
+        ulog_error!("[sidecar] Process exited immediately with status: {:?}", status);
         #[cfg(target_os = "windows")]
         maybe_mark_crashed_bun(&status, &bun_path);
         let diag = diagnose_immediate_exit(&status, &bun_path);
@@ -1799,10 +1818,10 @@ pub fn stop_tab_sidecar(manager: &ManagedSidecarManager, tab_id: &str) -> Result
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
     if let Some(instance) = manager_guard.remove_instance(tab_id) {
-        log::info!("[sidecar] Stopped instance for tab {} on port {}", tab_id, instance.port);
+        ulog_info!("[sidecar] Stopped instance for tab {} on port {}", tab_id, instance.port);
         // Instance is dropped here, killing the process
     } else {
-        log::debug!("[sidecar] No instance found for tab {}", tab_id);
+        ulog_debug!("[sidecar] No instance found for tab {}", tab_id);
     }
 
     Ok(())
@@ -1831,13 +1850,13 @@ pub fn get_tab_server_url(manager: &ManagedSidecarManager, tab_id: &str) -> Resu
     if let Some((session_id, port)) = activation_session {
         // Verify the sidecar is still healthy in Session-centric storage
         let is_healthy = manager_guard.sidecars.get_mut(&session_id)
-            .map(|s| s.is_running())
+            .map(|s| s.is_reusable())
             .unwrap_or(false)
             || manager_guard.instances.values_mut()
                 .any(|i| i.port == port && i.is_running());
 
         if is_healthy {
-            log::info!(
+            ulog_info!(
                 "[sidecar] Tab {} using session {} sidecar on port {} (via session_activation)",
                 tab_id, session_id, port
             );
@@ -1872,7 +1891,7 @@ pub fn get_tab_sidecar_status(manager: &ManagedSidecarManager, tab_id: &str) -> 
     if let Some((session_id, port, workspace_path)) = activation_info {
         // Check if the sidecar is healthy in Session-centric storage
         let is_running = manager_guard.sidecars.get_mut(&session_id)
-            .map(|s| s.is_running())
+            .map(|s| s.is_reusable())
             .unwrap_or(false)
             || manager_guard.instances.values_mut()
                 .any(|i| i.port == port && i.is_running());
@@ -1971,7 +1990,7 @@ pub async fn monitor_global_sidecar(
         if age < Duration::from_secs(STARTUP_GRACE_SECS) {
             if !process_alive {
                 // Process died during startup — still worth restarting, but log clearly
-                log::warn!(
+                ulog_warn!(
                     "[sidecar] Global sidecar on port {} died during startup (age {:?}), restarting",
                     port, age
                 );
@@ -2000,7 +2019,7 @@ pub async fn monitor_global_sidecar(
             continue;
         }
 
-        log::warn!("[sidecar] Global sidecar on port {} is unhealthy, auto-restarting...", port);
+        ulog_warn!("[sidecar] Global sidecar on port {} is unhealthy, auto-restarting...", port);
 
         // Mark the existing instance as unhealthy so start_global_sidecar() won't
         // short-circuit with "already running". Without this, a hung process (alive
@@ -2033,14 +2052,14 @@ pub async fn monitor_global_sidecar(
             Ok(Err(e)) => {
                 consecutive_restart_failures += 1;
                 if consecutive_restart_failures >= MAX_RESTART_FAILURES {
-                    log::error!("[sidecar] Failed to auto-restart global sidecar ({} consecutive failures, backing off): {}", consecutive_restart_failures, e);
+                    ulog_error!("[sidecar] Failed to auto-restart global sidecar ({} consecutive failures, backing off): {}", consecutive_restart_failures, e);
                 } else {
-                    log::error!("[sidecar] Failed to auto-restart global sidecar (attempt {}): {}", consecutive_restart_failures, e);
+                    ulog_error!("[sidecar] Failed to auto-restart global sidecar (attempt {}): {}", consecutive_restart_failures, e);
                 }
             }
             Err(e) => {
                 consecutive_restart_failures += 1;
-                log::error!("[sidecar] spawn_blocking failed during global sidecar restart: {}", e);
+                ulog_error!("[sidecar] spawn_blocking failed during global sidecar restart: {}", e);
             }
         }
     }
@@ -2085,7 +2104,7 @@ pub async fn monitor_session_sidecars(
                 Err(_) => continue,
             };
             for (sid, sc) in guard.sidecars.iter_mut() {
-                if !sc.is_running() && !sc.owners.is_empty() && !recovery.contains_key(sid) {
+                if sc.is_dead() && !sc.owners.is_empty() && !recovery.contains_key(sid) {
                     recovery.insert(sid.clone(), RecoveryEntry {
                         workspace: sc.workspace_path.clone(),
                         owners: sc.owners.iter().cloned().collect(),
@@ -2102,7 +2121,7 @@ pub async fn monitor_session_sidecars(
                 .map(|mut g| {
                     g.sidecars
                         .get_mut(sid)
-                        .map(|sc| !sc.is_running())
+                        .map(|sc| sc.is_dead())
                         .unwrap_or(true) // not in sidecars → keep in recovery
                 })
                 .unwrap_or(true)
@@ -2131,13 +2150,13 @@ pub async fn monitor_session_sidecars(
                     Err(_) => continue,
                 };
                 if let Some(sc) = guard.sidecars.get_mut(&session_id) {
-                    if sc.is_running() {
+                    if !sc.is_dead() {
                         // Recovered on its own — remove from recovery
                         recovery.remove(&session_id);
                         continue;
                     }
                 }
-                guard.sidecars.remove(&session_id);
+                guard.remove_sidecar(&session_id);
             }
 
             let first_owner = entry.owners[0].clone();
@@ -2237,17 +2256,17 @@ pub fn ensure_session_sidecar<R: Runtime>(
     workspace_path: &std::path::Path,
     owner: SidecarOwner,
 ) -> Result<EnsureSidecarResult, String> {
-    log::info!("[sidecar] ensure_session_sidecar called for session: {}, owner: {:?}", session_id, owner);
+    ulog_info!("[sidecar] ensure_session_sidecar called for session: {}, owner: {:?}", session_id, owner);
 
     // Ensure file descriptor limit is high enough for Bun
     ensure_high_file_descriptor_limit();
 
-    log::debug!("[sidecar] Acquiring manager lock...");
+    ulog_debug!("[sidecar] Acquiring manager lock...");
     let mut manager_guard = manager.lock().map_err(|e| {
-        log::error!("[sidecar] Failed to acquire manager lock: {}", e);
+        ulog_error!("[sidecar] Failed to acquire manager lock: {}", e);
         e.to_string()
     })?;
-    log::debug!("[sidecar] Manager lock acquired");
+    ulog_debug!("[sidecar] Manager lock acquired");
 
     // Check if Session already has a healthy Sidecar
     // We use a two-phase approach to avoid holding the lock during HTTP check:
@@ -2257,16 +2276,25 @@ pub fn ensure_session_sidecar<R: Runtime>(
 
     let existing_sidecar_info: Option<u16> = {
         if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-            if sidecar.is_running() {
-                Some(sidecar.port)
-            } else {
-                // Sidecar exists but process not running - remove it
-                log::info!(
+            if sidecar.is_dead() {
+                // Process exited, clean up
+                ulog_info!(
                     "[sidecar] Session {} has dead Sidecar process, removing",
                     session_id
                 );
-                manager_guard.sidecars.remove(session_id);
+                manager_guard.remove_sidecar(session_id);
                 None
+            } else if sidecar.is_reusable() {
+                // Healthy — needs HTTP verification outside the lock
+                Some(sidecar.port)
+            } else {
+                // Starting — another thread is doing wait_for_health, just join
+                ulog_info!(
+                    "[sidecar] Session {} Sidecar still starting on port {}, adding owner {:?}",
+                    session_id, sidecar.port, owner
+                );
+                sidecar.add_owner(owner);
+                return Ok(EnsureSidecarResult { port: sidecar.port, is_new: false });
             }
         } else {
             None
@@ -2290,29 +2318,17 @@ pub fn ensure_session_sidecar<R: Runtime>(
 
         if post_gen != pre_gen {
             // Generation changed: another thread replaced the sidecar during our HTTP check.
-            // Reuse the replacement instead of blindly removing it.
-            // IMPORTANT: Use is_process_alive() not is_running() — the replacement may still
-            // be in wait_for_health (healthy=false) but its process is alive and should not be killed.
-            log::info!(
-                "[sidecar] Session {} generation changed ({} → {}) during HTTP check on port {}, reusing replacement",
+            // Reuse the replacement if it's alive (Healthy or Starting).
+            ulog_info!(
+                "[sidecar] Session {} generation changed ({} → {}) during HTTP check on port {}, checking replacement",
                 session_id, pre_gen, post_gen, port
             );
             if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-                if sidecar.is_running() {
-                    // Replacement is fully healthy — reuse immediately
-                    sidecar.add_owner(owner);
-                    return Ok(EnsureSidecarResult {
-                        port: sidecar.port,
-                        is_new: false,
-                    });
-                }
-                if sidecar.is_process_alive() {
-                    // Replacement is still starting (healthy=false but process alive).
-                    // Add owner and return its port — the other thread's wait_for_health
-                    // will mark it healthy soon. Don't kill it by falling through to create.
-                    log::info!(
-                        "[sidecar] Session {} replacement on port {} still starting, adding owner and returning",
-                        session_id, sidecar.port
+                if !sidecar.is_dead() {
+                    // Replacement alive (Healthy or Starting) — reuse
+                    ulog_info!(
+                        "[sidecar] Session {} replacement on port {} is {:?}, adding owner and returning",
+                        session_id, sidecar.port, sidecar.state
                     );
                     sidecar.add_owner(owner);
                     return Ok(EnsureSidecarResult {
@@ -2325,8 +2341,8 @@ pub fn ensure_session_sidecar<R: Runtime>(
         } else if http_healthy {
             // Same generation, HTTP healthy — try to reuse
             if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-                if sidecar.port == port && sidecar.is_running() {
-                    log::info!(
+                if sidecar.port == port && sidecar.is_reusable() {
+                    ulog_info!(
                         "[sidecar] Session {} Sidecar HTTP healthy on port {}, adding owner {:?}",
                         session_id, port, owner
                     );
@@ -2338,17 +2354,17 @@ pub fn ensure_session_sidecar<R: Runtime>(
                 }
             }
             // Sidecar gone but generation unchanged (removed without replacement)
-            log::info!(
+            ulog_info!(
                 "[sidecar] Session {} Sidecar removed during HTTP check, will create new",
                 session_id
             );
         } else {
             // Same generation, HTTP unhealthy — safe to remove (no one replaced it)
-            log::warn!(
+            ulog_warn!(
                 "[sidecar] Session {} Sidecar process alive but HTTP unresponsive on port {}, removing",
                 session_id, port
             );
-            manager_guard.sidecars.remove(session_id);
+            manager_guard.remove_sidecar(session_id);
         }
 
         return create_new_session_sidecar(
@@ -2375,13 +2391,11 @@ fn create_new_session_sidecar<R: Runtime>(
 
     // Guard against double-creation: if another thread already created a sidecar for this
     // session (e.g., health monitor raced with frontend), reuse it instead of spawning another.
-    // Check is_process_alive() too — a Starting sidecar (healthy=false, process alive) should
-    // not be killed and recreated.
     if let Some(existing) = manager_guard.sidecars.get_mut(session_id) {
-        if existing.is_running() || existing.is_process_alive() {
-            log::info!(
-                "[sidecar] Session {} already has a {} sidecar on port {} (created by another thread), reusing",
-                session_id, if existing.healthy { "healthy" } else { "starting" }, existing.port
+        if !existing.is_dead() {
+            ulog_info!(
+                "[sidecar] Session {} already has a {:?} sidecar on port {} (created by another thread), reusing",
+                session_id, existing.state, existing.port
             );
             existing.add_owner(owner);
             return Ok(EnsureSidecarResult {
@@ -2390,7 +2404,7 @@ fn create_new_session_sidecar<R: Runtime>(
             });
         }
         // Exists but process dead — remove before creating fresh
-        manager_guard.sidecars.remove(session_id);
+        manager_guard.remove_sidecar(session_id);
     }
 
     // Need to start a new Sidecar
@@ -2403,7 +2417,7 @@ fn create_new_session_sidecar<R: Runtime>(
     // Allocate port
     let port = manager_guard.allocate_port()?;
 
-    log::info!(
+    ulog_info!(
         "[sidecar] Starting SessionSidecar for session {} on port {}, owner: {:?}",
         session_id, port, owner
     );
@@ -2452,7 +2466,7 @@ fn create_new_session_sidecar<R: Runtime>(
 
     // Spawn
     let mut child = cmd.spawn().map_err(|e| {
-        log::error!("[sidecar] Failed to spawn SessionSidecar: {}", e);
+        ulog_error!("[sidecar] Failed to spawn SessionSidecar: {}", e);
         format!("Failed to spawn sidecar: {}", e)
     })?;
 
@@ -2497,7 +2511,7 @@ fn create_new_session_sidecar<R: Runtime>(
     thread::sleep(Duration::from_millis(50));
     if let Ok(Some(status)) = child.try_wait() {
         thread::sleep(Duration::from_millis(100));
-        log::error!("[sidecar] SessionSidecar exited immediately with status: {:?}", status);
+        ulog_error!("[sidecar] SessionSidecar exited immediately with status: {:?}", status);
         #[cfg(target_os = "windows")]
         maybe_mark_crashed_bun(&status, &bun_path);
         let diag = diagnose_immediate_exit(&status, &bun_path);
@@ -2512,13 +2526,12 @@ fn create_new_session_sidecar<R: Runtime>(
         port,
         session_id: session_id.to_string(),
         workspace_path: workspace_path.to_path_buf(),
-        healthy: false,
+        state: SidecarState::Starting,
         owners,
         created_at: std::time::Instant::now(),
     };
 
-    manager_guard.next_generation(session_id);
-    manager_guard.sidecars.insert(session_id.to_string(), sidecar);
+    manager_guard.insert_sidecar(session_id, sidecar);
 
     // Drop lock before waiting for health
     drop(manager_guard);
@@ -2541,12 +2554,20 @@ fn create_new_session_sidecar<R: Runtime>(
     // Wait for health
     match wait_for_health(port, Some(alive_check)) {
         Ok(()) => {
-            // Mark as healthy
+            // Mark as healthy — verify port to avoid mutating a replacement sidecar
+            // that was created by another thread (e.g., health monitor) during the wait.
             let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
             if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-                sidecar.healthy = true;
+                if sidecar.port == port {
+                    sidecar.state = SidecarState::Healthy;
+                } else {
+                    ulog_warn!(
+                        "[sidecar] Session {} sidecar replaced during wait_for_health (expected port {}, found {}), skipping Healthy transition",
+                        session_id, port, sidecar.port
+                    );
+                }
             }
-            log::info!(
+            ulog_info!(
                 "[sidecar] SessionSidecar for session {} is healthy on port {}",
                 session_id, port
             );
@@ -2556,17 +2577,28 @@ fn create_new_session_sidecar<R: Runtime>(
             })
         }
         Err(e) => {
-            log::error!("[sidecar] SessionSidecar health check failed: {}", e);
+            ulog_error!("[sidecar] SessionSidecar health check failed: {}", e);
             let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
-            // Check exit status and mark crashed bun for fallback
-            #[cfg(target_os = "windows")]
-            if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-                if let Ok(Some(status)) = sidecar.process.try_wait() {
-                    maybe_mark_crashed_bun(&status, &bun_path);
+            // Verify port before acting — another thread may have replaced the sidecar
+            let port_matches = manager_guard.sidecars.get(session_id)
+                .map(|s| s.port == port)
+                .unwrap_or(false);
+            if port_matches {
+                // Check exit status and mark crashed bun for fallback
+                #[cfg(target_os = "windows")]
+                if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
+                    if let Ok(Some(status)) = sidecar.process.try_wait() {
+                        maybe_mark_crashed_bun(&status, &bun_path);
+                    }
                 }
+                // Remove the failed sidecar (ours, not a replacement)
+                manager_guard.remove_sidecar(session_id);
+            } else {
+                ulog_warn!(
+                    "[sidecar] Session {} sidecar replaced during wait_for_health (port {}), skipping removal",
+                    session_id, port
+                );
             }
-            // Remove the failed sidecar
-            manager_guard.sidecars.remove(session_id);
             Err(e)
         }
     }
@@ -2588,20 +2620,20 @@ pub fn release_session_sidecar(
     if removed {
         if stopped {
             // Clean up generation counter when sidecar is permanently removed
-            manager_guard.sidecar_generations.remove(session_id);
-            log::info!(
+            manager_guard.clear_generation(session_id);
+            ulog_info!(
                 "[sidecar] Released owner {:?} from session {}, Sidecar stopped (last owner)",
                 owner, session_id
             );
         } else {
-            log::info!(
+            ulog_info!(
                 "[sidecar] Released owner {:?} from session {}, Sidecar continues running",
                 owner, session_id
             );
         }
         Ok(stopped)
     } else {
-        log::debug!(
+        ulog_debug!(
             "[sidecar] Session {} has no Sidecar to release owner {:?} from",
             session_id, owner
         );
@@ -2755,7 +2787,7 @@ pub fn start_background_completion<R: Runtime>(
     let port = {
         let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
         if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-            if sidecar.is_running() {
+            if sidecar.is_reusable() {
                 Some(sidecar.port)
             } else {
                 None
@@ -2768,7 +2800,7 @@ pub fn start_background_completion<R: Runtime>(
     let port = match port {
         Some(p) => p,
         None => {
-            log::debug!("[bg-completion] No running sidecar for session {}", session_id);
+            ulog_debug!("[bg-completion] No running sidecar for session {}", session_id);
             return Ok(BackgroundCompletionResult { started: false, session_id: result_id });
         }
     };
@@ -2778,7 +2810,7 @@ pub fn start_background_completion<R: Runtime>(
     let is_running = state.as_deref() == Some("running");
 
     if !is_running {
-        log::info!("[bg-completion] Session {} is not running (state: {:?}), no background completion needed", session_id, state);
+        ulog_info!("[bg-completion] Session {} is not running (state: {:?}), no background completion needed", session_id, state);
         return Ok(BackgroundCompletionResult { started: false, session_id: result_id });
     }
 
@@ -2788,13 +2820,13 @@ pub fn start_background_completion<R: Runtime>(
         if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
             let bg_owner = SidecarOwner::BackgroundCompletion(session_id.to_string());
             if sidecar.owners.contains(&bg_owner) {
-                log::info!("[bg-completion] Session {} already has a BackgroundCompletion owner", session_id);
+                ulog_info!("[bg-completion] Session {} already has a BackgroundCompletion owner", session_id);
                 return Ok(BackgroundCompletionResult { started: true, session_id: result_id });
             }
             sidecar.add_owner(bg_owner);
-            log::info!("[bg-completion] Added BackgroundCompletion owner to session {} (port {})", session_id, port);
+            ulog_info!("[bg-completion] Added BackgroundCompletion owner to session {} (port {})", session_id, port);
         } else {
-            log::warn!("[bg-completion] Sidecar disappeared during state check for session {}", session_id);
+            ulog_warn!("[bg-completion] Sidecar disappeared during state check for session {}", session_id);
             return Ok(BackgroundCompletionResult { started: false, session_id: result_id });
         }
     }
@@ -2825,7 +2857,7 @@ fn poll_background_completion<R: Runtime>(
     session_id: &str,
     port: u16,
 ) {
-    log::info!("[bg-completion] Starting polling for session {} on port {}", session_id, port);
+    ulog_info!("[bg-completion] Starting polling for session {} on port {}", session_id, port);
     let start_time = std::time::Instant::now();
     let max_duration = Duration::from_secs(BG_MAX_DURATION_SECS);
     let poll_interval = Duration::from_secs(BG_POLL_INTERVAL_SECS);
@@ -2838,7 +2870,7 @@ fn poll_background_completion<R: Runtime>(
 
         // Safety timeout
         if start_time.elapsed() > max_duration {
-            log::warn!("[bg-completion] Session {} hit safety timeout ({} min), stopping", session_id, BG_MAX_DURATION_SECS / 60);
+            ulog_warn!("[bg-completion] Session {} hit safety timeout ({} min), stopping", session_id, BG_MAX_DURATION_SECS / 60);
             break;
         }
 
@@ -2852,17 +2884,17 @@ fn poll_background_completion<R: Runtime>(
                 Some(sidecar) => {
                     // Owner removed externally (e.g., user reconnected via cancelBackgroundCompletion)
                     if !sidecar.owners.contains(&bg_owner) {
-                        log::info!("[bg-completion] BackgroundCompletion owner removed for session {} (user reconnected?), exiting poll", session_id);
+                        ulog_info!("[bg-completion] BackgroundCompletion owner removed for session {} (user reconnected?), exiting poll", session_id);
                         return; // Don't remove owner - it's already gone
                     }
                     // Process died
-                    if !sidecar.is_running() {
-                        log::warn!("[bg-completion] Sidecar process died for session {}", session_id);
+                    if sidecar.is_dead() {
+                        ulog_warn!("[bg-completion] Sidecar process died for session {}", session_id);
                         break;
                     }
                 }
                 None => {
-                    log::info!("[bg-completion] Sidecar removed for session {}, exiting poll", session_id);
+                    ulog_info!("[bg-completion] Sidecar removed for session {}, exiting poll", session_id);
                     return; // Sidecar already gone, nothing to clean up
                 }
             }
@@ -2872,23 +2904,23 @@ fn poll_background_completion<R: Runtime>(
         match check_sidecar_session_state(port) {
             Some(ref state) if state == "running" => {
                 consecutive_http_failures = 0;
-                log::debug!("[bg-completion] Session {} still running, continuing poll", session_id);
+                ulog_debug!("[bg-completion] Session {} still running, continuing poll", session_id);
                 continue;
             }
             Some(ref state) => {
-                log::info!("[bg-completion] Session {} finished (state: {})", session_id, state);
+                ulog_info!("[bg-completion] Session {} finished (state: {})", session_id, state);
                 break;
             }
             None => {
                 consecutive_http_failures += 1;
                 if consecutive_http_failures >= MAX_HTTP_FAILURES {
-                    log::warn!(
+                    ulog_warn!(
                         "[bg-completion] Session {} HTTP unreachable {} consecutive times, giving up",
                         session_id, consecutive_http_failures
                     );
                     break;
                 }
-                log::warn!(
+                ulog_warn!(
                     "[bg-completion] Session {} HTTP unreachable ({}/{}), retrying...",
                     session_id, consecutive_http_failures, MAX_HTTP_FAILURES
                 );
@@ -2901,12 +2933,12 @@ fn poll_background_completion<R: Runtime>(
     let sidecar_stopped = match release_session_sidecar(manager, session_id, &bg_owner) {
         Ok(stopped) => stopped,
         Err(e) => {
-            log::error!("[bg-completion] Failed to release owner for session {}: {}", session_id, e);
+            ulog_error!("[bg-completion] Failed to release owner for session {}: {}", session_id, e);
             false
         }
     };
 
-    log::info!(
+    ulog_info!(
         "[bg-completion] Session {} background completion finished, sidecar_stopped: {}",
         session_id, sidecar_stopped
     );
@@ -2930,14 +2962,14 @@ pub fn cancel_background_completion(
     if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
         if sidecar.owners.contains(&bg_owner) {
             sidecar.owners.remove(&bg_owner);
-            log::info!("[bg-completion] Cancelled background completion for session {}", session_id);
+            ulog_info!("[bg-completion] Cancelled background completion for session {}", session_id);
             Ok(true)
         } else {
-            log::debug!("[bg-completion] No BackgroundCompletion owner to cancel for session {}", session_id);
+            ulog_debug!("[bg-completion] No BackgroundCompletion owner to cancel for session {}", session_id);
             Ok(false)
         }
     } else {
-        log::debug!("[bg-completion] No sidecar found to cancel background completion for session {}", session_id);
+        ulog_debug!("[bg-completion] No sidecar found to cancel background completion for session {}", session_id);
         Ok(false)
     }
 }
@@ -2975,7 +3007,7 @@ pub fn cmd_get_background_sessions(
 /// Stop all sidecar instances and clean up child processes
 /// This should be called when the app is closing
 pub fn stop_all_sidecars(manager: &ManagedSidecarManager) -> Result<(), String> {
-    log::info!("[sidecar] Stopping all sidecars and cleaning up child processes...");
+    ulog_info!("[sidecar] Stopping all sidecars and cleaning up child processes...");
 
     // 1. Stop all managed sidecar instances (kills bun sidecars via Drop)
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
@@ -2994,7 +3026,7 @@ pub fn stop_all_sidecars(manager: &ManagedSidecarManager) -> Result<(), String> 
 /// Unlike stop_all_sidecars (which is non-blocking), this function waits for
 /// all bun/SDK/MCP processes to exit, preventing NSIS installer file-lock errors on Windows.
 pub fn shutdown_for_update(manager: &ManagedSidecarManager) -> Result<(), String> {
-    log::info!("[sidecar] Shutdown for update: stopping all processes...");
+    ulog_info!("[sidecar] Shutdown for update: stopping all processes...");
 
     // 1. Stop all sidecar instances (via Drop → kill_process → taskkill /T /F)
     stop_all_sidecars(manager)?;
@@ -3010,12 +3042,12 @@ pub fn shutdown_for_update(manager: &ManagedSidecarManager) -> Result<(), String
             let has_mcp = has_windows_processes(".myagents\\mcp\\");
 
             if !has_sidecar && !has_sdk && !has_mcp {
-                log::info!("[sidecar] All processes terminated in {:?}", start.elapsed());
+                ulog_info!("[sidecar] All processes terminated in {:?}", start.elapsed());
                 break;
             }
 
             if start.elapsed() > max_wait {
-                log::warn!("[sidecar] Update shutdown timeout, force killing remaining...");
+                ulog_warn!("[sidecar] Update shutdown timeout, force killing remaining...");
                 kill_windows_processes_by_pattern(SIDECAR_MARKER);
                 kill_windows_processes_by_pattern("claude-agent-sdk");
                 kill_windows_processes_by_pattern(".myagents\\mcp\\");
@@ -3034,7 +3066,7 @@ pub fn shutdown_for_update(manager: &ManagedSidecarManager) -> Result<(), String
         thread::sleep(Duration::from_millis(500));
     }
 
-    log::info!("[sidecar] Shutdown for update complete");
+    ulog_info!("[sidecar] Shutdown for update complete");
     Ok(())
 }
 
@@ -3056,7 +3088,7 @@ fn cleanup_child_processes() {
 #[cfg(windows)]
 fn cleanup_child_processes() {
     // Windows: Clean up SDK and MCP child processes using wmic + taskkill
-    log::info!("[sidecar] Cleaning up child processes on Windows...");
+    ulog_info!("[sidecar] Cleaning up child processes on Windows...");
 
     // Clean up SDK child processes
     kill_windows_processes_by_pattern("claude-agent-sdk");
@@ -3095,7 +3127,7 @@ fn kill_windows_processes_by_pattern(pattern: &str) {
         }
         _ => {
             // Fallback to wmic for older Windows versions
-            log::info!("[sidecar] PowerShell failed, falling back to wmic");
+            ulog_info!("[sidecar] PowerShell failed, falling back to wmic");
             Command::new("wmic")
                 .args(["process", "where", &format!("commandline like '%{}%'", pattern), "get", "processid"])
                 .creation_flags(CREATE_NO_WINDOW)
@@ -3382,7 +3414,7 @@ pub async fn execute_cron_task<R: Runtime>(
     workspace_path: &str,
     payload: CronExecutePayload,
 ) -> Result<CronExecuteResponse, String> {
-    log::info!(
+    ulog_info!(
         "[sidecar] execute_cron_task called for task {} in workspace {}",
         payload.task_id, workspace_path
     );
@@ -3390,7 +3422,7 @@ pub async fn execute_cron_task<R: Runtime>(
     // Require session_id for Session-centric Sidecar
     let session_id = payload.session_id.clone().ok_or_else(|| {
         let err = format!("[sidecar] execute_cron_task requires session_id for task {}", payload.task_id);
-        log::error!("{}", err);
+        ulog_error!("{}", err);
         err
     })?;
 
@@ -3417,7 +3449,7 @@ pub async fn execute_cron_task<R: Runtime>(
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?
     .map_err(|e| {
-        log::error!("[sidecar] ensure_session_sidecar failed for task {}: {}", payload.task_id, e);
+        ulog_error!("[sidecar] ensure_session_sidecar failed for task {}: {}", payload.task_id, e);
         let _ = app_handle.emit("cron:debug", serde_json::json!({
             "taskId": payload.task_id,
             "message": format!("execute_cron_task: ensure_session_sidecar FAILED: {}", e),
@@ -3434,7 +3466,7 @@ pub async fn execute_cron_task<R: Runtime>(
         "message": format!("execute_cron_task: sidecar ready on port {}, isNew={}", port, result.is_new)
     }));
 
-    log::info!(
+    ulog_info!(
         "[sidecar] Cron sidecar ready for task {} on port {} (isNew={})",
         payload.task_id, port, result.is_new
     );
@@ -3469,7 +3501,7 @@ pub async fn execute_cron_task<R: Runtime>(
             "message": "execute_cron_task: session activation recorded"
         }));
 
-        log::info!(
+        ulog_info!(
             "[sidecar] Cron task {} activated session {} as cron (port {})",
             payload.task_id, session_id, port
         );
@@ -3482,7 +3514,7 @@ pub async fn execute_cron_task<R: Runtime>(
         "message": format!("execute_cron_task: about to send HTTP request to {}", url)
     }));
 
-    log::info!(
+    ulog_info!(
         "[sidecar] Executing cron task {} via {}",
         payload.task_id, url
     );
@@ -3519,7 +3551,7 @@ pub async fn execute_cron_task<R: Runtime>(
         .await
         .map_err(|e| format!("[sidecar] Failed to read response body: {}", e))?;
 
-    log::info!(
+    ulog_info!(
         "[sidecar] Cron task {} response: status={}, body={}",
         payload.task_id, status, body.chars().take(500).collect::<String>()
     );
@@ -3528,7 +3560,7 @@ pub async fn execute_cron_task<R: Runtime>(
     let result: CronExecuteResponse = serde_json::from_str(&body)
         .map_err(|e| format!("[sidecar] Failed to parse response JSON: {} (body: {})", e, body))?;
 
-    log::info!(
+    ulog_info!(
         "[sidecar] Cron task {} parsed response: success={}, error={:?}, ai_requested_exit={:?}",
         payload.task_id, result.success, result.error, result.ai_requested_exit
     );
@@ -3596,15 +3628,15 @@ async fn post_proxy(client: &reqwest::Client, port: u16, payload: &serde_json::V
     let url = format!("http://127.0.0.1:{}/api/proxy/set", port);
     match client.post(&url).json(payload).send().await {
         Ok(r) if r.status().is_success() => {
-            log::info!("[proxy-propagate] Updated sidecar on port {}", port);
+            ulog_info!("[proxy-propagate] Updated sidecar on port {}", port);
             true
         }
         Ok(r) => {
-            log::warn!("[proxy-propagate] Port {} returned {}", port, r.status());
+            ulog_warn!("[proxy-propagate] Port {} returned {}", port, r.status());
             false
         }
         Err(e) => {
-            log::warn!("[proxy-propagate] Port {} unreachable: {}", port, e);
+            ulog_warn!("[proxy-propagate] Port {} unreachable: {}", port, e);
             false
         }
     }
@@ -3665,7 +3697,7 @@ pub async fn cmd_propagate_proxy(
         }
     }
 
-    log::info!(
+    ulog_info!(
         "[proxy-propagate] Done: {} updated, {} failed",
         ok,
         fail
