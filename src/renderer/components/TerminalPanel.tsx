@@ -224,19 +224,29 @@ export function TerminalPanel({
     return () => disposable.dispose();
   }, [terminalId]);
 
-  // 5. Unified resize: single code path for both ResizeObserver and visibility changes.
-  // Prevents garbled prompt from multiple fit+SIGWINCH cycles racing each other.
+  // 5. Unified resize with transition-aware suppression.
+  //
+  // ROOT CAUSE of prompt truncation: the left panel has `transition-[width] duration-300`
+  // (300ms CSS transition). During this transition, the terminal container width changes
+  // continuously from 0 to its final width. Without suppression, ResizeObserver fires
+  // repeatedly during transition, each time calling fit() at a different intermediate width,
+  // sending multiple SIGWINCH to the shell → prompt redrawn at wrong widths → garbled text.
+  //
+  // Fix: suppress ALL resizes during a 400ms window after becoming visible (covers the
+  // full 300ms CSS transition + margin). Only send a single resize at the final stable width.
   const resizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastColsRef = useRef<number>(0);
   const lastRowsRef = useRef<number>(0);
+  const transitionGuardRef = useRef(false); // true = suppress resize (CSS transition in progress)
 
   const doFitAndResize = useCallback(() => {
-    if (!fitAddonRef.current) return;
+    if (!fitAddonRef.current || !containerRef.current) return;
+    // Skip if container is too narrow — still in CSS transition or hidden
+    if (containerRef.current.clientWidth < 100) return;
     fitAddonRef.current.fit();
     const dims = fitAddonRef.current.proposeDimensions();
     if (!dims || !terminalIdRef.current) return;
-    // Only send resize to PTY if dimensions actually changed — prevents
-    // duplicate SIGWINCH that causes shell to redraw prompt multiple times
+    // Only send resize to PTY if dimensions actually changed
     if (dims.cols === lastColsRef.current && dims.rows === lastRowsRef.current) return;
     lastColsRef.current = dims.cols;
     lastRowsRef.current = dims.rows;
@@ -248,10 +258,12 @@ export function TerminalPanel({
   }, []);
 
   // ResizeObserver — fires on container size changes (drag resize, window resize)
+  // Suppressed during the visibility transition window to prevent intermediate resizes.
   useEffect(() => {
     if (!containerRef.current) return;
 
     const observer = new ResizeObserver(() => {
+      if (transitionGuardRef.current) return; // Suppress during CSS transition
       if (resizeTimerRef.current) clearTimeout(resizeTimerRef.current);
       resizeTimerRef.current = setTimeout(doFitAndResize, 100);
     });
@@ -263,12 +275,19 @@ export function TerminalPanel({
     };
   }, [doFitAndResize]);
 
-  // Visibility change — fires when switching from file view or hidden back to terminal.
-  // Uses 80ms delay (longer than the 0→real size CSS transition) to ensure layout is stable.
+  // Visibility change — waits for CSS transition to complete (400ms > 300ms transition)
+  // before sending a single fit+resize. Suppresses ResizeObserver during this window.
   useEffect(() => {
     if (!isVisible) return;
-    const timer = setTimeout(doFitAndResize, 80);
-    return () => clearTimeout(timer);
+    transitionGuardRef.current = true;
+    const timer = setTimeout(() => {
+      transitionGuardRef.current = false;
+      doFitAndResize();
+    }, 400);
+    return () => {
+      clearTimeout(timer);
+      transitionGuardRef.current = false;
+    };
   }, [isVisible, doFitAndResize]);
 
   return (

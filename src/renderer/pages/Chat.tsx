@@ -5,6 +5,7 @@ import { track } from '@/analytics';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useToast } from '@/components/Toast';
+import Tip from '@/components/Tip';
 import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/DirectoryPanel';
 import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
@@ -2071,18 +2072,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                         {agentDir ? `~/${agentDir.split('/').pop()}` : ''}
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTerminalPinned(false);
-                        setSplitActiveView('file');
-                      }}
-                      className="flex h-5 w-5 items-center justify-center rounded transition-colors"
-                      style={{ color: getTerminalTheme().brightBlack }}
-                      title="隐藏终端"
-                    >
-                      <span className="text-sm leading-none">×</span>
-                    </button>
+                    <Tip label="隐藏终端" position="bottom">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTerminalPinned(false);
+                          setSplitActiveView('file');
+                        }}
+                        className="flex h-5 w-5 items-center justify-center rounded transition-colors hover:bg-white/15"
+                        style={{ color: getTerminalTheme().foreground }}
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </Tip>
                   </div>
                 )}
                 <Suspense fallback={<div className="flex h-full items-center justify-center" style={{ background: getTerminalTheme().background }}><Loader2 className="h-5 w-5 animate-spin" style={{ color: getTerminalTheme().brightBlack }} /></div>}>
