@@ -105,6 +105,20 @@ async function verifyViaSdk(
       };
     }
 
+    // Determine thinking config — mirrors startStreamingSession() logic.
+    // Third-party anthropic-protocol providers (SiliconFlow etc.) reject `thinking: {type:"adaptive"}`
+    // with 400 "thinking type should be enabled or disabled". Only enable for Claude models or official API.
+    const modelLower = (opts.model ?? '').toLowerCase();
+    const isClaudeModel = modelLower.includes('sonnet-4') || modelLower.includes('sonnet-5')
+      || modelLower.includes('opus-4') || modelLower.includes('opus-5');
+    const isOfficialAnthropicApi = !env.ANTHROPIC_BASE_URL || (() => {
+      try { return new URL(env.ANTHROPIC_BASE_URL!).host === 'api.anthropic.com'; }
+      catch { return false; }
+    })();
+    const thinkingConfig = (isOfficialAnthropicApi || isClaudeModel)
+      ? { type: 'adaptive' as const }
+      : { type: 'disabled' as const };
+
     const testQuery = query({
       prompt: simplePrompt(),
       options: {
@@ -117,6 +131,7 @@ async function verifyViaSdk(
         pathToClaudeCodeExecutable: cliPath,
         executable: 'bun',
         env,
+        thinking: thinkingConfig,
         stderr: (message: string) => {
           console.error(`[${logPrefix}] stderr:`, message);
           stderrMessages.push(message);
