@@ -485,6 +485,11 @@ button:active:not(:disabled) {
   transform: scale(0.97);
 }
 
+/* Clickable list rows (role="button" divs) — gentler scale than buttons */
+[role="button"]:active {
+  transform: scale(0.985);
+}
+
 button:disabled {
   cursor: not-allowed;
 }
