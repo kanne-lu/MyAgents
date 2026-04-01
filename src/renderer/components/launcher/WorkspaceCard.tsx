@@ -24,6 +24,7 @@ const CH_LABEL: Record<string, string> = {
     telegram: 'Telegram', feishu: '飞书', dingtalk: '钉钉',
     // OpenClaw plugins — concise labels matching PLATFORM_DISPLAY_NAMES in taskCenterUtils.ts
     qqbot: 'QQ', 'openclaw-lark': '飞书', 'openclaw-weixin': '微信',
+    'wecom-openclaw-plugin': '企业微信',
 };
 function chLabel(t: string) {
     if (t.startsWith('openclaw:')) {

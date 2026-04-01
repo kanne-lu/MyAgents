@@ -114,6 +114,8 @@ const PLATFORM_DISPLAY_NAMES: Record<string, string> = {
     dingtalk: '钉钉',
     qqbot: 'QQ',
     'openclaw-lark': '飞书',
+    'openclaw-weixin': '微信',
+    'wecom-openclaw-plugin': '企业微信',
 };
 
 /**

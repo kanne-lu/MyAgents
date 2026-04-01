@@ -594,7 +594,7 @@ function waitForMessage(): Promise<MessageQueueItem | null> {
 }
 
 /** 当前回合是否仍在进行中 */
-function isTurnInFlight(): boolean {
+export function isTurnInFlight(): boolean {
   return isStreamingMessage;
 }
 
