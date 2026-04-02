@@ -4,6 +4,8 @@
 import { BarChart2, Clock, Loader2, MessageSquare, Wrench, X } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 import { getSessionStats, type SessionDetailedStats } from '@/api/sessionClient';
 import { formatTokens, formatDuration } from '@/utils/formatTokens';
 
@@ -18,6 +20,9 @@ export default function SessionStatsModal({
     sessionTitle,
     onClose,
 }: SessionStatsModalProps) {
+    // Cmd+W dismissal: z-[200]
+    useCloseLayer(() => { onClose(); return true; }, 200);
+
     const [stats, setStats] = useState<SessionDetailedStats | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);

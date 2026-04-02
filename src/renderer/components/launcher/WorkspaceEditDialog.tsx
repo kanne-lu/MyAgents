@@ -8,6 +8,7 @@ import type { Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
 import WorkspaceIcon from './WorkspaceIcon';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 interface WorkspaceEditDialogProps {
     project: Project;
@@ -20,6 +21,8 @@ export default memo(function WorkspaceEditDialog({
     onSave,
     onClose,
 }: WorkspaceEditDialogProps) {
+    useCloseLayer(() => { onClose(); return true; }, 200);
+
     const [name, setName] = useState(project.displayName || getFolderName(project.path));
     const [icon, setIcon] = useState(project.icon || '');
     const [saving, setSaving] = useState(false);

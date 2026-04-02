@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowLeft, Bot, History, Loader2, Plus, PanelRightOpen, 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useToast } from '@/components/Toast';
@@ -230,6 +231,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
   const isDraggingSplitRef = useRef(false);
+  const splitPanelRef = useRef<HTMLDivElement>(null);
   const splitRatioRef = useRef(splitRatio);
   splitRatioRef.current = splitRatio;
   // Store drag listeners in refs so unmount cleanup can remove them
@@ -258,6 +260,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // When split view is active or layout is narrow, workspace uses overlay drawer
   const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitPanelVisible);
+
+  // Cmd+W: close split panel only when focus is in the right panel (terminal/editor).
+  // If focus is on the left side (chat input), pass through → closeTab.
+  useCloseLayer(() => {
+    if (!splitPanelVisible) return false;
+    if (!splitPanelRef.current?.contains(document.activeElement)) return false;
+    // Close the active view in the split panel
+    if (splitActiveView === 'file' && splitFile) {
+      setSplitFile(null);
+      if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+      return true;
+    }
+    if (splitActiveView === 'terminal' && terminalPinned) {
+      setTerminalPinned(false);
+      if (splitFile) setSplitActiveView('file');
+      return true;
+    }
+    return false; // focus in panel but no active view to close
+  }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
   const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string } | null>(null);
@@ -1965,7 +1986,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           </div>
           {/* Right panel — single flex-1 container for tab bar + file + terminal.
               Uses `hidden` when panel is not visible but terminal is alive in background. */}
-          <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!splitPanelVisible ? 'hidden' : ''}`}>
+          <div ref={splitPanelRef} className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!splitPanelVisible ? 'hidden' : ''}`}>
             {/* Tab switcher — only when both file AND terminal are pinned */}
             {splitFile && terminalPinned && terminalAlive && (
               <div className="flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-[var(--line)] bg-[var(--paper-elevated)] px-2">

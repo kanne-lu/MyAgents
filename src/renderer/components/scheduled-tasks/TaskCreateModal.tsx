@@ -17,6 +17,7 @@ import { getSessions, type SessionMetadata } from '@/api/sessionClient';
 import type { CronSchedule, CronEndConditions, CronRunMode } from '@/types/cronTask';
 import { MIN_CRON_INTERVAL } from '@/types/cronTask';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 function toLocalDateTimeString(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, '0');
@@ -91,6 +92,8 @@ function PillButton({ selected, onClick, children }: { selected: boolean; onClic
 }
 
 export default function TaskCreateModal({ onClose, onCreated }: TaskCreateModalProps) {
+  useCloseLayer(() => { onClose(); return true; }, 200);
+
   const { projects } = useConfig();
   const toast = useToast();
 

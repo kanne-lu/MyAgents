@@ -5,6 +5,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 interface PathInputDialogProps {
     isOpen: boolean;
     folderName: string;
@@ -20,6 +22,7 @@ export default function PathInputDialog({
     onConfirm,
     onCancel,
 }: PathInputDialogProps) {
+    useCloseLayer(() => { if (!isOpen) return false; onCancel(); return true; }, 50);
     const [path, setPath] = useState(defaultPath);
     const inputRef = useRef<HTMLInputElement>(null);
 

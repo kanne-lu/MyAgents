@@ -5,6 +5,7 @@ import { createPortal } from 'react-dom';
 import type { Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 interface WorkspaceSelectDialogProps {
   projects: Project[];
@@ -13,6 +14,8 @@ interface WorkspaceSelectDialogProps {
 }
 
 export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: WorkspaceSelectDialogProps) {
+  useCloseLayer(() => { onClose(); return true; }, 50);
+
   const eligibleProjects = useMemo(
     () => projects.filter(p => !p.isAgent && !p.internal),
     [projects],

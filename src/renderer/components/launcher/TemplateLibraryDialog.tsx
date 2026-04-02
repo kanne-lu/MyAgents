@@ -18,6 +18,7 @@ import { isBrowserDevMode } from '@/utils/browserMock';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import WorkspaceIcon from './WorkspaceIcon';
 import ConfirmDialog from '@/components/ConfirmDialog';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 interface TemplateLibraryDialogProps {
     onCreateWorkspace: (path: string, icon?: string, displayName?: string) => Promise<void>;
@@ -28,6 +29,8 @@ export default memo(function TemplateLibraryDialog({
     onCreateWorkspace,
     onClose,
 }: TemplateLibraryDialogProps) {
+    useCloseLayer(() => { onClose(); return true; }, 200);
+
     // State
     const [templates, setTemplates] = useState<WorkspaceTemplate[]>([...PRESET_TEMPLATES]);
     const [selectedId, setSelectedId] = useState<string>(PRESET_TEMPLATES[0]?.id ?? '');

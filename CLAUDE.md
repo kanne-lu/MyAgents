@@ -180,6 +180,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 | 表单用原生 `<select>` | 系统下拉框样式各平台不一致 | 使用 `<CustomSelect>` 组件（`@/components/CustomSelect`） |
 | 函数参数用 `undefined`/`null` 表示特定业务动作 | 内部调用方无意触发该动作 | 业务动作用自解释字面量（如 `'subscription'`），`undefined` 只表示"未提供 / 保持现状" |
 | 新增手写 shim 不加入 `_handwritten.json` | `generate:sdk-shims` 下次运行覆盖手写文件 | 手写 shim MUST 同步加入 `sdk-shim/plugin-sdk/_handwritten.json` |
+| 新增 overlay/可关闭面板不调用 `useCloseLayer` | Cmd+W 跳过该面板直接关 Tab | 在组件内调用 `useCloseLayer(() => { onClose(); return true; }, zIndex)`，zIndex 取组件 CSS z-index 值 |
 
 ---
 

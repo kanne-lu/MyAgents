@@ -29,6 +29,7 @@ import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EV
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
+import { dismissTopmost } from '@/utils/closeLayer';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
@@ -690,7 +691,8 @@ export default function App() {
         }
       } else if (e.key === 'w' || e.key === 'W') {
         e.preventDefault();
-        closeCurrentTab();
+        // Hierarchical close: dismiss topmost overlay/panel first, tab last
+        if (!dismissTopmost()) closeCurrentTab();
       } else if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
         // Cmd+Shift+[ = previous tab, Cmd+Shift+] = next tab
         e.preventDefault();

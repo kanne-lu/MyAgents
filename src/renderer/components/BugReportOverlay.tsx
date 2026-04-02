@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronUp, Send, ImagePlus } from 'lucide-react';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 import { track } from '@/analytics';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
@@ -24,6 +26,9 @@ interface BugReportOverlayProps {
 export default function BugReportOverlay({
     onClose, onNavigateToProviders, appVersion, providers, apiKeys, providerVerifyStatus,
 }: BugReportOverlayProps) {
+    // Cmd+W dismissal: z-[250] matches the component's CSS z-index
+    useCloseLayer(() => { onClose(); return true; }, 250);
+
     const [description, setDescription] = useState('');
     const [images, setImages] = useState<ImageAttachment[]>([]);
     const [showModelMenu, _setShowModelMenu] = useState(false);

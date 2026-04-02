@@ -7,6 +7,8 @@
 import { memo, useCallback, useMemo, useState } from 'react';
 import { BarChart2, Clock, Plus, Trash2, X } from 'lucide-react';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { deleteSession } from '@/api/sessionClient';
@@ -52,6 +54,7 @@ export default memo(function TaskCenterOverlay({
     onClose,
     isActive,
 }: TaskCenterOverlayProps) {
+    useCloseLayer(() => { onClose(); return true; }, 40);
     const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, removeSession } = useTaskCenterData({
         isActive,
     });

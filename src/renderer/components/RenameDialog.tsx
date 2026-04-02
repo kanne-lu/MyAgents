@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 interface RenameDialogProps {
     currentName: string;
     itemType: 'file' | 'folder';
@@ -14,6 +16,9 @@ export default function RenameDialog({
     onRename,
     onCancel
 }: RenameDialogProps) {
+    // Cmd+W dismissal: z-[250] matches the component's CSS z-index
+    useCloseLayer(() => { onCancel(); return true; }, 250);
+
     const [name, setName] = useState(currentName);
     const [error, setError] = useState<string | null>(null);
     const inputRef = useRef<HTMLInputElement>(null);

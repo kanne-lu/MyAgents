@@ -1,6 +1,8 @@
 import { useEffect, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 interface ConfirmDialogProps {
     title: string;
     message: string;
@@ -28,6 +30,9 @@ export default function ConfirmDialog({
     onConfirm,
     onCancel
 }: ConfirmDialogProps) {
+    // Cmd+W dismissal: z-[300] matches the component's CSS z-index
+    useCloseLayer(() => { onCancel(); return true; }, 300);
+
     // Support both old and new props
     const finalConfirmText = confirmText || confirmLabel || '确认';
     const finalCancelText = cancelText || cancelLabel || '取消';

@@ -4,6 +4,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import type { LogEntry, LogLevel, LogSource } from '@/types/log';
 
 interface UnifiedLogsPanelProps {
@@ -65,6 +67,7 @@ const HIDE_FILTERS: { value: HideFilter; label: string }[] = [
 const DEFAULT_HIDE_FILTERS = new Set<HideFilter>(['stream_event', 'analytics']);
 
 export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: UnifiedLogsPanelProps) {
+    useCloseLayer(() => { if (!isVisible) return false; onClose(); return true; }, 50);
     // All logs (React + Bun + Rust) now come from sseLogs prop via TabProvider
     const [filter, setFilter] = useState<LogSource | 'all'>('all');
     const [levelFilter, setLevelFilter] = useState<LogLevel | 'all'>('all');

@@ -25,6 +25,7 @@ import TaskRunHistory from './scheduled-tasks/TaskRunHistory';
 import ScheduleTypeTabs from './scheduled-tasks/ScheduleTypeTabs';
 import * as cronClient from '@/api/cronTaskClient';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 interface CronTaskDetailPanelProps {
     task: CronTask;
@@ -73,6 +74,8 @@ function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v
 }
 
 export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, onResume, onStop, onOpenSession }: CronTaskDetailPanelProps) {
+    useCloseLayer(() => { onClose(); return true; }, 50);
+
     const toast = useToast();
     const { projects } = useConfig();
     const isMountedRef = useRef(true);

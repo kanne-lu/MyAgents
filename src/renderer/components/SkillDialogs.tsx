@@ -5,6 +5,7 @@
 import React, { useRef, useState } from 'react';
 import { Loader2, FolderOpen } from 'lucide-react';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 interface CreateDialogProps {
     title: string;
@@ -27,6 +28,8 @@ export function CreateDialog({
     onCancel,
     loading
 }: CreateDialogProps) {
+    useCloseLayer(() => { onCancel(); return true; }, 300);
+
     return (
         <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/30 backdrop-blur-sm">
             <div className="w-full max-w-md rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-2xl">
@@ -98,6 +101,8 @@ export function NewSkillChooser({
     onCancel,
     syncConfig
 }: NewSkillChooserProps) {
+    useCloseLayer(() => { onCancel(); return true; }, 300);
+
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [syncing, setSyncing] = useState(false);
 

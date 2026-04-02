@@ -16,6 +16,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } fro
 import { createPortal } from 'react-dom';
 
 import { useTabApiOptional } from '@/context/TabContext';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { getMonacoLanguage, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 
@@ -121,6 +122,10 @@ export default function FilePreviewModal({
     embedded = false,
     onFullscreen,
 }: FilePreviewModalProps) {
+    // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
+    // Embedded mode (split-panel) has no z-index overlay and is handled separately.
+    useCloseLayer(() => { if (embedded) return false; onClose(); return true; }, 210);
+
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);

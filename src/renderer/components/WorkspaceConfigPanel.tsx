@@ -6,6 +6,8 @@ import { X, SlidersHorizontal, ChevronLeft } from 'lucide-react';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
 import SystemPromptsPanel from './SystemPromptsPanel';
@@ -43,6 +45,7 @@ const TAB_ITEMS: { key: Tab; label: string }[] = [
 ];
 
 export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab }: WorkspaceConfigPanelProps) {
+    useCloseLayer(() => { onClose(); return true; }, 200);
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);

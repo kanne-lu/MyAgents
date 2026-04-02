@@ -219,18 +219,49 @@ const MessageList = memo(function MessageList({
     }
   }, [allMessages.length, sessionId, virtuosoRef, followEnabledRef]);
 
-  // ── Auto-scroll during streaming — throttled to ~20fps via RAF ──
+  // ── Auto-scroll during streaming — throttled to ~20fps (48ms) ──
   // followOutput only fires on count change. During streaming the last message keeps
   // growing taller. autoscrollToBottom() handles this (scrolls only if already at bottom).
+  //
+  // Without throttling, autoscrollToBottom() fires on every SSE chunk (~60fps via RAF).
+  // Combined with Virtuoso's internal ResizeObserver + scroll correction loop, this causes
+  // visible position jitter in footer elements. Throttling to 20fps reduces the correction
+  // frequency while keeping scroll tracking visually smooth.
   const scrollRafRef = useRef(0);
+  const lastScrollTimeRef = useRef(0);
+  const trailingScrollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (streamingMessage && followEnabledRef.current) {
-      cancelAnimationFrame(scrollRafRef.current);
+    if (!streamingMessage || !followEnabledRef.current) return;
+
+    const THROTTLE_MS = 48; // ~20fps
+    const now = performance.now();
+    const elapsed = now - lastScrollTimeRef.current;
+
+    // Cancel any pending leading-edge RAF
+    cancelAnimationFrame(scrollRafRef.current);
+
+    if (elapsed >= THROTTLE_MS) {
+      // Leading edge: enough time passed, scroll now
+      lastScrollTimeRef.current = now;
+      if (trailingScrollRef.current) { clearTimeout(trailingScrollRef.current); trailingScrollRef.current = null; }
       scrollRafRef.current = requestAnimationFrame(() => {
         virtuosoRef.current?.autoscrollToBottom();
       });
+    } else if (!trailingScrollRef.current) {
+      // Trailing edge: schedule scroll after remaining throttle window
+      trailingScrollRef.current = setTimeout(() => {
+        trailingScrollRef.current = null;
+        lastScrollTimeRef.current = performance.now();
+        scrollRafRef.current = requestAnimationFrame(() => {
+          virtuosoRef.current?.autoscrollToBottom();
+        });
+      }, THROTTLE_MS - elapsed);
     }
-    return () => cancelAnimationFrame(scrollRafRef.current);
+
+    return () => {
+      cancelAnimationFrame(scrollRafRef.current);
+      if (trailingScrollRef.current) { clearTimeout(trailingScrollRef.current); trailingScrollRef.current = null; }
+    };
   }, [streamingMessage, followEnabledRef, virtuosoRef]);
 
   // ── Refs for stable callbacks — avoid recreating itemContent/Footer on every render ──

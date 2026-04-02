@@ -2,6 +2,8 @@
 // Redesigned for v0.1.42: adds execution mode (当前对话/新开对话) + ScheduleTypeTabs (3 schedule types)
 import { X, Clock, Bell, Flag, MessageSquare, AlertCircle } from 'lucide-react';
 import { useState, useCallback, useMemo, useRef } from 'react';
+
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import type { CronEndConditions, CronRunMode, CronTaskConfig, CronSchedule } from '@/types/cronTask';
 import { MIN_CRON_INTERVAL } from '@/types/cronTask';
 import ScheduleTypeTabs from '@/components/scheduled-tasks/ScheduleTypeTabs';
@@ -370,6 +372,7 @@ export default function CronTaskSettingsModal({
   initialConfig = null,
   workspacePath,
 }: CronTaskSettingsModalProps) {
+  useCloseLayer(() => { if (!isOpen) return false; onClose(); return true; }, 50);
   if (!isOpen) return null;
 
   return (

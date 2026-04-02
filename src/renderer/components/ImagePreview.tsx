@@ -2,6 +2,8 @@ import { X, ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 
+import { useCloseLayer } from '@/hooks/useCloseLayer';
+
 interface ImagePreviewProps {
     src: string;
     name: string;
@@ -11,6 +13,9 @@ interface ImagePreviewProps {
 export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) {
     const [scale, setScale] = useState(1);
     const [rotation, setRotation] = useState(0);
+
+    // Cmd+W dismissal: z-[200] matches the component's CSS z-index
+    useCloseLayer(() => { onClose(); return true; }, 200);
 
     // Close on Escape key
     useEffect(() => {
