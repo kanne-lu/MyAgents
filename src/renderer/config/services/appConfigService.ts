@@ -158,9 +158,27 @@ export function mergePresetCustomModels(
         if (!provider.isBuiltin) return provider;
         const customModels = presetCustomModels[provider.id];
         if (!customModels || customModels.length === 0) return provider;
+
+        // 智能合并：
+        // 1. 预设模型保留，从 discovered/manual 模型补充元数据
+        // 2. 新模型（ID 不在预设中的）追加到列表
+        const presetIds = new Set(provider.models.map(m => m.model));
+        const enrichedPresets = provider.models.map(preset => {
+            const extra = customModels.find(c => c.model === preset.model);
+            if (!extra) return preset;
+            return {
+                ...preset,
+                contextLength: preset.contextLength ?? extra.contextLength,
+                maxOutputTokens: preset.maxOutputTokens ?? extra.maxOutputTokens,
+                inputModalities: preset.inputModalities ?? extra.inputModalities,
+                outputModalities: preset.outputModalities ?? extra.outputModalities,
+            };
+        });
+        const newModels = customModels.filter(c => !presetIds.has(c.model));
+
         return {
             ...provider,
-            models: [...provider.models, ...customModels],
+            models: [...enrichedPresets, ...newModels],
         };
     });
 }

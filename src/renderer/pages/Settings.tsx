@@ -17,6 +17,7 @@ import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import { BotPlatformRegistry } from '@/components/ImSettings';
 import { WorkspaceSelectDialog } from '@/components/AgentSettings';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
+import ModelDiscoveryPanel from '@/components/ModelDiscoveryPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
     getModelsDisplay,
@@ -56,6 +57,7 @@ import {
     unlockDeveloperSection,
     UNLOCK_CONFIG,
 } from '@/utils/developerMode';
+import { supportsModelDiscovery } from '@/config/services/modelDiscoveryService';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isTauriEnvironment } from '@/utils/browserMock';
@@ -263,6 +265,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         savePresetCustomModels,
         removePresetCustomModel: _removePresetCustomModel,
         saveProviderModelAliases,
+        refreshConfig,
     } = useConfig();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -348,6 +351,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const [editingProvider, setEditingProvider] = useState<ProviderEditForm | null>(null);
     // 删除确认弹窗状态
     const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<Provider | null>(null);
+    // 模型发现面板状态
+    const [discoveryProvider, setDiscoveryProvider] = useState<Provider | null>(null);
+    const discoveryExistingIds = useMemo(
+        () => new Set(discoveryProvider?.models.map(m => m.model) ?? []),
+        [discoveryProvider],
+    );
 
     // UI-only loading state (not persisted)
     const [verifyLoading, setVerifyLoading] = useState<Record<string, boolean>>({});
@@ -5404,6 +5413,19 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                         <Plus className="h-4 w-4" />
                                     </button>
                                 </div>
+                                {/* Discover Models button */}
+                                {editingProvider.provider.isBuiltin && supportsModelDiscovery(editingProvider.provider) && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setDiscoveryProvider(editingProvider.provider)}
+                                        disabled={!apiKeys[editingProvider.provider.id]}
+                                        title={!apiKeys[editingProvider.provider.id] ? '请先配置 API Key' : undefined}
+                                        className="mt-1.5 flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                        <Download className="h-3.5 w-3.5" />
+                                        从 API 发现模型
+                                    </button>
+                                )}
                             </div>
 
                             {/* Advanced Options - Model Alias Mapping (not shown for Anthropic providers) */}
@@ -5493,6 +5515,32 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         </div>
                     </div>
                 </div>
+            )}
+
+            {/* Model Discovery Panel */}
+            {discoveryProvider && apiKeys[discoveryProvider.id] && (
+                <ModelDiscoveryPanel
+                    provider={discoveryProvider}
+                    apiKey={apiKeys[discoveryProvider.id]}
+                    existingModelIds={discoveryExistingIds}
+                    onConfirm={async (newModels) => {
+                        if (newModels.length === 0) { setDiscoveryProvider(null); return; }
+                        const providerId = discoveryProvider.id;
+                        // Disk-first: merge inside atomicModifyConfig to avoid stale state
+                        await atomicModifyConfig(c => {
+                            const existing = c.presetCustomModels?.[providerId] ?? [];
+                            const existingIds = new Set(existing.map(m => m.model));
+                            const toAdd = newModels.filter(m => !existingIds.has(m.model));
+                            if (toAdd.length === 0) return c;
+                            const updated = { ...c.presetCustomModels, [providerId]: [...existing, ...toAdd] };
+                            return { ...c, presetCustomModels: updated };
+                        });
+                        await refreshConfig();
+                        toast.success(`已添加 ${newModels.length} 个模型`);
+                        setDiscoveryProvider(null);
+                    }}
+                    onClose={() => setDiscoveryProvider(null)}
+                />
             )}
 
             {/* Delete Confirmation Modal */}

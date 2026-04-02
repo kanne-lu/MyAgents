@@ -43,9 +43,19 @@ export const PERMISSION_MODES: {
  * Model entity representing a single model configuration
  */
 export interface ModelEntity {
+  // === 核心字段（必填）===
   model: string;         // API 代码，如 "claude-sonnet-4-6"
   modelName: string;     // 显示名称，如 "Claude Sonnet 4.6"
   modelSeries: string;   // 品牌系列，如 "claude" | "deepseek" | "zhipu"
+
+  // === 元数据字段（可选，API 发现时填充）===
+  contextLength?: number;       // 上下文窗口（token 数）
+  maxOutputTokens?: number;     // 最大输出 token 数
+  inputModalities?: string[];   // 输入模态 ["text", "image", "video"]
+  outputModalities?: string[];  // 输出模态 ["text"]
+
+  // === 来源标记 ===
+  source?: 'preset' | 'discovered' | 'manual';
 }
 
 /**
@@ -147,6 +157,11 @@ export interface Provider {
 
   // 官网链接 (用于"去官网"入口)
   websiteUrl?: string;
+
+  // 模型发现端点 URL（可选覆盖）
+  // 默认行为：GET {config.baseUrl}/v1/models
+  // 当供应商的 Anthropic 路径不支持 /v1/models 时，指向其 OpenAI 路径
+  modelListUrl?: string;
 
   // 模型列表 - 使用新的 ModelEntity 结构
   models: ModelEntity[];
@@ -416,6 +431,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://platform.deepseek.com',
+    modelListUrl: 'https://api.deepseek.com/v1/models',
     config: {
       baseUrl: 'https://api.deepseek.com/anthropic',
       timeout: 600000,
@@ -437,6 +453,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://platform.moonshot.cn/console',
+    modelListUrl: 'https://api.moonshot.cn/v1/models',
     config: {
       baseUrl: 'https://api.moonshot.cn/anthropic',
     },
@@ -457,6 +474,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://bigmodel.cn/console/overview',
+    modelListUrl: 'https://open.bigmodel.cn/api/paas/v4/models',
     config: {
       baseUrl: 'https://open.bigmodel.cn/api/anthropic',
       timeout: 600000,
@@ -616,6 +634,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://bailian.console.aliyun.com/',
+    modelListUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/models',
     config: {
       baseUrl: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
     },

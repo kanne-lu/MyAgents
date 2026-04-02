@@ -2588,7 +2588,7 @@ dependencies = [
 
 [[package]]
 name = "myagents"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "axum",
  "base64 0.22.1",

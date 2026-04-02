@@ -1,6 +1,7 @@
 // Tauri IPC commands for sidecar management and app operations
 // Supports both legacy single-instance and new multi-instance APIs
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -1049,4 +1050,56 @@ pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result
             Ok(WecomQrPollResult { status: "waiting".into(), bot_id: None, secret: None })
         }
     }
+}
+
+// ============= Model Discovery =============
+
+/// Fetch provider model list via external API.
+/// Returns raw JSON response — parsing is done in the frontend.
+#[tauri::command]
+pub async fn cmd_fetch_provider_models(
+    url: String,
+    auth_header_name: String,
+    auth_header_value: String,
+    extra_headers: Option<HashMap<String, String>>,
+) -> Result<serde_json::Value, String> {
+    ulog_info!("[model-discovery] Fetching models from {}", url);
+
+    let builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15));
+
+    let client = crate::proxy_config::build_client_with_proxy(builder)?;
+
+    let mut request = client.get(&url)
+        .header(&auth_header_name, &auth_header_value);
+
+    if let Some(headers) = extra_headers {
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+    }
+
+    let response = request.send().await
+        .map_err(|e| {
+            ulog_error!("[model-discovery] Network error for {}: {}", url, e);
+            format!("Network error: {}", e)
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        // Limit error body to 2KB to avoid unbounded allocation
+        let body = response.text().await.unwrap_or_default();
+        let truncated = if body.len() > 2048 { &body[..2048] } else { &body };
+        ulog_error!("[model-discovery] HTTP {} from {}", status.as_u16(), url);
+        return Err(format!("HTTP {}: {}", status.as_u16(), truncated));
+    }
+
+    let result = response.json::<serde_json::Value>().await
+        .map_err(|e| {
+            ulog_error!("[model-discovery] Invalid JSON from {}: {}", url, e);
+            format!("Invalid JSON response: {}", e)
+        })?;
+
+    ulog_info!("[model-discovery] Success from {}", url);
+    Ok(result)
 }
