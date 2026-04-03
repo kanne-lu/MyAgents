@@ -20,7 +20,6 @@ import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import ModelManagementPanel from '@/components/ModelManagementPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
-    getModelsDisplay,
     getEffectiveModelAliases,
     type ModelAliases,
     type Provider,
@@ -2273,7 +2272,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                 )}
                                             </div>
                                             <p className="mt-1 truncate text-xs text-[var(--ink-muted)]">
-                                                {getModelsDisplay(provider)}
+                                                {provider.models.length > 0
+                                                    ? provider.models.map(m => m.modelName || m.model).join(', ')
+                                                    : '暂无模型'}
                                             </p>
                                         </div>
                                         <div className="flex shrink-0 items-center gap-1">
@@ -5219,9 +5220,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
                                     模型
                                 </label>
-                                <p className="text-sm text-[var(--ink-muted)]">
+                                <p className="truncate text-sm text-[var(--ink-muted)]">
                                     {editingProvider.provider.models.length > 0
-                                        ? getModelsDisplay(editingProvider.provider, 60)
+                                        ? editingProvider.provider.models.map(m => m.modelName || m.model).join(', ')
                                         : '暂无模型'}
                                 </p>
                                 <button

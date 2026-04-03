@@ -389,17 +389,16 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
 
   const displayName = model.modelName && model.modelName !== model.model ? model.modelName : null;
 
+  const title = displayName ?? model.model;
+  const subtitle = displayName ? model.model : null;
+
   return (
     <div className={`group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--hover-bg)] ${isPrimary ? 'bg-[var(--accent-warm-subtle)]' : ''}`}>
-      {/* Model info */}
+      {/* Model info — unified: title always same style, subtitle always same style */}
       <div className="min-w-0 flex-1">
-        {displayName ? (
-          <>
-            <span className="text-[13px] font-medium text-[var(--ink)]">{displayName}</span>
-            <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{model.model}</span>
-          </>
-        ) : (
-          <span className="font-mono text-[13px] text-[var(--ink)]">{model.model}</span>
+        <span className="text-[13px] font-medium text-[var(--ink)]">{title}</span>
+        {subtitle && (
+          <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{subtitle}</span>
         )}
       </div>
 
@@ -448,18 +447,16 @@ const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
 }) {
   const handleAdd = useCallback(() => onAdd(model), [onAdd, model]);
   const displayName = model.displayName && model.displayName !== model.id ? model.displayName : null;
+  const title = displayName ?? model.id;
+  const subtitle = displayName ? model.id : null;
 
   return (
     <div className="group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--hover-bg)]">
-      {/* Model info */}
+      {/* Model info — same style as ActiveModelRow */}
       <div className="min-w-0 flex-1">
-        {displayName ? (
-          <>
-            <span className="text-[13px] text-[var(--ink)]">{displayName}</span>
-            <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{model.id}</span>
-          </>
-        ) : (
-          <span className="font-mono text-[13px] text-[var(--ink)]">{model.id}</span>
+        <span className="text-[13px] font-medium text-[var(--ink)]">{title}</span>
+        {subtitle && (
+          <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{subtitle}</span>
         )}
       </div>
 
