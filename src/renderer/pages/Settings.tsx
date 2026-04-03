@@ -7,6 +7,7 @@ import { listen } from '@tauri-apps/api/event';
 import { homeDir, join } from '@tauri-apps/api/path';
 
 import { track } from '@/analytics';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { apiFetch, apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
 import CustomSelect from '@/components/CustomSelect';
@@ -642,6 +643,23 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     });
     const [mcpHeadersExpanded, setMcpHeadersExpanded] = useState(false);
     const [mcpOAuthExpanded, setMcpOAuthExpanded] = useState(false);
+
+    // Cmd+W dismissal for all inline Settings overlays (z-50 / z-[60]).
+    // Checks from highest z-index down; first truthy state gets closed.
+    useCloseLayer(() => {
+        // z-[60]: delete confirmation (highest)
+        if (deleteConfirmProvider) { setDeleteConfirmProvider(null); return true; }
+        // z-50: all other inline overlays
+        if (runtimeDialog.show) { setRuntimeDialog(prev => ({ ...prev, show: false })); return true; }
+        if (editingProvider) { setEditingProvider(null); return true; }
+        if (showCustomForm) { setShowCustomForm(false); return true; }
+        if (showMcpForm) { setShowMcpForm(false); setEditingMcpId(null); return true; }
+        if (builtinMcpSettings) { setBuiltinMcpSettings(null); return true; }
+        if (geminiImageSettings) { setGeminiImageSettings(null); return true; }
+        if (playwrightSettings) { setPlaywrightSettings(null); return true; }
+        if (edgeTtsSettings) { setEdgeTtsSettings(null); return true; }
+        return false;
+    }, 50);
 
     // Check which MCP servers need configuration (missing required fields)
     const checkMcpConfigStatus = async (servers: McpServerDefinition[]) => {
@@ -5330,7 +5348,14 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     provider={managingProvider}
                     apiKey={apiKeys[managingProvider.id]}
                     config={config}
-                    onClose={() => setManagingProviderId(null)}
+                    onClose={() => {
+                        setManagingProviderId(null);
+                        // Refresh editingProvider with latest provider data after model changes
+                        if (editingProvider && managingProvider) {
+                            const fresh = providers.find(p => p.id === editingProvider.provider.id);
+                            if (fresh) setEditingProvider(prev => prev ? { ...prev, provider: fresh } : null);
+                        }
+                    }}
                     onSaveCustomModels={savePresetCustomModels}
                     onUpdateCustomProvider={updateCustomProvider}
                     onSetPrimaryModel={savePrimaryModel}
