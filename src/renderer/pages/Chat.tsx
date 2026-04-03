@@ -282,7 +282,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Close the active view in the split panel
     if (splitActiveView === 'file' && splitFile) {
       setSplitFile(null);
-      if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+      if (browserUrl) setSplitActiveView('browser');
+      else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
       return true;
     }
     if (splitActiveView === 'terminal' && terminalPinned) {

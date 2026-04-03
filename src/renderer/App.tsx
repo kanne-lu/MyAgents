@@ -29,6 +29,7 @@ import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EV
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
+import { dismissTopmost } from '@/utils/closeLayer';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
@@ -688,8 +689,16 @@ export default function App() {
           setTabs((prev) => [...prev, newTab]);
           setActiveTabId(newTab.id);
         }
-      // NOTE: Cmd+W is handled by the macOS custom menu → window:cmd-w event
-      // → useTrayEvents.ts (not here). See lib.rs "cmd-w-close" menu item.
+      } else if (e.key === 'w' || e.key === 'W') {
+        // macOS: handled by native menu → window:cmd-w → useTrayEvents.ts.
+        // Windows/Linux: no native menu with Ctrl+W, so handle here directly.
+        // (On macOS this branch is dead code — the menu intercepts before JS.)
+        e.preventDefault();
+        if (!dismissTopmost()) {
+          if (!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]')) {
+            closeCurrentTab();
+          }
+        }
       } else if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
         // Cmd+Shift+[ = previous tab, Cmd+Shift+] = next tab
         e.preventDefault();

@@ -3,6 +3,7 @@
 
 import { useEffect, useCallback, useRef } from 'react';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import { dismissTopmost } from '@/utils/closeLayer';
 import { setWindowVisible, consumePendingNavigation } from '@/services/notificationService';
 
 interface TrayEventsOptions {
@@ -107,10 +108,9 @@ export function useTrayEvents(options: TrayEventsOptions) {
         // ── Cmd+W handler (macOS custom menu item → window:cmd-w) ──
         // Separated from X button (CloseRequested). Cmd+W walks the close hierarchy:
         // overlay → split panel → tab → launcher (terminal state, never exits).
-        unlistenCmdW = await listen('window:cmd-w', async () => {
+        unlistenCmdW = await listen('window:cmd-w', () => {
           console.log('[useTrayEvents] Cmd+W received');
           // 1. Try dismissing topmost overlay/panel
-          const { dismissTopmost } = await import('@/utils/closeLayer');
           if (dismissTopmost()) {
             console.log('[useTrayEvents] Cmd+W: overlay dismissed');
             return;
