@@ -1,4 +1,4 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useMemo } from 'react';
 
 interface ToolGroup {
     id: string;
@@ -41,7 +41,10 @@ export default function OpenClawToolGroupsSelector({
     const toolGroups = TOOL_GROUPS_BY_PLUGIN[pluginId];
 
     // Effective list: stored value, or all groups if not yet configured
-    const effective = enabledGroups ?? toolGroups?.map(g => g.id) ?? [];
+    const effective = useMemo(
+        () => enabledGroups ?? toolGroups?.map(g => g.id) ?? [],
+        [enabledGroups, toolGroups],
+    );
 
     const handleToggle = useCallback((groupId: string) => {
         const isEnabled = effective.includes(groupId);

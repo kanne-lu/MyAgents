@@ -139,7 +139,9 @@ export default function ChannelDetailView({
     const isBindingExpanded = bindingExpanded ?? !hasUsers;
 
     useEffect(() => {
-        return () => { isMountedRef.current = false; wecomQrRunIdRef.current++; };
+        const mountedRef = isMountedRef;
+        const qrRunIdRef = wecomQrRunIdRef;
+        return () => { mountedRef.current = false; qrRunIdRef.current++; };
     }, []);
 
     // Check if OpenClaw plugin is still installed

@@ -224,6 +224,7 @@ async function loadPlugin() {
   if (entryModule && /lark|feishu/i.test(entryModule)) {
     try {
       const ticketPath = `${pluginDir}/node_modules/${entryModule}/src/core/lark-ticket.js`;
+      // eslint-disable-next-line @typescript-eslint/no-require-imports -- runtime dynamic load, must share AsyncLocalStorage instance
       const ticketMod = require(ticketPath);
       if (typeof ticketMod.withTicket === 'function') {
         pluginWithTicket = ticketMod.withTicket;
