@@ -37,6 +37,8 @@ export interface UseConfigResult {
     // Preset provider custom models (user-added models for preset providers)
     savePresetCustomModels: (providerId: string, models: ModelEntity[]) => Promise<void>;
     removePresetCustomModel: (providerId: string, modelId: string) => Promise<void>;
+    // Provider primary model override
+    savePrimaryModel: (providerId: string, modelId: string) => Promise<void>;
     // Provider model aliases (SDK sub-agent model mapping)
     saveProviderModelAliases: (providerId: string, aliases: ModelAliases) => Promise<void>;
 

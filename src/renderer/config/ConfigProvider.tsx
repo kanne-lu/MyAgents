@@ -119,6 +119,8 @@ export interface ConfigActionsValue {
     // Preset custom models
     savePresetCustomModels: (providerId: string, models: ModelEntity[]) => Promise<void>;
     removePresetCustomModel: (providerId: string, modelId: string) => Promise<void>;
+    // Provider primary model override
+    savePrimaryModel: (providerId: string, modelId: string) => Promise<void>;
     // Provider model aliases (SDK sub-agent model mapping)
     saveProviderModelAliases: (providerId: string, aliases: ModelAliases) => Promise<void>;
     // API Keys
@@ -144,11 +146,19 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
-    // Derived: merge preset custom models
-    const providers = useMemo(
-        () => mergePresetCustomModels(rawProviders, config.presetCustomModels),
-        [rawProviders, config.presetCustomModels]
-    );
+    // Derived: merge preset custom models + apply user primary model overrides
+    const providers = useMemo(() => {
+        const merged = mergePresetCustomModels(rawProviders, config.presetCustomModels);
+        const overrides = config.providerPrimaryModels;
+        if (!overrides || Object.keys(overrides).length === 0) return merged;
+        // Apply user's primaryModel override directly on the Provider object
+        // so ALL consumers see the correct value without needing getEffectivePrimaryModel()
+        return merged.map(p => {
+            const userPrimary = overrides[p.id];
+            if (!userPrimary || !p.models?.some(m => m.model === userPrimary)) return p;
+            return { ...p, primaryModel: userPrimary };
+        });
+    }, [rawProviders, config.presetCustomModels, config.providerPrimaryModels]);
 
     // Mount guard
     const isMountedRef = useRef(true);
@@ -549,6 +559,15 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         setConfig(newConfig);
     }, []);
 
+    const savePrimaryModel = useCallback(async (providerId: string, modelId: string) => {
+        const newConfig = await atomicModifyConfig(c => ({
+            ...c,
+            providerPrimaryModels: { ...c.providerPrimaryModels, [providerId]: modelId },
+        }));
+        setConfig(newConfig);
+        await rebuildAndPersistAvailableProviders();
+    }, []);
+
     const saveProviderModelAliases = useCallback(async (providerId: string, aliases: ModelAliases) => {
         // Strip empty strings — prevent sending model: "" upstream
         const cleaned: ModelAliases = {};
@@ -573,14 +592,14 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
         updateConfig, refreshConfig, reload: load, refreshProviderData,
         addProject, updateProject, patchProject, removeProject, touchProject,
         addCustomProvider, updateCustomProvider, deleteCustomProvider, refreshProviders,
-        savePresetCustomModels, removePresetCustomModel, saveProviderModelAliases,
+        savePresetCustomModels, removePresetCustomModel, savePrimaryModel, saveProviderModelAliases,
         saveApiKey, deleteApiKey,
         saveProviderVerifyStatus,
     }), [
         updateConfig, refreshConfig, load, refreshProviderData,
         addProject, updateProject, patchProject, removeProject, touchProject,
         addCustomProvider, updateCustomProvider, deleteCustomProvider, refreshProviders,
-        savePresetCustomModels, removePresetCustomModel, saveProviderModelAliases,
+        savePresetCustomModels, removePresetCustomModel, savePrimaryModel, saveProviderModelAliases,
         saveApiKey, deleteApiKey,
         saveProviderVerifyStatus,
     ]);

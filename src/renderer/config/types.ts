@@ -91,6 +91,20 @@ export function getProviderModels(provider: Provider): ModelEntity[] {
 }
 
 /**
+ * Get effective primary model (user override > preset default)
+ */
+export function getEffectivePrimaryModel(
+  provider: Provider,
+  providerPrimaryModels?: Record<string, string>,
+): string {
+  const userOverride = providerPrimaryModels?.[provider.id];
+  if (userOverride && provider.models?.some(m => m.model === userOverride)) {
+    return userOverride;
+  }
+  return provider.primaryModel;
+}
+
+/**
  * Get display string for provider models (for compact UI display)
  * @param maxLength Maximum length before truncation (default 35)
  */
@@ -319,6 +333,10 @@ export interface AppConfig {
   // These are merged with preset models at runtime, allowing users to add models
   // while keeping preset definitions unchanged (updated with app releases)
   presetCustomModels?: Record<string, ModelEntity[]>;
+
+  // ===== Provider Primary Model (user overrides) =====
+  // Maps provider ID → user's preferred primary model (overrides preset primaryModel)
+  providerPrimaryModels?: Record<string, string>;
 
   // ===== Provider Model Aliases (user overrides) =====
   // Maps provider ID → user-configured model alias overrides (merged with preset defaults)

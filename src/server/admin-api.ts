@@ -479,7 +479,8 @@ export async function handleModelVerify(payload: { id: string; model?: string })
   const baseUrl = String(providerConfig.baseUrl ?? '');
   const authType = String(provider.authType ?? 'both');
   const apiProtocol = provider.apiProtocol as 'anthropic' | 'openai' | undefined;
-  const verifyModel = payload.model ?? String(provider.primaryModel ?? '');
+  const userPrimary = (config.providerPrimaryModels as Record<string, string> | undefined)?.[id];
+  const verifyModel = payload.model ?? userPrimary ?? String(provider.primaryModel ?? '');
 
   try {
     const { verifyProviderViaSdk } = await import('./provider-verify');

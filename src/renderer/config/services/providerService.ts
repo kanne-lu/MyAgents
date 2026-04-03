@@ -208,18 +208,25 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
         const verifyStatus = config.providerVerifyStatus ?? {};
 
         const mergedProviders = mergePresetCustomModels(allProviders, config.presetCustomModels);
+        // Apply user primary model overrides
+        const primaryOverrides = config.providerPrimaryModels as Record<string, string> | undefined;
         // Only include providers with valid credentials:
         // - Subscription: must have verified status + accountEmail (same as isProviderAvailable)
         // - API: must have a non-empty API key
         const availableProviders = mergedProviders
             .filter(p => isProviderAvailable(p, apiKeys, verifyStatus))
-            .map(p => ({
-                id: p.id, name: p.name, primaryModel: p.primaryModel,
+            .map(p => {
+                const userPrimary = primaryOverrides?.[p.id];
+                const effectivePrimary = (userPrimary && p.models?.some(m => m.model === userPrimary))
+                    ? userPrimary : p.primaryModel;
+                return {
+                id: p.id, name: p.name, primaryModel: effectivePrimary,
                 baseUrl: p.config.baseUrl, authType: p.authType,
                 apiProtocol: p.apiProtocol,
                 apiKey: p.type !== 'subscription' ? apiKeys[p.id] : undefined,
                 models: p.models.map(m => ({ model: m.model, modelName: m.modelName })),
-            }));
+            };
+            });
 
         const json = availableProviders.length > 0 ? JSON.stringify(availableProviders) : undefined;
         await atomicModifyConfig(c => ({ ...c, availableProvidersJson: json }));

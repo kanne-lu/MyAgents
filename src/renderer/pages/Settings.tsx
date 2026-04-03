@@ -17,12 +17,11 @@ import CronTaskDebugPanel from '@/components/dev/CronTaskDebugPanel';
 import { BotPlatformRegistry } from '@/components/ImSettings';
 import { WorkspaceSelectDialog } from '@/components/AgentSettings';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
-import ModelDiscoveryPanel from '@/components/ModelDiscoveryPanel';
+import ModelManagementPanel from '@/components/ModelManagementPanel';
 import UsageStatsPanel from '@/components/UsageStatsPanel';
 import {
     getModelsDisplay,
     getEffectiveModelAliases,
-    PRESET_PROVIDERS,
     type ModelAliases,
     type Provider,
     type ProviderAuthType,
@@ -57,7 +56,6 @@ import {
     unlockDeveloperSection,
     UNLOCK_CONFIG,
 } from '@/utils/developerMode';
-import { supportsModelDiscovery } from '@/config/services/modelDiscoveryService';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isTauriEnvironment } from '@/utils/browserMock';
@@ -160,82 +158,6 @@ interface SettingsProps {
 const VALID_SECTIONS: SettingsSection[] = ['general', 'providers', 'mcp', 'skills', 'sub-agents', 'agent', 'usage-stats', 'about'];
 
 // Memoized component for model tag list to avoid recreating presetModelIds on every render
-const ModelTagList = React.memo(function ModelTagList({
-    provider,
-    removedModels,
-    onRemove,
-    customModels,
-    onRemoveCustomModel,
-}: {
-    provider: Provider;
-    removedModels: string[];
-    onRemove: (modelId: string) => void;
-    customModels: string[];           // Newly added models (not yet saved)
-    onRemoveCustomModel: (modelId: string) => void;
-}) {
-    // For preset providers, determine which models are preset vs user-added
-    const presetModelIds = useMemo(() => {
-        if (!provider.isBuiltin) return new Set<string>();
-        const presetProvider = PRESET_PROVIDERS.find(p => p.id === provider.id);
-        return new Set(presetProvider?.models.map(m => m.model) ?? []);
-    }, [provider.id, provider.isBuiltin]);
-
-    const visibleModels = useMemo(
-        () => provider.models.filter(m => !removedModels.includes(m.model)),
-        [provider.models, removedModels]
-    );
-
-    return (
-        <>
-            {/* Existing saved models */}
-            {visibleModels.map((model) => {
-                const isPresetModel = presetModelIds.has(model.model);
-                const canDelete = !isPresetModel;
-
-                return (
-                    <div
-                        key={model.model}
-                        className={`group flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[var(--ink)] ${
-                            canDelete
-                                ? 'bg-[var(--paper-inset)] hover:bg-[var(--paper)]'
-                                : 'bg-[var(--paper-inset)]'
-                        }`}
-                    >
-                        <span>{model.model}</span>
-                        {isPresetModel ? (
-                            <span className="text-[10px] text-[var(--ink-muted)]">预设</span>
-                        ) : (
-                            <button
-                                type="button"
-                                onClick={() => onRemove(model.model)}
-                                className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
-                            >
-                                <X className="h-3 w-3" />
-                            </button>
-                        )}
-                    </div>
-                );
-            })}
-            {/* Newly added models (not yet saved) */}
-            {customModels.map((model) => (
-                <div
-                    key={`custom-${model}`}
-                    className="group flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-medium text-[var(--ink)] hover:bg-[var(--paper-inset)]"
-                >
-                    <span>{model}</span>
-                    <button
-                        type="button"
-                        onClick={() => onRemoveCustomModel(model)}
-                        className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
-                    >
-                        <X className="h-3 w-3" />
-                    </button>
-                </div>
-            ))}
-        </>
-    );
-});
-
 /** Default args for Playwright MCP: persistent profile mode (preserves login state, single-session) */
 async function getPlaywrightDefaultArgs(): Promise<string[]> {
     const home = await homeDir();
@@ -262,8 +184,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         addCustomProvider,
         updateCustomProvider,
         deleteCustomProvider: deleteCustomProviderService,
+        refreshProviders,
         savePresetCustomModels,
         removePresetCustomModel: _removePresetCustomModel,
+        savePrimaryModel,
         saveProviderModelAliases,
         refreshConfig,
     } = useConfig();
@@ -351,13 +275,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const [editingProvider, setEditingProvider] = useState<ProviderEditForm | null>(null);
     // 删除确认弹窗状态
     const [deleteConfirmProvider, setDeleteConfirmProvider] = useState<Provider | null>(null);
-    // 模型发现面板状态
-    const [discoveryProvider, setDiscoveryProvider] = useState<Provider | null>(null);
-    const discoveryExistingIds = useMemo(
-        () => new Set(discoveryProvider?.models.map(m => m.model) ?? []),
-        [discoveryProvider],
+    // 模型管理面板状态 — 存 ID 而非 Provider 对象，从 providers 派生最新引用
+    const [managingProviderId, setManagingProviderId] = useState<string | null>(null);
+    const managingProvider = useMemo(
+        () => managingProviderId ? providers.find(p => p.id === managingProviderId) ?? null : null,
+        [managingProviderId, providers],
     );
-
     // UI-only loading state (not persisted)
     const [verifyLoading, setVerifyLoading] = useState<Record<string, boolean>>({});
     const [verifyError, setVerifyError] = useState<Record<string, { error: string; detail?: string }>>({});
@@ -1834,9 +1757,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         };
     }, []);
 
-    const handleAddCustomProvider = async () => {
-        if (!customForm.name || !customForm.baseUrl || customForm.models.length === 0) {
-            return;
+    const handleAddCustomProvider = async (): Promise<Provider | null> => {
+        if (!customForm.name || !customForm.baseUrl) {
+            return null;
         }
         const newProvider: Provider = {
             id: `custom-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -1844,7 +1767,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             vendor: 'Custom',  // 内部保留但不在 UI 显示
             cloudProvider: customForm.cloudProvider || '自定义',
             type: 'api',
-            primaryModel: customForm.models[0],
+            primaryModel: customForm.models[0] ?? '',
             isBuiltin: false,
             authType: customForm.authType,
             apiProtocol: customForm.apiProtocol === 'openai' ? 'openai' : undefined,
@@ -1887,11 +1810,12 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
         } catch (error) {
             console.error('[Settings] Failed to add custom provider:', error);
             toast.error('添加服务商失败');
-            return;
+            return null;
         }
 
         setCustomForm(EMPTY_CUSTOM_FORM);
         setShowCustomForm(false);
+        return newProvider;
     };
 
     // 确认删除自定义供应商
@@ -1951,43 +1875,6 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 editMaxOutputTokensParamName: provider.maxOutputTokensParamName ?? 'max_tokens',
                 editUpstreamFormat: provider.upstreamFormat ?? 'chat_completions',
             }),
-        });
-    };
-
-    // Add custom model to editing provider
-    const addCustomModelToProvider = () => {
-        if (!editingProvider || !editingProvider.newModelInput.trim()) return;
-        const newModel = editingProvider.newModelInput.trim();
-        // Check if model already exists
-        const existingModels = editingProvider.provider.models.map((m) => m.model);
-        if (existingModels.includes(newModel) || editingProvider.customModels.includes(newModel)) {
-            toast.error('该模型 ID 已存在');
-            return;
-        }
-        setEditingProvider({
-            ...editingProvider,
-            customModels: [...editingProvider.customModels, newModel],
-            newModelInput: '',
-        });
-    };
-
-    // Remove custom model from editing provider
-    const removeCustomModelFromProvider = (modelId: string) => {
-        if (!editingProvider) return;
-        setEditingProvider({
-            ...editingProvider,
-            customModels: editingProvider.customModels.filter((m) => m !== modelId),
-        });
-    };
-
-    // Remove existing (saved) model from editing provider
-    // For custom providers: any model can be removed
-    // For preset providers: only user-added models can be removed (not preset models)
-    const removeExistingModel = (modelId: string) => {
-        if (!editingProvider) return;
-        setEditingProvider({
-            ...editingProvider,
-            removedModels: [...editingProvider.removedModels, modelId],
         });
     };
 
@@ -5077,73 +4964,31 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </div>
                             )}
 
+                            {/* Models — create provider first, then open management panel */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    模型 ID <span className="text-[var(--error)]">*</span>
+                                    模型
                                 </label>
-                                <div className="flex gap-2">
-                                    <input
-                                        type="text"
-                                        value={customForm.newModelInput}
-                                        onChange={(e) => setCustomForm((p) => ({ ...p, newModelInput: e.target.value }))}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter' && customForm.newModelInput.trim()) {
-                                                e.preventDefault();
-                                                const newModel = customForm.newModelInput.trim();
-                                                if (!customForm.models.includes(newModel)) {
-                                                    setCustomForm((p) => ({
-                                                        ...p,
-                                                        models: [...p.models, newModel],
-                                                        newModelInput: '',
-                                                    }));
-                                                }
-                                            }
-                                        }}
-                                        placeholder="输入模型 ID，按 Enter 添加"
-                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            const newModel = customForm.newModelInput.trim();
-                                            if (newModel && !customForm.models.includes(newModel)) {
-                                                setCustomForm((p) => ({
-                                                    ...p,
-                                                    models: [...p.models, newModel],
-                                                    newModelInput: '',
-                                                }));
-                                            }
-                                        }}
-                                        disabled={!customForm.newModelInput.trim()}
-                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
-                                    >
-                                        <Plus className="h-4 w-4" />
-                                    </button>
-                                </div>
-                                {/* Model tags */}
-                                {customForm.models.length > 0 && (
-                                    <div className="mt-2 flex flex-wrap gap-1.5">
-                                        {customForm.models.map((model, index) => (
-                                            <div
-                                                key={model}
-                                                className="flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-medium text-[var(--ink)]"
-                                            >
-                                                <span className="text-[10px] text-[var(--ink-muted)]">{index + 1}.</span>
-                                                <span>{model}</span>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setCustomForm((p) => ({
-                                                        ...p,
-                                                        models: p.models.filter((m) => m !== model),
-                                                    }))}
-                                                    className="ml-0.5 rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--error)]"
-                                                >
-                                                    <X className="h-3 w-3" />
-                                                </button>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
+                                <p className="text-sm text-[var(--ink-muted)]">
+                                    {customForm.models.length > 0
+                                        ? customForm.models.join(', ')
+                                        : '暂无模型'}
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={async () => {
+                                        if (!customForm.name?.trim() || !customForm.baseUrl?.trim()) {
+                                            toast.error('请先填写供应商名称和 Base URL');
+                                            return;
+                                        }
+                                        const created = await handleAddCustomProvider();
+                                        if (created) setManagingProviderId(created.id);
+                                    }}
+                                    className="mt-2 flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                                >
+                                    <Plus className="h-3.5 w-3.5" />
+                                    添加模型
+                                </button>
                             </div>
 
                             {/* API Key moved to provider list page for consistency with edit flow */}
@@ -5162,7 +5007,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </button>
                                 <button
                                     onClick={handleAddCustomProvider}
-                                    disabled={!customForm.name || !customForm.baseUrl || customForm.models.length === 0}
+                                    disabled={!customForm.name || !customForm.baseUrl}
                                     className="flex-1 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
                                 >
                                     添加
@@ -5369,63 +5214,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </div>
                             )}
 
-                            {/* Existing models */}
+                            {/* Models — preview + manage button */}
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    模型列表
+                                    模型
                                 </label>
-                                <div className="flex flex-wrap gap-1.5">
-                                    <ModelTagList
-                                        provider={editingProvider.provider}
-                                        removedModels={editingProvider.removedModels}
-                                        onRemove={removeExistingModel}
-                                        customModels={editingProvider.customModels}
-                                        onRemoveCustomModel={removeCustomModelFromProvider}
-                                    />
-                                </div>
-                            </div>
-
-                            {/* Custom models for this provider */}
-                            <div>
-                                <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
-                                    添加自定义模型 ID
-                                </label>
-                                <div className="flex gap-2">
-                                    <input
-                                        type="text"
-                                        value={editingProvider.newModelInput}
-                                        onChange={(e) => setEditingProvider((p) => p ? { ...p, newModelInput: e.target.value } : null)}
-                                        onKeyDown={(e) => {
-                                            if (e.key === 'Enter') {
-                                                e.preventDefault();
-                                                addCustomModelToProvider();
-                                            }
-                                        }}
-                                        placeholder="输入模型 ID，按 Enter 添加"
-                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors focus:border-[var(--focus-border)] focus:outline-none"
-                                    />
-                                    <button
-                                        type="button"
-                                        onClick={addCustomModelToProvider}
-                                        disabled={!editingProvider.newModelInput.trim()}
-                                        className="rounded-lg bg-[var(--paper-inset)] px-3 py-2.5 text-sm font-medium text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
-                                    >
-                                        <Plus className="h-4 w-4" />
-                                    </button>
-                                </div>
-                                {/* Discover Models button */}
-                                {editingProvider.provider.isBuiltin && supportsModelDiscovery(editingProvider.provider) && (
-                                    <button
-                                        type="button"
-                                        onClick={() => setDiscoveryProvider(editingProvider.provider)}
-                                        disabled={!apiKeys[editingProvider.provider.id]}
-                                        title={!apiKeys[editingProvider.provider.id] ? '请先配置 API Key' : undefined}
-                                        className="mt-1.5 flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:cursor-not-allowed disabled:opacity-40"
-                                    >
-                                        <Download className="h-3.5 w-3.5" />
-                                        从 API 发现模型
-                                    </button>
-                                )}
+                                <p className="text-sm text-[var(--ink-muted)]">
+                                    {editingProvider.provider.models.length > 0
+                                        ? getModelsDisplay(editingProvider.provider, 60)
+                                        : '暂无模型'}
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={() => setManagingProviderId(editingProvider.provider.id)}
+                                    className="mt-2 flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                                >
+                                    <Settings2 className="h-3.5 w-3.5" />
+                                    管理可用模型
+                                </button>
                             </div>
 
                             {/* Advanced Options - Model Alias Mapping (not shown for Anthropic providers) */}
@@ -5517,29 +5323,17 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 </div>
             )}
 
-            {/* Model Discovery Panel */}
-            {discoveryProvider && apiKeys[discoveryProvider.id] && (
-                <ModelDiscoveryPanel
-                    provider={discoveryProvider}
-                    apiKey={apiKeys[discoveryProvider.id]}
-                    existingModelIds={discoveryExistingIds}
-                    onConfirm={async (newModels) => {
-                        if (newModels.length === 0) { setDiscoveryProvider(null); return; }
-                        const providerId = discoveryProvider.id;
-                        // Disk-first: merge inside atomicModifyConfig to avoid stale state
-                        await atomicModifyConfig(c => {
-                            const existing = c.presetCustomModels?.[providerId] ?? [];
-                            const existingIds = new Set(existing.map(m => m.model));
-                            const toAdd = newModels.filter(m => !existingIds.has(m.model));
-                            if (toAdd.length === 0) return c;
-                            const updated = { ...c.presetCustomModels, [providerId]: [...existing, ...toAdd] };
-                            return { ...c, presetCustomModels: updated };
-                        });
-                        await refreshConfig();
-                        toast.success(`已添加 ${newModels.length} 个模型`);
-                        setDiscoveryProvider(null);
-                    }}
-                    onClose={() => setDiscoveryProvider(null)}
+            {/* Model Management Panel */}
+            {managingProvider && (
+                <ModelManagementPanel
+                    provider={managingProvider}
+                    apiKey={apiKeys[managingProvider.id]}
+                    config={config}
+                    onClose={() => setManagingProviderId(null)}
+                    onSaveCustomModels={savePresetCustomModels}
+                    onUpdateCustomProvider={updateCustomProvider}
+                    onSetPrimaryModel={savePrimaryModel}
+                    onRefresh={async () => { await refreshConfig(); await refreshProviders(); }}
                 />
             )}
 
