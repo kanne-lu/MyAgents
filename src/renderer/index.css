@@ -572,6 +572,15 @@ button:disabled {
   100% { background-position: -200% 0; }
 }
 
+/* Indeterminate progress bar animation (browser loading indicator) */
+@keyframes indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.animate-indeterminate {
+  animation: indeterminate 1.5s ease-in-out infinite;
+}
+
 
 /* Override Tailwind's font-mono to use our CSS variable with Chinese fallback */
 .font-mono {

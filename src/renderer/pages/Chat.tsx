@@ -1,5 +1,5 @@
-import { AlertTriangle, ArrowLeft, Bot, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { AlertTriangle, ArrowLeft, Bot, Globe, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
@@ -40,6 +40,7 @@ import {
   resolveProvider,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
+import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
@@ -48,6 +49,8 @@ import type { InitialMessage } from '@/types/tab';
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
 // Lazy load TerminalPanel for embedded terminal
 const LazyTerminalPanel = lazy(() => import('@/components/TerminalPanel').then(m => ({ default: m.TerminalPanel })));
+// Lazy load BrowserPanel for embedded browser
+const LazyBrowserPanel = lazy(() => import('@/components/BrowserPanel'));
 // Terminal chrome now uses CSS tokens that auto-switch with light/dark theme.
 // No need for cached theme constants — the header uses var(--paper), var(--ink), etc.
 
@@ -250,11 +253,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // false = terminal may be alive in background but not displayed.
   // Clicking terminal icon sets true; clicking terminal × sets false.
   const [terminalPinned, setTerminalPinned] = useState(false);
-  // Which view is active in the right panel: 'file' or 'terminal'
-  const [splitActiveView, setSplitActiveView] = useState<'file' | 'terminal'>('file');
+  // Which view is active in the right panel: 'file', 'terminal', or 'browser'
+  const [splitActiveView, setSplitActiveView] = useState<'file' | 'terminal' | 'browser'>('file');
+
+  // ── Embedded browser state ──
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  const [browserAlive, setBrowserAlive] = useState(false);
 
   // Derived: is the right split panel visible?
-  const splitPanelVisible = splitFile !== null || (terminalPinned && (terminalAlive || splitActiveView === 'terminal'));
+  const splitPanelVisible = splitFile !== null
+    || (terminalPinned && (terminalAlive || splitActiveView === 'terminal'))
+    || (browserUrl !== null);
   // Should the terminal component stay mounted? (for xterm.js state preservation)
   const terminalMounted = terminalAlive || (terminalPinned && splitActiveView === 'terminal');
 
@@ -274,7 +283,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
     if (splitActiveView === 'terminal' && terminalPinned) {
       setTerminalPinned(false);
-      if (splitFile) setSplitActiveView('file');
+      if (browserUrl) setSplitActiveView('browser');
+      else if (splitFile) setSplitActiveView('file');
+      return true;
+    }
+    if (splitActiveView === 'browser' && browserUrl) {
+      setBrowserUrl(null);
+      setBrowserAlive(false);
+      if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+      else if (splitFile) setSplitActiveView('file');
       return true;
     }
     return false; // focus in panel but no active view to close
@@ -295,6 +312,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setSplitActiveView('terminal');
     // If terminal was already created, just switch view; otherwise TerminalPanel will create it
   }, []);
+
+  // Open a URL in the embedded browser panel
+  const handleOpenInBrowserPanel = useCallback((url: string) => {
+    setBrowserUrl(url);
+    setSplitActiveView('browser');
+  }, []);
+
+  const handleBrowserCreated = useCallback(() => setBrowserAlive(true), []);
+  const handleBrowserCreateFailed = useCallback(() => {
+    setBrowserAlive(false);
+    setBrowserUrl(null);
+  }, []);
+
+  // Stable context value for BrowserPanelContext (only provided when split view is available)
+  const browserPanelCtx = useMemo(
+    () => (isSplitViewEnabled && !isNarrowLayout ? { openUrl: handleOpenInBrowserPanel } : null),
+    [isSplitViewEnabled, isNarrowLayout, handleOpenInBrowserPanel],
+  );
 
   // When split panel closes entirely, restore workspace sidebar to visible
   const prevSplitVisibleRef = useRef(splitPanelVisible);
@@ -1833,6 +1868,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           />
 
           {/* Message list with max-width */}
+          <BrowserPanelContext.Provider value={browserPanelCtx}>
           <FileActionProvider
             onInsertReference={handleInsertReference}
             refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
@@ -1875,6 +1911,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               </div>
             )}
           </FileActionProvider>
+          </BrowserPanelContext.Provider>
 
           {/* Text selection floating menu for quoting AI text */}
           <SelectionCommentMenu
@@ -1987,64 +2024,107 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           {/* Right panel — single flex-1 container for tab bar + file + terminal.
               Uses `hidden` when panel is not visible but terminal is alive in background. */}
           <div ref={splitPanelRef} className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!splitPanelVisible ? 'hidden' : ''}`}>
-            {/* Tab switcher — only when both file AND terminal are pinned */}
-            {splitFile && terminalPinned && terminalAlive && (
+            {/* Tab switcher — only when 2+ views are active */}
+            {(() => {
+              const activeViews = [splitFile, terminalPinned && terminalAlive, browserUrl].filter(Boolean).length;
+              return activeViews >= 2;
+            })() && (
               <div className="flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-[var(--line)] bg-[var(--paper-elevated)] px-2">
                 {/* File tab + its own × */}
-                <button
-                  type="button"
-                  onClick={() => setSplitActiveView('file')}
-                  className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
-                    splitActiveView === 'file'
-                      ? 'text-[var(--ink)]'
-                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                  }`}
-                >
-                  <span className="max-w-[120px] truncate">{splitFile.name}</span>
-                  <span
-                    role="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSplitFile(null);
-                      setSplitActiveView('terminal');
-                    }}
-                    className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
-                    title="关闭文件"
+                {splitFile && (
+                  <button
+                    type="button"
+                    onClick={() => setSplitActiveView('file')}
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      splitActiveView === 'file'
+                        ? 'text-[var(--ink)]'
+                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                    }`}
                   >
-                    <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
-                  </span>
-                  {splitActiveView === 'file' && (
-                    <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
-                  )}
-                </button>
+                    <span className="max-w-[120px] truncate">{splitFile.name}</span>
+                    <span
+                      role="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSplitFile(null);
+                        if (browserUrl) setSplitActiveView('browser');
+                        else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+                      }}
+                      className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                      title="关闭文件"
+                    >
+                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                    </span>
+                    {splitActiveView === 'file' && (
+                      <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                    )}
+                  </button>
+                )}
                 {/* Terminal tab + its own × */}
-                <button
-                  type="button"
-                  onClick={() => setSplitActiveView('terminal')}
-                  className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
-                    splitActiveView === 'terminal'
-                      ? 'text-[var(--ink)]'
-                      : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                  }`}
-                >
-                  <TerminalSquare className="h-3 w-3" />
-                  终端
-                  <span
-                    role="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setTerminalPinned(false);
-                      setSplitActiveView('file');
-                    }}
-                    className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
-                    title="隐藏终端"
+                {terminalPinned && terminalAlive && (
+                  <button
+                    type="button"
+                    onClick={() => setSplitActiveView('terminal')}
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      splitActiveView === 'terminal'
+                        ? 'text-[var(--ink)]'
+                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                    }`}
                   >
-                    <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
-                  </span>
-                  {splitActiveView === 'terminal' && (
-                    <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
-                  )}
-                </button>
+                    <TerminalSquare className="h-3 w-3" />
+                    终端
+                    <span
+                      role="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setTerminalPinned(false);
+                        if (browserUrl) setSplitActiveView('browser');
+                        else if (splitFile) setSplitActiveView('file');
+                      }}
+                      className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                      title="隐藏终端"
+                    >
+                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                    </span>
+                    {splitActiveView === 'terminal' && (
+                      <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                    )}
+                  </button>
+                )}
+                {/* Browser tab + its own × */}
+                {browserUrl && (
+                  <button
+                    type="button"
+                    onClick={() => setSplitActiveView('browser')}
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                      splitActiveView === 'browser'
+                        ? 'text-[var(--ink)]'
+                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                    }`}
+                  >
+                    <Globe className="h-3 w-3" />
+                    <span className="max-w-[120px] truncate">
+                      {(() => { try { return new URL(browserUrl).hostname; } catch { return '浏览器'; } })()}
+                    </span>
+                    <span
+                      role="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setBrowserUrl(null);
+                        setBrowserAlive(false);
+                        if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+                        else if (splitFile) setSplitActiveView('file');
+                      }}
+                      className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
+                      title="关闭浏览器"
+                    >
+                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                    </span>
+                    {splitActiveView === 'browser' && (
+                      <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
+                    )}
+                  </button>
+                )}
               </div>
             )}
 
@@ -2059,7 +2139,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     path={splitFile.path}
                     onClose={() => {
                       setSplitFile(null);
-                      if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+                      if (browserUrl) setSplitActiveView('browser');
+                      else if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
                     }}
                     onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
                     embedded
@@ -2077,8 +2158,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 Stays mounted while alive, uses `hidden` when not the active view. */}
             {terminalMounted && (
               <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'terminal' ? 'hidden' : ''}`}>
-                {/* Terminal header — only when tab switcher is NOT showing */}
-                {!(splitFile && terminalPinned && terminalAlive) && (
+                {/* Terminal header — only when tab switcher is NOT showing (single view) */}
+                {[splitFile, terminalPinned && terminalAlive, browserUrl].filter(Boolean).length < 2 && (
                   <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
                     <div className="flex items-center gap-1.5">
                       <TerminalSquare className="h-3.5 w-3.5 text-[var(--ink)]" />
@@ -2092,7 +2173,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                         type="button"
                         onClick={() => {
                           setTerminalPinned(false);
-                          setSplitActiveView('file');
+                          if (browserUrl) setSplitActiveView('browser');
+                          else if (splitFile) setSplitActiveView('file');
                         }}
                         className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                       >
@@ -2122,6 +2204,46 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                         });
                       }
                     }}
+                  />
+                </Suspense>
+              </div>
+            )}
+
+            {/* Browser — embedded Tauri child Webview */}
+            {browserUrl && (
+              <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'browser' ? 'hidden' : ''}`}>
+                {/* Browser header — only when tab switcher is NOT showing (single view) */}
+                {[splitFile, terminalPinned && terminalAlive, browserUrl].filter(Boolean).length < 2 && (
+                  <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
+                    <div className="flex items-center gap-1.5">
+                      <Globe className="h-3.5 w-3.5 text-[var(--ink)]" />
+                      <span className="text-[12px] font-medium text-[var(--ink)]">浏览器</span>
+                    </div>
+                    <Tip label="关闭浏览器" position="bottom">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBrowserUrl(null);
+                          setBrowserAlive(false);
+                          if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+                          else if (splitFile) setSplitActiveView('file');
+                        }}
+                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </Tip>
+                  </div>
+                )}
+                <Suspense fallback={<div className="flex h-full items-center justify-center bg-[var(--paper)]"><Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]" /></div>}>
+                  <LazyBrowserPanel
+                    tabId={tabId}
+                    url={browserUrl}
+                    isVisible={isActive && splitPanelVisible && splitActiveView === 'browser'}
+                    isDraggingSplit={isDraggingSplit}
+                    browserAlive={browserAlive}
+                    onBrowserCreated={handleBrowserCreated}
+                    onCreateFailed={handleBrowserCreateFailed}
                   />
                 </Suspense>
               </div>

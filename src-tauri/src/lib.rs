@@ -15,6 +15,7 @@ pub mod system_binary;
 mod sidecar;
 mod sse_proxy;
 pub mod terminal;
+pub mod browser;
 mod tray;
 mod updater;
 
@@ -98,6 +99,12 @@ pub fn run() {
     let terminal_state_for_window = terminal_state.clone();
     let terminal_state_for_tray_exit = terminal_state.clone();
 
+    // Create browser manager state
+    let browser_state = browser::BrowserManager::new();
+    let browser_state_for_exit = browser_state.clone();
+    let browser_state_for_window = browser_state.clone();
+    let browser_state_for_tray_exit = browser_state.clone();
+
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
 
@@ -124,6 +131,7 @@ pub fn run() {
         .manage(im_bot_state)
         .manage(agent_state)
         .manage(terminal_state)
+        .manage(browser_state)
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -242,6 +250,16 @@ pub fn run() {
             terminal::cmd_terminal_write,
             terminal::cmd_terminal_resize,
             terminal::cmd_terminal_close,
+            // Browser commands (embedded webview)
+            browser::cmd_browser_create,
+            browser::cmd_browser_navigate,
+            browser::cmd_browser_go_back,
+            browser::cmd_browser_go_forward,
+            browser::cmd_browser_reload,
+            browser::cmd_browser_resize,
+            browser::cmd_browser_show,
+            browser::cmd_browser_hide,
+            browser::cmd_browser_close,
             // File utility commands
             commands::cmd_read_workspace_file,
             commands::cmd_write_workspace_file,
@@ -344,6 +362,9 @@ pub fn run() {
                     // Clean up terminal PTY sessions
                     let ts = terminal_state_for_tray_exit.clone();
                     tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
+                    // Clean up browser webviews
+                    let bs = browser_state_for_tray_exit.clone();
+                    tauri::async_runtime::block_on(browser::close_all_browsers(&bs, &app_handle_for_tray));
                     app_dirs::release_lock();
                 }
                 app_handle_for_tray.exit(0);
@@ -465,6 +486,10 @@ pub fn run() {
                         // Clean up terminal PTY sessions
                         let ts = terminal_state_for_window.clone();
                         tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
+                        // Clean up browser webviews
+                        let bs = browser_state_for_window.clone();
+                        let app_for_browser = window.app_handle().clone();
+                        tauri::async_runtime::block_on(browser::close_all_browsers(&bs, &app_for_browser));
                         app_dirs::release_lock();
                     }
                 }
@@ -489,6 +514,9 @@ pub fn run() {
                     // Clean up terminal PTY sessions
                     let ts = terminal_state_for_exit.clone();
                     tauri::async_runtime::block_on(terminal::close_all_terminals(&ts));
+                    // Clean up browser webviews
+                    let bs = browser_state_for_exit.clone();
+                    tauri::async_runtime::block_on(browser::close_all_browsers(&bs, _app_handle));
                     app_dirs::release_lock();
                 }
             }

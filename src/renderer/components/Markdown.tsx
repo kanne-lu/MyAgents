@@ -11,7 +11,7 @@
 
 import 'katex/dist/katex.min.css';
 
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useState } from 'react';
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
@@ -22,7 +22,8 @@ import remarkMath from 'remark-math';
 import CodeBlock from './markdown/CodeBlock';
 import InlineCode from './markdown/InlineCode';
 import MermaidDiagram from './markdown/MermaidDiagram';
-import { openExternal } from '@/utils/openExternal';
+import { openExternal, isExternalUrl } from '@/utils/openExternal';
+import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import { useTabApiOptional } from '@/context/TabContext';
 
@@ -31,9 +32,11 @@ const REMARK_PLUGINS_DEFAULT = [remarkGfm, remarkMath];
 const REMARK_PLUGINS_WITH_BREAKS = [remarkGfm, remarkMath, remarkBreaks];
 const REHYPE_PLUGINS = [rehypeKatex];
 
-// Custom link component that opens links in system browser/default app
-// Supports text selection for copying
-const MarkdownLink: Components['a'] = ({ href, children, ...props }) => {
+// Custom link component that opens links in embedded browser panel (if available)
+// or falls back to system browser. Supports text selection for copying.
+function MarkdownLink({ href, children, ...props }: React.ComponentProps<'a'>) {
+  const browserPanel = useContext(BrowserPanelContext);
+
   const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault();
 
@@ -42,11 +45,13 @@ const MarkdownLink: Components['a'] = ({ href, children, ...props }) => {
     const hasSelection = selection && selection.toString().length > 0;
 
     if (!hasSelection && href) {
-      // Open all links with system default application
-      // - http/https: system browser
-      // - mailto: system email client
-      // - file paths: system default app for that file type
-      openExternal(href);
+      if (browserPanel && isExternalUrl(href) && !href.toLowerCase().startsWith('mailto:')) {
+        // Route to embedded browser panel (exclude mailto: — those go to system email client)
+        browserPanel.openUrl(href);
+      } else {
+        // Fallback: system browser / default app
+        openExternal(href);
+      }
     }
   };
 
@@ -61,7 +66,7 @@ const MarkdownLink: Components['a'] = ({ href, children, ...props }) => {
       {children}
     </a>
   );
-};
+}
 
 // Custom code component - handles both inline and block code
 const CodeComponent: Components['code'] = ({ className, children, node: _node, ...props }) => {
