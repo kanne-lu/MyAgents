@@ -691,8 +691,15 @@ export default function App() {
         }
       } else if (e.key === 'w' || e.key === 'W') {
         e.preventDefault();
-        // Hierarchical close: dismiss topmost overlay/panel first, tab last
-        if (!dismissTopmost()) closeCurrentTab();
+        // Hierarchical close: dismiss topmost overlay/panel first, tab last.
+        // Safety net: if dismissTopmost() found nothing but a backdrop-blur overlay
+        // IS visible (unregistered overlay), block tab close instead of exiting the app.
+        // Design guide mandates backdrop-blur-sm for all closeable overlays (Section 6.7),
+        // so this catches both registered AND unregistered overlays.
+        if (!dismissTopmost()) {
+          const hasOverlayBackdrop = !!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]');
+          if (!hasOverlayBackdrop) closeCurrentTab();
+        }
       } else if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
         // Cmd+Shift+[ = previous tab, Cmd+Shift+] = next tab
         e.preventDefault();
