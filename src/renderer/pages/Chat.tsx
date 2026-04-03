@@ -324,6 +324,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setBrowserAlive(false);
     setBrowserUrl(null);
   }, []);
+  const handleBrowserClose = useCallback(() => {
+    setBrowserUrl(null);
+    setBrowserAlive(false);
+    if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
+    else if (splitFile) setSplitActiveView('file');
+  }, [terminalPinned, terminalAlive, splitFile]);
 
   // Stable context value for BrowserPanelContext (only provided when split view is available)
   const browserPanelCtx = useMemo(
@@ -2213,29 +2219,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             {/* Browser — embedded Tauri child Webview */}
             {browserUrl && (
               <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${splitActiveView !== 'browser' ? 'hidden' : ''}`}>
-                {/* Browser header — only when tab switcher is NOT showing (single view) */}
-                {[splitFile, terminalPinned && terminalAlive, browserUrl].filter(Boolean).length < 2 && (
-                  <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
-                    <div className="flex items-center gap-1.5">
-                      <Globe className="h-3.5 w-3.5 text-[var(--ink)]" />
-                      <span className="text-[12px] font-medium text-[var(--ink)]">浏览器</span>
-                    </div>
-                    <Tip label="关闭浏览器" position="bottom">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setBrowserUrl(null);
-                          setBrowserAlive(false);
-                          if (terminalPinned && terminalAlive) setSplitActiveView('terminal');
-                          else if (splitFile) setSplitActiveView('file');
-                        }}
-                        className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                      >
-                        <X className="h-3.5 w-3.5" />
-                      </button>
-                    </Tip>
-                  </div>
-                )}
                 <Suspense fallback={<div className="flex h-full items-center justify-center bg-[var(--paper)]"><Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]" /></div>}>
                   <LazyBrowserPanel
                     tabId={tabId}
@@ -2245,6 +2228,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     browserAlive={browserAlive}
                     onBrowserCreated={handleBrowserCreated}
                     onCreateFailed={handleBrowserCreateFailed}
+                    onClose={handleBrowserClose}
                   />
                 </Suspense>
               </div>

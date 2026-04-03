@@ -5,17 +5,15 @@
  * web content is rendered by a native Tauri child Webview positioned
  * over the placeholder using absolute coordinates (OS-level overlay).
  *
- * Coordinate sync via ResizeObserver ensures the native Webview
- * follows React layout changes (resize, split ratio drag, etc.).
- *
- * All show/hide logic is consolidated in a single effect to avoid
- * dual-actor conflicts (visibility + overlay guard + drag state).
+ * The toolbar always includes a close button (×), so the separate
+ * single-view header in Chat.tsx is not needed — one row handles
+ * both navigation and panel control.
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { ChevronLeft, ChevronRight, RotateCw, ExternalLink, Loader2, Globe } from 'lucide-react';
+import { ChevronLeft, ChevronRight, RotateCw, ExternalLink, Loader2, Globe, X } from 'lucide-react';
 import { openExternal } from '@/utils/openExternal';
 import { useBrowserOverlayGuard } from '@/hooks/useBrowserOverlayGuard';
 import Tip from '@/components/Tip';
@@ -29,6 +27,7 @@ interface BrowserPanelProps {
   browserAlive: boolean;
   onBrowserCreated: () => void;
   onCreateFailed: () => void;
+  onClose: () => void;
 }
 
 export default function BrowserPanel({
@@ -39,21 +38,25 @@ export default function BrowserPanel({
   browserAlive,
   onBrowserCreated,
   onCreateFailed,
+  onClose,
 }: BrowserPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [currentUrl, setCurrentUrl] = useState(url ?? '');
   const [isLoading, setIsLoading] = useState(false);
   const creatingRef = useRef(false);
 
-  // Overlay detection — returns true when modal/overlay is on screen
+  // ── Editable URL bar state ──
+  const [urlEditing, setUrlEditing] = useState(false);
+  const [urlDraft, setUrlDraft] = useState('');
+  const urlInputRef = useRef<HTMLInputElement>(null);
+
+  // Overlay detection
   const overlayDetected = useBrowserOverlayGuard(browserAlive);
 
-  // Track the last URL we told the webview to load (avoid duplicate navigations)
+  // Track the last URL we told the webview to load
   const lastRequestedUrlRef = useRef<string | null>(null);
 
   // ── Create or navigate webview when url prop changes ──
-  // Uses cancelled flag pattern (like TerminalPanel) to prevent leaks
-  // if the component unmounts during in-flight creation.
   useEffect(() => {
     if (!url) return;
     const el = containerRef.current;
@@ -62,22 +65,17 @@ export default function BrowserPanel({
     let cancelled = false;
 
     if (!browserAlive && !creatingRef.current) {
-      // First URL — create webview
       creatingRef.current = true;
       lastRequestedUrlRef.current = url;
       const rect = el.getBoundingClientRect();
 
       invoke('cmd_browser_create', {
-        tabId,
-        url,
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
+        tabId, url,
+        x: rect.x, y: rect.y,
+        width: rect.width, height: rect.height,
       })
         .then(() => {
           if (cancelled) {
-            // Component unmounted during creation — destroy the orphaned webview
             invoke('cmd_browser_close', { tabId }).catch(() => {});
             return;
           }
@@ -87,11 +85,8 @@ export default function BrowserPanel({
           console.error('[browser] Create failed:', err);
           if (!cancelled) onCreateFailed();
         })
-        .finally(() => {
-          creatingRef.current = false;
-        });
+        .finally(() => { creatingRef.current = false; });
     } else if (browserAlive && url !== lastRequestedUrlRef.current) {
-      // Subsequent URL change — navigate existing webview
       lastRequestedUrlRef.current = url;
       invoke('cmd_browser_navigate', { tabId, url }).catch(() => {});
     }
@@ -100,7 +95,6 @@ export default function BrowserPanel({
   }, [url, browserAlive, tabId, onBrowserCreated, onCreateFailed]);
 
   // ── Listen for URL/loading events from Rust ──
-  // Uses cancelled flag to prevent listener leaks on fast unmount.
   useEffect(() => {
     if (!browserAlive) return;
 
@@ -127,7 +121,7 @@ export default function BrowserPanel({
     };
   }, [browserAlive, tabId]);
 
-  // ── ResizeObserver: sync native webview position with React layout ──
+  // ── ResizeObserver ──
   useEffect(() => {
     const el = containerRef.current;
     if (!el || !browserAlive) return;
@@ -135,19 +129,14 @@ export default function BrowserPanel({
     const syncBounds = () => {
       const rect = el.getBoundingClientRect();
       invoke('cmd_browser_resize', {
-        tabId,
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
+        tabId, x: rect.x, y: rect.y,
+        width: rect.width, height: rect.height,
       }).catch(() => {});
     };
 
     const observer = new ResizeObserver(syncBounds);
     observer.observe(el);
     window.addEventListener('resize', syncBounds);
-
-    // Initial sync
     syncBounds();
 
     return () => {
@@ -156,25 +145,18 @@ export default function BrowserPanel({
     };
   }, [browserAlive, tabId]);
 
-  // ── Consolidated show/hide — single actor for all visibility factors ──
+  // ── Consolidated show/hide ──
   useEffect(() => {
     if (!browserAlive) return;
-
     const shouldShow = isVisible && !isDraggingSplit && !overlayDetected;
-    console.log(`[browser] visibility effect: shouldShow=${shouldShow} isVisible=${isVisible} isDragging=${isDraggingSplit} overlayDetected=${overlayDetected}`);
-
     if (shouldShow) {
       invoke('cmd_browser_show', { tabId }).catch(() => {});
-      // Re-sync position after becoming visible
       const el = containerRef.current;
       if (el) {
         const rect = el.getBoundingClientRect();
         invoke('cmd_browser_resize', {
-          tabId,
-          x: rect.x,
-          y: rect.y,
-          width: rect.width,
-          height: rect.height,
+          tabId, x: rect.x, y: rect.y,
+          width: rect.width, height: rect.height,
         }).catch(() => {});
       }
     } else {
@@ -185,9 +167,7 @@ export default function BrowserPanel({
   // ── Cleanup on unmount ──
   useEffect(() => {
     const tid = tabId;
-    return () => {
-      invoke('cmd_browser_close', { tabId: tid }).catch(() => {});
-    };
+    return () => { invoke('cmd_browser_close', { tabId: tid }).catch(() => {}); };
   }, [tabId]);
 
   // ── Navigation handlers ──
@@ -207,38 +187,60 @@ export default function BrowserPanel({
     if (currentUrl) openExternal(currentUrl);
   }, [currentUrl]);
 
-  // Extract display hostname from URL
+  // ── URL bar editing ──
+  const handleUrlClick = useCallback(() => {
+    setUrlDraft(currentUrl);
+    setUrlEditing(true);
+    // Focus will happen after render via autoFocus
+  }, [currentUrl]);
+
+  const handleUrlSubmit = useCallback(() => {
+    setUrlEditing(false);
+    let trimmed = urlDraft.trim();
+    if (!trimmed) return;
+    // Auto-add https:// if no protocol
+    if (!/^https?:\/\//i.test(trimmed)) {
+      trimmed = 'https://' + trimmed;
+    }
+    if (trimmed !== currentUrl) {
+      invoke('cmd_browser_navigate', { tabId, url: trimmed }).catch(() => {});
+      lastRequestedUrlRef.current = trimmed;
+    }
+  }, [urlDraft, currentUrl, tabId]);
+
+  const handleUrlKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      handleUrlSubmit();
+    } else if (e.key === 'Escape') {
+      setUrlEditing(false);
+    }
+  }, [handleUrlSubmit]);
+
+  // Extract display hostname
   const displayUrl = currentUrl
-    ? (() => {
-        try {
-          return new URL(currentUrl).hostname || currentUrl;
-        } catch {
-          return currentUrl;
-        }
-      })()
+    ? (() => { try { return new URL(currentUrl).hostname || currentUrl; } catch { return currentUrl; } })()
     : '';
 
-  const navBtnClass =
+  const navBtn =
     'flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]';
-  const navBtnDisabled =
-    'flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] opacity-30 cursor-not-allowed';
 
   return (
     <div className="flex h-full flex-col">
-      {/* Navigation toolbar */}
+      {/* Navigation toolbar — always includes close button (single row for all states) */}
       <div className="relative flex h-9 flex-shrink-0 items-center gap-0.5 border-b border-[var(--line)] bg-[var(--paper)] px-2">
         <Tip label="后退" position="bottom">
-          <button type="button" className={navBtnClass} onClick={handleGoBack}>
+          <button type="button" className={navBtn} onClick={handleGoBack}>
             <ChevronLeft className="h-3.5 w-3.5" />
           </button>
         </Tip>
         <Tip label="前进" position="bottom">
-          <button type="button" className={navBtnClass} onClick={handleGoForward}>
+          <button type="button" className={navBtn} onClick={handleGoForward}>
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
         </Tip>
         <Tip label={isLoading ? '停止' : '刷新'} position="bottom">
-          <button type="button" className={navBtnClass} onClick={handleReload}>
+          <button type="button" className={navBtn} onClick={handleReload}>
             {isLoading ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
@@ -247,22 +249,44 @@ export default function BrowserPanel({
           </button>
         </Tip>
 
-        {/* URL display */}
-        <span
-          className="ml-2 min-w-0 flex-1 truncate text-[12px] text-[var(--ink-muted)] select-all"
-          title={currentUrl}
-        >
-          {currentUrl}
-        </span>
+        {/* Editable URL bar */}
+        {urlEditing ? (
+          <input
+            ref={urlInputRef}
+            autoFocus
+            className="ml-1.5 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-2 py-0.5 text-[12px] text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+            value={urlDraft}
+            onChange={(e) => setUrlDraft(e.target.value)}
+            onKeyDown={handleUrlKeyDown}
+            onBlur={() => setUrlEditing(false)}
+            spellCheck={false}
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={handleUrlClick}
+            className="ml-1.5 min-w-0 flex-1 cursor-text truncate rounded-[var(--radius-sm)] px-2 py-0.5 text-left text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)]"
+            title={currentUrl}
+          >
+            {currentUrl}
+          </button>
+        )}
 
         <Tip label="在浏览器中打开" position="bottom">
           <button
             type="button"
-            className={currentUrl ? navBtnClass : navBtnDisabled}
+            className={navBtn}
             onClick={handleOpenExternal}
             disabled={!currentUrl}
           >
             <ExternalLink className="h-3.5 w-3.5" />
+          </button>
+        </Tip>
+
+        {/* Close button — always present */}
+        <Tip label="关闭浏览器" position="bottom">
+          <button type="button" className={navBtn} onClick={onClose}>
+            <X className="h-3.5 w-3.5" />
           </button>
         </Tip>
 
@@ -276,19 +300,15 @@ export default function BrowserPanel({
 
       {/* Placeholder container — native Webview overlays this area */}
       <div ref={containerRef} className="relative min-h-0 flex-1 bg-[var(--paper)]">
-        {/* Show placeholder when webview is not yet alive */}
         {!browserAlive && (
           <div className="flex h-full items-center justify-center">
             <div className="flex flex-col items-center gap-2 text-[var(--ink-subtle)]">
               <Globe className="h-6 w-6" />
-              <span className="text-[12px]">
-                {url ? '加载中...' : ''}
-              </span>
+              <span className="text-[12px]">{url ? '加载中...' : ''}</span>
             </div>
           </div>
         )}
 
-        {/* Frosted placeholder during split drag */}
         {isDraggingSplit && browserAlive && (
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-[var(--paper)]/80 backdrop-blur-md">
             <div className="flex flex-col items-center gap-2 text-[var(--ink-subtle)]">
