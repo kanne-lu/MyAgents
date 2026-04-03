@@ -71,10 +71,12 @@ export default function ModelManagementPanel({
   useCloseLayer(() => { onClose(); return true; }, 200);
 
   // ===== Discovery fetch =====
-  const canDiscover = !!apiKey && supportsModelDiscovery(provider);
+  // Anthropic providers use SDK (no API key needed), others need a key
+  const isAnthropicProvider = provider.id === 'anthropic-sub' || provider.id === 'anthropic-api';
+  const canDiscover = (isAnthropicProvider || !!apiKey) && supportsModelDiscovery(provider);
 
   const doFetch = useCallback(async () => {
-    if (!apiKey || !supportsModelDiscovery(provider)) return;
+    if (!canDiscover) return;
     setDiscoveryLoading(true);
     setDiscoveryError(null);
     const thisId = ++fetchIdRef.current;
@@ -90,7 +92,7 @@ export default function ModelManagementPanel({
         setDiscoveryLoading(false);
       }
     }
-  }, [provider, apiKey]);
+  }, [canDiscover, provider, apiKey]);
 
   useEffect(() => { doFetch(); }, [doFetch]);
 

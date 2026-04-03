@@ -1011,6 +1011,16 @@ export function getSessionModel(): string | undefined {
   return currentModel;
 }
 
+/** Get supported models from SDK (returns empty array if no active session) */
+export async function getSupportedModels(): Promise<Array<{ value: string; displayName: string; description: string }>> {
+  if (!querySession) return [];
+  try {
+    return await querySession.supportedModels();
+  } catch {
+    return [];
+  }
+}
+
 export function getSessionPermissionMode(): PermissionMode {
   return currentPermissionMode;
 }

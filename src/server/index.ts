@@ -6441,6 +6441,17 @@ async function main() {
         }
       }
 
+      // GET /api/supported-models - Get available models from SDK
+      if (pathname === '/api/supported-models' && request.method === 'GET') {
+        try {
+          const { getSupportedModels } = await import('./agent-session');
+          const models = await getSupportedModels();
+          return jsonResponse({ models });
+        } catch (error) {
+          return jsonResponse({ models: [], error: error instanceof Error ? error.message : 'Failed to get models' });
+        }
+      }
+
       // POST /api/model/set - Set default model for this session
       if (pathname === '/api/model/set' && request.method === 'POST') {
         try {
