@@ -65,12 +65,25 @@ export async function fetchProviderModels(
   return parseModelsResponse(body);
 }
 
-/** Resolve the URL to fetch models from */
+/** Resolve the URL to fetch models from.
+ *  Smart inference for custom providers based on base URL patterns:
+ *  - .../anthropic → strip suffix, use .../v1/models (Anthropic path has no /v1/models)
+ *  - .../v1        → append /models (avoid /v1/v1/models duplication)
+ *  - other         → append /v1/models (default OpenAI convention)
+ */
 function resolveModelListUrl(provider: Provider): string | null {
   if (provider.modelListUrl) return provider.modelListUrl;
   const baseUrl = provider.config.baseUrl;
   if (!baseUrl) return null;
-  return `${baseUrl.replace(/\/+$/, '')}/v1/models`;
+  const trimmed = baseUrl.replace(/\/+$/, '');
+
+  if (/\/anthropic$/i.test(trimmed)) {
+    return `${trimmed.slice(0, -'/anthropic'.length)}/v1/models`;
+  }
+  if (/\/v\d+$/i.test(trimmed)) {
+    return `${trimmed}/models`;
+  }
+  return `${trimmed}/v1/models`;
 }
 
 // ============= Parsing =============
