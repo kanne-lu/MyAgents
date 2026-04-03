@@ -5238,7 +5238,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
                                     模型
                                 </label>
-                                <p className="truncate text-sm text-[var(--ink-muted)]">
+                                <p className="truncate pl-1 text-sm text-[var(--ink-muted)]">
                                     {editingProvider.provider.models.length > 0
                                         ? editingProvider.provider.models.map(m => m.modelName || m.model).join(', ')
                                         : '暂无模型'}
