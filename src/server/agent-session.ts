@@ -2145,10 +2145,28 @@ function persistMessagesToStorage(
     if (sessionMessages[i].role === 'user') {
       const content = sessionMessages[i].content;
       const text = typeof content === 'string' ? content : '';
-      if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>') || text.startsWith('<system-reminder>')) {
+      if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>')) {
         continue;
       }
-      lastMessagePreview = text.trim().slice(0, 60) || undefined;
+      // Skip pure system-reminder messages (heartbeat/cron injections where the
+      // ENTIRE message is <system-reminder>...</system-reminder> with no user content).
+      // Mixed messages (group chat: system-reminder prefix + actual user text) are
+      // real user messages and MUST update lastMessagePreview/lastActiveAt.
+      if (text.startsWith('<system-reminder>')) {
+        const closeTag = '</system-reminder>';
+        const closeIdx = text.indexOf(closeTag);
+        // Pure: no content after closing tag → skip. Mixed: has content → keep.
+        if (closeIdx >= 0 && text.slice(closeIdx + closeTag.length).trim() === '') continue;
+        if (closeIdx < 0) continue; // malformed, treat as system
+      }
+      // For group messages with <system-reminder> prefix, extract the user-visible part for preview
+      let previewText = text;
+      if (previewText.startsWith('<system-reminder>')) {
+        const closeTag = '</system-reminder>';
+        const closeIdx = previewText.indexOf(closeTag);
+        if (closeIdx >= 0) previewText = previewText.slice(closeIdx + closeTag.length).trim();
+      }
+      lastMessagePreview = previewText.slice(0, 60) || undefined;
       foundRealUserMessage = true;
       break;
     }

@@ -6753,8 +6753,11 @@ async function main() {
           if (payload.sourceType === 'group') {
             const parts: string[] = [];
             const isAlways = payload.groupActivation === 'always';
-            const botName = payload.botName ?? 'AI';
-            const platformLabel = payload.groupPlatform ?? '';
+            // Sanitize untrusted fields to prevent prompt injection via display names
+            // (e.g., a sender name containing "</system-reminder>" could break out of the tag)
+            const sanitize = (s: string) => s.replace(/[<>\[\]]/g, '').replace(/\n/g, ' ').trim();
+            const botName = sanitize(payload.botName ?? 'AI');
+            const platformLabel = sanitize(payload.groupPlatform ?? '');
             const messageCount = payload.messageCount ?? 0;
 
             // ── <system-reminder> injection strategy ──
@@ -6764,7 +6767,8 @@ async function main() {
 
             if (shouldInjectFullRules) {
               // Full system-reminder with group info + rules
-              let reminder = `<system-reminder>\n[群聊信息]\n你正在「${payload.groupName ?? '未知群聊'}」${platformLabel}群聊中。你的名字是「${botName}」。`;
+              const safeGroupName = sanitize(payload.groupName ?? '未知群聊');
+              let reminder = `<system-reminder>\n[群聊信息]\n你正在「${safeGroupName}」${platformLabel}群聊中。你的名字是「${botName}」。`;
               if (isAlways) {
                 reminder += '\n激活模式：全部消息（你会收到群里所有消息，包括不是发给你的）。';
               } else {
@@ -6772,7 +6776,8 @@ async function main() {
               }
               reminder += '\n你的回复会自动发送到群里，直接回复即可。\n群内不同人的消息会以 [from: 名字 时间] 标注发送者。';
               if (isAlways) {
-                reminder += `\n\n[回复规则]\n你必须非常克制，大多数消息不需要你回复。仅在以下情况回复：\n1. 消息明确 @你（即 @${botName}）\n2. 消息回复了你之前的消息\n3. 有人直接向你提问或请求帮助\n4. 你确信能提供明确价值的信息\n\n以下情况必须保持沉默：\n- 消息 @的是其他人或其他机器人\n- 普通闲聊、与你无关的讨论\n- 你不确定是否该回复时\n\n不需要回复时，只回复 <NO_REPLY>，不要添加任何其他内容。`;
+                const mentionExample = payload.botName ? `（即 @${botName}）` : '';
+                reminder += `\n\n[回复规则]\n你必须非常克制，大多数消息不需要你回复。仅在以下情况回复：\n1. 消息明确 @你${mentionExample}\n2. 消息回复了你之前的消息\n3. 有人直接向你提问或请求帮助\n4. 你确信能提供明确价值的信息\n\n以下情况必须保持沉默：\n- 消息 @的是其他人或其他机器人\n- 普通闲聊、与你无关的讨论\n- 你不确定是否该回复时\n\n不需要回复时，只回复 <NO_REPLY>，不要添加任何其他内容。`;
               }
               if (payload.groupSystemPrompt) {
                 reminder += `\n\n[群聊指令]\n${payload.groupSystemPrompt}`;
@@ -6799,7 +6804,7 @@ async function main() {
             if (isAlways) {
               messageBlock += payload.isMention ? '[本条消息 @了你]\n' : '[本条消息未 @你]\n';
             }
-            messageBlock += payload.senderName ? `[from: ${payload.senderName} ${ts}]\n` : '';
+            messageBlock += payload.senderName ? `[from: ${sanitize(payload.senderName)} ${ts}]\n` : '';
             messageBlock += finalMessage;
             parts.push(messageBlock);
             finalMessage = parts.join('\n\n');
