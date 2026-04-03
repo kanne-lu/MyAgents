@@ -289,18 +289,22 @@ export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; 
   const cwd = join(homedir(), '.myagents', 'projects');
   mkdirSync(cwd, { recursive: true });
 
-  // No custom env — use default credentials (subscription OAuth or API key from ~/.claude.json)
+  // Use default Anthropic env (includes proxy config, NO_PROXY etc.)
+  const env = buildClaudeSessionEnv();
+
   const testQuery = query({
     prompt: '1+1=',
     options: {
       maxTurns: 0,
       sessionId: randomUUID(),
       cwd,
-      settingSources: ['project'],
+      // 'user' reads ~/.claude/ OAuth credentials (same as verifySubscription)
+      settingSources: ['user'],
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       pathToClaudeCodeExecutable: cliPath,
       executable: 'bun',
+      env,
       persistSession: false,
       mcpServers: {},
       systemPrompt: { type: 'preset' as const, preset: 'claude_code' as const },
