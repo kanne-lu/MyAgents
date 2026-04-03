@@ -274,7 +274,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // If focus is on the left side (chat input), pass through → closeTab.
   useCloseLayer(() => {
     if (!splitPanelVisible) return false;
-    if (!splitPanelRef.current?.contains(document.activeElement)) return false;
+    // Browser panel uses a native Tauri Webview (not a DOM element), so
+    // document.activeElement won't be inside splitPanelRef when focus is in the
+    // browser. Skip the focus check when the browser view is active.
+    const isBrowserActive = splitActiveView === 'browser' && browserUrl;
+    if (!isBrowserActive && !splitPanelRef.current?.contains(document.activeElement)) return false;
     // Close the active view in the split panel
     if (splitActiveView === 'file' && splitFile) {
       setSplitFile(null);
