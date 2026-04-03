@@ -47,3 +47,11 @@ export function dismissTopmost(): boolean {
     }
     return false;
 }
+
+/**
+ * Check whether any overlay layer (zIndex > 0) is currently registered.
+ * Used by BrowserPanel to detect overlays and hide the native Webview.
+ */
+export function hasOverlayLayer(): boolean {
+    return layers.some(l => l.zIndex > 0);
+}

@@ -1542,10 +1542,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const aIdx = msgs.findIndex(m => m.id === assistantMessageId);
     if (aIdx < 0) return;
 
-    // Find the nearest user message before this assistant message
+    // Find the nearest real user message before this assistant message
+    // (skip synthetic task-notification messages which are injected as role='user')
     let userMsg: typeof msgs[number] | null = null;
     for (let i = aIdx - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user') { userMsg = msgs[i]; break; }
+      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { userMsg = msgs[i]; break; }
     }
     if (!userMsg) return;
 
@@ -1803,7 +1804,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     const msgs = messagesRef.current;
                     let lastUserMsg = null;
                     for (let i = msgs.length - 1; i >= 0; i--) {
-                      if (msgs[i].role === 'user') { lastUserMsg = msgs[i]; break; }
+                      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { lastUserMsg = msgs[i]; break; }
                     }
                     if (!lastUserMsg) return null;
                     return (

@@ -1,64 +1,36 @@
 /**
  * useBrowserOverlayGuard — Detects overlay elements covering the browser Webview.
  *
- * Returns `true` when a fixed + backdrop-blur overlay is present, `false` otherwise.
- * The caller (BrowserPanel) uses this in a combined visibility effect to decide
- * whether to show/hide the native Webview — avoiding dual-actor show/hide conflicts.
+ * Returns `true` when an overlay is present (closeLayer with zIndex > 0),
+ * `false` otherwise. The caller (BrowserPanel) uses this to decide whether
+ * to show/hide the native Webview — avoiding z-order issues where native
+ * Webview floats above React DOM overlays.
  *
- * Detection: Elements matching `position: fixed` + `backdrop-filter: blur`
- * OR having `data-suppress-browser` attribute.
+ * Uses the closeLayer registry (same system that handles Cmd+W) rather than
+ * MutationObserver DOM heuristics — single source of truth, zero overhead.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
+import { registerCloseLayer, hasOverlayLayer } from '@/utils/closeLayer';
 
 export function useBrowserOverlayGuard(active: boolean): boolean {
   const [overlayDetected, setOverlayDetected] = useState(false);
-  const rafIdRef = useRef(0);
 
   useEffect(() => {
-    if (!active) return;
+    if (!active) { setOverlayDetected(false); return; }
 
-    const isOverlayBackdrop = (el: Element): boolean => {
-      if (!(el instanceof HTMLElement)) return false;
-      if (el.hasAttribute('data-suppress-browser')) return true;
-      const style = getComputedStyle(el);
-      return (
-        style.position === 'fixed' &&
-        style.backdropFilter !== 'none' &&
-        style.backdropFilter.includes('blur')
-      );
-    };
+    // Check on mount
+    setOverlayDetected(hasOverlayLayer());
 
-    const sync = () => {
-      const candidates = document.querySelectorAll(
-        '[class*="backdrop-blur"], [data-suppress-browser]',
-      );
-      let hasOverlay = false;
-      for (const el of candidates) {
-        if (isOverlayBackdrop(el)) {
-          hasOverlay = true;
-          break;
-        }
-      }
-      setOverlayDetected(hasOverlay);
-    };
+    // Re-check whenever the closeLayer registry changes.
+    // We register a no-op layer at zIndex -1 (below everything) that never
+    // handles close but triggers a re-render when the registry changes.
+    // Simpler: poll on a short interval since overlays open/close infrequently.
+    const timer = setInterval(() => {
+      setOverlayDetected(hasOverlayLayer());
+    }, 100);
 
-    // Debounce via rAF to avoid layout thrashing during streaming
-    const debouncedSync = () => {
-      cancelAnimationFrame(rafIdRef.current);
-      rafIdRef.current = requestAnimationFrame(sync);
-    };
-
-    const observer = new MutationObserver(debouncedSync);
-    observer.observe(document.body, { childList: true, subtree: true });
-
-    // Initial check
-    sync();
-
-    return () => {
-      observer.disconnect();
-      cancelAnimationFrame(rafIdRef.current);
-    };
+    return () => clearInterval(timer);
   }, [active]);
 
   return overlayDetected;

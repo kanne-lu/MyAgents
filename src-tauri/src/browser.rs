@@ -78,12 +78,18 @@ pub async fn cmd_browser_create(
 
     let builder = WebviewBuilder::new(&label, tauri::WebviewUrl::External(parsed_url))
         .on_navigation(move |nav_url| {
+            let scheme = nav_url.scheme();
+            // Security: only allow http/https navigation — block file://, javascript:, data:// etc.
+            if scheme != "http" && scheme != "https" {
+                ulog_info!("[browser] Blocked navigation to {} (scheme: {})", nav_url, scheme);
+                return false;
+            }
             // Emit URL change to frontend
             let _ = app_nav.emit(
                 &format!("browser:url-changed:{}", tab_id_nav),
                 nav_url.to_string(),
             );
-            true // allow all navigation
+            true
         })
         .on_page_load(move |_webview, payload| {
             let event_name = format!("browser:loading:{}", tab_id_load);

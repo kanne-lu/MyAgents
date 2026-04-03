@@ -1065,10 +1065,20 @@ pub async fn cmd_fetch_provider_models(
 ) -> Result<serde_json::Value, String> {
     ulog_info!("[model-discovery] Fetching models from {}", url);
 
-    let builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15));
+    // Determine if URL points to localhost — if so, use local_http (no proxy) to avoid
+    // the system-proxy-intercepts-localhost bug. Otherwise, use proxy_config for external APIs.
+    let is_localhost = url.starts_with("http://127.0.0.1")
+        || url.starts_with("http://localhost")
+        || url.starts_with("https://127.0.0.1")
+        || url.starts_with("https://localhost");
 
-    let client = crate::proxy_config::build_client_with_proxy(builder)?;
+    let client = if is_localhost {
+        crate::local_http::json_client(std::time::Duration::from_secs(15))
+    } else {
+        let builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15));
+        crate::proxy_config::build_client_with_proxy(builder)?
+    };
 
     let mut request = client.get(&url)
         .header(&auth_header_name, &auth_header_value);
@@ -1087,9 +1097,12 @@ pub async fn cmd_fetch_provider_models(
 
     let status = response.status();
     if !status.is_success() {
-        // Limit error body to 2KB to avoid unbounded allocation
+        // Limit error body to ~2KB to avoid unbounded allocation (char-boundary safe for UTF-8)
         let body = response.text().await.unwrap_or_default();
-        let truncated = if body.len() > 2048 { &body[..2048] } else { &body };
+        let truncated = match body.char_indices().nth(2048) {
+            Some((byte_pos, _)) => &body[..byte_pos],
+            None => &body,
+        };
         ulog_error!("[model-discovery] HTTP {} from {}", status.as_u16(), url);
         return Err(format!("HTTP {}: {}", status.as_u16(), truncated));
     }
