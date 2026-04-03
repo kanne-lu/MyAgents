@@ -100,8 +100,19 @@ export function useTrayEvents(options: TrayEventsOptions) {
           }
         });
 
-        // Listen for window close request (X button)
+        // Listen for window close request (X button or native Cmd+W)
         unlistenCloseRequested = await listen('window:close-requested', async () => {
+          // On macOS, Cmd+W triggers BOTH our JS keydown handler AND Tauri's native
+          // CloseRequested. If our JS handler already handled it (overlay close / tab close),
+          // skip the tray minimize to avoid the double-action.
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const cmdWFlag = (window as any).__cmdWHandled as number | undefined;
+          if (cmdWFlag && Date.now() - cmdWFlag < 500) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            delete (window as any).__cmdWHandled;
+            console.log('[useTrayEvents] Skipping close-requested (already handled by Cmd+W)');
+            return;
+          }
           console.log('[useTrayEvents] Window close requested');
           const { minimizeToTray } = optionsRef.current;
 

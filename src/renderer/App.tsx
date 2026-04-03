@@ -691,6 +691,11 @@ export default function App() {
         }
       } else if (e.key === 'w' || e.key === 'W') {
         e.preventDefault();
+        // Mark that Cmd+W was handled by our JS layer. On macOS, Cmd+W ALSO triggers
+        // Tauri's native CloseRequested → window:close-requested → minimize to tray.
+        // The flag tells useTrayEvents to skip that close request (see useTrayEvents.ts).
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (window as any).__cmdWHandled = Date.now();
         // Hierarchical close: dismiss topmost overlay/panel first, tab last.
         // Safety net: if dismissTopmost() found nothing but a backdrop-blur overlay
         // IS visible (unregistered overlay), block tab close instead of exiting the app.
