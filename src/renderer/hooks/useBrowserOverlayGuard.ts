@@ -1,37 +1,38 @@
 /**
- * useBrowserOverlayGuard — Detects visible overlay elements that would
+ * useBrowserOverlayGuard — Detects visible overlay backdrops that would
  * cover the native browser Webview.
  *
- * Returns `true` when a visible fixed-position overlay exists, `false` otherwise.
+ * Returns `true` when a full-screen overlay backdrop is present, `false` otherwise.
  * The caller (BrowserPanel) uses this in a combined visibility effect to decide
  * whether to show/hide the native Webview.
  *
- * Detection strategy: scan `document.body` direct children (overlays use
- * `createPortal(el, document.body)`) for elements with `position: fixed`
- * and significant size (not zero-size hidden elements).
+ * Detection relies on the design system convention (design_guide §6.7):
+ * all overlay backdrops use `backdrop-blur` + `position: fixed`. This
+ * distinguishes full-screen overlays (modals, panels) from small fixed
+ * elements (toasts, tooltips) which don't use backdrop-blur.
+ *
  * Also checks `data-suppress-browser` attribute as a manual escape hatch.
  *
- * Uses MutationObserver on body's direct children (childList only, no subtree)
- * + rAF debounce for minimal overhead.
+ * Scans only `document.body` direct children (overlays use `createPortal`
+ * to body). MutationObserver on childList only + rAF debounce for minimal overhead.
  */
 
 import { useEffect, useRef, useState } from 'react';
 
 function checkOverlays(): boolean {
-  // Check data-suppress-browser anywhere in the doc (rare, explicit marker)
+  // Manual escape hatch
   if (document.querySelector('[data-suppress-browser]')) return true;
 
-  // Scan body's direct children for visible fixed overlays
-  // (overlays mount via createPortal to document.body)
+  // Scan body's direct children for overlay backdrops.
+  // Design system convention: overlays use position:fixed + backdrop-blur.
+  // This skips toasts, tooltips, and other small fixed elements.
   for (const child of document.body.children) {
     if (!(child instanceof HTMLElement)) continue;
     const style = getComputedStyle(child);
     if (
       style.position === 'fixed' &&
-      style.display !== 'none' &&
-      style.visibility !== 'hidden' &&
-      child.offsetWidth > 0 &&
-      child.offsetHeight > 0
+      style.backdropFilter !== 'none' &&
+      style.backdropFilter.includes('blur')
     ) {
       return true;
     }
@@ -50,7 +51,6 @@ export function useBrowserOverlayGuard(active: boolean): boolean {
       setOverlayDetected(checkOverlays());
     };
 
-    // Debounce via rAF
     const debouncedSync = () => {
       cancelAnimationFrame(rafIdRef.current);
       rafIdRef.current = requestAnimationFrame(sync);
