@@ -29,7 +29,6 @@ import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EV
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
-import { dismissTopmost } from '@/utils/closeLayer';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
@@ -689,16 +688,8 @@ export default function App() {
           setTabs((prev) => [...prev, newTab]);
           setActiveTabId(newTab.id);
         }
-      } else if (e.key === 'w' || e.key === 'W') {
-        e.preventDefault();
-        // On macOS, Cmd+W triggers Tauri CloseRequested BEFORE this JS handler
-        // (window hides → keydown skipped). The primary closeLayer logic is in
-        // useTrayEvents.ts window:close-requested handler. This JS handler serves
-        // as fallback for non-macOS or cases where JS keydown does fire.
-        if (!dismissTopmost()) {
-          const hasOverlayBackdrop = !!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]');
-          if (!hasOverlayBackdrop) closeCurrentTab();
-        }
+      // NOTE: Cmd+W is handled by the macOS custom menu → window:cmd-w event
+      // → useTrayEvents.ts (not here). See lib.rs "cmd-w-close" menu item.
       } else if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
         // Cmd+Shift+[ = previous tab, Cmd+Shift+] = next tab
         e.preventDefault();
@@ -1546,11 +1537,9 @@ export default function App() {
   useTrayEvents({
     minimizeToTray: config.minimizeToTray,
     onOpenSettings: () => handleOpenSettings('general'),
-    onCloseTab: () => {
+    onCmdWCloseTab: () => {
       // Cmd+W bottom: overlay → split → tab → launcher → STOP.
-      // Never exit/tray from Cmd+W. The launcher is the final resting state.
       closeCurrentTab(); // Last tab auto-creates launcher; launcher is a no-op.
-      return true;       // Always consumed — never fall through to tray/exit.
     },
     onNavigateToTab: (tabId: string) => {
       // Verify the tab still exists before switching

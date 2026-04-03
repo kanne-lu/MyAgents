@@ -379,6 +379,69 @@ pub fn run() {
                 }
             }
 
+            // macOS: Custom menu — replace native "Close Window" (Cmd+W) with a custom
+            // menu item that emits window:cmd-w to the frontend. This separates the
+            // Cmd+W path (overlay → tab → launcher → stop) from the X button path
+            // (CloseRequested → tray/exit). Without this, Cmd+W triggers CloseRequested
+            // which hides the window before JS can handle it.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{MenuBuilder, SubmenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+
+                let app_name = app.package_info().name.clone();
+                let app_handle = app.handle();
+
+                let close_tab = MenuItemBuilder::with_id("cmd-w-close", "Close Tab")
+                    .accelerator("CmdOrCtrl+W")
+                    .build(app_handle)?;
+
+                let app_menu = SubmenuBuilder::new(app_handle, &app_name)
+                    .about(None)
+                    .separator()
+                    .services()
+                    .separator()
+                    .hide()
+                    .hide_others()
+                    .show_all()
+                    .separator()
+                    .quit()
+                    .build()?;
+
+                let edit_menu = SubmenuBuilder::new(app_handle, "Edit")
+                    .undo()
+                    .redo()
+                    .separator()
+                    .cut()
+                    .copy()
+                    .paste()
+                    .select_all()
+                    .build()?;
+
+                let window_menu = SubmenuBuilder::new(app_handle, "Window")
+                    .item(&close_tab)
+                    .item(&PredefinedMenuItem::minimize(app_handle, None)?)
+                    .item(&PredefinedMenuItem::maximize(app_handle, None)?)
+                    .separator()
+                    .item(&PredefinedMenuItem::fullscreen(app_handle, None)?)
+                    .build()?;
+
+                let menu = MenuBuilder::new(app_handle)
+                    .item(&app_menu)
+                    .item(&edit_menu)
+                    .item(&window_menu)
+                    .build()?;
+
+                app.set_menu(menu)?;
+
+                // Handle custom menu item click
+                let app_handle_for_menu = app.handle().clone();
+                app.on_menu_event(move |_app, event| {
+                    if event.id().as_ref() == "cmd-w-close" {
+                        let _ = app_handle_for_menu.emit("window:cmd-w", ());
+                    }
+                });
+            }
+
             // Windows: Remove system decorations for custom title bar
             #[cfg(target_os = "windows")]
             {
