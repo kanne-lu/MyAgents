@@ -6,6 +6,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
+import { apiGetJson } from '@/api/apiFetch';
 import type { Provider, ModelEntity } from '../types';
 
 // ============= Types =============
@@ -27,28 +28,43 @@ export interface DiscoveredModel {
 
 /**
  * Fetch models from a provider.
- * - anthropic-api: Anthropic REST API with x-api-key auth
- * - Other providers: external HTTP via Rust proxy (Bearer auth)
+ * - Anthropic (sub/api): SDK supportedModels() via Sidecar (spawns lightweight session if needed)
+ * - Other providers: external HTTP via Rust proxy
  */
 export async function fetchProviderModels(
   provider: Provider,
   apiKey: string | undefined,
 ): Promise<DiscoveredModel[]> {
+  // Anthropic providers → SDK route (both sub and api use the same Claude SDK)
+  if (provider.id === 'anthropic-sub' || provider.id === 'anthropic-api') {
+    return fetchFromSdk();
+  }
+
+  // Other providers → external HTTP
   if (!apiKey) throw new Error('API Key is required');
   const url = resolveModelListUrl(provider);
   if (!url) throw new Error('No model list URL available for this provider');
 
-  // Anthropic API uses x-api-key auth + anthropic-version header
-  const isAnthropicApi = provider.id === 'anthropic-api';
-
   const body = await invoke<unknown>('cmd_fetch_provider_models', {
-    url: isAnthropicApi ? `${url}?limit=100` : url,
-    authHeaderName: isAnthropicApi ? 'x-api-key' : 'Authorization',
-    authHeaderValue: isAnthropicApi ? apiKey : `Bearer ${apiKey}`,
-    extraHeaders: isAnthropicApi ? { 'anthropic-version': '2023-06-01' } : null,
+    url,
+    authHeaderName: 'Authorization',
+    authHeaderValue: `Bearer ${apiKey}`,
+    extraHeaders: null,
   });
 
   return parseModelsResponse(body);
+}
+
+/** Fetch models from SDK via Global Sidecar's /api/supported-models endpoint.
+ *  The sidecar spawns a lightweight SDK session if none exists. */
+async function fetchFromSdk(): Promise<DiscoveredModel[]> {
+  const result = await apiGetJson<{ models: Array<{ value: string; displayName: string; description: string }> }>(
+    '/api/supported-models',
+  );
+  return (result.models ?? []).map(m => ({
+    id: m.value,
+    displayName: m.displayName,
+  }));
 }
 
 /** Resolve the URL to fetch models from.
@@ -204,8 +220,8 @@ export function formatTokenCount(count: number): string {
 
 /** Check if a provider supports model discovery */
 export function supportsModelDiscovery(provider: Provider): boolean {
-  // Subscription providers have no API key for REST API calls
-  if (provider.type === 'subscription') return false;
+  // Anthropic providers use SDK (no API key needed for model listing)
+  if (provider.id === 'anthropic-sub' || provider.id === 'anthropic-api') return true;
   // MiniMax has no model list endpoint
   if (provider.id === 'minimax') return false;
   return true;

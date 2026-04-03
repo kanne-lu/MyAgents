@@ -1011,13 +1011,28 @@ export function getSessionModel(): string | undefined {
   return currentModel;
 }
 
-/** Get supported models from SDK (returns empty array if no active session) */
+/** Get supported models from SDK.
+ *  Uses existing session if available; otherwise spawns a lightweight query
+ *  that initializes just enough to retrieve the model list, then closes. */
 export async function getSupportedModels(): Promise<Array<{ value: string; displayName: string; description: string }>> {
-  if (!querySession) return [];
+  // Fast path: existing session
+  if (querySession) {
+    try { return await querySession.supportedModels(); } catch { /* fall through */ }
+  }
+
+  // Slow path: spawn a temporary query for initialization data
+  let tempQuery: Query | null = null;
   try {
-    return await querySession.supportedModels();
+    // Empty async iterable — SDK initializes but never receives a user message
+    const emptyPrompt: AsyncIterable<SDKUserMessage> = { [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) };
+    tempQuery = query({ prompt: emptyPrompt, options: { maxTurns: 0 } });
+    // First next() triggers subprocess spawn + initialization handshake
+    await tempQuery.next();
+    return await tempQuery.supportedModels();
   } catch {
     return [];
+  } finally {
+    try { tempQuery?.return(undefined as never); } catch { /* cleanup */ }
   }
 }
 

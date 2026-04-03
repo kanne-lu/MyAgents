@@ -71,7 +71,8 @@ export default function ModelManagementPanel({
   useCloseLayer(() => { onClose(); return true; }, 200);
 
   // ===== Discovery fetch =====
-  const canDiscover = !!apiKey && supportsModelDiscovery(provider);
+  const isAnthropicProvider = provider.id === 'anthropic-sub' || provider.id === 'anthropic-api';
+  const canDiscover = (isAnthropicProvider || !!apiKey) && supportsModelDiscovery(provider);
 
   const doFetch = useCallback(async () => {
     if (!canDiscover) return;
