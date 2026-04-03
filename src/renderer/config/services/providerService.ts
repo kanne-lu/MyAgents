@@ -207,7 +207,7 @@ export async function rebuildAndPersistAvailableProviders(): Promise<void> {
         ]);
         const verifyStatus = config.providerVerifyStatus ?? {};
 
-        const mergedProviders = mergePresetCustomModels(allProviders, config.presetCustomModels);
+        const mergedProviders = mergePresetCustomModels(allProviders, config.presetCustomModels, config.presetRemovedModels as Record<string, string[]> | undefined);
         // Apply user primary model overrides
         const primaryOverrides = config.providerPrimaryModels as Record<string, string> | undefined;
         // Only include providers with valid credentials:

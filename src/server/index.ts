@@ -6755,7 +6755,7 @@ async function main() {
             const isAlways = payload.groupActivation === 'always';
             // Sanitize untrusted fields to prevent prompt injection via display names
             // (e.g., a sender name containing "</system-reminder>" could break out of the tag)
-            const sanitize = (s: string) => s.replace(/[<>\[\]]/g, '').replace(/\n/g, ' ').trim();
+            const sanitize = (s: string) => s.replace(/[<>[\]]/g, '').replace(/\n/g, ' ').trim();
             const botName = sanitize(payload.botName ?? 'AI');
             const platformLabel = sanitize(payload.groupPlatform ?? '');
             const messageCount = payload.messageCount ?? 0;

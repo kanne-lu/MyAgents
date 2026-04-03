@@ -150,31 +150,37 @@ import type { ModelEntity } from '../types';
 export function mergePresetCustomModels(
     providers: Provider[],
     presetCustomModels: Record<string, ModelEntity[]> | undefined,
+    presetRemovedModels?: Record<string, string[]>,
 ): Provider[] {
-    if (!presetCustomModels || Object.keys(presetCustomModels).length === 0) {
-        return providers;
-    }
+    const hasCustom = presetCustomModels && Object.keys(presetCustomModels).length > 0;
+    const hasRemoved = presetRemovedModels && Object.keys(presetRemovedModels).length > 0;
+    if (!hasCustom && !hasRemoved) return providers;
+
     return providers.map(provider => {
         if (!provider.isBuiltin) return provider;
-        const customModels = presetCustomModels[provider.id];
-        if (!customModels || customModels.length === 0) return provider;
+        const customModels = presetCustomModels?.[provider.id];
+        const removedIds = presetRemovedModels?.[provider.id];
+        if (!customModels?.length && !removedIds?.length) return provider;
 
-        // 智能合并：
-        // 1. 预设模型保留，从 discovered/manual 模型补充元数据
-        // 2. 新模型（ID 不在预设中的）追加到列表
+        const removedSet = new Set(removedIds ?? []);
+
+        // 1. 预设模型：排除用户删除的，从 discovered 补充元数据
         const presetIds = new Set(provider.models.map(m => m.model));
-        const enrichedPresets = provider.models.map(preset => {
-            const extra = customModels.find(c => c.model === preset.model);
-            if (!extra) return preset;
-            return {
-                ...preset,
-                contextLength: preset.contextLength ?? extra.contextLength,
-                maxOutputTokens: preset.maxOutputTokens ?? extra.maxOutputTokens,
-                inputModalities: preset.inputModalities ?? extra.inputModalities,
-                outputModalities: preset.outputModalities ?? extra.outputModalities,
-            };
-        });
-        const newModels = customModels.filter(c => !presetIds.has(c.model));
+        const enrichedPresets = provider.models
+            .filter(m => !removedSet.has(m.model))
+            .map(preset => {
+                const extra = customModels?.find(c => c.model === preset.model);
+                if (!extra) return preset;
+                return {
+                    ...preset,
+                    contextLength: preset.contextLength ?? extra.contextLength,
+                    maxOutputTokens: preset.maxOutputTokens ?? extra.maxOutputTokens,
+                    inputModalities: preset.inputModalities ?? extra.inputModalities,
+                    outputModalities: preset.outputModalities ?? extra.outputModalities,
+                };
+            });
+        // 2. 用户添加的新模型（不在预设中的）
+        const newModels = customModels?.filter(c => !presetIds.has(c.model)) ?? [];
 
         return {
             ...provider,

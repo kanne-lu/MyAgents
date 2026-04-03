@@ -1,15 +1,15 @@
 /**
  * ModelManagementPanel - Unified overlay for managing provider models
  *
- * Upper section: Active models with primary model selection, delete, add custom ID
- * Lower section: Discover more models from provider API
+ * Upper section: Active models — hover "设为首选", delete any model, add custom ID
+ * Lower section: Discover more — single-click "添加" per row, no multi-select
  */
-import { X, Search, Loader2, RefreshCw, Image, Video, Brain, AlertCircle, Check, Plus, Trash2 } from 'lucide-react';
+import { X, Search, Loader2, RefreshCw, AlertCircle, Plus, Trash2 } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
-import { PRESET_PROVIDERS, type Provider, type ModelEntity, type AppConfig } from '@/config/types';
+import { type Provider, type ModelEntity, type AppConfig } from '@/config/types';
 import {
   fetchProviderModels,
   toModelEntity,
@@ -17,6 +17,7 @@ import {
   supportsModelDiscovery,
   type DiscoveredModel,
 } from '@/config/services/modelDiscoveryService';
+import { atomicModifyConfig } from '@/config/configService';
 
 interface ModelManagementPanelProps {
   provider: Provider;
@@ -43,23 +44,14 @@ export default function ModelManagementPanel({
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
   const [discoveryError, setDiscoveryError] = useState<string | null>(null);
-  const [selectedToAdd, setSelectedToAdd] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [customInput, setCustomInput] = useState('');
   const isMountedRef = useRef(true);
   const fetchIdRef = useRef(0);
 
-  // provider.primaryModel is already resolved by ConfigProvider (user override applied)
   const primaryModel = provider.primaryModel;
 
-  // Preset model IDs (cannot be deleted)
-  const presetModelIds = useMemo(() => {
-    if (!provider.isBuiltin) return new Set<string>();
-    const preset = PRESET_PROVIDERS.find(p => p.id === provider.id);
-    return new Set(preset?.models.map(m => m.model) ?? []);
-  }, [provider.id, provider.isBuiltin]);
-
-  // Active model IDs set (for discovery section "already added" check)
+  // Active model IDs set
   const activeModelIds = useMemo(
     () => new Set(provider.models.map(m => m.model)),
     [provider.models],
@@ -70,7 +62,6 @@ export default function ModelManagementPanel({
     return () => { isMountedRef.current = false; };
   }, []);
 
-  // Prevent background scroll
   useEffect(() => {
     const prev = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
@@ -111,16 +102,27 @@ export default function ModelManagementPanel({
 
   const handleDeleteModel = useCallback(async (modelId: string) => {
     if (provider.isBuiltin) {
-      // Remove from presetCustomModels
-      const existing = config.presetCustomModels?.[provider.id] ?? [];
-      const updated = existing.filter(m => m.model !== modelId);
-      await onSaveCustomModels(provider.id, updated);
+      // For preset models: add to presetRemovedModels
+      // For user-added models: remove from presetCustomModels
+      const customModels = config.presetCustomModels?.[provider.id] ?? [];
+      const isUserAdded = customModels.some(m => m.model === modelId);
+      if (isUserAdded) {
+        await onSaveCustomModels(provider.id, customModels.filter(m => m.model !== modelId));
+      } else {
+        // Preset model — add to removed list
+        await atomicModifyConfig(c => {
+          const removed = c.presetRemovedModels?.[provider.id] ?? [];
+          if (removed.includes(modelId)) return c;
+          return {
+            ...c,
+            presetRemovedModels: { ...c.presetRemovedModels, [provider.id]: [...removed, modelId] },
+          };
+        });
+      }
     } else if (onUpdateCustomProvider) {
-      // Remove from custom provider models
       const updatedModels = provider.models.filter(m => m.model !== modelId);
       await onUpdateCustomProvider({ ...provider, models: updatedModels });
     }
-    // If deleted model was primary, auto-switch
     if (modelId === primaryModel) {
       const remaining = provider.models.filter(m => m.model !== modelId);
       if (remaining.length > 0) {
@@ -132,12 +134,10 @@ export default function ModelManagementPanel({
 
   const handleAddCustomModel = useCallback(async () => {
     const id = customInput.trim();
-    if (!id) return;
-    if (activeModelIds.has(id)) return;
+    if (!id || activeModelIds.has(id)) return;
 
     const entity: ModelEntity = {
-      model: id,
-      modelName: id,
+      model: id, modelName: id,
       modelSeries: provider.vendor.toLowerCase(),
       source: 'manual',
     };
@@ -152,42 +152,46 @@ export default function ModelManagementPanel({
     await onRefresh();
   }, [customInput, activeModelIds, provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
 
-  const handleAddDiscovered = useCallback(async () => {
-    const toAdd = discoveredModels
-      .filter(m => selectedToAdd.has(m.id) && !activeModelIds.has(m.id))
-      .map(m => toModelEntity(m, provider));
-    if (toAdd.length === 0) return;
+  const handleAddDiscoveredModel = useCallback(async (model: DiscoveredModel) => {
+    if (activeModelIds.has(model.id)) return;
+    const entity = toModelEntity(model, provider);
 
     if (provider.isBuiltin) {
+      // Also remove from presetRemovedModels if re-adding a previously removed preset
+      await atomicModifyConfig(c => {
+        const removed = c.presetRemovedModels?.[provider.id];
+        if (!removed?.includes(model.id)) return c;
+        return {
+          ...c,
+          presetRemovedModels: {
+            ...c.presetRemovedModels,
+            [provider.id]: removed.filter(id => id !== model.id),
+          },
+        };
+      });
       const existing = config.presetCustomModels?.[provider.id] ?? [];
-      await onSaveCustomModels(provider.id, [...existing, ...toAdd]);
+      await onSaveCustomModels(provider.id, [...existing, entity]);
     } else if (onUpdateCustomProvider) {
-      await onUpdateCustomProvider({ ...provider, models: [...provider.models, ...toAdd] });
+      await onUpdateCustomProvider({ ...provider, models: [...provider.models, entity] });
     }
-    setSelectedToAdd(new Set());
     await onRefresh();
-  }, [discoveredModels, selectedToAdd, activeModelIds, provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
+  }, [activeModelIds, provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
 
-  const toggleSelectDiscovered = useCallback((id: string) => {
-    setSelectedToAdd(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }, []);
-
-  // ===== Filtered discovery models =====
+  // ===== Filtered discovery (exclude already-added) =====
   const filteredDiscovered = useMemo(() => {
-    if (!search.trim()) return discoveredModels;
-    const q = search.toLowerCase();
-    return discoveredModels.filter(m =>
-      m.id.toLowerCase().includes(q) ||
-      m.displayName?.toLowerCase().includes(q) ||
-      m.ownedBy?.toLowerCase().includes(q)
-    );
-  }, [discoveredModels, search]);
+    let list = discoveredModels.filter(m => !activeModelIds.has(m.id));
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(m =>
+        m.id.toLowerCase().includes(q) ||
+        m.displayName?.toLowerCase().includes(q) ||
+        m.ownedBy?.toLowerCase().includes(q)
+      );
+    }
+    return list;
+  }, [discoveredModels, activeModelIds, search]);
 
-  const addableCount = [...selectedToAdd].filter(id => !activeModelIds.has(id)).length;
+  const allAdded = discoveredModels.length > 0 && discoveredModels.every(m => activeModelIds.has(m.id));
 
   return createPortal(
     <div
@@ -200,12 +204,10 @@ export default function ModelManagementPanel({
       >
         {/* Header */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-5 py-3.5">
-          <div className="min-w-0">
-            <h2 className="text-[15px] font-semibold text-[var(--ink)]">
-              管理可用模型
-              <span className="ml-2 text-sm font-normal text-[var(--ink-muted)]">{provider.name}</span>
-            </h2>
-          </div>
+          <h2 className="text-[15px] font-semibold text-[var(--ink)]">
+            管理可用模型
+            <span className="ml-2 text-sm font-normal text-[var(--ink-muted)]">{provider.name}</span>
+          </h2>
           <button
             type="button"
             onClick={onClose}
@@ -219,20 +221,22 @@ export default function ModelManagementPanel({
         <div className="flex-1 overflow-y-auto">
           {/* ===== Upper: Active Models ===== */}
           <div className="border-b border-[var(--line-subtle)] px-5 py-4">
-            <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+            <h3 className="mb-2.5 text-xs font-semibold text-[var(--ink-muted)]">
               可用模型
+              {provider.models.length > 0 && (
+                <span className="ml-1.5 font-normal text-[var(--ink-subtle)]">{provider.models.length}</span>
+              )}
             </h3>
 
             {provider.models.length === 0 ? (
               <p className="py-4 text-center text-sm text-[var(--ink-muted)]">暂无模型，请在下方发现或手动添加</p>
             ) : (
-              <div className="space-y-1">
+              <div className="-mx-2">
                 {provider.models.map(model => (
                   <ActiveModelRow
                     key={model.model}
                     model={model}
                     isPrimary={model.model === primaryModel}
-                    isPreset={presetModelIds.has(model.model)}
                     onSetPrimary={handleSetPrimary}
                     onDelete={handleDeleteModel}
                   />
@@ -263,8 +267,8 @@ export default function ModelManagementPanel({
 
           {/* ===== Lower: Discover Models ===== */}
           <div className="px-5 py-4">
-            <div className="mb-3 flex items-center justify-between">
-              <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+            <div className="mb-2.5 flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-[var(--ink-muted)]">
                 发现更多模型
               </h3>
               {canDiscover && !discoveryLoading && discoveredModels.length > 0 && (
@@ -279,7 +283,7 @@ export default function ModelManagementPanel({
               )}
             </div>
 
-            {/* Search (only when models loaded) */}
+            {/* Search */}
             {canDiscover && !discoveryLoading && !discoveryError && discoveredModels.length > 0 && (
               <div className="relative mb-3">
                 <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--ink-subtle)]" />
@@ -293,7 +297,7 @@ export default function ModelManagementPanel({
               </div>
             )}
 
-            {/* Discovery content */}
+            {/* States */}
             {!canDiscover && !apiKey && (
               <p className="py-6 text-center text-sm text-[var(--ink-muted)]">请先配置 API Key</p>
             )}
@@ -324,43 +328,35 @@ export default function ModelManagementPanel({
               </div>
             )}
 
+            {canDiscover && !discoveryLoading && !discoveryError && allAdded && (
+              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">所有可用模型已在上方列表中</p>
+            )}
+
+            {canDiscover && !discoveryLoading && !discoveryError && !allAdded && filteredDiscovered.length === 0 && search && (
+              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">没有匹配的模型</p>
+            )}
+
             {canDiscover && !discoveryLoading && !discoveryError && discoveredModels.length === 0 && (
               <p className="py-6 text-center text-sm text-[var(--ink-muted)]">该供应商未返回可用模型</p>
             )}
 
-            {canDiscover && !discoveryLoading && !discoveryError && filteredDiscovered.length > 0 && (
-              <div className="space-y-1.5">
+            {/* Model list — no checkboxes, just rows with hover "添加" */}
+            {filteredDiscovered.length > 0 && (
+              <div className="-mx-2">
                 {filteredDiscovered.map(m => (
-                  <DiscoveredModelCard
+                  <DiscoveredModelRow
                     key={m.id}
                     model={m}
-                    isAdded={activeModelIds.has(m.id)}
-                    isSelected={selectedToAdd.has(m.id)}
-                    onToggle={toggleSelectDiscovered}
+                    onAdd={handleAddDiscoveredModel}
                   />
                 ))}
               </div>
-            )}
-
-            {canDiscover && !discoveryLoading && !discoveryError && filteredDiscovered.length === 0 && discoveredModels.length > 0 && (
-              <p className="py-6 text-center text-sm text-[var(--ink-muted)]">
-                {search ? '没有匹配的模型' : '所有可用模型已在上方列表中'}
-              </p>
             )}
           </div>
         </div>
 
         {/* Footer */}
-        <div className="flex flex-shrink-0 items-center justify-end gap-3 border-t border-[var(--line)] px-5 py-3">
-          {addableCount > 0 && (
-            <button
-              type="button"
-              onClick={handleAddDiscovered}
-              className="rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--accent-warm-hover)]"
-            >
-              添加 {addableCount} 个模型
-            </button>
-          )}
+        <div className="flex flex-shrink-0 items-center justify-end border-t border-[var(--line)] px-5 py-3">
           <button
             type="button"
             onClick={onClose}
@@ -375,148 +371,113 @@ export default function ModelManagementPanel({
   );
 }
 
-// ===== ActiveModelRow (upper section) =====
+// ===== ActiveModelRow =====
 
 const ActiveModelRow = React.memo(function ActiveModelRow({
   model,
   isPrimary,
-  isPreset,
   onSetPrimary,
   onDelete,
 }: {
   model: ModelEntity;
   isPrimary: boolean;
-  isPreset: boolean;
   onSetPrimary: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
-  const handleRadio = useCallback(() => { if (!isPrimary) onSetPrimary(model.model); }, [isPrimary, onSetPrimary, model.model]);
+  const handleSetPrimary = useCallback(() => { if (!isPrimary) onSetPrimary(model.model); }, [isPrimary, onSetPrimary, model.model]);
   const handleDelete = useCallback(() => onDelete(model.model), [onDelete, model.model]);
 
-  return (
-    <div className={`group flex items-center gap-2.5 rounded-lg px-2.5 py-2 transition-colors hover:bg-[var(--hover-bg)] ${isPrimary ? 'bg-[var(--accent-warm-subtle)]' : ''}`}>
-      {/* Radio */}
-      <button type="button" onClick={handleRadio} className="flex-shrink-0">
-        <div className={`flex h-4 w-4 items-center justify-center rounded-full border-2 transition-colors ${
-          isPrimary ? 'border-[var(--accent)] bg-[var(--accent)]' : 'border-[var(--line-strong)]'
-        }`}>
-          {isPrimary && <div className="h-1.5 w-1.5 rounded-full bg-[var(--button-primary-text)]" />}
-        </div>
-      </button>
+  const displayName = model.modelName && model.modelName !== model.model ? model.modelName : null;
 
+  return (
+    <div className={`group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--hover-bg)] ${isPrimary ? 'bg-[var(--accent-warm-subtle)]' : ''}`}>
       {/* Model info */}
       <div className="min-w-0 flex-1">
-        <span className="truncate font-mono text-[13px] text-[var(--ink)]">{model.model}</span>
-        {model.modelName && model.modelName !== model.model && (
-          <span className="ml-2 text-xs text-[var(--ink-muted)]">{model.modelName}</span>
+        {displayName ? (
+          <>
+            <span className="text-[13px] font-medium text-[var(--ink)]">{displayName}</span>
+            <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{model.model}</span>
+          </>
+        ) : (
+          <span className="font-mono text-[13px] text-[var(--ink)]">{model.model}</span>
         )}
       </div>
 
-      {/* Metadata tags */}
-      {model.contextLength && (
+      {/* Context length */}
+      {model.contextLength ? (
         <span className="flex-shrink-0 text-[10px] text-[var(--ink-subtle)]">
           {formatTokenCount(model.contextLength)}
         </span>
-      )}
+      ) : null}
 
-      {/* Badges */}
-      {isPrimary && (
-        <span className="flex-shrink-0 rounded bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+      {/* Primary badge or hover action */}
+      {isPrimary ? (
+        <span className="flex-shrink-0 rounded-full bg-[var(--accent-warm-muted)] px-2 py-0.5 text-[10px] font-medium text-[var(--accent)]">
           首选
         </span>
-      )}
-      {isPreset && (
-        <span className="flex-shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-subtle)]">
-          预设
-        </span>
-      )}
-
-      {/* Delete button (only for non-preset) */}
-      {!isPreset ? (
+      ) : (
         <button
           type="button"
-          onClick={handleDelete}
-          className="flex-shrink-0 rounded p-1 text-[var(--ink-subtle)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--error)] group-hover:opacity-100"
+          onClick={handleSetPrimary}
+          className="flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-[var(--ink-subtle)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] group-hover:opacity-100"
         >
-          <Trash2 className="h-3 w-3" />
+          设为首选
         </button>
-      ) : (
-        // Spacer to keep alignment when no delete button
-        <div className="w-5 flex-shrink-0" />
       )}
+
+      {/* Delete */}
+      <button
+        type="button"
+        onClick={handleDelete}
+        className="flex-shrink-0 rounded p-1 text-[var(--ink-subtle)] opacity-0 transition-all hover:text-[var(--error)] group-hover:opacity-100"
+      >
+        <Trash2 className="h-3 w-3" />
+      </button>
     </div>
   );
 });
 
-// ===== DiscoveredModelCard (lower section) =====
+// ===== DiscoveredModelRow (lower section — light row with hover "添加") =====
 
-const DiscoveredModelCard = React.memo(function DiscoveredModelCard({
+const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
   model,
-  isAdded,
-  isSelected,
-  onToggle,
+  onAdd,
 }: {
   model: DiscoveredModel;
-  isAdded: boolean;
-  isSelected: boolean;
-  onToggle: (id: string) => void;
+  onAdd: (model: DiscoveredModel) => void;
 }) {
-  const handleClick = useCallback(() => { if (!isAdded) onToggle(model.id); }, [isAdded, onToggle, model.id]);
-
-  const tags: { label: string; icon?: React.ReactNode }[] = [];
-  if (model.contextLength) tags.push({ label: `${formatTokenCount(model.contextLength)}` });
-  if (model.maxOutputTokens) tags.push({ label: `输出 ${formatTokenCount(model.maxOutputTokens)}` });
-  if (model.supportsImage) tags.push({ label: '图片', icon: <Image className="h-3 w-3" /> });
-  if (model.supportsVideo) tags.push({ label: '视频', icon: <Video className="h-3 w-3" /> });
-  if (model.supportsReasoning) tags.push({ label: '推理', icon: <Brain className="h-3 w-3" /> });
+  const handleAdd = useCallback(() => onAdd(model), [onAdd, model]);
+  const displayName = model.displayName && model.displayName !== model.id ? model.displayName : null;
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={isAdded}
-      className={`group w-full rounded-lg border p-3 text-left transition-all ${
-        isAdded
-          ? 'cursor-default border-[var(--line-subtle)] opacity-50'
-          : isSelected
-            ? 'border-[var(--accent)] bg-[var(--accent-warm-subtle)]'
-            : 'border-[var(--line)] hover:border-[var(--line-strong)]'
-      }`}
-    >
-      <div className="flex items-start gap-2.5">
-        {/* Checkbox */}
-        <div className={`mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded border transition-colors ${
-          isAdded
-            ? 'border-[var(--success)] bg-[var(--success-bg)]'
-            : isSelected
-              ? 'border-[var(--accent)] bg-[var(--accent)]'
-              : 'border-[var(--line-strong)]'
-        }`}>
-          {(isAdded || isSelected) && (
-            <Check className={`h-3 w-3 ${isAdded ? 'text-[var(--success)]' : 'text-[var(--button-primary-text)]'}`} />
-          )}
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="truncate font-mono text-[13px] font-medium text-[var(--ink)]">{model.id}</span>
-            {model.ownedBy && <span className="flex-shrink-0 text-[11px] text-[var(--ink-subtle)]">{model.ownedBy}</span>}
-          </div>
-          {model.displayName && model.displayName !== model.id && (
-            <p className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">{model.displayName}</p>
-          )}
-          {tags.length > 0 && (
-            <div className="mt-1.5 flex flex-wrap gap-1.5">
-              {tags.map((tag, i) => (
-                <span key={i} className="inline-flex items-center gap-1 rounded-md bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px] text-[var(--ink-muted)]">
-                  {tag.icon}{tag.label}
-                </span>
-              ))}
-            </div>
-          )}
-          {isAdded && <p className="mt-1 text-[11px] text-[var(--success)]">已添加</p>}
-        </div>
+    <div className="group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--hover-bg)]">
+      {/* Model info */}
+      <div className="min-w-0 flex-1">
+        {displayName ? (
+          <>
+            <span className="text-[13px] text-[var(--ink)]">{displayName}</span>
+            <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{model.id}</span>
+          </>
+        ) : (
+          <span className="font-mono text-[13px] text-[var(--ink)]">{model.id}</span>
+        )}
       </div>
-    </button>
+
+      {/* Metadata */}
+      {model.contextLength ? (
+        <span className="flex-shrink-0 text-[10px] text-[var(--ink-subtle)]">
+          {formatTokenCount(model.contextLength)}
+        </span>
+      ) : null}
+
+      {/* Add button — visible on hover */}
+      <button
+        type="button"
+        onClick={handleAdd}
+        className="flex-shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-medium text-[var(--accent)] opacity-0 transition-all hover:bg-[var(--accent-warm-subtle)] group-hover:opacity-100"
+      >
+        添加
+      </button>
+    </div>
   );
 });

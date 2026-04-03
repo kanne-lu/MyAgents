@@ -333,6 +333,9 @@ export interface AppConfig {
   // These are merged with preset models at runtime, allowing users to add models
   // while keeping preset definitions unchanged (updated with app releases)
   presetCustomModels?: Record<string, ModelEntity[]>;
+  // Preset models explicitly removed by user (key = provider ID, value = model IDs)
+  // App upgrades won't re-add these; new models NOT in this list appear automatically
+  presetRemovedModels?: Record<string, string[]>;
 
   // ===== Provider Primary Model (user overrides) =====
   // Maps provider ID → user's preferred primary model (overrides preset primaryModel)

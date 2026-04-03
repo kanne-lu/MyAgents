@@ -148,7 +148,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     // Derived: merge preset custom models + apply user primary model overrides
     const providers = useMemo(() => {
-        const merged = mergePresetCustomModels(rawProviders, config.presetCustomModels);
+        const merged = mergePresetCustomModels(rawProviders, config.presetCustomModels, config.presetRemovedModels);
         const overrides = config.providerPrimaryModels;
         if (!overrides || Object.keys(overrides).length === 0) return merged;
         // Apply user's primaryModel override directly on the Provider object
@@ -158,7 +158,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
             if (!userPrimary || !p.models?.some(m => m.model === userPrimary)) return p;
             return { ...p, primaryModel: userPrimary };
         });
-    }, [rawProviders, config.presetCustomModels, config.providerPrimaryModels]);
+    }, [rawProviders, config.presetCustomModels, config.presetRemovedModels, config.providerPrimaryModels]);
 
     // Mount guard
     const isMountedRef = useRef(true);
