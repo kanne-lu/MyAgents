@@ -190,8 +190,17 @@ export default function BrowserPanel({
   }, [tabId]);
 
   const handleOpenExternal = useCallback(() => {
+    // For local file previews, open the file path (not file:// URL) so Tauri
+    // shell.open() launches the system default app (same as right-click → Open).
+    if (sourceFile?.path) {
+      // sourceFile.path is relative — reconstruct absolute path from the file:// URL
+      const fileUrl = currentUrl || url || '';
+      if (fileUrl.startsWith('file://')) {
+        try { openExternal(decodeURIComponent(new URL(fileUrl).pathname)); return; } catch { /* fall through */ }
+      }
+    }
     if (currentUrl) openExternal(currentUrl);
-  }, [currentUrl]);
+  }, [currentUrl, url, sourceFile]);
 
   // ── URL bar editing ──
   const handleUrlClick = useCallback(() => {
