@@ -1015,12 +1015,26 @@ export function getSessionPermissionMode(): PermissionMode {
   return currentPermissionMode;
 }
 
-/** Set permission mode (called by Rust IM router via /api/session/permission-mode) */
+/** Set permission mode (called from frontend via /api/session/permission-mode) */
 export function setSessionPermissionMode(mode: PermissionMode): void {
   if (mode === currentPermissionMode) return;
   const oldMode = currentPermissionMode;
   currentPermissionMode = mode;
   console.log(`[agent] session permission mode set: ${oldMode} -> ${mode}`);
+
+  // Apply permission mode change to SDK subprocess immediately (same as setSessionModel).
+  // Without this, the SDK subprocess stays in the old mode until the next message
+  // triggers applySessionConfig(). Critical for plan mode: user switches to plan in UI
+  // but SDK keeps auto → canUseTool may be skipped → tools execute unchecked.
+  if (querySession) {
+    const sdkMode = mapToSdkPermissionMode(mode);
+    querySession.setPermissionMode(sdkMode).catch(err => {
+      console.error('[agent] failed to apply permission mode to running session:', err);
+    });
+  }
+
+  // Notify frontend of the mode change so UI stays in sync
+  broadcast('chat:permission-mode-changed', { permissionMode: mode });
 }
 
 export function setSessionModel(model: string): void {
@@ -1813,6 +1827,8 @@ export function handleExitPlanModeResponse(requestId: string, approved: boolean)
     currentPermissionMode = prePlanPermissionMode;
     prePlanPermissionMode = null;
     console.debug(`[ExitPlanMode] Restored currentPermissionMode to: ${currentPermissionMode}`);
+    // Notify frontend that mode changed (plan → auto/custom/etc.)
+    broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
   }
   pending.resolve(approved);
   return true;
@@ -1879,6 +1895,7 @@ export function handleEnterPlanModeResponse(requestId: string, approved: boolean
     prePlanPermissionMode = currentPermissionMode;
     currentPermissionMode = 'plan';
     console.debug(`[EnterPlanMode] Saved prePlanPermissionMode=${prePlanPermissionMode}, switched to plan`);
+    broadcast('chat:permission-mode-changed', { permissionMode: 'plan' });
   }
   pending.resolve(approved);
   return true;

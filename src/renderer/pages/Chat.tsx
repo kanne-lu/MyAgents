@@ -1466,6 +1466,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [pendingExitPlanMode?.resolved, pendingExitPlanMode?.requestId]);
 
+  // Sync permission mode from backend → frontend.
+  // Backend is the source of truth: SDK tools (EnterPlanMode/ExitPlanMode) and
+  // setSessionPermissionMode() all broadcast 'chat:permission-mode-changed'.
+  // This ensures the UI toggle always reflects the actual SDK subprocess state.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const mode = (e as CustomEvent).detail?.permissionMode as PermissionMode | undefined;
+      if (mode && mode !== permissionMode) {
+        setPermissionMode(mode);
+      }
+    };
+    window.addEventListener('permission-mode-sync', handler);
+    return () => window.removeEventListener('permission-mode-sync', handler);
+  }, [permissionMode]);
+
   // Stable callback for time rewind — uses ref for messages to keep reference stable
   const handleRewind = useCallback((messageId: string) => {
     const msgs = messagesRef.current;

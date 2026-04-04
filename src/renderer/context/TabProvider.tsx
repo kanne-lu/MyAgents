@@ -705,6 +705,18 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:permission-mode-changed': {
+                // Backend permission mode changed (e.g., ExitPlanMode restored auto).
+                // Dispatch to Chat.tsx so it can sync the UI toggle.
+                const payload = data as { permissionMode: string } | null;
+                if (payload?.permissionMode) {
+                    window.dispatchEvent(new CustomEvent('permission-mode-sync', {
+                        detail: { permissionMode: payload.permissionMode }
+                    }));
+                }
+                break;
+            }
+
             case 'chat:api-retry': {
                 // SDK is retrying API call (rate limit or transient error)
                 // null payload = retry resolved, streaming resumed — clear status
