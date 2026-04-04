@@ -471,6 +471,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const senderId = String(ctx.SenderId || ctx.senderId || '');
           const senderName = String(ctx.SenderName || ctx.senderName || '');
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
+          // DEBUG: log ctx fields for group chatId diagnosis
+          console.log(`[compat-debug] chatType=${chatType}, ctx.ChatType=${ctx.ChatType}, ctx.chatType=${ctx.chatType}, ctx.ChatId=${ctx.ChatId}, ctx.chatId=${ctx.chatId}, ctx.From=${ctx.From}, ctx.GroupSubject=${ctx.GroupSubject}`);
           // Chat ID extraction: For group messages, ctx.From is the SENDER's ID
           // (e.g., "feishu:ou_xxx"), not the group chat ID. The correct group chat ID
           // is in ctx.ChatId/ctx.chatId (e.g., "oc_xxx" from Feishu API).

@@ -1655,11 +1655,9 @@ const DirectoryPanel = memo(forwardRef<DirectoryPanelHandle, DirectoryPanelProps
 
             {/* Vertical drag divider — tree ↔ capabilities */}
             <div
-              className="flex h-1 cursor-row-resize items-center justify-center transition-colors hover:bg-[var(--accent)]/30"
+              className="mx-4 cursor-row-resize border-b border-[var(--line-subtle)] transition-colors hover:border-[var(--accent)]/30"
               onMouseDown={handleCapDividerMouseDown}
-            >
-              <div className="h-px w-8 rounded-full bg-[var(--ink-subtle)]" />
-            </div>
+            />
 
             {/* Agent Capabilities Panel */}
             <AgentCapabilitiesPanel
