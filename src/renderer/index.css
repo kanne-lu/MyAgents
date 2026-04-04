@@ -905,6 +905,7 @@ code {
   letter-spacing: -0.02em;
   color: var(--ink);
   margin-bottom: 16px;
+  text-align: center;
 }
 
 .introduction-content h2 {
