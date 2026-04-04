@@ -15,8 +15,8 @@ function logConfigUpdated() { _w('logConfigUpdated'); return undefined; }
 const updateConfig = undefined;
 function resolveChannelModelOverride() { _w('resolveChannelModelOverride'); return undefined; }
 function resolveMarkdownTableMode() { _w('resolveMarkdownTableMode'); return undefined; }
-function resolveChannelGroupPolicy() { _w('resolveChannelGroupPolicy'); return undefined; }
-function resolveChannelGroupRequireMention() { _w('resolveChannelGroupRequireMention'); return undefined; }
+function resolveChannelGroupPolicy() { return { allowed: true, allowlistEnabled: false }; }
+function resolveChannelGroupRequireMention() { return false; }
 const GROUP_POLICY_BLOCKED_LABEL = undefined;
 function resolveAllowlistProviderRuntimeGroupPolicy() { _w('resolveAllowlistProviderRuntimeGroupPolicy'); return undefined; }
 function resolveDefaultGroupPolicy() { _w('resolveDefaultGroupPolicy'); return undefined; }

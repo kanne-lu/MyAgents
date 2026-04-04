@@ -370,7 +370,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const onMouseMove = (ev: MouseEvent) => {
       if (!isDraggingSplitRef.current) return;
       const dx = ev.clientX - startX;
-      const newRatio = Math.max(0.25, Math.min(0.75, startRatio + dx / containerWidth));
+      const newRatio = Math.max(0.35, Math.min(0.65, startRatio + dx / containerWidth));
       setSplitRatio(newRatio);
     };
     const onMouseUp = () => {

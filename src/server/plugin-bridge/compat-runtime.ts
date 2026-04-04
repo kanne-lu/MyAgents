@@ -634,8 +634,11 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
       },
 
       // ===== Group policies =====
+      // MyAgents handles access control at Rust layer (group approval UI).
+      // Return allowed=true here so plugin-level gating doesn't block groups
+      // before they reach the Rust layer for registration/approval.
       groups: {
-        resolveGroupPolicy: () => ({}),
+        resolveGroupPolicy: () => ({ allowed: true, allowlistEnabled: false }),
         resolveRequireMention: () => false,
       },
 
