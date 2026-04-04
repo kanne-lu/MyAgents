@@ -263,9 +263,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const [browserAlive, setBrowserAlive] = useState(false);
 
-  // ── Introduction overlay: read INTRODUCTION.md once per agentDir ──
+  // ── Introduction overlay: read INTRODUCTION.md per agentDir/sessionId ──
+  // sessionId in deps → re-reads when user creates a new session (so edits via settings are reflected)
   useEffect(() => {
     if (!agentDir || !isTauriEnvironment()) return;
+    setIntroductionContent(null); // Clear stale content before async read
     let cancelled = false;
     const sep = agentDir.includes('\\') ? '\\' : '/';
     const filePath = `${agentDir}${sep}INTRODUCTION.md`;

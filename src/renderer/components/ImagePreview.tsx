@@ -109,7 +109,6 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
             {/* Image container */}
             <div
                 className="relative flex items-center justify-center"
-                onClick={(e) => e.stopPropagation()}
             >
                 <img
                     src={src}

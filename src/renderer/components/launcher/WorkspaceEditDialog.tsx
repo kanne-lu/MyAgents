@@ -3,7 +3,7 @@
  * Shown from workspace card right-click "Edit" option
  */
 
-import { memo, useCallback, useState } from 'react';
+import { memo, useCallback, useEffect, useState } from 'react';
 import type { Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
@@ -23,6 +23,13 @@ export default memo(function WorkspaceEditDialog({
     onClose,
 }: WorkspaceEditDialogProps) {
     useCloseLayer(() => { onClose(); return true; }, 200);
+
+    // Escape to close
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); onClose(); } };
+        document.addEventListener('keydown', handler);
+        return () => document.removeEventListener('keydown', handler);
+    }, [onClose]);
 
     const [name, setName] = useState(project.displayName || getFolderName(project.path));
     const [icon, setIcon] = useState(project.icon || '');
