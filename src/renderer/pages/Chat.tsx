@@ -234,7 +234,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
   const isDraggingSplitRef = useRef(false);
-  const splitPanelRef = useRef<HTMLDivElement>(null);
   const splitRatioRef = useRef(splitRatio);
   splitRatioRef.current = splitRatio;
   // Store drag listeners in refs so unmount cleanup can remove them
@@ -270,16 +269,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // When split view is active or layout is narrow, workspace uses overlay drawer
   const shouldUseWorkspaceOverlay = isNarrowLayout || (isSplitViewEnabled && splitPanelVisible);
 
-  // Cmd+W: close split panel only when focus is in the right panel (terminal/editor).
-  // If focus is on the left side (chat input), pass through → closeTab.
+  // Cmd+W: split panel visible → always close the active view first (no focus detection).
+  // Simpler mental model: Cmd+W closes from right to left, outside to inside.
+  // Split panel acts as a buffer — absorbs Cmd+W before it reaches the tab.
   useCloseLayer(() => {
     if (!splitPanelVisible) return false;
-    // Browser panel uses a native Tauri Webview (not a DOM element), so
-    // document.activeElement won't be inside splitPanelRef when focus is in the
-    // browser. Skip the focus check when the browser view is active.
-    const isBrowserActive = splitActiveView === 'browser' && browserUrl;
-    if (!isBrowserActive && !splitPanelRef.current?.contains(document.activeElement)) return false;
-    // Close the active view in the split panel
     if (splitActiveView === 'file' && splitFile) {
       setSplitFile(null);
       if (browserUrl) setSplitActiveView('browser');
@@ -299,7 +293,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       else if (splitFile) setSplitActiveView('file');
       return true;
     }
-    return false; // focus in panel but no active view to close
+    return false;
   }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
@@ -2035,7 +2029,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           </div>
           {/* Right panel — single flex-1 container for tab bar + file + terminal.
               Uses `hidden` when panel is not visible but terminal is alive in background. */}
-          <div ref={splitPanelRef} className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!splitPanelVisible ? 'hidden' : ''}`}>
+          <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${!splitPanelVisible ? 'hidden' : ''}`}>
             {/* Tab switcher — only when 2+ views are active */}
             {(() => {
               const activeViews = [splitFile, terminalPinned && terminalAlive, browserUrl].filter(Boolean).length;
