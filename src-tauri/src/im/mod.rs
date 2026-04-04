@@ -1709,8 +1709,10 @@ async fn create_bot_instance<R: Runtime>(
                         // Native adapters discover groups via platform events (my_chat_member etc.),
                         // but Bridge/OpenClaw plugins have no equivalent lifecycle event.
                         if is_bridge_platform {
+                            // Match by group_id OR group_name (handles chatId format migration:
+                            // old records have group_id=ou_xxx, new format uses oc_xxx)
                             let known = group_permissions_for_loop.read().await
-                                .iter().any(|g| g.group_id == msg.chat_id);
+                                .iter().any(|g| g.group_id == msg.chat_id || g.group_name == msg.chat_id);
                             if !known {
                                 ulog_info!("[im] Bridge group auto-discovery: {} ({})", msg.chat_id, msg.hint_group_name.as_deref().unwrap_or("?"));
                                 // try_send (not send().await) — sender and receiver share the same
@@ -2178,9 +2180,16 @@ async fn create_bot_instance<R: Runtime>(
                             {
                                 let mut perms = group_permissions_for_loop.write().await;
                                 // Dedup: skip if group already known (Approved or Pending).
-                                // Prevents duplicate welcome messages under burst traffic from Bridge.
-                                if perms.iter().any(|g| g.group_id == chat_id) {
-                                    ulog_info!("[im] Group {} already known, skipping BotAdded", chat_id);
+                                // Also match by group_name to handle the chatId format migration
+                                // (pre-fix: group_id=ou_xxx from ctx.From, post-fix: group_id=oc_xxx from ctx.To).
+                                if let Some(existing) = perms.iter_mut().find(|g| g.group_id == chat_id || g.group_name == chat_id) {
+                                    // If found by group_name (old format), update group_id to the correct value
+                                    if existing.group_id != chat_id {
+                                        ulog_info!("[im] Group {} migrating group_id: {} -> {}", chat_title, existing.group_id, chat_id);
+                                        existing.group_id = chat_id.clone();
+                                    } else {
+                                        ulog_info!("[im] Group {} already known, skipping BotAdded", chat_id);
+                                    }
                                     continue;
                                 }
                                 perms.push(perm.clone());
