@@ -1,6 +1,7 @@
 import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2 } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
+import Tip from '@/components/Tip';
 import { useToast } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabApiOptional, type SessionState } from '@/context/TabContext';
@@ -1594,9 +1595,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                               {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
                               {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
-                                <span title="验证未通过，部分模型可能不可用">
+                                <Tip label="验证未通过，部分模型可能不可用" position="bottom">
                                   <AlertCircle className="h-3 w-3 shrink-0 text-[var(--warning)]" />
-                                </span>
+                                </Tip>
                               )}
                             </div>
                             {p.models.map(model => {
