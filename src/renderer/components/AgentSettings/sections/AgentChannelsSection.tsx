@@ -236,11 +236,10 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
       {overlay && createPortal(
         <div
           className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 backdrop-blur-sm"
-          onClick={closeOverlay}
+          onMouseDown={e => { if (e.target === e.currentTarget) closeOverlay(); }}
         >
           <div
             className="relative flex h-[90vh] w-[90vw] max-w-5xl flex-col overflow-hidden rounded-2xl bg-[var(--paper-elevated)] shadow-2xl"
-            onClick={e => e.stopPropagation()}
           >
             {/* Close button — absolute top-right */}
             <button

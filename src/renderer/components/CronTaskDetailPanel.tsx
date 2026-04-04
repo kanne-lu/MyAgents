@@ -180,7 +180,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
             <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" style={{ animation: 'overlayFadeIn 200ms ease-out' }}
                 onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
                 <div className="flex h-[80vh] w-full max-w-lg flex-col rounded-2xl bg-[var(--paper-elevated)] shadow-lg"
-                    style={{ animation: 'overlayPanelIn 250ms ease-out' }} onClick={e => e.stopPropagation()}>
+                    style={{ animation: 'overlayPanelIn 250ms ease-out' }}>
 
                     {/* Header */}
                     <div className="flex shrink-0 items-center justify-between px-6 py-4">

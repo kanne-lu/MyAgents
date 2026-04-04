@@ -5398,11 +5398,10 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             {runtimeDialog.show && (
                 <div
                     className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-                    onClick={() => setRuntimeDialog({ show: false })}
+                    onMouseDown={e => { if (e.target === e.currentTarget) setRuntimeDialog({ show: false }); }}
                 >
                     <div
                         className="mx-4 w-full max-w-sm rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-xl"
-                        onClick={e => e.stopPropagation()}
                     >
                         <div className="flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--warning-bg)]">

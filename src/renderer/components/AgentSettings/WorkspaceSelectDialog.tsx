@@ -24,7 +24,7 @@ export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: W
   return createPortal(
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm"
-      onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="w-full max-w-md rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-6 shadow-xl">
         <div className="mb-4 flex items-center justify-between">

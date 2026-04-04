@@ -56,12 +56,11 @@ export default function ImagePreview({ src, name, onClose }: ImagePreviewProps) 
     return createPortal(
         <div
             className="fixed inset-0 z-[200] flex items-center justify-center bg-black/80 backdrop-blur-sm"
-            onClick={onClose}
+            onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
         >
             {/* Header with title and controls */}
             <div
                 className="absolute top-0 left-0 right-0 flex items-center justify-between px-6 py-4"
-                onClick={(e) => e.stopPropagation()}
             >
                 <span className="text-sm font-medium text-white/90 truncate max-w-[50%]">{name}</span>
                 <div className="flex items-center gap-2">
