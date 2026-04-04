@@ -4829,7 +4829,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             </div>
                         </div>
 
-                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6">
+                        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 pb-4">
                             <div>
                                 <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">
                                     供应商名称 <span className="text-[var(--error)]">*</span>
@@ -5016,7 +5016,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     <input
                                         type="text"
                                         placeholder="输入模型 ID，回车添加"
-                                        className="flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-2 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--ink)] focus:outline-none"
+                                        className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none"
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
                                                 e.preventDefault();
