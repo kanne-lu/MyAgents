@@ -324,14 +324,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           // --- Protocol-standard path ---
 
-          // Extract chatId (same logic as dispatchReplyWithBufferedBlockDispatcher)
-          const cfgChatType = String(ctx.ChatType || ctx.chatType || 'direct');
-          let chatId: string;
-          if (cfgChatType === 'group') {
-            chatId = String(ctx.GroupSubject || ctx.ChatId || ctx.chatId || ctx.From || ctx.from || '');
-          } else {
-            chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
-          }
+          // Extract chatId: ctx.To is the reply destination in OpenClaw protocol.
+          let chatId = String(ctx.To || ctx.to || ctx.From || ctx.from || '');
           if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
 
           if (!chatId) {
@@ -471,20 +465,11 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const senderId = String(ctx.SenderId || ctx.senderId || '');
           const senderName = String(ctx.SenderName || ctx.senderName || '');
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
-          // Chat ID extraction: For group messages, ctx.From is the SENDER's ID
-          // (e.g., "feishu:ou_xxx"), not the group chat ID. The correct group chat ID
-          // is in ctx.ChatId/ctx.chatId (e.g., "oc_xxx" from Feishu API).
-          // For private messages, ctx.From IS the correct chat ID.
-          let chatId: string;
-          if (chatType === 'group') {
-            // Group: prefer GroupSubject/ChatId (actual group chat ID) over From (sender ID).
-            // Feishu plugin: ctx.ChatId is undefined, ctx.GroupSubject = oc_xxx (group chat ID),
-            // ctx.From = feishu:ou_xxx (sender user ID — intentionally per-user for session isolation).
-            chatId = String(ctx.GroupSubject || ctx.ChatId || ctx.chatId || ctx.From || ctx.from || '');
-          } else {
-            // Private: From is the correct chat/user ID
-            chatId = String(ctx.From || ctx.from || ctx.ChatId || ctx.chatId || '');
-          }
+          // Chat ID extraction: ctx.To is the REPLY DESTINATION in OpenClaw protocol.
+          // ctx.From is the SENDER identity — wrong for group routing.
+          // Feishu plugin: To = "chat:oc_xxx" (group) or "user:ou_xxx" (private),
+          // From = "feishu:ou_xxx" (always sender). Using From for groups sends replies to private chat.
+          let chatId = String(ctx.To || ctx.to || ctx.From || ctx.from || '');
           if (chatId.includes(':')) chatId = chatId.split(':').slice(1).join(':');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
