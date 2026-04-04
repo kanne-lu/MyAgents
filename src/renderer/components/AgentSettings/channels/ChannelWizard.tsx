@@ -33,10 +33,10 @@ import feishuIcon from '../../ImSettings/assets/feishu.jpeg';
 import dingtalkIcon from '../../ImSettings/assets/dingtalk.svg';
 import { findPromotedByPlatform } from '../../ImSettings/promotedPlugins';
 
-const FEISHU_PERMISSIONS_JSON = `{
+export const FEISHU_PERMISSIONS_JSON = `{
   "scopes": {
     "tenant": [
-      "contact:contact.base:readonly",
+      "contact:user.base:readonly",
       "docx:document:readonly",
       "im:chat:read",
       "im:chat:update",
@@ -93,7 +93,6 @@ const FEISHU_PERMISSIONS_JSON = `{
       "calendar:calendar.event:reply",
       "calendar:calendar.event:update",
       "calendar:calendar.free_busy:read",
-      "contact:contact.base:readonly",
       "contact:user.base:readonly",
       "contact:user:search",
       "docs:document.comment:create",

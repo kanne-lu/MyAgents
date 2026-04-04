@@ -32,6 +32,7 @@ import type { ChannelStatusData } from '@/hooks/useAgentStatuses';
 import { isOpenClawPlatform } from '../../../../shared/types/im';
 import type { InstalledPlugin } from '../../../../shared/types/im';
 import { findPromotedByPlatform } from '../../ImSettings/promotedPlugins';
+import { FEISHU_PERMISSIONS_JSON } from './ChannelWizard';
 import OpenClawToolGroupsSelector from './OpenClawToolGroupsSelector';
 
 // ===== OpenClaw Plugin Config Editor =====
@@ -78,6 +79,42 @@ function OpenClawConfigEditor({
             <p className="text-xs text-[var(--ink-muted)]">
                 修改配置后需重启 Channel 才能生效
             </p>
+        </div>
+    );
+}
+
+/** Inline collapsible button to view/copy Feishu permissions JSON */
+function FeishuPermissionsButton() {
+    const [expanded, setExpanded] = useState(false);
+    const [copied, setCopied] = useState(false);
+    return (
+        <div className="flex flex-col gap-2">
+            <button
+                type="button"
+                onClick={() => setExpanded(!expanded)}
+                className="flex items-center gap-1.5 self-start rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            >
+                <ChevronDown className={`h-3 w-3 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+                飞书权限 JSON
+            </button>
+            {expanded && (
+                <div className="relative rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] p-3">
+                    <button
+                        type="button"
+                        onClick={async () => {
+                            await navigator.clipboard.writeText(FEISHU_PERMISSIONS_JSON);
+                            setCopied(true);
+                            setTimeout(() => setCopied(false), 1500);
+                        }}
+                        className="absolute right-2 top-2 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
+                    >
+                        {copied ? '已复制' : '复制'}
+                    </button>
+                    <pre className="max-h-[240px] overflow-auto text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                        {FEISHU_PERMISSIONS_JSON}
+                    </pre>
+                </div>
+            )}
         </div>
     );
 }
@@ -835,6 +872,11 @@ export default function ChannelDetailView({
                     </div>
                 )}
             </div>
+
+            {/* Feishu permissions JSON — quick access for existing configurations */}
+            {(channel.type === 'feishu' || channel.openclawPluginId === 'openclaw-lark') && (
+                <FeishuPermissionsButton />
+            )}
 
             {/* OpenClaw Tool Groups (e.g. feishu) */}
             {isOpenClaw && channel.openclawPluginId && (
