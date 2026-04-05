@@ -88,6 +88,25 @@ const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ─── ClaudeCodeRuntime ───
 
+/**
+ * Map MyAgents permission mode values to CC CLI's --permission-mode values.
+ * MyAgents uses internal names (auto/plan/fullAgency), CC uses different names.
+ */
+function mapPermissionModeToCc(mode: string): string {
+  switch (mode) {
+    case 'auto': return 'acceptEdits';
+    case 'plan': return 'plan';
+    case 'fullAgency': return 'bypassPermissions';
+    // CC's own mode values pass through directly
+    case 'default':
+    case 'acceptEdits':
+    case 'bypassPermissions':
+    case 'dontAsk':
+      return mode;
+    default: return 'default';
+  }
+}
+
 export class ClaudeCodeRuntime implements AgentRuntime {
   readonly type: RuntimeType = 'claude-code';
 
@@ -172,7 +191,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       // Desktop: delegate permission prompts to MyAgents UI
       args.push('--permission-prompt-tool', 'stdio');
       if (options.permissionMode) {
-        args.push('--permission-mode', options.permissionMode);
+        // Map MyAgents permission mode to CC CLI's --permission-mode values
+        const ccMode = mapPermissionModeToCc(options.permissionMode);
+        args.push('--permission-mode', ccMode);
       }
     }
 
