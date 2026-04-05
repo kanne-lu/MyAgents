@@ -570,6 +570,41 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => { cancelled = true; };
   }, []);
 
+  // Runtime-specific model and permission state (v0.1.59)
+  const isExternalRuntime = currentRuntime !== 'builtin';
+  const [runtimeModel, setRuntimeModel] = useState<string | undefined>(
+    (currentAgent?.runtimeConfig as { model?: string } | undefined)?.model
+  );
+  const [runtimePermissionMode, setRuntimePermissionMode] = useState<string>(
+    (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode
+    || (currentRuntime === 'claude-code' ? 'default' : 'full-auto')
+  );
+
+  // CC static model list and permission modes (from shared types)
+  const ccModels: import('../../shared/types/runtime').RuntimeModelInfo[] = useMemo(() => [
+    { value: 'sonnet', displayName: 'Sonnet', isDefault: true },
+    { value: 'opus', displayName: 'Opus' },
+    { value: 'haiku', displayName: 'Haiku' },
+    { value: 'sonnet[1m]', displayName: 'Sonnet (1M context)' },
+    { value: 'opus[1m]', displayName: 'Opus (1M context)' },
+  ], []);
+
+  const ccPermissionModes = useMemo(() => {
+    // Import statically from shared types (CC permission modes are constants)
+    return [
+      { value: 'default', label: 'Default', icon: '\u{1F6E1}', description: '每次工具调用都需要确认' },
+      { value: 'plan', label: 'Plan', icon: '\u{1F4CB}', description: '规划模式，只读不执行' },
+      { value: 'acceptEdits', label: 'Accept Edits', icon: '\u{1F4DD}', description: '自动接受文件编辑，其他需确认' },
+      { value: 'bypassPermissions', label: 'Bypass', icon: '\u26A1', description: '跳过所有权限确认' },
+    ] as import('../../shared/types/runtime').RuntimePermissionMode[];
+  }, []);
+
+  // Effective model/permission based on runtime
+  const effectiveModel = isExternalRuntime ? runtimeModel : selectedModel;
+  const effectivePermissionMode = isExternalRuntime
+    ? runtimePermissionMode as PermissionMode
+    : permissionMode;
+
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
     setWorkspaceRefreshTrigger(prev => prev + 1);
@@ -2090,10 +2125,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             provider={currentProvider}
             providers={providers}
             onProviderChange={handleProviderChange}
-            selectedModel={selectedModel}
-            onModelChange={handleModelChange}
-            permissionMode={permissionMode}
-            onPermissionModeChange={handlePermissionModeChange}
+            selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
+            onModelChange={isExternalRuntime ? setRuntimeModel : handleModelChange}
+            permissionMode={effectivePermissionMode}
+            onPermissionModeChange={isExternalRuntime
+              ? ((mode: PermissionMode) => setRuntimePermissionMode(mode))
+              : handlePermissionModeChange}
             apiKeys={apiKeys}
             providerVerifyStatus={providerVerifyStatus}
             inputRef={inputRef}
@@ -2116,6 +2153,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             runtime={currentRuntime}
             runtimeDetections={runtimeDetections}
             onRuntimeChange={handleRuntimeChange}
+            runtimeModels={isExternalRuntime ? ccModels : undefined}
+            runtimePermissionModes={isExternalRuntime ? ccPermissionModes : undefined}
             queuedMessages={queuedMessages}
             onCancelQueued={handleCancelQueuedVoid}
             onForceExecuteQueued={handleForceExecuteQueuedVoid}
