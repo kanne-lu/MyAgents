@@ -351,11 +351,17 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     const reader = stdout.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let lineCount = 0;
+
+    console.log('[claude-code] NDJSON reader started, waiting for stdout data...');
 
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          console.log(`[claude-code] stdout stream ended after ${lineCount} lines`);
+          break;
+        }
         buffer += decoder.decode(value, { stream: true });
 
         // Process complete lines
@@ -364,8 +370,18 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
         for (const line of lines) {
           if (!line.trim()) continue;
+          lineCount++;
+          // Log first few lines and then periodically for diagnostics
+          if (lineCount <= 5 || lineCount % 50 === 0) {
+            const preview = line.length > 200 ? line.slice(0, 200) + '...' : line;
+            console.log(`[claude-code] stdout line #${lineCount}: ${preview}`);
+          }
           const event = this.parseLine(line);
           if (event) {
+            // Log non-delta events (deltas are too frequent)
+            if (event.kind !== 'text_delta' && event.kind !== 'thinking_delta' && event.kind !== 'tool_input_delta') {
+              console.log(`[claude-code] event: ${event.kind}`);
+            }
             onEvent(event);
           }
         }

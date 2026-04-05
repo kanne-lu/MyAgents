@@ -1526,11 +1526,14 @@ async function main() {
 
             if (!isExternalSessionActive()) {
               // First message — start the external session
+              // NOTE: Don't pass MyAgents' model (e.g. "glm-5.1") to external CLI.
+              // External runtimes use their own model configuration.
+              // Only pass runtimeConfig.model if explicitly set for this runtime.
               await startExternalSession({
                 sessionId: getSessionId(),
                 workspacePath: agentDir,
                 initialMessage: text,
-                model: model ?? undefined,
+                // model is intentionally omitted — CC/Codex use their own defaults
                 permissionMode: permissionMode,
                 scenario: { type: 'desktop' },
               });
