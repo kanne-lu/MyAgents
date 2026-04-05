@@ -318,6 +318,7 @@ export interface AppConfig {
   theme: 'light' | 'dark' | 'system';
   minimizeToTray: boolean;
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
+  multiAgentRuntime?: boolean; // 多 Agent Runtime 模式（开发者，默认关闭）
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
   // General settings
   autoStart: boolean; // 开机启动

@@ -3747,6 +3747,12 @@ fn resolve_agent_runtime_from_config(workspace_path: &std::path::Path) -> Option
     let content = std::fs::read_to_string(&config_path).ok()?;
     let cfg: serde_json::Value = serde_json::from_str(&content).ok()?;
 
+    // Gate: multi-agent runtime feature must be explicitly enabled (developer mode)
+    // When off, all sidecars start as builtin regardless of agent config
+    if !cfg.get("multiAgentRuntime").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return None;
+    }
+
     let workspace_str = workspace_path.to_string_lossy();
     let agents = cfg.get("agents")?.as_array()?;
     for agent in agents {

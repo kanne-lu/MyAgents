@@ -573,7 +573,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, []);
 
   // Runtime-specific model and permission state (v0.1.59)
-  const isExternalRuntime = currentRuntime !== 'builtin';
+  // Gate: when multiAgentRuntime is off, treat everything as builtin regardless of agent config
+  const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
+  const isExternalRuntime = multiAgentRuntimeEnabled && currentRuntime !== 'builtin';
   const [runtimeModel, setRuntimeModel] = useState<string | undefined>(
     (currentAgent?.runtimeConfig as { model?: string } | undefined)?.model
   );
@@ -2154,8 +2156,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onCronStop={handleCronStop}
             onInputChange={setCronPrompt}
             runtime={currentRuntime}
-            runtimeDetections={runtimeDetections}
-            onRuntimeChange={handleRuntimeChange}
+            runtimeDetections={multiAgentRuntimeEnabled ? runtimeDetections : undefined}
+            onRuntimeChange={multiAgentRuntimeEnabled ? handleRuntimeChange : undefined}
             runtimeModels={isExternalRuntime ? runtimeModels : undefined}
             runtimePermissionModes={isExternalRuntime ? runtimePermissionModes : undefined}
             queuedMessages={queuedMessages}

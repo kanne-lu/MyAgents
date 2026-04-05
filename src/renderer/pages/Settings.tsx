@@ -3137,6 +3137,28 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                             </div>
                                         </div>
 
+                                        {/* Multi-Agent Runtime Toggle */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">多 Agent Runtime 模式</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        启用后可在对话输入框和工作区设置中选择外部 Runtime（Claude Code CLI、Codex CLI）。关闭后所有工作区使用内置 Runtime。
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => updateConfig({ multiAgentRuntime: !config.multiAgentRuntime })}
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.multiAgentRuntime ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                        }`}
+                                                >
+                                                    <span
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.multiAgentRuntime ? 'translate-x-5' : 'translate-x-0'
+                                                            }`}
+                                                    />
+                                                </button>
+                                            </div>
+                                        </div>
+
                                         {/* Build Versions */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">构建信息</h3>
