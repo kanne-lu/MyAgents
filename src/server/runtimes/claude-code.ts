@@ -192,12 +192,17 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       args.push('--dangerously-skip-permissions');
     } else {
       // Desktop: delegate permission prompts to MyAgents UI
-      args.push('--permission-prompt-tool', 'stdio');
-      if (options.permissionMode) {
-        // Map MyAgents permission mode to CC CLI's --permission-mode values
-        const ccMode = mapPermissionModeToCc(options.permissionMode);
-        args.push('--permission-mode', ccMode);
+      const ccMode = options.permissionMode ? mapPermissionModeToCc(options.permissionMode) : 'default';
+
+      if (ccMode === 'bypassPermissions') {
+        // bypassPermissions requires these two flags — even in desktop mode
+        args.push('--allow-dangerously-skip-permissions');
+        args.push('--dangerously-skip-permissions');
+      } else {
+        // Non-bypass modes: delegate permission prompts to MyAgents via stdio
+        args.push('--permission-prompt-tool', 'stdio');
       }
+      args.push('--permission-mode', ccMode);
     }
 
     // Model
@@ -232,10 +237,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       args.push(...options.additionalArgs);
     }
 
-    // Initial message as positional argument
-    if (options.initialMessage) {
-      args.push(options.initialMessage);
-    }
+    // NOTE: Initial message is sent via stdin (not positional arg) because
+    // --input-format stream-json mode ignores positional prompts and waits for stdin.
 
     console.log(`[claude-code] Starting session: claude ${args.slice(0, 6).join(' ')} ... (${args.length} args)`);
 
@@ -250,6 +253,17 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     });
 
     const handle = new ClaudeCodeProcess(proc);
+
+    // Send initial message via stdin (must happen before reading stdout to avoid deadlock)
+    if (options.initialMessage) {
+      const userMsg = {
+        type: 'user',
+        message: { role: 'user', content: options.initialMessage },
+        parent_tool_use_id: null,
+      };
+      await handle.writeLine(JSON.stringify(userMsg));
+      console.log(`[claude-code] Initial message sent via stdin (${options.initialMessage.length} chars)`);
+    }
 
     // Read stderr for logging
     this.readStderr(proc.stderr);
