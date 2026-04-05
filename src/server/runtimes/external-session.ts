@@ -17,6 +17,13 @@ import type { RuntimeType } from '../../shared/types/runtime';
 let activeProcess: RuntimeProcess | null = null;
 let activeRuntime: AgentRuntime | null = null;
 let isRunning = false;
+let turnCompleted = false;
+
+// Track session context for multi-turn resume (CC -p mode exits after each turn)
+let lastSessionId = '';
+let lastWorkspacePath = '';
+let lastScenario: InteractionScenario = { type: 'desktop' };
+let lastCcSessionId = '';  // CC's internal session ID (from system.init)
 
 // ─── Public API ───
 
@@ -60,8 +67,20 @@ export async function startExternalSession(options: {
   const systemPromptAppend = buildSystemPromptAppend(options.scenario);
 
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}`);
-  // Set isRunning AFTER process is created (not before) to prevent race:
-  // a concurrent sendMessage during startup would see isRunning=true but activeProcess=null
+  turnCompleted = false;
+
+  // Broadcast user message so frontend displays it in the chat
+  if (options.initialMessage) {
+    broadcast('chat:message-replay', {
+      message: {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: options.initialMessage,
+        timestamp: new Date().toISOString(),
+      },
+    });
+  }
+
   broadcast('chat:status', { sessionState: 'running' });
 
   try {
@@ -82,6 +101,10 @@ export async function startExternalSession(options: {
     // Atomically set both process and running flag
     activeProcess = process;
     isRunning = true;
+    // Track for multi-turn resume
+    lastSessionId = options.sessionId;
+    lastWorkspacePath = options.workspacePath;
+    lastScenario = options.scenario;
     console.log(`[external-session] ${runtimeType} process started, pid=${activeProcess.pid}`);
   } catch (err) {
     isRunning = false;
@@ -97,7 +120,9 @@ export async function startExternalSession(options: {
 }
 
 /**
- * Send a user message to the active external session
+ * Send a user message to the active external session.
+ * For CC's `-p` mode: each turn spawns a new process with `--resume`.
+ * The previous process has already exited after the first turn.
  */
 export async function sendExternalMessage(
   text: string,
@@ -105,14 +130,30 @@ export async function sendExternalMessage(
   _permissionMode?: string,
   _model?: string,
 ): Promise<{ queued: boolean; error?: string }> {
-  if (!activeProcess || !activeRuntime) {
+  if (!activeRuntime) {
     return { queued: false, error: 'No active external runtime session' };
   }
 
-  if (activeProcess.exited) {
-    return { queued: false, error: 'External runtime process has exited' };
+  // CC's -p mode exits after each turn. For follow-up messages,
+  // start a new process with --resume to continue the conversation.
+  if (!activeProcess || activeProcess.exited) {
+    console.log(`[external-session] Previous process exited, resuming session for follow-up`);
+    try {
+      await startExternalSession({
+        sessionId: lastSessionId,
+        workspacePath: lastWorkspacePath,
+        initialMessage: text,
+        scenario: lastScenario,
+        resumeSessionId: lastCcSessionId, // Resume CC's session
+      });
+      return { queued: true };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { queued: false, error: message };
+    }
   }
 
+  // Process still running (shouldn't happen in -p mode, but handle it)
   try {
     broadcast('chat:status', { sessionState: 'running' });
     await activeRuntime.sendMessage(activeProcess, text);
@@ -256,6 +297,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'session_init':
+      // Capture CC's session ID for multi-turn resume
+      if (event.sessionId) lastCcSessionId = event.sessionId;
       broadcast('chat:system-init', {
         info: {
           sessionId: event.sessionId,
@@ -270,13 +313,18 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'turn_complete':
+      // Mark turn complete — session_complete will follow for -p mode
+      turnCompleted = true;
       broadcast('chat:message-complete', {});
       broadcast('chat:status', { sessionState: 'idle' });
       break;
 
     case 'session_complete':
       if (event.subtype === 'success') {
-        broadcast('chat:message-complete', {});
+        // Only broadcast if turn_complete didn't already
+        if (!turnCompleted) {
+          broadcast('chat:message-complete', {});
+        }
       } else {
         broadcast('chat:message-error', event.result || 'Session ended with error');
       }
@@ -300,7 +348,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'message_replay':
-      broadcast('chat:message-replay', { message: event.message });
+      // Skip assistant message replays during active streaming — CC sends both
+      // stream_event deltas AND a complete assistant message, causing duplication.
+      // Only replay user messages (for session resume scenarios).
+      if (event.message.role === 'user') {
+        broadcast('chat:message-replay', { message: event.message });
+      }
+      // Assistant replays are intentionally dropped — the stream_event deltas
+      // already delivered the content to the frontend incrementally.
       break;
 
     case 'raw':
