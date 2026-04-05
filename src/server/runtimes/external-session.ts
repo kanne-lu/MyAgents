@@ -11,7 +11,8 @@ import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent } from './types';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import type { RuntimeType } from '../../shared/types/runtime';
-import { saveSessionMessages, updateSessionMetadata } from '../SessionStore';
+import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
+import { createSessionMetadata } from '../types/session';
 import type { SessionMessage } from '../types/session';
 
 // ─── Module state ───
@@ -34,6 +35,21 @@ let allSessionMessages: SessionMessage[] = [];
 let currentAssistantText = '';  // Accumulate streaming text for the current assistant message
 let currentTurnStartTime = 0;
 
+// IM stream callback — mirrors agent-session.ts pattern for IM Bot relay
+type ImStreamCallback = (
+  event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity',
+  data: string,
+) => void;
+let imStreamCallback: ImStreamCallback | null = null;
+let imCallbackNulledDuringTurn = false; // Prevents stale turn events leaking to new callback
+
+/** Fire IM callback only if not stale (guard mirrors agent-session.ts pattern) */
+function fireImCallback(event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string): void {
+  if (imStreamCallback && !imCallbackNulledDuringTurn) {
+    imStreamCallback(event, data);
+  }
+}
+
 /**
  * Set CC's session ID (called from hook endpoint or system.init event).
  * Used for --resume in multi-turn conversations.
@@ -41,6 +57,46 @@ let currentTurnStartTime = 0;
 export function setCcSessionId(id: string): void {
   lastCcSessionId = id;
   console.log(`[external-session] CC session ID set: ${id}`);
+}
+
+/**
+ * Restore module-level state after Sidecar restart (session resume).
+ * Called from index.ts when a CC session is reopened from history.
+ * Sets lastCcSessionId so sendExternalMessage uses --resume instead of --session-id.
+ */
+export function restoreExternalSessionState(
+  sessionId: string,
+  workspacePath: string,
+  scenario: InteractionScenario,
+): void {
+  lastSessionId = sessionId;
+  lastWorkspacePath = workspacePath;
+  lastScenario = scenario;
+  lastCcSessionId = sessionId; // CC session ID === our session ID
+
+  // Load existing messages for correct incremental save
+  const data = getSessionData(sessionId);
+  if (data?.messages?.length) {
+    allSessionMessages = data.messages;
+  }
+  console.log(`[external-session] Restored state for session ${sessionId} (${allSessionMessages.length} messages)`);
+}
+
+/**
+ * Set IM stream callback for relaying CC events to Rust IM.
+ * Mirrors agent-session.ts setImStreamCallback pattern.
+ */
+export function setExternalImStreamCallback(cb: ImStreamCallback | null): void {
+  if (cb !== null && imStreamCallback !== null) {
+    imCallbackNulledDuringTurn = true;
+    try { imStreamCallback('error', '消息处理被新请求取代'); } catch { /* old stream may already be closed */ }
+  }
+  if (cb === null) {
+    imCallbackNulledDuringTurn = true;
+  } else {
+    imCallbackNulledDuringTurn = false;
+  }
+  imStreamCallback = cb;
 }
 
 // ─── Public API ───
@@ -57,6 +113,40 @@ export function shouldUseExternalRuntime(): boolean {
  */
 export function getActiveRuntimeType(): RuntimeType {
   return getCurrentRuntimeType();
+}
+
+/**
+ * Wait for external session to become idle (CC -p process exits after each turn).
+ * Returns true if completed within timeout, false otherwise.
+ */
+export async function waitForExternalSessionIdle(timeoutMs: number, pollMs = 500): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  // Brief initial delay to let sendExternalMessage → startExternalSession set isRunning.
+  // Without this, polling could see the pre-start state (!isRunning && !activeProcess) and
+  // return true immediately before the CC process has even started.
+  if (!isRunning && !activeProcess) {
+    await new Promise(r => setTimeout(r, 200));
+    if (!isRunning && !activeProcess) return true; // genuinely idle
+  }
+  while (Date.now() < deadline) {
+    if (!isRunning && !activeProcess) return true;
+    if (activeProcess?.exited) return true;
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+  return false;
+}
+
+/**
+ * Get the last assistant message text from the current session.
+ * Used by Cron handler to extract CC response after completion.
+ */
+export function getLastExternalAssistantText(): string {
+  for (let i = allSessionMessages.length - 1; i >= 0; i--) {
+    if (allSessionMessages[i].role === 'assistant') {
+      return allSessionMessages[i].content ?? '';
+    }
+  }
+  return '';
 }
 
 /**
@@ -106,6 +196,18 @@ export async function startExternalSession(options: {
     allSessionMessages.push(userMsg);
     currentAssistantText = '';
     currentTurnStartTime = Date.now();
+
+    // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
+    if (!options.resumeSessionId && !getSessionMetadata(options.sessionId)) {
+      const meta = createSessionMetadata(options.workspacePath);
+      meta.id = options.sessionId;
+      meta.runtime = getCurrentRuntimeType();
+      const trimmed = options.initialMessage.trim();
+      meta.title = trimmed.slice(0, 40);
+      if (meta.title.length < trimmed.length) meta.title += '...';
+      saveSessionMetadata(meta);
+      console.log(`[external-session] session ${options.sessionId} persisted to SessionStore`);
+    }
   }
 
   broadcast('chat:status', { sessionState: 'running' });
@@ -253,6 +355,8 @@ export async function stopExternalSession(): Promise<boolean> {
     activeProcess = null;
     activeRuntime = null;
     isRunning = false;
+    // Notify IM stream callback if active (prevents orphaned SSE streams on user-stop)
+    fireImCallback('error', 'Session stopped');
     broadcast('chat:status', { sessionState: 'idle' });
   }
 }
@@ -298,14 +402,17 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'text_delta':
       broadcast('chat:message-chunk', event.text);
       currentAssistantText += event.text;
+      fireImCallback('delta', event.text);
       break;
 
     case 'text_stop':
-      // Text block ended — no direct SSE mapping needed
+      // Text block ended
+      fireImCallback('block-end', '');
       break;
 
     case 'thinking_start':
       broadcast('chat:thinking-start', { index: event.index });
+      fireImCallback('activity', '');
       break;
 
     case 'thinking_delta':
@@ -324,6 +431,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         name: event.toolName,
         input: {},
       });
+      fireImCallback('activity', '');
       break;
 
     case 'tool_input_delta':
@@ -355,6 +463,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolUseId: event.toolUseId,
         input: event.input,
       });
+      fireImCallback('permission-request', JSON.stringify({
+        requestId: event.requestId,
+        toolName: event.toolName,
+        input: event.input,
+      }));
       break;
 
     case 'session_init':
@@ -378,6 +491,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       turnCompleted = true;
       broadcast('chat:message-complete', {});
       broadcast('chat:status', { sessionState: 'idle' });
+      fireImCallback('complete', '');
 
       // Persist assistant message to SessionStore
       if (currentAssistantText.trim()) {
@@ -413,9 +527,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         // Only broadcast if turn_complete didn't already
         if (!turnCompleted) {
           broadcast('chat:message-complete', {});
+          fireImCallback('complete', '');
         }
       } else {
         broadcast('chat:message-error', event.result || 'Session ended with error');
+        fireImCallback('error', event.result || 'Session ended with error');
       }
       broadcast('chat:status', { sessionState: 'idle' });
       // Clean up module state — prevents stuck sessions on CC crash

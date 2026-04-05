@@ -258,7 +258,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
       {/* Runtime (v0.1.59) */}
       <div className="flex items-center gap-3">
-        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">运行时</label>
+        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">运行环境</label>
         <div className="flex-1">
           <RuntimeSelector
             value={currentRuntime}
@@ -268,6 +268,15 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           />
         </div>
       </div>
+
+      {/* External runtime notice */}
+      {currentRuntime !== 'builtin' && (
+        <p className="rounded-lg bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--ink-muted)]">
+          当前 Agent 工作区的运行环境已设置为 <span className="font-medium text-[var(--ink-secondary)]">{currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'}</span>。
+          无论您在 MyAgents 客户端或通过绑定的聊天机器人与 AI 对话，均将直接调用本机已安装的 {currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'} 来执行，效果等同于在终端中使用。
+          因此供应商配置、支持的模型、MCP 工具、权限规则等均由 {currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'} 自身管理，如需调整请在其设置中修改。
+        </p>
+      )}
 
       {/* Model — hidden when external runtime (they manage their own models) */}
       {currentRuntime === 'builtin' && (

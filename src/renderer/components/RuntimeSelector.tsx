@@ -2,39 +2,45 @@
 // Appears in SimpleChatInput toolbar (left of permission mode) and WorkspaceBasicsSection
 
 import { memo, useCallback, useRef, useState } from 'react';
-import { ChevronUp } from 'lucide-react';
+import { ChevronUp, Settings } from 'lucide-react';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // Runtime types that have backend implementations (not just type definitions)
 const IMPLEMENTED_RUNTIMES = new Set<RuntimeType>(['builtin', 'claude-code']);
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
+// ─── Runtime icon assets ───
+import myagentsIcon from '@/assets/runtime-icons/myagents.png';
+import claudeCodeIcon from '@/assets/runtime-icons/claude-code.png';
+import codexIcon from '@/assets/runtime-icons/codex.png';
+
+const RUNTIME_ICON_MAP: Record<RuntimeType, string> = {
+  builtin: myagentsIcon,
+  'claude-code': claudeCodeIcon,
+  codex: codexIcon,
+};
+
 // ─── Runtime display metadata ───
 
 const RUNTIME_OPTIONS: {
   type: RuntimeType;
   name: string;
-  shortName: string;
 }[] = [
-    { type: 'builtin', name: 'MyAgents', shortName: 'MyAgents' },
-    { type: 'claude-code', name: 'Claude Code', shortName: 'CC' },
-    { type: 'codex', name: 'Codex', shortName: 'Codex' },
+    { type: 'builtin', name: 'MyAgents (Claude Agent SDK)' },
+    { type: 'claude-code', name: 'Claude Code CLI' },
+    { type: 'codex', name: 'Codex CLI' },
   ];
 
-// Simple text-based icons for each runtime type (avoids image dependency)
-// Uses design system tokens — accent-warm for MyAgents, accent-cool for external CLIs
 function RuntimeIcon({ type, size = 14 }: { type: RuntimeType; size?: number }) {
-  const style = { width: size, height: size, fontSize: size - 2, lineHeight: `${size}px` };
-  switch (type) {
-    case 'builtin':
-      return <span className="inline-flex items-center justify-center rounded text-[var(--accent-warm)]" style={style}>M</span>;
-    case 'claude-code':
-      return <span className="inline-flex items-center justify-center rounded text-[var(--accent-warm)]" style={style}>C</span>;
-    case 'codex':
-      return <span className="inline-flex items-center justify-center rounded text-[var(--accent-cool)]" style={style}>X</span>;
-    default:
-      return <span className="inline-flex items-center justify-center rounded" style={style}>?</span>;
-  }
+  return (
+    <img
+      src={RUNTIME_ICON_MAP[type]}
+      alt=""
+      className="shrink-0 rounded-[3px]"
+      style={{ width: size, height: size }}
+      draggable={false}
+    />
+  );
 }
 
 // ─── Component ───
@@ -44,6 +50,7 @@ interface RuntimeSelectorProps {
   detections: RuntimeDetections;
   onChange: (runtime: RuntimeType) => void;
   variant?: 'toolbar' | 'panel';
+  onOpenSettings?: () => void;
 }
 
 export default memo(function RuntimeSelector({
@@ -51,6 +58,7 @@ export default memo(function RuntimeSelector({
   detections,
   onChange,
   variant = 'toolbar',
+  onOpenSettings,
 }: RuntimeSelectorProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -92,7 +100,7 @@ export default memo(function RuntimeSelector({
         {open && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-            <div className="absolute left-0 bottom-full z-20 mb-1 w-56 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
+            <div className="absolute left-0 bottom-full z-20 mb-1 w-72 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
               {RUNTIME_OPTIONS.map((opt) => {
                 const detection = detections[opt.type];
                 const installed = opt.type === 'builtin' || (detection?.installed && IMPLEMENTED_RUNTIMES.has(opt.type));
@@ -102,24 +110,19 @@ export default memo(function RuntimeSelector({
                     type="button"
                     onClick={() => installed && handleSelect(opt.type)}
                     disabled={!installed}
-                    className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${installed
+                    className={`flex w-full items-center gap-3 px-3 py-2.5 text-left whitespace-nowrap transition-colors ${installed
                       ? opt.type === value
                         ? 'bg-[var(--accent-warm-subtle)]'
                         : 'hover:bg-[var(--hover-bg)]'
                       : 'opacity-40 cursor-not-allowed'
                       }`}
                   >
-                    <RuntimeIcon type={opt.type} size={16} />
-                    <div className="flex-1 min-w-0">
-                      <span className={`text-sm font-medium ${opt.type === value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                        {opt.name}
-                      </span>
-                    </div>
-                    {opt.type === value && (
-                      <span className="text-[var(--accent)] text-xs">✓</span>
-                    )}
+                    <RuntimeIcon type={opt.type} size={20} />
+                    <span className={`text-sm font-medium ${opt.type === value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
+                      {opt.name}
+                    </span>
                     {!installed && (
-                      <span className="text-[var(--ink-subtle)] text-xs">
+                      <span className="ml-auto text-[var(--ink-subtle)] text-xs">
                         {detection?.installed && !IMPLEMENTED_RUNTIMES.has(opt.type) ? '即将支持' : '未安装'}
                       </span>
                     )}
@@ -142,17 +145,29 @@ export default memo(function RuntimeSelector({
           e.stopPropagation();
           setOpen(!open);
         }}
-        className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+        className="flex items-center gap-1 rounded-lg px-1.5 py-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
         title={`Runtime: ${currentOption.name}`}
       >
-        <RuntimeIcon type={value} size={14} />
-        <span className="toolbar-label">{currentOption.shortName}</span>
-        <ChevronUp className="h-3 w-3" />
+        <RuntimeIcon type={value} size={16} />
+        <ChevronUp className={`h-2.5 w-2.5 transition-transform ${open ? '' : 'rotate-180'}`} />
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 bottom-full z-20 mb-1 w-56 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
+          <div className="absolute left-0 bottom-full z-20 mb-1 w-72 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl py-1">
+            <div className="flex items-center justify-between px-3 pb-0.5 pt-1.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">运行环境</span>
+              {onOpenSettings && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenSettings(); }}
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                >
+                  <Settings className="h-2.5 w-2.5" />
+                  设置
+                </button>
+              )}
+            </div>
             {RUNTIME_OPTIONS.map((opt) => {
               const detection = detections[opt.type];
               const installed = opt.type === 'builtin' || (detection?.installed && IMPLEMENTED_RUNTIMES.has(opt.type));
@@ -165,24 +180,19 @@ export default memo(function RuntimeSelector({
                     if (installed) handleSelect(opt.type);
                   }}
                   disabled={!installed}
-                  className={`flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors ${installed
+                  className={`flex w-full items-center gap-3 px-3 py-2.5 text-left whitespace-nowrap transition-colors ${installed
                     ? opt.type === value
                       ? 'bg-[var(--accent-warm-subtle)]'
                       : 'hover:bg-[var(--hover-bg)]'
                     : 'opacity-40 cursor-not-allowed'
                     }`}
                 >
-                  <RuntimeIcon type={opt.type} size={16} />
-                  <div className="flex-1 min-w-0">
-                    <span className={`text-sm font-medium ${opt.type === value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                      {opt.name}
-                    </span>
-                  </div>
-                  {opt.type === value && (
-                    <span className="text-[var(--accent)] text-xs">✓</span>
-                  )}
+                  <RuntimeIcon type={opt.type} size={20} />
+                  <span className={`text-sm font-medium ${opt.type === value ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
+                    {opt.name}
+                  </span>
                   {!installed && (
-                    <span className="text-[var(--ink-subtle)] text-xs">未安装</span>
+                    <span className="ml-auto text-[var(--ink-subtle)] text-xs">未安装</span>
                   )}
                 </button>
               );

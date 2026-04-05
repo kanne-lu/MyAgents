@@ -160,7 +160,6 @@ import { registerBridgeSeedFn } from './bridge-cache';
 import { generateTitle } from './title-generator';
 import {
   shouldUseExternalRuntime,
-  startExternalSession,
   sendExternalMessage,
   respondExternalPermission,
   stopExternalSession,
@@ -169,6 +168,9 @@ import {
   getRuntimePermissionModes,
   getActiveRuntimeType,
   restoreExternalSessionState,
+  setExternalImStreamCallback,
+  waitForExternalSessionIdle,
+  getLastExternalAssistantText,
 } from './runtimes/external-session';
 
 type ImagePayload = {
@@ -2017,59 +2019,82 @@ async function main() {
           // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
           const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
           console.log('[cron] execute-sync: about to enqueue user message');
-          // Cron tasks are unattended — bypass all permissions so tool requests
-          // (e.g. Bash) don't block forever waiting for human approval.
-          const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
-          console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
 
-          // Wait for session to become idle (execution complete)
-          // Timeout: 60 minutes max execution time (matches Rust cron_task timeout)
-          const completed = await waitForSessionIdle(3600000, 1000);
+          let textContent = '';
 
-          if (!completed) {
-            console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
-            // Clean up the cron message from the queue to prevent ghost execution
-            // after the original streaming task finishes.
-            // Use cancelQueueItem (not clearMessageQueue) to avoid removing unrelated
-            // user-queued messages that should still execute after the current task.
-            if (enqueueResult.queued && enqueueResult.queueId) {
-              cancelQueueItem(enqueueResult.queueId);
+          if (shouldUseExternalRuntime()) {
+            // ─── External Runtime (CC/Codex): cron task ───
+            const ccResult = await sendExternalMessage(
+              wrappedPrompt, undefined, undefined, undefined,
+              {
+                sessionId: getSessionId(),
+                workspacePath: agentDir,
+                scenario: { type: 'cron', taskId: taskId ?? 'unknown', intervalMinutes: intervalMinutes ?? 0, aiCanExit: aiCanExit ?? false },
+                permissionMode: 'fullAgency',
+                model: undefined,
+              },
+            );
+            if (!ccResult.queued) {
+              clearCronTaskContext(effectiveSessionId);
+              resetInteractionScenario();
+              return jsonResponse({ success: false, error: ccResult.error ?? 'Failed to start cron via external runtime' }, 503);
             }
-            clearCronTaskContext(effectiveSessionId);
-            resetInteractionScenario();
-            return jsonResponse({
-              success: false,
-              error: 'Execution timed out after 10 minutes'
-            }, 408); // Request Timeout
+
+            const completed = await waitForExternalSessionIdle(3600000, 1000);
+            if (!completed) {
+              console.warn(`[cron] execute-sync taskId=${taskId} timed out (external runtime)`);
+              clearCronTaskContext(effectiveSessionId);
+              resetInteractionScenario();
+              return jsonResponse({ success: false, error: 'Execution timed out' }, 408);
+            }
+
+            textContent = getLastExternalAssistantText();
+          } else {
+            // ─── Builtin Runtime: existing path ───
+            // Cron tasks are unattended — bypass all permissions so tool requests
+            // (e.g. Bash) don't block forever waiting for human approval.
+            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
+            console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
+
+            // Wait for session to become idle (execution complete)
+            // Timeout: 60 minutes max execution time (matches Rust cron_task timeout)
+            const completed = await waitForSessionIdle(3600000, 1000);
+
+            if (!completed) {
+              console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
+              if (enqueueResult.queued && enqueueResult.queueId) {
+                cancelQueueItem(enqueueResult.queueId);
+              }
+              clearCronTaskContext(effectiveSessionId);
+              resetInteractionScenario();
+              return jsonResponse({ success: false, error: 'Execution timed out' }, 408);
+            }
+
+            // Extract response text from builtin session messages
+            const messages = getMessages();
+            const lastAssistantMessage = [...messages].reverse().find(m => m.role === 'assistant');
+            if (lastAssistantMessage) {
+              if (typeof lastAssistantMessage.content === 'string') {
+                textContent = lastAssistantMessage.content;
+              } else if (Array.isArray(lastAssistantMessage.content)) {
+                textContent = lastAssistantMessage.content
+                  .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+                  .map(block => block.text)
+                  .join('\n');
+              }
+            }
           }
 
-          // Check if AI requested exit
+          // Check if AI requested exit (works for both runtimes — checks text patterns)
           let aiRequestedExit = false;
           let exitReason: string | undefined;
 
-          // Check messages for completion marker or exit_cron_task tool call
-          const messages = getMessages();
-          const lastAssistantMessage = [...messages].reverse().find(m => m.role === 'assistant');
-
-          let textContent = '';
-          if (lastAssistantMessage) {
-            if (typeof lastAssistantMessage.content === 'string') {
-              textContent = lastAssistantMessage.content;
-            } else if (Array.isArray(lastAssistantMessage.content)) {
-              textContent = lastAssistantMessage.content
-                .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
-                .map(block => block.text)
-                .join('\n');
-            }
-
-            // Check for completion marker
+          if (textContent) {
             const completionMatch = textContent.match(CRON_TASK_COMPLETE_PATTERN);
             if (completionMatch) {
               aiRequestedExit = true;
               exitReason = completionMatch[1].trim();
             }
-
-            // Also check for exit tool result in text
             if (textContent.includes(CRON_TASK_EXIT_TEXT)) {
               aiRequestedExit = true;
               const reasonMatch = textContent.match(CRON_TASK_EXIT_REASON_PATTERN);
@@ -4528,12 +4553,20 @@ async function main() {
       }
 
       // POST /api/permission/respond - Handle user permission decision
+      // Auto-routes to external runtime (CC/Codex) when active, otherwise uses builtin SDK handler.
       if (pathname === '/api/permission/respond' && request.method === 'POST') {
         try {
           const payload = await request.json() as {
             requestId: string;
             decision: 'deny' | 'allow_once' | 'always_allow';
           };
+
+          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
+            // External runtime: translate decision enum → boolean approved
+            const approved = payload.decision !== 'deny';
+            await respondExternalPermission(payload.requestId, approved);
+            return jsonResponse({ success: true });
+          }
 
           const { handlePermissionResponse } = await import('./agent-session');
           const success = handlePermissionResponse(payload.requestId, payload.decision);
@@ -6953,18 +6986,40 @@ async function main() {
             senderName: payload.senderName,
           };
 
-          // Use enqueueUserMessage — shares the same persistent generator as Desktop
-          const result = await enqueueUserMessage(
-            finalMessage,
-            payload.images, // forward image attachments from Telegram
-            (payload.permissionMode as PermissionMode) ?? 'plan',
-            payload.model ?? undefined, // model: per-message from Rust /model command
-            payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM (undefined = keep current)
-            metadata,
-          );
+          // ─── External Runtime branch (CC/Codex) ───
+          if (shouldUseExternalRuntime()) {
+            if (payload.images?.length) {
+              console.warn(`[im/chat] External runtime does not support image attachments, ${payload.images.length} image(s) dropped`);
+            }
+            const imSource = payload.source.split('_')[0];
+            const imSourceType = payload.source.includes('group') ? 'group' as const : 'private' as const;
+            const ccResult = await sendExternalMessage(
+              finalMessage, undefined, undefined, undefined,
+              {
+                sessionId: getSessionId(),
+                workspacePath: agentDir,
+                scenario: { type: 'agent-channel' as const, platform: imSource, sourceType: imSourceType, botName: payload.botName },
+                permissionMode: 'fullAgency',
+                model: undefined, // CC uses its own configured model
+              },
+            );
+            if (!ccResult.queued) {
+              return jsonResponse({ success: false, error: ccResult.error ?? 'Failed to send via external runtime' }, 503);
+            }
+          } else {
+            // Use enqueueUserMessage — shares the same persistent generator as Desktop
+            const result = await enqueueUserMessage(
+              finalMessage,
+              payload.images, // forward image attachments from Telegram
+              (payload.permissionMode as PermissionMode) ?? 'plan',
+              payload.model ?? undefined, // model: per-message from Rust /model command
+              payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM (undefined = keep current)
+              metadata,
+            );
 
-          if (result.error) {
-            return jsonResponse({ success: false, error: result.error }, 503);
+            if (result.error) {
+              return jsonResponse({ success: false, error: result.error }, 503);
+            }
           }
 
           // Mark session source (only on first IM message for this session)
@@ -7008,12 +7063,13 @@ async function main() {
                 if (closed) return;
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
               };
+              const clearCallback = shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback;
               const closeStream = () => {
                 if (closed) return;
                 closed = true;
                 if (heartbeatTimer) clearInterval(heartbeatTimer);
                 if (safetyTimer) clearTimeout(safetyTimer);
-                setImStreamCallback(null);
+                clearCallback(null);
                 try { controller.close(); } catch { /* already closed */ }
               };
 
@@ -7031,7 +7087,9 @@ async function main() {
                 }
               }, 3_600_000);
 
-              setImStreamCallback((event, data) => {
+              // Route IM stream callback to the appropriate runtime's relay
+              const setCallback = shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback;
+              setCallback((event, data) => {
                 if (event === 'permission-request') {
                   // Forward permission request to Rust for interactive approval
                   sendEvent({ type: 'permission-request', ...JSON.parse(data) });
@@ -7079,7 +7137,7 @@ async function main() {
               closed = true;
               if (heartbeatTimer) clearInterval(heartbeatTimer);
               if (safetyTimer) clearTimeout(safetyTimer);
-              setImStreamCallback(null);
+              (shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback)(null);
             }
           });
 
@@ -7194,44 +7252,66 @@ description: >
           // Heartbeat is unattended — bypass all permissions so tool use doesn't block.
           // Pass current model + providerEnv for consistency (undefined is also safe —
           // enqueueUserMessage treats it as "keep current provider" via pit-of-success semantics).
-          getAndClearLastAgentError(); // Clear stale errors from prior turns before injecting heartbeat
-          await enqueueUserMessage(
-            enrichedPrompt,
-            [],
-            'fullAgency',
-            getSessionModel(),
-            getSessionProviderEnv(),
-            {
-              source: payload.source as 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group',
-              sourceId: payload.sourceId,
-            },
-          );
-          messageEnqueued = true; // Events are now in the AI prompt — do NOT re-queue
-
-          // Wait for AI to finish (5 min timeout)
-          const completed = await waitForSessionIdle(300000, 500);
-
-          if (!completed) {
-            return jsonResponse({ status: 'error', text: 'Heartbeat timeout' });
-          }
-
-          // Get last assistant message
-          const messages = getMessages();
-          const lastMsg = [...messages].reverse().find(m => m.role === 'assistant');
-
-          if (!lastMsg) {
-            return jsonResponse({ status: 'silent', reason: 'no_response' });
-          }
-
-          // Extract text content from message
           let text = '';
-          if (typeof lastMsg.content === 'string') {
-            text = lastMsg.content;
-          } else if (Array.isArray(lastMsg.content)) {
-            text = lastMsg.content
-              .filter((b: { type: string }) => b.type === 'text')
-              .map((b: { type: string; text?: string }) => b.text || '')
-              .join('\n');
+
+          if (shouldUseExternalRuntime()) {
+            // ─── External Runtime (CC/Codex): heartbeat ───
+            const ccResult = await sendExternalMessage(
+              enrichedPrompt, undefined, undefined, undefined,
+              {
+                sessionId: getSessionId(),
+                workspacePath: agentDir,
+                scenario: { type: 'agent-channel', platform: payload.source?.split('_')[0] ?? 'unknown', sourceType: 'private' },
+                permissionMode: 'fullAgency',
+                model: undefined,
+              },
+            );
+            if (!ccResult.queued) {
+              return jsonResponse({ status: 'error', text: ccResult.error ?? 'External runtime failed' });
+            }
+            messageEnqueued = true;
+
+            const completed = await waitForExternalSessionIdle(300000, 500);
+            if (!completed) {
+              return jsonResponse({ status: 'error', text: 'Heartbeat timeout' });
+            }
+
+            text = getLastExternalAssistantText();
+          } else {
+            // ─── Builtin Runtime: existing path ───
+            getAndClearLastAgentError();
+            await enqueueUserMessage(
+              enrichedPrompt,
+              [],
+              'fullAgency',
+              getSessionModel(),
+              getSessionProviderEnv(),
+              {
+                source: payload.source as 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group',
+                sourceId: payload.sourceId,
+              },
+            );
+            messageEnqueued = true;
+
+            const completed = await waitForSessionIdle(300000, 500);
+            if (!completed) {
+              return jsonResponse({ status: 'error', text: 'Heartbeat timeout' });
+            }
+
+            const messages = getMessages();
+            const lastMsg = [...messages].reverse().find(m => m.role === 'assistant');
+            if (!lastMsg) {
+              return jsonResponse({ status: 'silent', reason: 'no_response' });
+            }
+
+            if (typeof lastMsg.content === 'string') {
+              text = lastMsg.content;
+            } else if (Array.isArray(lastMsg.content)) {
+              text = lastMsg.content
+                .filter((b: { type: string }) => b.type === 'text')
+                .map((b: { type: string; text?: string }) => b.text || '')
+                .join('\n');
+            }
           }
 
           // Guard: message was enqueued but assistant response is empty → AI failed to respond
@@ -7338,12 +7418,19 @@ description: >
       }
 
       // POST /api/im/permission-response — Handle IM user's permission decision (from approval card/button)
+      // Auto-routes to external runtime when active (same pattern as /api/permission/respond).
       if (pathname === '/api/im/permission-response' && request.method === 'POST') {
         try {
           const payload = await request.json() as {
             requestId: string;
             decision: 'deny' | 'allow_once' | 'always_allow';
           };
+
+          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
+            const approved = payload.decision !== 'deny';
+            await respondExternalPermission(payload.requestId, approved);
+            return jsonResponse({ success: true });
+          }
 
           const { handlePermissionResponse } = await import('./agent-session');
           const success = handlePermissionResponse(payload.requestId, payload.decision);

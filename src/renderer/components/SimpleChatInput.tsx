@@ -272,7 +272,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const currentModelName = isExternalRuntime
     ? (runtimeModels?.find(m => m.value === selectedModel)?.displayName
       ?? runtimeModels?.find(m => m.isDefault)?.displayName
-      ?? (runtime === 'claude-code' ? 'Sonnet' : '选择模型'))
+      ?? '默认')
     : (currentModelId
       ? (provider ? getModelDisplayName(provider, currentModelId) : currentModelId)
       : '选择模型');
@@ -1394,6 +1394,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   detections={runtimeDetections}
                   onChange={onRuntimeChange}
                   variant="toolbar"
+                  onOpenSettings={onOpenAgentSettings}
                 />
               )}
 

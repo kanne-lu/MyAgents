@@ -134,11 +134,10 @@ export function getRuntimePermissionModes(runtime: RuntimeType): RuntimePermissi
 // ─── Claude Code model list (canonical, shared) ───
 
 export const CC_MODELS: RuntimeModelInfo[] = [
-  { value: 'sonnet', displayName: 'Sonnet', isDefault: true },
+  { value: '', displayName: '默认', isDefault: true },
+  { value: 'sonnet', displayName: 'Sonnet' },
   { value: 'opus', displayName: 'Opus' },
   { value: 'haiku', displayName: 'Haiku' },
-  { value: 'sonnet[1m]', displayName: 'Sonnet (1M context)' },
-  { value: 'opus[1m]', displayName: 'Opus (1M context)' },
 ];
 
 /**

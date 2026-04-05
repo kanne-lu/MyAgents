@@ -42,6 +42,8 @@ import {
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+import { CC_MODELS, CC_PERMISSION_MODES } from '../../shared/types/runtime';
+import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
 
@@ -552,19 +554,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [workspaceConfigInitialTab, setWorkspaceConfigInitialTab] = useState<WorkspaceTab | undefined>();
 
   // Agent Runtime detection (v0.1.59)
-  const [runtimeDetections, setRuntimeDetections] = useState<import('../../shared/types/runtime').RuntimeDetections>({
+  const [runtimeDetections, setRuntimeDetections] = useState<RuntimeDetections>({
     'builtin': { installed: true },
     'claude-code': { installed: false },
     'codex': { installed: false },
   });
-  const currentRuntime = (currentAgent?.runtime as import('../../shared/types/runtime').RuntimeType) || 'builtin';
+  const currentRuntime = (currentAgent?.runtime as RuntimeType) || 'builtin';
 
   // Detect installed runtimes once on mount
   useEffect(() => {
     let cancelled = false;
     import('@tauri-apps/api/core').then(({ invoke }) => {
       invoke<Record<string, { installed: boolean; version?: string; path?: string }>>('cmd_detect_runtimes')
-        .then(detections => { if (!cancelled) setRuntimeDetections(detections as import('../../shared/types/runtime').RuntimeDetections); })
+        .then(detections => { if (!cancelled) setRuntimeDetections(detections as RuntimeDetections); })
         .catch(() => { /* detection failure is non-fatal */ });
     });
     return () => { cancelled = true; };
@@ -581,16 +583,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   );
 
   // CC models and permission modes — imported from shared canonical definitions
-  const ccModels = useMemo(() => {
-    // Dynamic import to avoid circular dependency at module level
-    const { CC_MODELS } = require('../../shared/types/runtime');
-    return CC_MODELS as import('../../shared/types/runtime').RuntimeModelInfo[];
-  }, []);
-
-  const ccPermissionModes = useMemo(() => {
-    const { CC_PERMISSION_MODES } = require('../../shared/types/runtime');
-    return CC_PERMISSION_MODES as import('../../shared/types/runtime').RuntimePermissionMode[];
-  }, []);
+  const ccModels = CC_MODELS;
+  const ccPermissionModes = CC_PERMISSION_MODES;
 
   // Effective model/permission based on runtime
   const effectiveModel = isExternalRuntime ? runtimeModel : selectedModel;
@@ -1495,9 +1489,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const handleOpenAgentSettings = useCallback(() => setShowWorkspaceConfig(true), []);
 
   // Runtime change — show confirm dialog, then open new Tab (v0.1.59)
-  const [pendingRuntimeChange, setPendingRuntimeChange] = useState<import('../../shared/types/runtime').RuntimeType | null>(null);
+  const [pendingRuntimeChange, setPendingRuntimeChange] = useState<RuntimeType | null>(null);
 
-  const handleRuntimeChange = useCallback((runtime: import('../../shared/types/runtime').RuntimeType) => {
+  const handleRuntimeChange = useCallback((runtime: RuntimeType) => {
     if (!currentAgent || runtime === currentRuntime) return;
     setPendingRuntimeChange(runtime);
   }, [currentAgent, currentRuntime]);

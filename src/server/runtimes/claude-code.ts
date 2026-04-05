@@ -202,19 +202,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       return modelCache.models;
     }
 
-    // Claude Code models are well-known aliases.
-    // Spawning a CC session just to query models is wasteful (consumes API tokens).
-    // Use static list matching CC's /model picker options.
-    const models: RuntimeModelInfo[] = [
-      { value: 'sonnet', displayName: 'Sonnet', isDefault: true },
-      { value: 'opus', displayName: 'Opus' },
-      { value: 'haiku', displayName: 'Haiku' },
-      { value: 'sonnet[1m]', displayName: 'Sonnet (1M context)' },
-      { value: 'opus[1m]', displayName: 'Opus (1M context)' },
-    ];
-
-    modelCache = { models, timestamp: Date.now() };
-    return models;
+    // Reuse canonical CC_MODELS from shared types (single source of truth)
+    const { CC_MODELS } = await import('../../shared/types/runtime');
+    modelCache = { models: CC_MODELS, timestamp: Date.now() };
+    return CC_MODELS;
   }
 
   getPermissionModes(): RuntimePermissionMode[] {

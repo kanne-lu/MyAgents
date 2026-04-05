@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { RuntimeType } from '../../shared/types/runtime';
 
 /**
  * Session statistics for tracking usage
@@ -39,6 +40,8 @@ export interface SessionMetadata {
         sourceSessionId: string;  // Source session's SDK session ID (for resume)
         messageUuid: string;      // Fork point: assistant message's sdkUuid (for resumeSessionAt)
     };
+    /** Which runtime created this session. Absent = 'builtin' (backward compatible) */
+    runtime?: RuntimeType;
 }
 
 /**

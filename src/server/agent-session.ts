@@ -29,6 +29,7 @@ import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
+import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -1141,6 +1142,8 @@ function schedulePreWarm(): void {
   if (preWarmTimer) clearTimeout(preWarmTimer);
   if (!agentDir) return;
   if (preWarmDisabled) return;
+  // External runtimes (CC/Codex) manage their own subprocess — skip builtin SDK pre-warm
+  if (isExternalRuntime(getCurrentRuntimeType())) return;
 
   // Stop retrying after consecutive failures to avoid infinite loop
   if (preWarmFailCount >= PRE_WARM_MAX_RETRIES) {
