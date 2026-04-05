@@ -31,6 +31,7 @@ import {
 import { setImCronContext } from './tools/im-cron-tool';
 import {
   handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
+  handleMcpOAuthDiscover, handleMcpOAuthStart, handleMcpOAuthStatus, handleMcpOAuthRevoke,
   handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
   handleAgentList, handleAgentEnable, handleAgentDisable, handleAgentSet,
   handleAgentChannelList, handleAgentChannelAdd, handleAgentChannelRemove,
@@ -167,6 +168,7 @@ import {
   queryRuntimeModels,
   getRuntimePermissionModes,
   getActiveRuntimeType,
+  restoreExternalSessionState,
 } from './runtimes/external-session';
 
 type ImagePayload = {
@@ -1029,6 +1031,10 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'mcp/disable') return handleMcpDisable(payload as Parameters<typeof handleMcpDisable>[0]);
   if (route === 'mcp/env') return handleMcpEnv(payload as Parameters<typeof handleMcpEnv>[0]);
   if (route === 'mcp/test') return await handleMcpTest(payload as Parameters<typeof handleMcpTest>[0]);
+  if (route === 'mcp/oauth/discover') return await handleMcpOAuthDiscover(payload as Parameters<typeof handleMcpOAuthDiscover>[0]);
+  if (route === 'mcp/oauth/start') return await handleMcpOAuthStart(payload as Parameters<typeof handleMcpOAuthStart>[0]);
+  if (route === 'mcp/oauth/status') return await handleMcpOAuthStatus(payload as Parameters<typeof handleMcpOAuthStatus>[0]);
+  if (route === 'mcp/oauth/revoke') return await handleMcpOAuthRevoke(payload as Parameters<typeof handleMcpOAuthRevoke>[0]);
 
   // Model commands
   if (route === 'model/list') return handleModelList();
@@ -1299,6 +1305,12 @@ async function main() {
 
   await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
   console.log('[startup] initializeAgent done');
+
+  // For external runtime sessions being resumed: restore module state so sendExternalMessage
+  // uses --resume instead of --session-id. Must happen after initializeAgent sets up the session.
+  if (shouldUseExternalRuntime() && initialSessionId) {
+    restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
+  }
 
   // Store sidecar port for OpenAI bridge loopback
   setSidecarPort(port);

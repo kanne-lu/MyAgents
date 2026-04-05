@@ -113,6 +113,8 @@ Examples:
   myagents mcp list
   myagents mcp add --id playwright --type stdio --command npx --args @playwright/mcp@latest
   myagents mcp enable playwright --scope both
+  myagents mcp oauth discover notion-mcp
+  myagents mcp oauth start notion-mcp
   myagents model list
   myagents model set-key deepseek sk-xxx
   myagents cron list
@@ -194,6 +196,10 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'plugin' && action === 'list') {
     printPluginList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'mcp' && action === 'oauth') {
+    printMcpOAuth(result.data as Record<string, unknown>);
     return;
   }
   if (group === 'version') {
@@ -335,6 +341,38 @@ function printPluginList(plugins: Array<Record<string, unknown>>): void {
   console.log(`\n${plugins.length} plugins installed`);
 }
 
+function printMcpOAuth(data: Record<string, unknown>): void {
+  if (!data) return;
+  const id = data.id ?? '';
+
+  // discover result
+  if (data.required !== undefined) {
+    console.log(`MCP: ${id}`);
+    console.log(`OAuth required: ${data.required ? 'yes' : 'no'}`);
+    if (data.supportsDynamicRegistration) console.log('Dynamic registration: supported (zero-config)');
+    if (data.scopes) console.log(`Scopes: ${(data.scopes as string[]).join(', ')}`);
+    return;
+  }
+
+  // status result
+  if (data.status !== undefined) {
+    const symbol = data.status === 'connected' ? '\u2713' : data.status === 'expired' ? '\u26A0' : '\u2717';
+    console.log(`${symbol} ${id}: ${data.status}`);
+    if (data.expiresAt) console.log(`  Expires: ${new Date(Number(data.expiresAt)).toLocaleString()}`);
+    if (data.scope) console.log(`  Scope: ${data.scope}`);
+    return;
+  }
+
+  // start result (authUrl present)
+  if (data.authUrl) {
+    console.log(`OAuth authorization URL:\n  ${data.authUrl}`);
+    return;
+  }
+
+  // Generic fallback (revoke, etc.)
+  console.log(`\u2713 ${id}: done`);
+}
+
 function printAgentRuntimeStatus(data: Record<string, unknown>): void {
   const entries = Object.values(data);
   if (entries.length === 0) {
@@ -437,6 +475,11 @@ function buildRoute(group: string, action: string, rest: string[]): string {
   if (group === 'agent' && action === 'runtime-status') {
     return 'agent/runtime-status';
   }
+  // MCP OAuth subcommands: mcp oauth discover/start/status/revoke
+  if (group === 'mcp' && action === 'oauth') {
+    const oauthAction = rest[0] || 'status';
+    return `mcp/oauth/${oauthAction}`;
+  }
   return `${group}/${action}`;
 }
 
@@ -466,6 +509,21 @@ function buildRequestBody(
     }
     if (action === 'remove' || action === 'enable' || action === 'disable' || action === 'test') {
       return { id: rest[0] || flags.id, scope: flags.scope };
+    }
+    if (action === 'oauth') {
+      const oauthAction = rest[0] || 'status'; // discover | start | status | revoke
+      const serverId = rest[1] || (flags.id as string);
+      if (!serverId) return { id: undefined }; // will trigger missing field error
+      if (oauthAction === 'start') {
+        return {
+          id: serverId,
+          clientId: flags.clientId,
+          clientSecret: flags.clientSecret,
+          scopes: flags.scopes,
+          callbackPort: flags.callbackPort ? Number(flags.callbackPort) : undefined,
+        };
+      }
+      return { id: serverId };
     }
     if (action === 'env') {
       const serverId = rest[0];

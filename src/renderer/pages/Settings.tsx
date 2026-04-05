@@ -1405,6 +1405,23 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             if (!editingMcpId) track('mcp_add', { type: mcpForm.type });
 
             toast.success(editingMcpId ? 'MCP 服务器已保存' : 'MCP 服务器已添加');
+
+            // Auto-probe OAuth for HTTP/SSE servers after adding/saving
+            if ((mcpForm.type === 'http' || mcpForm.type === 'sse') && mcpForm.url) {
+                const savedId = newServer.id;
+                const savedUrl = mcpForm.url;
+                // Run in background — don't block form close
+                handleMcpOAuthProbe(savedId, savedUrl).then(probe => {
+                    if (!probe) return; // Server doesn't require OAuth
+                    if (probe.supportsDynamicRegistration !== false) {
+                        // Auto-mode supported — start OAuth flow automatically
+                        handleMcpOAuthConnect(savedId, savedUrl);
+                    } else {
+                        // Manual config needed — inform user
+                        toast.info('此 MCP 需要 OAuth 授权，请在设置中配置 OAuth 参数');
+                    }
+                }).catch(() => { /* probe failed — server may not need OAuth */ });
+            }
         } catch {
             toast.error(editingMcpId ? '保存失败' : '添加失败');
         }
