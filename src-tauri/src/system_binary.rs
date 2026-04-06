@@ -35,6 +35,14 @@ const EXTRA_SEARCH_DIRS: &[&str] = &[
     "/bin",
 ];
 
+/// User-relative directories that require $HOME expansion at runtime.
+/// e.g., `~/.local/bin` is where `claude` (Claude Code CLI) is installed globally.
+#[cfg(not(target_os = "windows"))]
+const USER_RELATIVE_DIRS: &[&str] = &[
+    ".local/bin",          // Claude Code CLI global install (`claude`)
+    ".bun/bin",            // Bun global installs
+];
+
 /// Find a system binary by name, searching both the process PATH and common
 /// system directories that GUI apps may miss.
 ///
@@ -52,12 +60,26 @@ pub fn find(binary_name: &str) -> Option<PathBuf> {
 pub fn augmented_path() -> std::ffi::OsString {
     let system_path = std::env::var("PATH").unwrap_or_default();
     let sep = if cfg!(windows) { ";" } else { ":" };
-    let mut parts: Vec<&str> = system_path.split(sep).collect();
+    let mut parts: Vec<String> = system_path.split(sep).map(|s| s.to_string()).collect();
 
     #[cfg(not(target_os = "windows"))]
-    for dir in EXTRA_SEARCH_DIRS {
-        if !parts.contains(dir) {
-            parts.push(dir);
+    {
+        // Static system directories
+        for dir in EXTRA_SEARCH_DIRS {
+            let d = dir.to_string();
+            if !parts.contains(&d) {
+                parts.push(d);
+            }
+        }
+
+        // User-relative directories (expand $HOME)
+        if let Some(home) = dirs::home_dir() {
+            for rel in USER_RELATIVE_DIRS {
+                let abs = home.join(rel).to_string_lossy().to_string();
+                if !parts.contains(&abs) {
+                    parts.push(abs);
+                }
+            }
         }
     }
 

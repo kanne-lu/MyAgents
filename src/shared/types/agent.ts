@@ -8,6 +8,7 @@ import type {
   GroupPermission,
   GroupActivation,
 } from './im';
+import type { RuntimeType, RuntimeConfig } from './runtime';
 
 /**
  * Channel type — reuses ImPlatform, not redefined
@@ -111,6 +112,10 @@ export interface AgentConfig {
 
   // Active message routing
   lastActiveChannel?: LastActiveChannel;
+
+  // Agent Runtime (v0.1.59)
+  runtime?: RuntimeType;           // 'builtin' | 'claude-code' | 'codex', defaults to 'builtin'
+  runtimeConfig?: RuntimeConfig;   // Runtime-specific model/permission/args
 
   // Runtime
   setupCompleted?: boolean;

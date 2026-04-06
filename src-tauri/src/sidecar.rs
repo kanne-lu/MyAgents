@@ -1648,6 +1648,17 @@ pub fn start_tab_sidecar<R: Runtime>(
         cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
     }
 
+    // Inject runtime type for Agent Runtime selection (v0.1.59)
+    // Session sidecars resolve runtime from agent config; global sidecar always uses builtin.
+    // This env var is read by the Bun sidecar to decide which runtime to use.
+    if !is_global {
+        if let Some(ref dir) = agent_dir {
+            if let Some(runtime) = resolve_agent_runtime_from_config(dir) {
+                cmd.env("MYAGENTS_RUNTIME", &runtime);
+            }
+        }
+    }
+
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
@@ -2453,6 +2464,11 @@ fn create_new_session_sidecar<R: Runtime>(
     let mgmt_port = crate::management_api::get_management_port();
     if mgmt_port > 0 {
         cmd.env("MYAGENTS_MANAGEMENT_PORT", mgmt_port.to_string());
+    }
+
+    // Inject runtime type for Agent Runtime selection (v0.1.59)
+    if let Some(runtime) = resolve_agent_runtime_from_config(workspace_path) {
+        cmd.env("MYAGENTS_RUNTIME", &runtime);
     }
 
     cmd.stdout(Stdio::piped())
@@ -3720,5 +3736,36 @@ pub async fn cmd_propagate_proxy(
         fail
     );
     Ok(serde_json::json!({ "updated": ok, "failed": fail }))
+}
+
+// ─── Agent Runtime resolution (v0.1.59) ───
+
+/// Look up the `runtime` field from the agent config in ~/.myagents/config.json
+/// matching the given workspace path. Returns None for "builtin" (the default).
+fn resolve_agent_runtime_from_config(workspace_path: &std::path::Path) -> Option<String> {
+    let config_path = dirs::home_dir()?.join(".myagents").join("config.json");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let cfg: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    // Gate: multi-agent runtime feature must be explicitly enabled (developer mode)
+    // When off, all sidecars start as builtin regardless of agent config
+    if !cfg.get("multiAgentRuntime").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return None;
+    }
+
+    let workspace_str = workspace_path.to_string_lossy();
+    let agents = cfg.get("agents")?.as_array()?;
+    for agent in agents {
+        let agent_path = agent.get("workspacePath")?.as_str()?;
+        if agent_path == workspace_str.as_ref() {
+            if let Some(runtime) = agent.get("runtime").and_then(|v| v.as_str()) {
+                if runtime != "builtin" {
+                    return Some(runtime.to_string());
+                }
+            }
+            return None;
+        }
+    }
+    None
 }
 

@@ -29,6 +29,7 @@ import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
+import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -1141,6 +1142,8 @@ function schedulePreWarm(): void {
   if (preWarmTimer) clearTimeout(preWarmTimer);
   if (!agentDir) return;
   if (preWarmDisabled) return;
+  // External runtimes (CC/Codex) manage their own subprocess — skip builtin SDK pre-warm
+  if (isExternalRuntime(getCurrentRuntimeType())) return;
 
   // Stop retrying after consecutive failures to avoid infinite loop
   if (preWarmFailCount >= PRE_WARM_MAX_RETRIES) {
@@ -3680,8 +3683,18 @@ export async function initializeAgent(
     // is absent — yet the SDK session directory already exists on disk.
     const meta = getSessionMetadata(initialSessionId);
     if (meta) {
-      sessionRegistered = true;
-      console.log(`[agent] initializeAgent: will resume session ${initialSessionId} (sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+      // Cross-runtime guard: if session was created by an external runtime (Codex/CC)
+      // but current runtime is builtin, the SDK will NOT recognize this session ID.
+      // Attempting to resume would cause "No conversation found" → auto-reset → data loss.
+      // Instead, treat as NOT registered so the builtin SDK creates a fresh session on first message.
+      const isCrossRuntime = meta.runtime && meta.runtime !== 'builtin' && !isExternalRuntime(getCurrentRuntimeType());
+      if (isCrossRuntime) {
+        sessionRegistered = false;
+        console.log(`[agent] initializeAgent: cross-runtime session ${initialSessionId} (created by ${meta.runtime}), will NOT resume with builtin SDK`);
+      } else {
+        sessionRegistered = true;
+        console.log(`[agent] initializeAgent: will resume session ${initialSessionId} (sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+      }
     } else {
       sessionRegistered = false;
       console.log(`[agent] initializeAgent: will create new session ${initialSessionId}`);
@@ -3701,7 +3714,8 @@ export async function initializeAgent(
   // 2. messageSequence continues from last ID (prevents ID collision with disk messages)
   // 3. saveSessionMessages incremental append works correctly (messages.slice(existingCount))
   // Same pattern as switchToSession's message loading.
-  if (initialSessionId && sessionRegistered) {
+  // Also load for cross-runtime sessions (sessionRegistered=false but messages exist for display).
+  if (initialSessionId && getSessionMetadata(initialSessionId)) {
     const sessionData = getSessionData(initialSessionId);
     if (sessionData?.messages?.length) {
       loadMessagesFromStorage(sessionData.messages);

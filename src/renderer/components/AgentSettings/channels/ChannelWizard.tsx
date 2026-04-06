@@ -555,7 +555,7 @@ export default function ChannelWizard({
             if (isMountedRef.current) {
                 track('agent_channel_create', { platform });
                 toastRef.current.success('Channel 启动成功，请完成用户绑定');
-                setStep(3); // Advance to binding step
+                setStep(bindingStep); // Advance to binding step
             }
         } catch (err) {
             if (isMountedRef.current) {
@@ -1603,7 +1603,8 @@ export default function ChannelWizard({
             )}
 
             {/* OpenClaw Step 2: Setup guide (for promoted plugins like feishu) + Confirm + Start */}
-            {isOpenClaw && step === 2 && (
+            {/* Skip for QR login plugins — they go directly from scan (step 1) to binding (step 2) */}
+            {isOpenClaw && !isQrLogin && step === 2 && (
                 <div className="space-y-6">
                     {/* Action bar at top */}
                     {renderActionBar({

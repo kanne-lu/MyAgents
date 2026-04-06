@@ -74,7 +74,7 @@ interface TabContentProps {
   onUpdateTitle: (tabId: string, title: string) => void;
   onUpdateUnread: (tabId: string, hasUnread: boolean) => void;
   onRenameSession: (tabId: string, newTitle: string) => void;
-  onForkSession: (tabId: string, newSessionId: string, agentDir: string, title: string) => void;
+  onForkSession: (tabId: string, newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
   onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
   onClearInitialMessage: (tabId: string) => void;
   onClearJoinedExistingSidecar: (tabId: string) => void;
@@ -143,7 +143,7 @@ const MemoizedTabContent = memo(function TabContent({
             onJoinedExistingSidecarHandled={() => onClearJoinedExistingSidecar(tab.id)}
             sessionTitle={tab.title}
             onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
-            onForkSession={(newSessionId: string, agentDir: string, title: string) => onForkSession(tab.id, newSessionId, agentDir, title)}
+            onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
           />
         </TabProvider>
       )}
@@ -975,7 +975,7 @@ export default function App() {
    * Handle fork session: create a new tab for the forked session.
    * Called from Chat after the backend has created the forked session metadata + messages.
    */
-  const handleForkSession = useCallback(async (_tabId: string, newSessionId: string, forkAgentDir: string, title: string) => {
+  const handleForkSession = useCallback(async (_tabId: string, newSessionId: string, forkAgentDir: string, title: string, initialMessage?: string) => {
     // Check tab limit
     if (tabsRef.current.length >= MAX_TABS) {
       toastRef.current.error('标签页已达上限，请关闭一个后重试');
@@ -988,6 +988,7 @@ export default function App() {
       sessionId: newSessionId,
       view: 'chat',
       title,
+      ...(initialMessage ? { initialMessage: { text: initialMessage } } : {}),
     };
 
     setTabs(prev => [...prev, newTab]);

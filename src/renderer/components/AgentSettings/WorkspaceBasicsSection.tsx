@@ -11,6 +11,10 @@ import { PERMISSION_MODES, type Project, type McpServerDefinition } from '@/conf
 import type { AgentConfig } from '../../../shared/types/agent';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
+import RuntimeSelector from '../RuntimeSelector';
+import type { RuntimeType, RuntimeDetections } from '../../../shared/types/runtime';
+import { invoke } from '@tauri-apps/api/core';
+import { useToast } from '@/components/Toast';
 
 interface WorkspaceBasicsSectionProps {
   project: Project | undefined;
@@ -19,7 +23,8 @@ interface WorkspaceBasicsSectionProps {
 }
 
 export default function WorkspaceBasicsSection({ project, agent, agentDir }: WorkspaceBasicsSectionProps) {
-  const { providers, patchProject, refreshConfig } = useConfig();
+  const { config, providers, patchProject, refreshConfig } = useConfig();
+  const toast = useToast();
   // Derive canonical name from project — use as initializer key to reset input
   const canonicalName = useMemo(
     () => project?.displayName || project?.name || '',
@@ -31,6 +36,17 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
   const [globalEnabledMcp, setGlobalEnabledMcp] = useState<string[]>([]);
   const isMountedRef = useRef(true);
 
+  // Runtime detection (v0.1.59)
+  const [runtimeDetections, setRuntimeDetections] = useState<RuntimeDetections>({
+    'builtin': { installed: true },
+    'claude-code': { installed: false },
+    'codex': { installed: false },
+  });
+  // When multiAgentRuntime is off, treat as builtin regardless of agent config (方案 C)
+  const currentRuntime: RuntimeType = config.multiAgentRuntime
+    ? ((agent?.runtime as RuntimeType) || 'builtin')
+    : 'builtin';
+
   // Sync name when canonical name changes externally
   useEffect(() => {
     setName(canonicalName);
@@ -40,6 +56,32 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     isMountedRef.current = true;
     return () => { isMountedRef.current = false; };
   }, []);
+
+  // Detect installed runtimes (v0.1.59)
+  useEffect(() => {
+    void (async () => {
+      try {
+        const detections = await invoke<Record<string, { installed: boolean; version?: string; path?: string }>>('cmd_detect_runtimes');
+        if (isMountedRef.current) {
+          setRuntimeDetections(detections as RuntimeDetections);
+        }
+      } catch (err) {
+        console.warn('[runtime] Failed to detect runtimes:', err);
+      }
+    })();
+  }, []);
+
+  const handleRuntimeChange = useCallback(async (runtime: RuntimeType) => {
+    if (!agent) return;
+    try {
+      await patchAgentConfig(agent.id, { runtime });
+      refreshConfig();
+      const label = runtime === 'claude-code' ? 'Claude Code' : runtime === 'codex' ? 'Codex' : 'MyAgents';
+      toast.success(`已切换为 ${label}，新开 Tab 后生效`);
+    } catch (err) {
+      console.error('[runtime] Failed to save runtime:', err);
+    }
+  }, [agent, refreshConfig, toast]);
 
   // Load globally available MCP servers
   useEffect(() => {
@@ -221,7 +263,34 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
         </span>
       </div>
 
-      {/* Model */}
+      {/* Runtime (v0.1.59) — only visible when multi-agent runtime is enabled in developer settings */}
+      {config.multiAgentRuntime && (
+        <>
+          <div className="flex items-center gap-3">
+            <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">运行环境</label>
+            <div className="flex-1">
+              <RuntimeSelector
+                value={currentRuntime}
+                detections={runtimeDetections}
+                onChange={handleRuntimeChange}
+                variant="panel"
+              />
+            </div>
+          </div>
+
+          {/* External runtime notice */}
+          {currentRuntime !== 'builtin' && (
+            <p className="rounded-lg bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--ink-muted)]">
+              当前 Agent 工作区的运行环境已设置为 <span className="font-medium text-[var(--ink-secondary)]">{currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'}</span>。
+              无论您在 MyAgents 客户端或通过绑定的聊天机器人与 AI 对话，均将直接调用本机已安装的 {currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'} 来执行，效果等同于在终端中使用。
+              因此供应商配置、支持的模型、MCP 工具、权限规则等均由 {currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'} 自身管理，如需调整请在其设置中修改。
+            </p>
+          )}
+        </>
+      )}
+
+      {/* Model — hidden when external runtime (they manage their own models) */}
+      {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
         <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">模型</label>
         <button
@@ -258,8 +327,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           </>
         )}
       </div>
+      )}
 
-      {/* Permission */}
+      {/* Permission — hidden when external runtime */}
+      {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
         <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">权限</label>
         <button
@@ -295,8 +366,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           </>
         )}
       </div>
+      )}
 
-      {/* MCP Tools */}
+      {/* MCP Tools — hidden when external runtime */}
+      {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
         <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">工具</label>
         <button
@@ -343,6 +416,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           </>
         )}
       </div>
+      )}
     </div>
   );
 }

@@ -765,7 +765,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "1";
+const CLI_VERSION: &str = "2";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
@@ -1126,4 +1126,65 @@ pub async fn cmd_fetch_provider_models(
 
     ulog_info!("[model-discovery] Success from {}", url);
     Ok(result)
+}
+
+// ============= Agent Runtime Detection (v0.1.59) =============
+
+/// Runtime detection result for a single CLI
+#[derive(serde::Serialize, Clone)]
+pub struct RuntimeDetectionResult {
+    pub installed: bool,
+    pub version: Option<String>,
+    pub path: Option<String>,
+}
+
+/// Detect whether external Agent Runtime CLIs are installed
+#[tauri::command]
+pub fn cmd_detect_runtimes() -> HashMap<String, RuntimeDetectionResult> {
+    let mut results = HashMap::new();
+
+    // Builtin is always available
+    results.insert("builtin".to_string(), RuntimeDetectionResult {
+        installed: true,
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        path: None,
+    });
+
+    // Claude Code CLI
+    results.insert("claude-code".to_string(), detect_cli("claude"));
+
+    // Codex CLI
+    results.insert("codex".to_string(), detect_cli("codex"));
+
+    results
+}
+
+fn detect_cli(binary_name: &str) -> RuntimeDetectionResult {
+    match crate::system_binary::find(binary_name) {
+        Some(path) => {
+            // Try to get version — MUST use process_cmd::new() to prevent Windows console flash
+            let version = crate::process_cmd::new(&path)
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|output| {
+                    if output.status.success() {
+                        String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+                    } else {
+                        None
+                    }
+                });
+
+            RuntimeDetectionResult {
+                installed: true,
+                version,
+                path: Some(path.to_string_lossy().to_string()),
+            }
+        }
+        None => RuntimeDetectionResult {
+            installed: false,
+            version: None,
+            path: None,
+        },
+    }
 }

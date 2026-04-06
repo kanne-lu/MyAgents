@@ -40,6 +40,7 @@ export interface TabState {
     isLoading: boolean;
     isSessionLoading: boolean;  // true while loadSession REST API is in-flight
     sessionState: SessionState;
+    sessionRuntime: string | null;  // Runtime that created this session (null = builtin)
 
     // Agent info
     logs: string[];
@@ -138,6 +139,7 @@ const defaultContextValue: TabContextValue = {
     isLoading: false,
     isSessionLoading: false,
     sessionState: 'idle',
+    sessionRuntime: null,
     logs: [],
     unifiedLogs: [],
     systemInitInfo: null,

@@ -272,6 +272,14 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
     const [showCustomForm, setShowCustomForm] = useState(false);
     const [customForm, setCustomForm] = useState<CustomProviderForm>(EMPTY_CUSTOM_FORM);
+    const customModelInputRef = useRef<HTMLInputElement>(null);
+    const addCustomModelFromInput = () => {
+        const val = customModelInputRef.current?.value.trim();
+        if (val && !customForm.models.includes(val)) {
+            setCustomForm((p) => ({ ...p, models: [...p.models, val] }));
+            if (customModelInputRef.current) customModelInputRef.current.value = '';
+        }
+    };
     // Provider edit/manage panel state
     const [editingProvider, setEditingProvider] = useState<ProviderEditForm | null>(null);
     // 删除确认弹窗状态
@@ -1405,6 +1413,23 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
             if (!editingMcpId) track('mcp_add', { type: mcpForm.type });
 
             toast.success(editingMcpId ? 'MCP 服务器已保存' : 'MCP 服务器已添加');
+
+            // Auto-probe OAuth for HTTP/SSE servers after adding/saving
+            if ((mcpForm.type === 'http' || mcpForm.type === 'sse') && mcpForm.url) {
+                const savedId = newServer.id;
+                const savedUrl = mcpForm.url;
+                // Run in background — don't block form close
+                handleMcpOAuthProbe(savedId, savedUrl).then(probe => {
+                    if (!probe) return; // Server doesn't require OAuth
+                    if (probe.supportsDynamicRegistration !== false) {
+                        // Auto-mode supported — start OAuth flow automatically
+                        handleMcpOAuthConnect(savedId, savedUrl);
+                    } else {
+                        // Manual config needed — inform user
+                        toast.info('此 MCP 需要 OAuth 授权，请在设置中配置 OAuth 参数');
+                    }
+                }).catch(() => { /* probe failed — server may not need OAuth */ });
+            }
         } catch {
             toast.error(editingMcpId ? '保存失败' : '添加失败');
         }
@@ -2996,6 +3021,30 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                     <p className="text-center text-[14px] font-medium italic tracking-wide text-[var(--ink)]">
                                         你有一个想法，And it&apos;s done.
                                     </p>
+                                </div>
+                            </div>
+
+                            {/* 实验室 */}
+                            <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                <h3 className="text-base font-medium text-[var(--ink)]">实验室</h3>
+
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">更多 Agent Runtime</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            启用后可在输入框和Agent设置中选择外部 Runtime 例如 Claude Code CLI、Codex CLI。若关闭，则恢复使用内置 Runtime。
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => updateConfig({ multiAgentRuntime: !config.multiAgentRuntime })}
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.multiAgentRuntime ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                            }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.multiAgentRuntime ? 'translate-x-5' : 'translate-x-0'
+                                                }`}
+                                        />
+                                    </button>
                                 </div>
                             </div>
 
@@ -5014,20 +5063,24 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 )}
                                 <div className="flex gap-2">
                                     <input
+                                        ref={customModelInputRef}
                                         type="text"
                                         placeholder="输入模型 ID，回车添加"
                                         className="flex-1 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-2.5 text-sm transition-colors placeholder:text-[var(--ink-muted)] focus:border-[var(--focus-border)] focus:outline-none"
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
                                                 e.preventDefault();
-                                                const val = (e.target as HTMLInputElement).value.trim();
-                                                if (val && !customForm.models.includes(val)) {
-                                                    setCustomForm((p) => ({ ...p, models: [...p.models, val] }));
-                                                    (e.target as HTMLInputElement).value = '';
-                                                }
+                                                addCustomModelFromInput();
                                             }
                                         }}
                                     />
+                                    <button
+                                        type="button"
+                                        onClick={addCustomModelFromInput}
+                                        className="rounded-lg bg-[var(--paper-inset)] px-2.5 py-1.5 text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                                    >
+                                        <Plus className="h-4 w-4" />
+                                    </button>
                                 </div>
                             </div>
 

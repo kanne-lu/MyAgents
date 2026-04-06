@@ -835,6 +835,12 @@ pub struct AgentConfigRust {
     #[serde(default)]
     pub last_active_channel: Option<LastActiveChannel>,
 
+    // Agent Runtime (v0.1.59) — 'builtin' | 'claude-code' | 'codex'
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub runtime_config: Option<serde_json::Value>,
+
     #[serde(default)]
     pub setup_completed: Option<bool>,
 }

@@ -338,10 +338,18 @@ export async function handleMcpTest(payload: { id: string }): Promise<AdminRespo
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 15000);
+
+      // Inject stored OAuth token if no explicit Authorization header
+      const { resolveAuthHeaders } = await import('./mcp-oauth');
+      const configHeaders = server.headers || {};
+      const hasExplicitAuth = Object.keys(configHeaders).some(k => k.toLowerCase() === 'authorization');
+      const oauthHeaders = hasExplicitAuth ? {} : await resolveAuthHeaders(server.id);
+
       const headers: Record<string, string> = {
         'Accept': server.type === 'sse' ? 'text/event-stream' : 'application/json, text/event-stream',
         'Accept-Encoding': 'identity',
-        ...(server.headers || {}),
+        ...configHeaders,
+        ...oauthHeaders,
       };
 
       const resp = server.type === 'http'
@@ -356,7 +364,10 @@ export async function handleMcpTest(payload: { id: string }): Promise<AdminRespo
       clearTimeout(timeout);
 
       if (resp.status === 401 || resp.status === 403) {
-        return { success: false, error: `Authentication failed (HTTP ${resp.status}). Check headers or API key.` };
+        const hint = oauthHeaders['Authorization']
+          ? 'OAuth token may be expired or revoked. Try re-authorizing.'
+          : 'This server may require OAuth authorization. Use Settings UI or `myagents mcp oauth start`.';
+        return { success: false, error: `Authentication failed (HTTP ${resp.status}). ${hint}` };
       }
       if (!resp.ok) {
         return { success: false, error: `Server returned HTTP ${resp.status}` };
@@ -391,6 +402,98 @@ export async function handleMcpTest(payload: { id: string }): Promise<AdminRespo
   }
 
   return { success: true, data: { id, type: server.type }, hint: 'Configuration valid.' };
+}
+
+// ---------------------------------------------------------------------------
+// MCP OAuth Handlers (CLI-facing wrappers around mcp-oauth module)
+// ---------------------------------------------------------------------------
+
+/** Resolve MCP server URL from config by ID */
+function getMcpServerUrl(id: string): { url: string } | { error: string } {
+  const allServers = getAllMcpServers();
+  const server = allServers.find(s => s.id === id);
+  if (!server) return { error: `MCP server '${id}' not found` };
+  if (server.type !== 'sse' && server.type !== 'http') {
+    return { error: `MCP server '${id}' is type '${server.type}' — OAuth only applies to sse/http servers.` };
+  }
+  if (!server.url) return { error: `MCP server '${id}' has no URL configured` };
+  return { url: server.url };
+}
+
+export async function handleMcpOAuthDiscover(payload: { id: string }): Promise<AdminResponse> {
+  const { id } = payload;
+  if (!id) return { success: false, error: 'Missing required field: id' };
+  const resolved = getMcpServerUrl(id);
+  if ('error' in resolved) return { success: false, error: resolved.error };
+
+  try {
+    const { probeOAuthRequirement } = await import('./mcp-oauth');
+    const result = await probeOAuthRequirement(id, resolved.url, true);
+    return { success: true, data: { id, ...result } };
+  } catch (err) {
+    return { success: false, error: `OAuth discovery failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+export async function handleMcpOAuthStart(payload: {
+  id: string;
+  clientId?: string;
+  clientSecret?: string;
+  scopes?: string;
+  callbackPort?: number;
+}): Promise<AdminResponse> {
+  const { id } = payload;
+  if (!id) return { success: false, error: 'Missing required field: id' };
+  const resolved = getMcpServerUrl(id);
+  if ('error' in resolved) return { success: false, error: resolved.error };
+
+  try {
+    const { authorizeServer } = await import('./mcp-oauth');
+    const manualConfig = payload.clientId ? {
+      clientId: payload.clientId,
+      clientSecret: payload.clientSecret,
+      scopes: payload.scopes ? payload.scopes.split(/[,\s]+/).filter(Boolean) : undefined,
+      callbackPort: payload.callbackPort,
+    } : undefined;
+
+    const { authUrl, waitForCompletion } = await authorizeServer(id, resolved.url, manualConfig);
+
+    // Fire-and-forget: log completion but don't block the HTTP response.
+    // CLI should poll `mcp oauth status <id>` to check completion.
+    waitForCompletion.then(ok => {
+      console.log(`[admin] OAuth ${ok ? 'completed' : 'failed/cancelled'} for MCP ${id}`);
+    });
+
+    return { success: true, data: { id, authUrl }, hint: 'Authorization started. Complete in browser, then check with `mcp oauth status`.' };
+  } catch (err) {
+    return { success: false, error: `OAuth start failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+export async function handleMcpOAuthStatus(payload: { id: string }): Promise<AdminResponse> {
+  const { id } = payload;
+  if (!id) return { success: false, error: 'Missing required field: id' };
+
+  try {
+    const { getOAuthStatus } = await import('./mcp-oauth');
+    const result = getOAuthStatus(id);
+    return { success: true, data: { id, ...result } };
+  } catch (err) {
+    return { success: false, error: `OAuth status check failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+export async function handleMcpOAuthRevoke(payload: { id: string }): Promise<AdminResponse> {
+  const { id } = payload;
+  if (!id) return { success: false, error: 'Missing required field: id' };
+
+  try {
+    const { revokeAuthorization } = await import('./mcp-oauth');
+    await revokeAuthorization(id);
+    return { success: true, data: { id }, hint: 'OAuth authorization revoked.' };
+  } catch (err) {
+    return { success: false, error: `OAuth revoke failed: ${err instanceof Error ? err.message : String(err)}` };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -813,6 +916,7 @@ Commands:
   disable <id>             Disable an MCP server
   test <id>                Validate MCP server connectivity
   env <id> <action>        Manage environment variables
+  oauth <action> <id>      Manage OAuth for HTTP/SSE servers
 
 Options for 'add':
   --id          Server ID (required)
@@ -822,6 +926,7 @@ Options for 'add':
   --args        Arguments (repeatable)
   --url         Endpoint URL (for sse/http)
   --env         KEY=VALUE (repeatable)
+  --headers     KEY=VALUE (repeatable, for sse/http)
 
 Options for 'enable' / 'disable':
   --scope       global | project | both (default: both)
@@ -829,7 +934,19 @@ Options for 'enable' / 'disable':
 Options for 'env':
   set KEY=VALUE [KEY2=VALUE2 ...]
   get
-  delete KEY [KEY2 ...]`,
+  delete KEY [KEY2 ...]
+
+OAuth subcommands:
+  oauth discover <id>      Probe server for OAuth requirements
+  oauth start <id>         Start OAuth authorization (opens browser)
+  oauth status <id>        Check OAuth status
+  oauth revoke <id>        Revoke stored OAuth token
+
+Options for 'oauth start' (manual mode):
+  --client-id      OAuth client ID (skip for auto mode)
+  --client-secret  OAuth client secret
+  --scopes         Scopes (comma or space separated)
+  --callback-port  Local callback port`,
 
   model: `myagents model — Manage model providers
 

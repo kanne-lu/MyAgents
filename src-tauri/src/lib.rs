@@ -168,6 +168,8 @@ pub fn run() {
             commands::cmd_initialize_bundled_workspace,
             commands::cmd_create_bot_workspace,
             commands::cmd_remove_bot_workspace,
+            // Agent Runtime detection (v0.1.59)
+            commands::cmd_detect_runtimes,
             // Workspace template commands
             commands::cmd_create_workspace_from_template,
             commands::cmd_create_workspace_from_bundled_template,

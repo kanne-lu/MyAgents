@@ -42,6 +42,8 @@ import {
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
+import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
 
@@ -120,7 +122,7 @@ interface ChatProps {
   /** Called when user renames the session */
   onRenameSession?: (newTitle: string) => void;
   /** Called when user forks session at a specific assistant message — App creates new tab */
-  onForkSession?: (newSessionId: string, agentDir: string, title: string) => void;
+  onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
 }
 
 export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
@@ -135,6 +137,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     isLoading,
     isSessionLoading,
     sessionState,
+    sessionRuntime,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
     agentError,
@@ -550,6 +553,64 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [globalSkillFolderNames, setGlobalSkillFolderNames] = useState<Set<string>>(new Set());
   // Initial tab for workspace config panel (set when opening from capabilities panel)
   const [workspaceConfigInitialTab, setWorkspaceConfigInitialTab] = useState<WorkspaceTab | undefined>();
+
+  // Agent Runtime detection (v0.1.59)
+  const [runtimeDetections, setRuntimeDetections] = useState<RuntimeDetections>({
+    'builtin': { installed: true },
+    'claude-code': { installed: false },
+    'codex': { installed: false },
+  });
+  // Gate: when multiAgentRuntime is off, treat everything as builtin regardless of agent config.
+  // This gate is applied at the definition of currentRuntime itself so ALL downstream
+  // derivations (runtimePermissionModes, runtimeModels, etc.) are automatically safe.
+  const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
+  const currentRuntime = multiAgentRuntimeEnabled
+    ? ((currentAgent?.runtime as RuntimeType) || 'builtin')
+    : 'builtin';
+  const isExternalRuntime = currentRuntime !== 'builtin';
+
+  // Detect installed runtimes once on mount
+  useEffect(() => {
+    let cancelled = false;
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      invoke<Record<string, { installed: boolean; version?: string; path?: string }>>('cmd_detect_runtimes')
+        .then(detections => { if (!cancelled) setRuntimeDetections(detections as RuntimeDetections); })
+        .catch(() => { /* detection failure is non-fatal */ });
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const [runtimeModel, setRuntimeModel] = useState<string | undefined>(
+    (currentAgent?.runtimeConfig as { model?: string } | undefined)?.model
+  );
+  const [runtimePermissionMode, setRuntimePermissionMode] = useState<string>(
+    (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode
+    || (currentRuntime === 'claude-code' ? 'default' : 'full-auto')
+  );
+
+  // Runtime-specific models and permission modes
+  const runtimePermissionModes = currentRuntime === 'claude-code' ? CC_PERMISSION_MODES
+    : currentRuntime === 'codex' ? CODEX_PERMISSION_MODES : undefined;
+
+  // Codex models are dynamic (fetched from app-server); CC models are static
+  const [codexModels, setCodexModels] = useState<typeof CC_MODELS>([]);
+  useEffect(() => {
+    if (!multiAgentRuntimeEnabled || currentRuntime !== 'codex') return;
+    let cancelled = false;
+    apiGet('/api/runtime/models?type=codex').then((res: unknown) => {
+      const data = res as { models?: typeof CC_MODELS } | undefined;
+      if (!cancelled && data?.models?.length) setCodexModels(data.models);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
+
+  const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
+    : currentRuntime === 'codex' ? codexModels : undefined;
+
+  // Effective model/permission based on runtime
+  const effectiveModel = isExternalRuntime ? runtimeModel : selectedModel;
+  const effectivePermissionMode = isExternalRuntime
+    ? runtimePermissionMode as PermissionMode
+    : permissionMode;
 
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
@@ -1313,6 +1374,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
   }, [currentProject?.id, patchProject]);
 
+  // Cross-runtime session detection: session was created by external runtime, but current is builtin.
+  // User should be warned before sending new messages (which would use a different runtime).
+  const isCrossRuntimeSession = !isExternalRuntime && !!sessionRuntime && sessionRuntime !== 'builtin';
+  const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
+    text: string;
+    images: ImageAttachment[];
+  } | null>(null);
+
   // PERFORMANCE: text is now passed from SimpleChatInput (which manages its own state)
   // This avoids re-rendering Chat on every keystroke.
   // Returns false to signal SimpleChatInput NOT to clear the input (e.g., on rejection).
@@ -1320,6 +1389,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Must have content and not be in stopping state
     if ((!text && (!images || images.length === 0)) || sessionState === 'stopping') {
       return false;
+    }
+
+    // Cross-runtime guard: session was created by external runtime (Codex/CC) but
+    // current runtime is builtin. Show confirm dialog instead of sending directly.
+    if (isCrossRuntimeSession) {
+      setPendingCrossRuntimeMessage({ text, images: images ?? [] });
+      return false;  // Signal SimpleChatInput NOT to clear the input
     }
 
     // Queue limit: max 5 queued messages
@@ -1387,7 +1463,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
       // sendMessage is fire-and-forget (returns true immediately for optimistic UI).
       // Error handling is done inside sendMessage's .then()/.catch() in TabProvider.
-      await sendMessage(text, images, permissionMode, selectedModel, providerEnv);
+      // Use effective model/permission (runtime-aware) — not the builtin values
+      await sendMessage(text, images, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv);
     } catch (error) {
       const errorMessage = {
         id: `error-${crypto.randomUUID()}`,
@@ -1403,7 +1480,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, permissionMode, selectedModel, scrollToBottom]);
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, isCrossRuntimeSession, scrollToBottom]);
 
   // Ref-stabilize handleSendMessage for handleRetry (avoids frequent re-creation)
   const handleSendMessageRef = useRef(handleSendMessage);
@@ -1445,6 +1522,55 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [stopResponse]);
 
   const handleOpenAgentSettings = useCallback(() => setShowWorkspaceConfig(true), []);
+
+  // Runtime change — show confirm dialog, then open new Tab (v0.1.59)
+  const [pendingRuntimeChange, setPendingRuntimeChange] = useState<RuntimeType | null>(null);
+
+  const handleRuntimeChange = useCallback((runtime: RuntimeType) => {
+    if (!currentAgent || runtime === currentRuntime) return;
+    setPendingRuntimeChange(runtime);
+  }, [currentAgent, currentRuntime]);
+
+  const confirmRuntimeChange = useCallback(async () => {
+    const runtime = pendingRuntimeChange;
+    setPendingRuntimeChange(null);
+    if (!runtime || !currentAgent) return;
+    try {
+      // 1. Save runtime to agent config
+      await patchAgentConfig(currentAgent.id, { runtime });
+      await refreshProviderData();
+      // 2. Create a new session and open in new Tab
+      if (onForkSession && agentDir) {
+        const { createSession } = await import('@/api/sessionClient');
+        const session = await createSession(agentDir);
+        const runtimeLabel = runtime === 'claude-code' ? 'Claude Code' : runtime === 'codex' ? 'Codex' : 'MyAgents';
+        onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
+      }
+    } catch (err) {
+      console.error('[chat] Failed to switch runtime:', err);
+      toastRef.current.error('切换 Runtime 失败');
+    }
+  }, [pendingRuntimeChange, currentAgent, refreshProviderData, onForkSession, agentDir]);
+
+  // Cross-runtime confirm: create new session in new tab and send the pending message
+  const confirmCrossRuntimeSend = useCallback(async () => {
+    const pending = pendingCrossRuntimeMessage;
+    setPendingCrossRuntimeMessage(null);
+    if (!pending || !agentDir || !onForkSession) return;
+    try {
+      const { createSession } = await import('@/api/sessionClient');
+      const session = await createSession(agentDir);
+      // Open new tab with the pending message as initialMessage
+      if (pending.images.length > 0) {
+        toastRef.current.warning('图片附件无法带入新会话，请重新添加');
+      }
+      onForkSession(session.id, agentDir, pending.text.slice(0, 40) || '新会话', pending.text);
+    } catch (err) {
+      console.error('[chat] Failed to create cross-runtime session:', err);
+      toastRef.current.error('创建新会话失败');
+    }
+  }, [pendingCrossRuntimeMessage, agentDir, onForkSession]);
+
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
   const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);
 
@@ -1998,9 +2124,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onExitPlanModeReject={handleExitPlanModeReject}
               systemStatus={rewindStatus || systemStatus}
               isStreaming={isLoading || sessionState === 'running'}
-              onRewind={handleRewind}
+              onRewind={isExternalRuntime ? undefined : handleRewind}
               onRetry={handleRetry}
-              onFork={handleFork}
+              onFork={isExternalRuntime ? undefined : handleFork}
             />
 
             {/* Introduction overlay — shown in empty sessions when INTRODUCTION.md exists */}
@@ -2042,10 +2168,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             provider={currentProvider}
             providers={providers}
             onProviderChange={handleProviderChange}
-            selectedModel={selectedModel}
-            onModelChange={handleModelChange}
-            permissionMode={permissionMode}
-            onPermissionModeChange={handlePermissionModeChange}
+            selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
+            onModelChange={isExternalRuntime ? setRuntimeModel : handleModelChange}
+            permissionMode={effectivePermissionMode}
+            onPermissionModeChange={isExternalRuntime
+              ? ((mode: PermissionMode) => setRuntimePermissionMode(mode))
+              : handlePermissionModeChange}
             apiKeys={apiKeys}
             providerVerifyStatus={providerVerifyStatus}
             inputRef={inputRef}
@@ -2065,6 +2193,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onCronCancel={disableCronMode}
             onCronStop={handleCronStop}
             onInputChange={setCronPrompt}
+            runtime={currentRuntime}
+            runtimeDetections={multiAgentRuntimeEnabled ? runtimeDetections : undefined}
+            onRuntimeChange={multiAgentRuntimeEnabled ? handleRuntimeChange : undefined}
+            runtimeModels={isExternalRuntime ? runtimeModels : undefined}
+            runtimePermissionModes={isExternalRuntime ? runtimePermissionModes : undefined}
             queuedMessages={queuedMessages}
             onCancelQueued={handleCancelQueuedVoid}
             onForceExecuteQueued={handleForceExecuteQueuedVoid}
@@ -2371,6 +2504,30 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           }}
           refreshKey={workspaceRefreshKey}
           initialTab={workspaceConfigInitialTab}
+        />
+      )}
+
+      {/* Cross-Runtime Session Confirm Dialog */}
+      {pendingCrossRuntimeMessage && (
+        <ConfirmDialog
+          title="跨 Runtime 会话"
+          message={`此会话由 ${sessionRuntime === 'codex' ? 'Codex' : sessionRuntime === 'claude-code' ? 'Claude Code' : sessionRuntime} 创建，新消息将使用内置 Runtime 新开会话。`}
+          confirmText="新开会话并发送"
+          cancelText="取消"
+          onConfirm={confirmCrossRuntimeSend}
+          onCancel={() => setPendingCrossRuntimeMessage(null)}
+        />
+      )}
+
+      {/* Runtime Switch Confirm Dialog (v0.1.59) */}
+      {pendingRuntimeChange && (
+        <ConfirmDialog
+          title="切换 Runtime"
+          message={`切换到 ${pendingRuntimeChange === 'claude-code' ? 'Claude Code' : pendingRuntimeChange === 'codex' ? 'Codex' : 'MyAgents'} 将新开一个会话。当前会话保留不变。`}
+          confirmText="确认切换"
+          cancelText="取消"
+          onConfirm={confirmRuntimeChange}
+          onCancel={() => setPendingRuntimeChange(null)}
         />
       )}
 

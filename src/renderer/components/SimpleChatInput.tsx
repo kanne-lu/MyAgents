@@ -16,6 +16,8 @@ import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 import { isProviderAvailable } from '@/config/configService';
+import RuntimeSelector from '@/components/RuntimeSelector';
+import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // ===== Module-level pure helpers (extracted from render body) =====
 
@@ -108,6 +110,12 @@ interface SimpleChatInputProps {
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
   toolbarPrefix?: React.ReactNode;
+  // Agent Runtime (v0.1.59)
+  runtime?: RuntimeType;
+  runtimeDetections?: RuntimeDetections;
+  onRuntimeChange?: (runtime: RuntimeType) => void;
+  runtimeModels?: import('../../shared/types/runtime').RuntimeModelInfo[];
+  runtimePermissionModes?: import('../../shared/types/runtime').RuntimePermissionMode[];
   // Queued messages props
   queuedMessages?: QueuedMessageInfo[];
   onCancelQueued?: (queueId: string) => void;
@@ -179,11 +187,24 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onInputChange,
   mode = 'chat',
   toolbarPrefix,
+  runtime = 'builtin',
+  runtimeDetections,
+  onRuntimeChange,
+  runtimeModels,
+  runtimePermissionModes,
   queuedMessages = [],
   onCancelQueued,
   onForceExecuteQueued,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
+  const isExternalRuntime = runtime !== 'builtin';
+
+  // Compute display modes and model name based on runtime
+  const displayPermissionModes = isExternalRuntime && runtimePermissionModes
+    ? runtimePermissionModes.map(m => ({ value: m.value as PermissionMode, label: m.label, icon: m.icon, description: m.description, sdkValue: m.value }))
+    : PERMISSION_MODES;
+  const currentModeDisplay = displayPermissionModes.find(m => m.value === permissionMode)
+    ?? displayPermissionModes[0];
 
   // PERFORMANCE FIX: Use internal state to avoid parent re-renders on every keystroke
   // This prevents MessageList from re-rendering when typing in long conversations
@@ -247,10 +268,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
   // Derive current model ID from prop or provider default — no hardcoded fallback
   const currentModelId = selectedModel ?? provider?.primaryModel;
-  // Get display name for current model
-  const currentModelName = currentModelId
-    ? (provider ? getModelDisplayName(provider, currentModelId) : currentModelId)
-    : '选择模型';
+  // Get display name for current model (runtime-aware)
+  const currentModelName = isExternalRuntime
+    ? (runtimeModels?.find(m => m.value === selectedModel)?.displayName
+      ?? runtimeModels?.find(m => m.isDefault)?.displayName
+      ?? '默认')
+    : (currentModelId
+      ? (provider ? getModelDisplayName(provider, currentModelId) : currentModelId)
+      : '选择模型');
 
   // @file search
   const [showFileSearch, setShowFileSearch] = useState(false);
@@ -1362,6 +1387,17 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 onChange={handleFileChange}
               />
 
+              {/* Runtime Selector (v0.1.59) */}
+              {runtimeDetections && onRuntimeChange && !isLauncherMode && (
+                <RuntimeSelector
+                  value={runtime}
+                  detections={runtimeDetections}
+                  onChange={onRuntimeChange}
+                  variant="toolbar"
+                  onOpenSettings={onOpenAgentSettings}
+                />
+              )}
+
               {/* Mode Dropdown */}
               <div className="relative">
                 <button
@@ -1376,8 +1412,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                   title="切换执行模式"
                 >
-                  <span>{PERMISSION_MODES.find(m => m.value === permissionMode)?.icon}</span>
-                  <span className="toolbar-label">{PERMISSION_MODES.find(m => m.value === permissionMode)?.label}</span>
+                  <span>{currentModeDisplay?.icon}</span>
+                  <span className="toolbar-label">{currentModeDisplay?.label}</span>
                   <ChevronUp className="h-3 w-3" />
                 </button>
                 {showModeMenu && (
@@ -1398,13 +1434,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                         </button>
                       )}
                     </div>
-                    {PERMISSION_MODES.map((mode) => (
+                    {displayPermissionModes.map((mode) => (
                       <button
                         key={mode.value}
                         type="button"
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (mode.value === 'fullAgency') {
+                          if (mode.value === 'fullAgency' || (mode.value as string) === 'bypassPermissions') {
                             toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
                           }
                           onPermissionModeChange?.(mode.value);
@@ -1427,7 +1463,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 )}
               </div>
 
-              {/* Tool/MCP Dropdown - always visible */}
+              {/* Tool/MCP Dropdown - hidden for external runtimes (they use their own tools) */}
+              {!isExternalRuntime && (
               <div className="relative">
                 <button
                   type="button"
@@ -1524,6 +1561,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   </div>
                 )}
               </div>
+              )}
 
               {/* Heartbeat Loop Button */}
               {!isLauncherMode && onCronButtonClick && (
@@ -1570,7 +1608,36 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <span className="max-w-[140px] truncate">{currentModelName}</span>
                   <ChevronUp className="h-3 w-3 shrink-0" />
                 </button>
-                {showModelMenu && (() => {
+                {showModelMenu && (isExternalRuntime && runtimeModels ? (
+                  /* External Runtime model selector — shows CC/Codex models */
+                  <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
+                    <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                      {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime?.toUpperCase()} 模型
+                    </div>
+                    {runtimeModels.map(model => {
+                      const isSelected = selectedModel === model.value || (!selectedModel && model.isDefault);
+                      return (
+                        <button
+                          key={model.value}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onModelChange?.(model.value);
+                            setShowModelMenu(false);
+                          }}
+                          className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                            isSelected
+                              ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                              : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                          }`}
+                        >
+                          {model.displayName}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : showModelMenu && (() => {
+                  /* Builtin Runtime model selector — original provider-based */
                   const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
                   return (
                     <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
@@ -1609,7 +1676,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     if (provider?.id !== p.id) {
-                                      // Atomic provider+model change to avoid useEffect race
                                       onProviderChange?.(p.id, model.model);
                                     } else {
                                       onModelChange?.(model.model);
@@ -1631,7 +1697,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       )}
                     </div>
                   );
-                })()}
+                })())}
               </div>
 
               {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
