@@ -559,7 +559,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     'claude-code': { installed: false },
     'codex': { installed: false },
   });
-  const currentRuntime = (currentAgent?.runtime as RuntimeType) || 'builtin';
+  // Gate: when multiAgentRuntime is off, treat everything as builtin regardless of agent config.
+  // This gate is applied at the definition of currentRuntime itself so ALL downstream
+  // derivations (runtimePermissionModes, runtimeModels, etc.) are automatically safe.
+  const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
+  const currentRuntime = multiAgentRuntimeEnabled
+    ? ((currentAgent?.runtime as RuntimeType) || 'builtin')
+    : 'builtin';
+  const isExternalRuntime = currentRuntime !== 'builtin';
 
   // Detect installed runtimes once on mount
   useEffect(() => {
@@ -571,11 +578,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     });
     return () => { cancelled = true; };
   }, []);
-
-  // Runtime-specific model and permission state (v0.1.59)
-  // Gate: when multiAgentRuntime is off, treat everything as builtin regardless of agent config
-  const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
-  const isExternalRuntime = multiAgentRuntimeEnabled && currentRuntime !== 'builtin';
   const [runtimeModel, setRuntimeModel] = useState<string | undefined>(
     (currentAgent?.runtimeConfig as { model?: string } | undefined)?.model
   );
