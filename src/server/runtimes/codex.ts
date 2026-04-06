@@ -436,6 +436,16 @@ export class CodexRuntime implements AgentRuntime {
           persistExtendedHistory: false,
         }, 30_000) as { thread: { id: string } };
         codexProc.threadId = result.thread.id;
+
+        // Emit synthetic session_init — thread/resume doesn't trigger notifications
+        // but external-session needs it for session ID sync and frontend needs
+        // chat:system-init for model/tools info after Sidecar restart
+        onEvent({
+          kind: 'session_init',
+          sessionId: result.thread.id,
+          model: options.model || '',
+          tools: [],
+        });
       } else {
         // New thread
         const result = await codexProc.rpc.call('thread/start', {

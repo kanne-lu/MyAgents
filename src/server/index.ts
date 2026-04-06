@@ -171,6 +171,9 @@ import {
   setExternalImStreamCallback,
   waitForExternalSessionIdle,
   getLastExternalAssistantText,
+  setExternalModel,
+  setExternalPermissionMode,
+  didLastTurnSucceed,
 } from './runtimes/external-session';
 
 type ImagePayload = {
@@ -1655,6 +1658,9 @@ async function main() {
 
       // Rewind session to a specific user message (time travel)
       if (pathname === '/chat/rewind' && request.method === 'POST') {
+        if (shouldUseExternalRuntime()) {
+          return jsonResponse({ success: false, error: 'Rewind is not supported for external runtimes (CC/Codex)' }, 400);
+        }
         const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
         const userMessageId = typeof body.userMessageId === 'string' ? body.userMessageId : '';
         if (!userMessageId) {
@@ -1666,6 +1672,9 @@ async function main() {
 
       // Fork session at a specific assistant message (create branch)
       if (pathname === '/sessions/fork' && request.method === 'POST') {
+        if (shouldUseExternalRuntime()) {
+          return jsonResponse({ success: false, error: 'Fork is not supported for external runtimes (CC/Codex)' }, 400);
+        }
         const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
         const messageId = typeof body.messageId === 'string' ? body.messageId : '';
         if (!messageId) {
@@ -2050,6 +2059,13 @@ async function main() {
               clearCronTaskContext(effectiveSessionId);
               resetInteractionScenario();
               return jsonResponse({ success: false, error: 'Execution timed out' }, 408);
+            }
+
+            if (!didLastTurnSucceed()) {
+              console.warn(`[cron] execute-sync taskId=${taskId} external runtime turn failed`);
+              clearCronTaskContext(effectiveSessionId);
+              resetInteractionScenario();
+              return jsonResponse({ success: false, error: 'External runtime turn failed' }, 503);
             }
 
             textContent = getLastExternalAssistantText();
@@ -6618,6 +6634,10 @@ async function main() {
           if (!payload?.model) {
             return jsonResponse({ success: false, error: 'model is required' }, 400);
           }
+          if (shouldUseExternalRuntime()) {
+            await setExternalModel(payload.model);
+            return jsonResponse({ success: true });
+          }
           setSessionModel(payload.model);
           return jsonResponse({ success: true });
         } catch (error) {
@@ -6646,6 +6666,10 @@ async function main() {
           const payload = await request.json() as { permissionMode?: string };
           if (!payload?.permissionMode) {
             return jsonResponse({ success: false, error: 'permissionMode is required' }, 400);
+          }
+          if (shouldUseExternalRuntime()) {
+            await setExternalPermissionMode(payload.permissionMode);
+            return jsonResponse({ success: true });
           }
           const { setSessionPermissionMode } = await import('./agent-session');
           setSessionPermissionMode(payload.permissionMode as import('./agent-session').PermissionMode);
@@ -7288,6 +7312,10 @@ description: >
             const completed = await waitForExternalSessionIdle(300000, 500);
             if (!completed) {
               return jsonResponse({ status: 'error', text: 'Heartbeat timeout' });
+            }
+
+            if (!didLastTurnSucceed()) {
+              return jsonResponse({ status: 'error', text: 'External runtime turn failed' });
             }
 
             text = getLastExternalAssistantText();

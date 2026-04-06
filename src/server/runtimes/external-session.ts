@@ -21,12 +21,16 @@ let activeProcess: RuntimeProcess | null = null;
 let activeRuntime: AgentRuntime | null = null;
 let isRunning = false;
 let turnCompleted = false;
+let startingPromise: Promise<void> | null = null;  // Guard against concurrent startExternalSession
+let watchdogTimer: ReturnType<typeof setTimeout> | null = null;  // Hung process detection
 
 // Track session context for multi-turn resume (CC -p mode exits after each turn)
 let lastSessionId = '';
 let lastWorkspacePath = '';
 let lastScenario: InteractionScenario = { type: 'desktop' };
 let lastRuntimeSessionId = '';  // Runtime's session ID (CC: from hook/init; Codex: threadId)
+let lastModel = '';             // Latest model from config sync (passed on resume)
+let lastPermissionMode = '';    // Latest permission mode from config sync
 
 // Message accumulation for SessionStore persistence
 // allSessionMessages grows across turns — saveSessionMessages expects the FULL cumulative array
@@ -98,6 +102,30 @@ function flushAllPending(): void {
   pendingToolInputs.clear();
 }
 
+// ─── Watchdog timer (10 min inactivity → kill hung process) ───
+const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000;
+
+function resetWatchdog(): void {
+  if (watchdogTimer) clearTimeout(watchdogTimer);
+  watchdogTimer = setTimeout(async () => {
+    console.error('[external-session] Watchdog timeout — no activity for 10 minutes, killing process');
+    broadcast('chat:agent-error', { message: 'External runtime timed out (no activity for 10 minutes)' });
+    broadcast('chat:message-error', 'External runtime timed out');
+    fireImCallback('error', 'External runtime timed out');
+    await stopExternalSession();
+  }, WATCHDOG_TIMEOUT_MS);
+}
+
+function clearWatchdog(): void {
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+}
+
+// ─── Turn outcome tracking (stale text protection for cron/heartbeat) ───
+let lastTurnSucceeded = false;
+
+// ─── Token usage accumulation ───
+let currentTurnUsage: { inputTokens: number; outputTokens: number } | null = null;
+
 /** Reset all per-turn accumulators */
 function resetTurnAccumulators(): void {
   currentAssistantText = '';
@@ -106,6 +134,7 @@ function resetTurnAccumulators(): void {
   pendingThinkingText = '';
   pendingThinkingIndex = 0;
   pendingToolInputs.clear();
+  currentTurnUsage = null;
 }
 
 /** Check if content looks like JSON ContentBlock[] (matches frontend heuristic in TabProvider.tsx:1969) */
@@ -205,6 +234,37 @@ export function setExternalImStreamCallback(cb: ImStreamCallback | null): void {
   imStreamCallback = cb;
 }
 
+// ─── Config change handlers ───
+
+/**
+ * Set model for external runtime. Stops any running process so the next
+ * sendExternalMessage resumes with the new model.
+ * Called from index.ts /api/model/set when runtime is external.
+ */
+export async function setExternalModel(model: string): Promise<void> {
+  lastModel = model;
+  console.log(`[external-session] Model set to "${model}"`);
+  // Stop running process — next message will start with new model via resume
+  if (isRunning || activeProcess) {
+    console.log('[external-session] Stopping process for model change');
+    await stopExternalSession();
+  }
+}
+
+/**
+ * Set permission mode for external runtime. Stops any running process so the next
+ * sendExternalMessage resumes with the new permission mode.
+ * Called from index.ts /api/session/permission-mode when runtime is external.
+ */
+export async function setExternalPermissionMode(mode: string): Promise<void> {
+  lastPermissionMode = mode;
+  console.log(`[external-session] Permission mode set to "${mode}"`);
+  if (isRunning || activeProcess) {
+    console.log('[external-session] Stopping process for permission mode change');
+    await stopExternalSession();
+  }
+}
+
 // ─── Public API ───
 
 /**
@@ -247,6 +307,14 @@ export async function waitForExternalSessionIdle(timeoutMs: number, pollMs = 500
 }
 
 /**
+ * Check if the last external turn completed successfully.
+ * Used by cron/heartbeat to avoid reading stale assistant text after a crash.
+ */
+export function didLastTurnSucceed(): boolean {
+  return lastTurnSucceeded;
+}
+
+/**
  * Get the last assistant message text from the current session.
  * Used by Cron handler and IM heartbeat to extract response text.
  * Handles both JSON ContentBlock[] and plain text formats.
@@ -285,10 +353,37 @@ export async function startExternalSession(options: {
   scenario: InteractionScenario;
   resumeSessionId?: string;
 }): Promise<void> {
+  // Concurrency guard — wait for any in-flight start to finish
+  if (startingPromise) {
+    await startingPromise;
+  }
   if (isRunning) {
     console.warn('[external-session] Session already running, ignoring start request');
     return;
   }
+
+  // Wrap the body so concurrent callers serialize via startingPromise
+  let resolveStarting: () => void;
+  startingPromise = new Promise(r => { resolveStarting = r; });
+
+  try {
+    await _doStartExternalSession(options);
+  } finally {
+    startingPromise = null;
+    resolveStarting!();
+  }
+}
+
+/** Internal start implementation — called through concurrency guard above */
+async function _doStartExternalSession(options: {
+  sessionId: string;
+  workspacePath: string;
+  initialMessage?: string;
+  model?: string;
+  permissionMode?: string;
+  scenario: InteractionScenario;
+  resumeSessionId?: string;
+}): Promise<void> {
 
   const runtimeType = getCurrentRuntimeType();
   const runtime = getExternalRuntime(runtimeType);
@@ -299,8 +394,13 @@ export async function startExternalSession(options: {
 
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}`);
   turnCompleted = false;
+  lastTurnSucceeded = false;  // Reset — success only set after turn_complete
   resetTurnAccumulators();
+  resetWatchdog();  // Start watchdog — will kill process if no activity for 10 min
   currentTurnStartTime = 0;
+  // Track latest config for resume
+  if (options.model) lastModel = options.model;
+  if (options.permissionMode) lastPermissionMode = options.permissionMode;
   // Only clear message history for new sessions, not resumes
   if (!options.resumeSessionId) {
     allSessionMessages = [];
@@ -319,6 +419,10 @@ export async function startExternalSession(options: {
     allSessionMessages.push(userMsg);
     resetTurnAccumulators();
     currentTurnStartTime = Date.now();
+
+    // Persist user message immediately (crash safety — don't wait for turn_complete)
+    try { saveSessionMessages(options.sessionId, allSessionMessages); }
+    catch (err) { console.error('[external-session] Failed to persist user message:', err); }
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
     if (!options.resumeSessionId && !getSessionMetadata(options.sessionId)) {
@@ -428,7 +532,8 @@ export async function sendExternalMessage(
         sessionId: lastSessionId,
         workspacePath: lastWorkspacePath,
         initialMessage: text,
-        permissionMode: context?.permissionMode,
+        model: lastModel || context?.model,
+        permissionMode: lastPermissionMode || context?.permissionMode,
         scenario: lastScenario,
         resumeSessionId: lastRuntimeSessionId, // --resume to continue conversation
       });
@@ -457,6 +562,12 @@ export async function sendExternalMessage(
     resetTurnAccumulators();
     currentTurnStartTime = Date.now();
 
+    // Persist user message immediately (crash safety)
+    if (lastSessionId) {
+      try { saveSessionMessages(lastSessionId, allSessionMessages); }
+      catch (err) { console.error('[external-session] Failed to persist user message:', err); }
+    }
+
     broadcast('chat:status', { sessionState: 'running' });
     await activeRuntime.sendMessage(activeProcess, text);
     return { queued: true };
@@ -484,6 +595,7 @@ export async function respondExternalPermission(
  * Stop the active external session
  */
 export async function stopExternalSession(): Promise<boolean> {
+  clearWatchdog();
   if (!activeProcess || !activeRuntime) return false;
   try {
     await activeRuntime.stopSession(activeProcess);
@@ -545,6 +657,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       currentAssistantText += event.text;
       pendingTextBuffer += event.text;
       fireImCallback('delta', event.text);
+      resetWatchdog();
       break;
 
     case 'text_stop':
@@ -565,6 +678,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       pendingThinkingText += event.text;
       // Frontend expects { index, delta } — match builtin SSE shape
       broadcast('chat:thinking-chunk', { index: event.index, delta: event.text });
+      resetWatchdog();
       break;
 
     case 'thinking_stop':
@@ -643,6 +757,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         content: event.content,
         isError: event.isError ?? false,
       });
+      // Emit complete immediately — external runtimes deliver tool results as a single event
+      // (no streaming delta). Frontend needs this to clear tool loading spinner + trigger file refresh.
+      broadcast('chat:tool-result-complete', {
+        toolUseId: event.toolUseId,
+        content: event.content,
+        isError: event.isError ?? false,
+      });
+      resetWatchdog();
       break;
 
     case 'permission_request':
@@ -688,12 +810,23 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'turn_complete': {
       // Mark turn complete — session_complete will follow for -p mode
       turnCompleted = true;
-      broadcast('chat:message-complete', {});
+      lastTurnSucceeded = true;  // Successful turn — safe for cron/heartbeat to read
+      clearWatchdog();
+      const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
+      const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
+
+      broadcast('chat:message-complete', {
+        ...(currentTurnUsage ? { inputTokens: currentTurnUsage.inputTokens, outputTokens: currentTurnUsage.outputTokens } : {}),
+        ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
+        ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
+      });
       broadcast('chat:status', { sessionState: 'idle' });
       fireImCallback('complete', '');
 
       // Flush any pending blocks (text, thinking, tool) and persist structured content
       flushAllPending();
+
+      const usageData = currentTurnUsage ? { inputTokens: currentTurnUsage.inputTokens, outputTokens: currentTurnUsage.outputTokens } : undefined;
 
       if (currentContentBlocks.length > 0) {
         // Persist as JSON ContentBlock[] — matches builtin runtime format
@@ -703,7 +836,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           role: 'assistant',
           content,
           timestamp: new Date().toISOString(),
-          durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
+          durationMs: turnDurationMs,
+          usage: usageData,
+          toolCount: turnToolCount || undefined,
         };
         allSessionMessages.push(assistantMsg);
         resetTurnAccumulators();
@@ -714,7 +849,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           role: 'assistant',
           content: currentAssistantText,
           timestamp: new Date().toISOString(),
-          durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
+          durationMs: turnDurationMs,
+          usage: usageData,
         };
         allSessionMessages.push(assistantMsg);
         resetTurnAccumulators();
@@ -738,6 +874,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     }
 
     case 'session_complete':
+      clearWatchdog();
       if (event.subtype === 'success') {
         // CC slash commands (e.g. /context, /cost) return output directly in `result`
         // without streaming text_delta events. Only broadcast if NO turn completed
@@ -804,7 +941,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'usage':
-      // Token usage — could broadcast if needed
+      // Accumulate token usage — attached to assistant message on turn_complete
+      currentTurnUsage = {
+        inputTokens: (currentTurnUsage?.inputTokens ?? 0) + event.inputTokens,
+        outputTokens: (currentTurnUsage?.outputTokens ?? 0) + event.outputTokens,
+      };
       break;
 
     case 'log':

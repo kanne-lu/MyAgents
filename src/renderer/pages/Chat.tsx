@@ -2086,9 +2086,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onExitPlanModeReject={handleExitPlanModeReject}
               systemStatus={rewindStatus || systemStatus}
               isStreaming={isLoading || sessionState === 'running'}
-              onRewind={handleRewind}
+              onRewind={isExternalRuntime ? undefined : handleRewind}
               onRetry={handleRetry}
-              onFork={handleFork}
+              onFork={isExternalRuntime ? undefined : handleFork}
             />
 
             {/* Introduction overlay — shown in empty sessions when INTRODUCTION.md exists */}
