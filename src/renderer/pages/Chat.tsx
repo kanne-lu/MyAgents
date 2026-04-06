@@ -122,7 +122,7 @@ interface ChatProps {
   /** Called when user renames the session */
   onRenameSession?: (newTitle: string) => void;
   /** Called when user forks session at a specific assistant message — App creates new tab */
-  onForkSession?: (newSessionId: string, agentDir: string, title: string) => void;
+  onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
 }
 
 export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
@@ -137,6 +137,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     isLoading,
     isSessionLoading,
     sessionState,
+    sessionRuntime,
     unifiedLogs,
     systemInitInfo: _systemInitInfo,
     agentError,
@@ -1373,6 +1374,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
   }, [currentProject?.id, patchProject]);
 
+  // Cross-runtime session detection: session was created by external runtime, but current is builtin.
+  // User should be warned before sending new messages (which would use a different runtime).
+  const isCrossRuntimeSession = !isExternalRuntime && !!sessionRuntime && sessionRuntime !== 'builtin';
+  const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
+    text: string;
+    images: ImageAttachment[];
+  } | null>(null);
+
   // PERFORMANCE: text is now passed from SimpleChatInput (which manages its own state)
   // This avoids re-rendering Chat on every keystroke.
   // Returns false to signal SimpleChatInput NOT to clear the input (e.g., on rejection).
@@ -1380,6 +1389,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Must have content and not be in stopping state
     if ((!text && (!images || images.length === 0)) || sessionState === 'stopping') {
       return false;
+    }
+
+    // Cross-runtime guard: session was created by external runtime (Codex/CC) but
+    // current runtime is builtin. Show confirm dialog instead of sending directly.
+    if (isCrossRuntimeSession) {
+      setPendingCrossRuntimeMessage({ text, images: images ?? [] });
+      return false;  // Signal SimpleChatInput NOT to clear the input
     }
 
     // Queue limit: max 5 queued messages
@@ -1464,7 +1480,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, scrollToBottom]);
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, isExternalRuntime, isCrossRuntimeSession, scrollToBottom]);
 
   // Ref-stabilize handleSendMessage for handleRetry (avoids frequent re-creation)
   const handleSendMessageRef = useRef(handleSendMessage);
@@ -1535,6 +1551,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       toastRef.current.error('切换 Runtime 失败');
     }
   }, [pendingRuntimeChange, currentAgent, refreshProviderData, onForkSession, agentDir]);
+
+  // Cross-runtime confirm: create new session in new tab and send the pending message
+  const confirmCrossRuntimeSend = useCallback(async () => {
+    const pending = pendingCrossRuntimeMessage;
+    setPendingCrossRuntimeMessage(null);
+    if (!pending || !agentDir || !onForkSession) return;
+    try {
+      const { createSession } = await import('@/api/sessionClient');
+      const session = await createSession(agentDir);
+      // Open new tab with the pending message as initialMessage
+      if (pending.images.length > 0) {
+        toastRef.current.warning('图片附件无法带入新会话，请重新添加');
+      }
+      onForkSession(session.id, agentDir, pending.text.slice(0, 40) || '新会话', pending.text);
+    } catch (err) {
+      console.error('[chat] Failed to create cross-runtime session:', err);
+      toastRef.current.error('创建新会话失败');
+    }
+  }, [pendingCrossRuntimeMessage, agentDir, onForkSession]);
+
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
   const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);
 
@@ -2468,6 +2504,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           }}
           refreshKey={workspaceRefreshKey}
           initialTab={workspaceConfigInitialTab}
+        />
+      )}
+
+      {/* Cross-Runtime Session Confirm Dialog */}
+      {pendingCrossRuntimeMessage && (
+        <ConfirmDialog
+          title="跨 Runtime 会话"
+          message={`此会话由 ${sessionRuntime === 'codex' ? 'Codex' : sessionRuntime === 'claude-code' ? 'Claude Code' : sessionRuntime} 创建，新消息将使用内置 Runtime 新开会话。`}
+          confirmText="新开会话并发送"
+          cancelText="取消"
+          onConfirm={confirmCrossRuntimeSend}
+          onCancel={() => setPendingCrossRuntimeMessage(null)}
         />
       )}
 

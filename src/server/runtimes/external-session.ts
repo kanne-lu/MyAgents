@@ -470,6 +470,7 @@ async function _doStartExternalSession(options: {
     isRunning = false;
     activeProcess = null;
     activeRuntime = null;
+    clearWatchdog();
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[external-session] Failed to start ${runtimeType}:`, message);
     broadcast('chat:status', { sessionState: 'error' });
@@ -559,7 +560,9 @@ export async function sendExternalMessage(
     broadcast('chat:message-replay', { message: userMsg });
     allSessionMessages.push(userMsg);
     turnCompleted = false;
+    lastTurnSucceeded = false;  // Reset for this turn (prevents stale text on failure)
     resetTurnAccumulators();
+    resetWatchdog();  // Start watchdog for this turn (Case 3 bypasses startExternalSession)
     currentTurnStartTime = Date.now();
 
     // Persist user message immediately (crash safety)
@@ -715,6 +718,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolId: event.toolUseId,
         delta: event.delta,
       });
+      resetWatchdog();  // Tool streaming is activity — prevent killing long-running tools
       break;
     }
 
@@ -791,12 +795,15 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           updateSessionMetadata(lastSessionId, { runtimeSessionId: event.sessionId });
         }
       }
+      // Match builtin broadcast shape: { info: {...}, sessionId } — top-level sessionId
+      // is read by frontend for session ID sync (TabProvider).
       broadcast('chat:system-init', {
         info: {
           sessionId: event.sessionId,
           model: event.model,
           tools: event.tools,
         },
+        sessionId: lastSessionId,
       });
       break;
 
@@ -816,7 +823,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
 
       broadcast('chat:message-complete', {
-        ...(currentTurnUsage ? { inputTokens: currentTurnUsage.inputTokens, outputTokens: currentTurnUsage.outputTokens } : {}),
+        ...(currentTurnUsage ? { input_tokens: currentTurnUsage.inputTokens, output_tokens: currentTurnUsage.outputTokens } : {}),
         ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
         ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
       });
@@ -941,10 +948,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'usage':
-      // Accumulate token usage — attached to assistant message on turn_complete
+      // Store latest token usage — Codex emits running totals (not deltas),
+      // so we replace rather than accumulate to avoid double-counting.
       currentTurnUsage = {
-        inputTokens: (currentTurnUsage?.inputTokens ?? 0) + event.inputTokens,
-        outputTokens: (currentTurnUsage?.outputTokens ?? 0) + event.outputTokens,
+        inputTokens: event.inputTokens,
+        outputTokens: event.outputTokens,
       };
       break;
 

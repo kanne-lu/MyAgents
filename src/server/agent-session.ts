@@ -3683,8 +3683,18 @@ export async function initializeAgent(
     // is absent — yet the SDK session directory already exists on disk.
     const meta = getSessionMetadata(initialSessionId);
     if (meta) {
-      sessionRegistered = true;
-      console.log(`[agent] initializeAgent: will resume session ${initialSessionId} (sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+      // Cross-runtime guard: if session was created by an external runtime (Codex/CC)
+      // but current runtime is builtin, the SDK will NOT recognize this session ID.
+      // Attempting to resume would cause "No conversation found" → auto-reset → data loss.
+      // Instead, treat as NOT registered so the builtin SDK creates a fresh session on first message.
+      const isCrossRuntime = meta.runtime && meta.runtime !== 'builtin' && !isExternalRuntime(getCurrentRuntimeType());
+      if (isCrossRuntime) {
+        sessionRegistered = false;
+        console.log(`[agent] initializeAgent: cross-runtime session ${initialSessionId} (created by ${meta.runtime}), will NOT resume with builtin SDK`);
+      } else {
+        sessionRegistered = true;
+        console.log(`[agent] initializeAgent: will resume session ${initialSessionId} (sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+      }
     } else {
       sessionRegistered = false;
       console.log(`[agent] initializeAgent: will create new session ${initialSessionId}`);
@@ -3704,7 +3714,8 @@ export async function initializeAgent(
   // 2. messageSequence continues from last ID (prevents ID collision with disk messages)
   // 3. saveSessionMessages incremental append works correctly (messages.slice(existingCount))
   // Same pattern as switchToSession's message loading.
-  if (initialSessionId && sessionRegistered) {
+  // Also load for cross-runtime sessions (sessionRegistered=false but messages exist for display).
+  if (initialSessionId && getSessionMetadata(initialSessionId)) {
     const sessionData = getSessionData(initialSessionId);
     if (sessionData?.messages?.length) {
       loadMessagesFromStorage(sessionData.messages);
