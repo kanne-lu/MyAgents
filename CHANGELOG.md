@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.60] - 2026-04-07
+
+### Added
+- **多 Agent Runtime 支持（实验室）**：除内置 Claude Agent SDK 外，可接入 Claude Code CLI 和 OpenAI Codex 作为 AI 运行时。在「关于 → 实验室」中开启后，每个工作区可独立选择 Runtime
+- **MCP OAuth 认证**：MCP 工具支持 OAuth 授权流程，设置页自动检测需要认证的工具并引导完成授权
+
+### Improved
+- **自定义供应商模型输入**：添加模型时新增「+」按钮，除回车外多一种添加方式
+
+### Fixed
+- **QR 登录空白页**：OpenClaw 插件扫码登录时，wizard 步骤冲突导致页面空白
+
+---
+
 ## [0.1.59] - 2026-04-04
 
 ### Added
