@@ -14,6 +14,7 @@ import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import RuntimeSelector from '../RuntimeSelector';
 import type { RuntimeType, RuntimeDetections } from '../../../shared/types/runtime';
 import { invoke } from '@tauri-apps/api/core';
+import { useToast } from '@/components/Toast';
 
 interface WorkspaceBasicsSectionProps {
   project: Project | undefined;
@@ -23,6 +24,7 @@ interface WorkspaceBasicsSectionProps {
 
 export default function WorkspaceBasicsSection({ project, agent, agentDir }: WorkspaceBasicsSectionProps) {
   const { config, providers, patchProject, refreshConfig } = useConfig();
+  const toast = useToast();
   // Derive canonical name from project — use as initializer key to reset input
   const canonicalName = useMemo(
     () => project?.displayName || project?.name || '',
@@ -74,10 +76,12 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     try {
       await patchAgentConfig(agent.id, { runtime });
       refreshConfig();
+      const label = runtime === 'claude-code' ? 'Claude Code' : runtime === 'codex' ? 'Codex' : 'MyAgents';
+      toast.success(`已切换为 ${label}，新开 Tab 后生效`);
     } catch (err) {
       console.error('[runtime] Failed to save runtime:', err);
     }
-  }, [agent, refreshConfig]);
+  }, [agent, refreshConfig, toast]);
 
   // Load globally available MCP servers
   useEffect(() => {

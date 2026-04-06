@@ -542,9 +542,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'session_complete':
       if (event.subtype === 'success') {
-        // CC slash commands (e.g. /context, /cost) return output in `result` field
-        // without streaming text_delta events. Broadcast as assistant message if present.
-        if (event.result && !currentAssistantText.trim()) {
+        // CC slash commands (e.g. /context, /cost) return output directly in `result`
+        // without streaming text_delta events. Only broadcast if NO turn completed
+        // (turnCompleted means text was already streamed + persisted normally).
+        if (event.result && !turnCompleted && !currentAssistantText.trim()) {
           broadcast('chat:message-chunk', event.result);
           currentAssistantText += event.result;
         }
