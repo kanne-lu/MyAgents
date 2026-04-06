@@ -608,34 +608,63 @@ export class CodexRuntime implements AgentRuntime {
         };
 
       // ── Tool/item lifecycle ──
+      // Tool name mapping: Codex item types → existing frontend badge names
+      // (Bash, Edit, Grep, Read, Write, WebFetch, Glob, etc.)
       case 'item/started': {
-        const item = p.item as { type: string; id: string; command?: string; cwd?: string; tool?: string; server?: string; text?: string; query?: string; arguments?: unknown } | undefined;
+        const item = p.item as {
+          type: string; id: string;
+          command?: string; cwd?: string; tool?: string; server?: string;
+          text?: string; query?: string; arguments?: unknown;
+          path?: string; status?: string; revisedPrompt?: string;
+          changes?: Array<{ path: string }>;
+        } | undefined;
         if (!item) return null;
         switch (item.type) {
           case 'commandExecution': {
-            // Emit start + initial input (command text) so frontend shows what's being run
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'Shell' }];
+            // Map to 'Bash' — matches frontend toolBadgeConfig for Terminal icon + amber color
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'Bash' }];
             if (item.command) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: item.command });
             return events;
           }
-          case 'fileChange':
-            return { kind: 'tool_use_start', toolUseId: item.id, toolName: 'FileEdit' };
+          case 'fileChange': {
+            // Map to 'Edit' — matches frontend file edit badge (emerald color)
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'Edit' }];
+            // Show file paths being changed
+            if (item.changes?.length) {
+              const paths = (item.changes as Array<{ path: string }>).map(c => c.path).join(', ');
+              events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: paths });
+            }
+            return events;
+          }
           case 'mcpToolCall': {
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: item.tool || 'MCP Tool' }];
+            // Prefix with mcp__ to match frontend MCP tool badge patterns
+            const toolName = item.server && item.tool ? `mcp__${item.server}__${item.tool}` : (item.tool || 'MCP Tool');
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName }];
             if (item.arguments) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: JSON.stringify(item.arguments) });
             return events;
           }
-          case 'dynamicToolCall':
-            return { kind: 'tool_use_start', toolUseId: item.id, toolName: item.tool || 'Tool' };
+          case 'dynamicToolCall': {
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: item.tool || 'Tool' }];
+            if (item.arguments) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: JSON.stringify(item.arguments) });
+            return events;
+          }
           case 'webSearch': {
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'WebSearch' }];
+            // Map to 'WebFetch' — matches frontend web fetch badge (indigo color)
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'WebFetch' }];
             if (item.query) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: item.query });
             return events;
           }
+          case 'imageView': {
+            // Map to 'Read' — closest existing badge for viewing content
+            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'Read' }];
+            if (item.path) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: item.path });
+            return events;
+          }
+          case 'imageGeneration':
+            return { kind: 'tool_use_start', toolUseId: item.id, toolName: 'ImageGeneration' };
           case 'reasoning':
             return { kind: 'thinking_start', index: 0 };
           case 'agentMessage':
-            return null;
           case 'userMessage':
           case 'plan':
           case 'contextCompaction':
@@ -647,19 +676,15 @@ export class CodexRuntime implements AgentRuntime {
 
       case 'item/completed': {
         const item = p.item as {
-          type: string;
-          id: string;
-          command?: string;
-          aggregatedOutput?: string;
-          exitCode?: number;
-          changes?: unknown[];
-          tool?: string;
-          result?: unknown;
-          error?: { message: string };
-          text?: string;
-          summary?: string[];
-          query?: string;
-          action?: { type: string; url?: string; queries?: string[] };
+          type: string; id: string;
+          command?: string; aggregatedOutput?: string; exitCode?: number;
+          changes?: Array<{ path: string; kind: string; diff: string }>;
+          tool?: string; result?: unknown; error?: { message: string };
+          text?: string; summary?: string[];
+          query?: string; action?: { type: string; url?: string; queries?: string[] };
+          path?: string; status?: string; revisedPrompt?: string;
+          contentItems?: Array<{ type: string; text?: string }>;
+          success?: boolean;
         } | undefined;
         if (!item) return null;
 
@@ -671,23 +696,33 @@ export class CodexRuntime implements AgentRuntime {
               { kind: 'tool_use_stop', toolUseId: item.id },
               { kind: 'tool_result', toolUseId: item.id, content: item.aggregatedOutput || '', isError: item.exitCode != null && item.exitCode !== 0 },
             ];
-          case 'fileChange':
+          case 'fileChange': {
+            // Show file paths and diffs for each changed file
+            const details = Array.isArray(item.changes)
+              ? item.changes.map(c => `${c.kind}: ${c.path}${c.diff ? '\n' + c.diff : ''}`).join('\n\n')
+              : 'File changed';
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: Array.isArray(item.changes) ? `${item.changes.length} file(s) changed` : 'File changed' },
+              { kind: 'tool_result', toolUseId: item.id, content: details },
             ];
-          case 'mcpToolCall':
+          }
+          case 'mcpToolCall': {
+            // Extract text content from MCP result
+            const resultContent = (item.result as { content?: Array<{ text?: string }> })?.content;
+            const text = resultContent?.map(c => c.text || '').filter(Boolean).join('\n') || JSON.stringify(item.result ?? '');
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: item.error?.message || JSON.stringify(item.result ?? ''), isError: !!item.error },
+              { kind: 'tool_result', toolUseId: item.id, content: item.error?.message || text, isError: !!item.error },
             ];
-          case 'dynamicToolCall':
+          }
+          case 'dynamicToolCall': {
+            const text = item.contentItems?.map(c => c.text || '').filter(Boolean).join('\n') || JSON.stringify(item.result ?? '');
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: JSON.stringify(item.result ?? '') },
+              { kind: 'tool_result', toolUseId: item.id, content: text, isError: item.success === false },
             ];
+          }
           case 'webSearch': {
-            // Include query and URL in result for display
             const parts: string[] = [];
             if (item.query) parts.push(`Query: ${item.query}`);
             if (item.action?.url) parts.push(`URL: ${item.action.url}`);
@@ -696,6 +731,16 @@ export class CodexRuntime implements AgentRuntime {
               { kind: 'tool_result', toolUseId: item.id, content: parts.join('\n') || 'Search completed' },
             ];
           }
+          case 'imageView':
+            return [
+              { kind: 'tool_use_stop', toolUseId: item.id },
+              { kind: 'tool_result', toolUseId: item.id, content: item.path || 'Image viewed' },
+            ];
+          case 'imageGeneration':
+            return [
+              { kind: 'tool_use_stop', toolUseId: item.id },
+              { kind: 'tool_result', toolUseId: item.id, content: item.revisedPrompt || item.status || 'Image generated' },
+            ];
           case 'reasoning':
             return { kind: 'thinking_stop', index: 0 };
           case 'agentMessage':
