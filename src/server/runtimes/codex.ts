@@ -10,7 +10,7 @@ import { spawn, type Subprocess } from 'bun';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback } from './types';
-import { augmentedProcessEnv } from './env-utils';
+import { augmentedProcessEnv, resolveCommand } from './env-utils';
 
 // ─── Model cache ───
 
@@ -253,7 +253,7 @@ export class CodexRuntime implements AgentRuntime {
 
   async detect(): Promise<RuntimeDetection> {
     try {
-      const proc = spawn(['codex', '--version'], {
+      const proc = spawn([resolveCommand('codex'), '--version'], {
         stdout: 'pipe',
         stderr: 'pipe',
         stdin: 'ignore',
@@ -291,7 +291,7 @@ export class CodexRuntime implements AgentRuntime {
 
   private async queryModelsViaAppServer(): Promise<RuntimeModelInfo[]> {
     // Spawn a temporary app-server to query model/list
-    const proc = spawn(['codex', 'app-server'], {
+    const proc = spawn([resolveCommand('codex'), 'app-server'], {
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
@@ -343,7 +343,7 @@ export class CodexRuntime implements AgentRuntime {
     options: SessionStartOptions,
     onEvent: UnifiedEventCallback,
   ): Promise<RuntimeProcess> {
-    const proc = spawn(['codex', 'app-server'], {
+    const proc = spawn([resolveCommand('codex'), 'app-server'], {
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',

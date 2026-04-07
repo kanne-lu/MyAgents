@@ -12,7 +12,7 @@ import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback } from './types';
-import { augmentedProcessEnv } from './env-utils';
+import { augmentedProcessEnv, resolveCommand } from './env-utils';
 
 // ─── SessionStart Hook settings generator ───
 // CC's hooks fire on session lifecycle events. We inject a SessionStart hook
@@ -155,7 +155,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   async detect(): Promise<RuntimeDetection> {
     try {
-      const proc = spawn(['claude', '--version'], {
+      const proc = spawn([resolveCommand('claude'), '--version'], {
         stdout: 'pipe',
         stderr: 'pipe',
         stdin: 'ignore',
@@ -289,7 +289,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
     // Augment PATH with user-level directories (e.g. ~/.local/bin where `claude` lives).
     // NOTE: Also inherits NO_PROXY from Sidecar (injected by proxy_config::apply_to_subprocess()).
-    const proc = spawn(['claude', ...args], {
+    const proc = spawn([resolveCommand('claude'), ...args], {
       cwd: options.workspacePath,
       env: augmentedProcessEnv(),
       stdout: 'pipe',
