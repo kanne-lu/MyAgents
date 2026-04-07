@@ -746,7 +746,16 @@ export default function TabProvider({
                         if (typeof prev.content === 'string') {
                             return { ...prev, content: prev.content + chunk };
                         }
-                        const contentArray = prev.content;
+                        // Implicit close: force-complete any unclosed thinking blocks
+                        // when text content arrives (thinking must have ended)
+                        let contentArray = prev.content;
+                        if (contentArray.some(b => b.type === 'thinking' && !b.isComplete)) {
+                            contentArray = contentArray.map(b =>
+                                b.type === 'thinking' && !b.isComplete
+                                    ? { ...b, isComplete: true, thinkingDurationMs: b.thinkingStartedAt ? Date.now() - b.thinkingStartedAt : undefined }
+                                    : b
+                            );
+                        }
                         const lastBlock = contentArray[contentArray.length - 1];
                         if (lastBlock?.type === 'text') {
                             return {
@@ -787,13 +796,21 @@ export default function TabProvider({
                         thinkingStartedAt: Date.now()
                     };
                     if (prev?.role === 'assistant') {
-                        const content = typeof prev.content === 'string'
+                        let content = typeof prev.content === 'string'
                             ? [{ type: 'text' as const, text: prev.content }]
                             : prev.content;
                         // Deduplicate: skip if a thinking block with this index already exists
                         if (content.some(b => b.type === 'thinking' && b.thinkingStreamIndex === index)) {
                             return prev;
                         }
+                        // Implicit close: force-complete any previously unclosed thinking blocks.
+                        // SDK stream indices reset per-turn, so a new thinking-start means the
+                        // previous thinking block (from the same or prior turn) must have ended.
+                        content = content.map(b =>
+                            b.type === 'thinking' && !b.isComplete
+                                ? { ...b, isComplete: true, thinkingDurationMs: b.thinkingStartedAt ? Date.now() - b.thinkingStartedAt : undefined }
+                                : b
+                        );
                         return { ...prev, content: [...content, thinkingBlock] };
                     }
                     isStreamingRef.current = true;
@@ -844,9 +861,16 @@ export default function TabProvider({
                         tool: toolSimple
                     };
                     if (prev?.role === 'assistant') {
-                        const content = typeof prev.content === 'string'
+                        // Implicit close: force-complete any unclosed thinking blocks
+                        // when a tool_use block arrives (thinking must have ended)
+                        let content = typeof prev.content === 'string'
                             ? [{ type: 'text' as const, text: prev.content }]
                             : prev.content;
+                        content = content.map(b =>
+                            b.type === 'thinking' && !b.isComplete
+                                ? { ...b, isComplete: true, thinkingDurationMs: b.thinkingStartedAt ? Date.now() - b.thinkingStartedAt : undefined }
+                                : b
+                        );
                         return { ...prev, content: [...content, toolBlock] };
                     }
                     isStreamingRef.current = true;

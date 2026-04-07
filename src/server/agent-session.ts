@@ -3066,6 +3066,29 @@ function handleMessageComplete(): void {
   // buildSdkMcpServers() if the session restarts (MCP change, error recovery, etc.).
   // It is still cleared on full session termination (see below).
 
+  // Force-close any unclosed thinking blocks (parity with handleMessageStopped).
+  // If content_block_stop was lost (transport issue, subagent edge case, or API error),
+  // the thinking block stays incomplete and the frontend timer runs indefinitely.
+  // This safety net ensures thinking state is always consistent at turn boundary.
+  const lastMsg = messages[messages.length - 1];
+  if (lastMsg?.role === 'assistant' && typeof lastMsg.content !== 'string') {
+    let patched = false;
+    lastMsg.content = lastMsg.content.map((block) => {
+      if (block.type === 'thinking' && !block.isComplete) {
+        patched = true;
+        return {
+          ...block,
+          isComplete: true,
+          thinkingDurationMs: block.thinkingStartedAt ? Date.now() - block.thinkingStartedAt : undefined
+        };
+      }
+      return block;
+    });
+    if (patched) {
+      console.warn('[agent] Force-closed orphaned thinking block(s) in handleMessageComplete');
+    }
+  }
+
   // Transition to idle only when no queued messages remain.
   // With mid-turn injection, the generator is always at waitForMessage() after yield
   // (no waitForTurnComplete gate). Queued messages are delivered via wakeGenerator()
@@ -5448,6 +5471,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             }
           }
         } else if (streamEvent.type === 'content_block_start') {
+          // Implicit thinking close: when a non-thinking content block starts (text, tool_use),
+          // force-close any unclosed thinking blocks in backend state.
+          // Frontend does its own implicit close, so this keeps backend state consistent.
+          if (streamEvent.content_block.type !== 'thinking') {
+            const lastAssistant = messages.length > 0 ? messages[messages.length - 1] : null;
+            if (lastAssistant?.role === 'assistant' && typeof lastAssistant.content !== 'string') {
+              for (const block of lastAssistant.content) {
+                if (block.type === 'thinking' && !block.isComplete) {
+                  block.isComplete = true;
+                  block.thinkingDurationMs = block.thinkingStartedAt ? Date.now() - block.thinkingStartedAt : undefined;
+                  console.log('[agent] Implicitly closed orphaned thinking block on new content_block_start');
+                }
+              }
+            }
+          }
           // IM stream: track text block indices (non-subagent only, cross-turn guard)
           // Flush pending mid-turn queue at non-subagent text content_block_start.
           // thinking/tool_use/server_tool_use are covered by their start handlers.
@@ -5586,6 +5624,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         } else if (streamEvent.type === 'content_block_stop') {
           const toolId = streamIndexToToolId.get(streamEvent.index);
           if (sdkMessage.parent_tool_use_id) {
+            // Subagent thinking blocks: broadcast content-block-stop so frontend can close
+            // the thinking timer. Without this, subagent thinking blocks stay "incomplete"
+            // and the timer runs for the entire remaining duration of the parent tool call.
+            if (!toolId && !toolResultIndexToId.has(streamEvent.index)) {
+              broadcast('chat:content-block-stop', {
+                index: streamEvent.index,
+              });
+              handleContentBlockStop(streamEvent.index, undefined);
+            }
             if (toolId) {
               finalizeSubagentToolInput(sdkMessage.parent_tool_use_id, toolId);
             }
