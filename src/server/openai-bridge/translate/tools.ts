@@ -30,25 +30,25 @@ export function translateToolChoice(choice: AnthropicToolChoice): OpenAIToolChoi
   }
 }
 
-/** OpenAI tool_calls → Anthropic tool_use content blocks */
+/** OpenAI tool_calls → Anthropic tool_use content blocks.
+ *
+ * IMPORTANT: thought_signature is intentionally NOT included here.
+ * The SDK stores these Anthropic-format blocks in its session transcript and replays
+ * them on resume. Including non-standard fields like thought_signature causes the
+ * Anthropic API to reject the request ("Extra inputs are not permitted").
+ * The bridge handler caches thought_signatures separately (handler.ts thoughtSignatureCache)
+ * and re-injects them on outgoing OpenAI-format requests. See: #68 */
 export function translateToolCalls(toolCalls: OpenAIToolCall[]): {
   type: 'tool_use';
   id: string;
   name: string;
   input: Record<string, unknown>;
-  thought_signature?: string;
 }[] {
   return toolCalls.map(tc => ({
     type: 'tool_use' as const,
     id: tc.id || generateToolUseId(),
     name: tc.function.name,
     input: safeParseJson(tc.function.arguments),
-    // Gemini thinking models require round-tripping thought_signature on tool calls.
-    // Check both direct field and extra_content.google.thought_signature (OpenAI-compat format).
-    ...((() => {
-      const sig = tc.thought_signature || tc.extra_content?.google?.thought_signature;
-      return sig ? { thought_signature: sig } : {};
-    })()),
   }));
 }
 

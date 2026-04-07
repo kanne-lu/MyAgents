@@ -126,18 +126,14 @@ export class StreamTranslator {
       const name = tc.function?.name || '';
       this.toolCallBuffers.set(idx, { id, name, args: '' });
 
+      // IMPORTANT: thought_signature is intentionally NOT included on content_block_start.
+      // The SDK stores these events in its session transcript and replays them on resume.
+      // Including non-standard fields causes API rejection ("Extra inputs are not permitted").
+      // The bridge handler caches thought_signatures separately. See: #68
       events.push({
         type: 'content_block_start',
         index: this.contentIndex,
-        content_block: {
-          type: 'tool_use', id, name, input: {},
-          // Gemini thinking models: pass through thought_signature.
-          // Check both direct field and extra_content.google.thought_signature (OpenAI-compat format).
-          ...((() => {
-            const sig = tc.thought_signature || tc.extra_content?.google?.thought_signature;
-            return sig ? { thought_signature: sig } : {};
-          })()),
-        },
+        content_block: { type: 'tool_use', id, name, input: {} },
       });
     }
 

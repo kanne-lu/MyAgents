@@ -27,24 +27,36 @@ export function translateMessages(
     }
   }
 
-  // 2. Collect known tool_use_ids from assistant messages for orphan detection
+  // 2. Collect known tool_use_ids from assistant messages for orphan detection.
+  //    Also detect if ANY assistant message in the conversation has thinking content.
+  //    Some upstream models (e.g. Kimi K2.5) require reasoning_content on ALL assistant
+  //    messages with tool_calls when thinking was used anywhere in the conversation,
+  //    even if the current request's thinking.type is not 'enabled'. See: #69
   const knownToolUseIds = new Set<string>();
+  let conversationHasThinking = false;
   for (const msg of messages) {
     if (msg.role === 'assistant' && Array.isArray(msg.content)) {
       for (const block of msg.content) {
         if (block.type === 'tool_use') {
           knownToolUseIds.add(block.id);
+        } else if (block.type === 'thinking' && block.thinking) {
+          conversationHasThinking = true;
         }
       }
     }
   }
+
+  // Use conversation-level thinking detection as fallback for request-level flag.
+  // The SDK may not always include thinking.type === 'enabled' on every request,
+  // but upstream models still require reasoning_content if thinking was used earlier.
+  const effectiveThinkingEnabled = thinkingEnabled || conversationHasThinking;
 
   // 3. Translate each message
   for (const msg of messages) {
     if (msg.role === 'user') {
       translateUserMessage(msg, result, knownToolUseIds);
     } else if (msg.role === 'assistant') {
-      translateAssistantMessage(msg, result, thinkingEnabled);
+      translateAssistantMessage(msg, result, effectiveThinkingEnabled);
     }
   }
 
@@ -119,7 +131,9 @@ function translateAssistantMessage(msg: AnthropicMessage, result: OpenAIMessage[
 
   const textParts: string[] = [];
   const thinkingParts: string[] = [];
-  const toolCalls: { id: string; type: 'function'; function: { name: string; arguments: string }; thought_signature?: string }[] = [];
+  // Note: thought_signature is NOT included here. The bridge handler re-injects it from
+  // its cache (handler.ts:106-138) after message translation. See: #68
+  const toolCalls: { id: string; type: 'function'; function: { name: string; arguments: string } }[] = [];
 
   for (const block of msg.content) {
     if (block.type === 'text') {
@@ -132,8 +146,6 @@ function translateAssistantMessage(msg: AnthropicMessage, result: OpenAIMessage[
           name: block.name,
           arguments: JSON.stringify(block.input),
         },
-        // Gemini thinking models require round-tripping thought_signature
-        ...(block.thought_signature ? { thought_signature: block.thought_signature } : {}),
       });
     } else if (block.type === 'thinking') {
       // Preserve thinking blocks as reasoning_content for upstream models

@@ -5509,14 +5509,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             broadcast('chat:thinking-start', { index: streamEvent.index });
           } else if (streamEvent.content_block.type === 'tool_use') {
             streamIndexToToolId.set(streamEvent.index, streamEvent.content_block.id);
-            // Extract thought_signature from content block (Gemini thinking models)
-            const contentBlock = streamEvent.content_block as { id: string; name: string; input?: Record<string, unknown>; thought_signature?: string };
+            // Note: thought_signature is no longer extracted here. The bridge strips it from
+            // Anthropic-format events to prevent SDK transcript pollution (see #68). The bridge
+            // handler caches thought_signatures separately and re-injects on outgoing requests.
+            const contentBlock = streamEvent.content_block as { id: string; name: string; input?: Record<string, unknown> };
             const toolPayload = {
               id: contentBlock.id,
               name: contentBlock.name,
               input: contentBlock.input || {},
               streamIndex: streamEvent.index,
-              ...(contentBlock.thought_signature ? { thought_signature: contentBlock.thought_signature } : {}),
             };
             if (sdkMessage.parent_tool_use_id) {
               handleSubagentToolUseStart(sdkMessage.parent_tool_use_id, toolPayload);

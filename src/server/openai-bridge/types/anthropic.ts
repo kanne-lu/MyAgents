@@ -54,8 +54,9 @@ export interface AnthropicToolUseBlock {
   id: string;
   name: string;
   input: Record<string, unknown>;
-  /** Gemini thinking models: round-trip opaque signature for tool calls */
-  thought_signature?: string;
+  // Note: thought_signature is intentionally NOT included here.
+  // It's a Gemini-specific field that lives only on the OpenAI side (handler.ts cache).
+  // Including it in Anthropic-format blocks pollutes the SDK transcript → API rejection. See: #68
 }
 
 export interface AnthropicToolResultBlock {
@@ -107,7 +108,7 @@ export interface AnthropicResponse {
 
 export type AnthropicResponseContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown>; thought_signature?: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
   | { type: 'thinking'; thinking: string; signature: string };
 
 export type AnthropicStopReason = 'end_turn' | 'max_tokens' | 'stop_sequence' | 'tool_use';
