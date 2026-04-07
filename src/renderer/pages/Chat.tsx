@@ -1326,9 +1326,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Anthropic validates thinking block signatures that third-party providers don't,
     // so session history is incompatible. Show confirm dialog instead of switching inline.
     // Only guard when there are existing messages (fresh sessions can switch freely).
-    const currentIsThirdParty = currentProvider && (currentProvider.apiProtocol === 'openai' || !!currentProvider.config.baseUrl);
-    const newIsAnthropicNative = newProvider && !newProvider.config.baseUrl && newProvider.apiProtocol !== 'openai';
-    if (currentIsThirdParty && newIsAnthropicNative && messages.length > 0) {
+    // Use apiProtocol as primary discriminator (not baseUrl) to avoid false positives
+    // with Anthropic API preset which has baseUrl but is still Anthropic-native.
+    const currentIsThirdParty = currentProvider?.apiProtocol === 'openai';
+    const newIsAnthropicNative = !newProvider?.apiProtocol || newProvider.apiProtocol === 'anthropic';
+    if (currentIsThirdParty && newIsAnthropicNative && messagesRef.current.length > 0) {
       setPendingProviderSwitch({ providerId, model });
       return;  // Don't update state — dialog will handle it
     }
@@ -1351,8 +1353,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         void patchAgentConfig(currentProject.agentId, { providerId, model: model ?? undefined });
       }
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps
-  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider, messages.length]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
+  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.apiProtocol]);
 
   // Handle model change with analytics tracking and project write-back
   const handleModelChange = useCallback((model: string) => {
@@ -1586,6 +1588,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           await patchAgentConfig(currentProject.agentId, { providerId: pending.providerId, model: pending.model ?? undefined });
         }
       }
+      await refreshConfig();  // Sync React state so new tab sees updated provider
       // 2. Create a new session and open in new Tab
       const { createSession } = await import('@/api/sessionClient');
       const session = await createSession(agentDir);
@@ -1595,7 +1598,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       console.error('[chat] Failed to create cross-provider session:', err);
       toastRef.current.error('创建新会话失败');
     }
-  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject, patchProject, providers]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId
+  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {

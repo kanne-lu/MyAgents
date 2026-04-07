@@ -1078,8 +1078,17 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // Full equality check — all ProviderEnv fields affect subprocess env (authType, apiProtocol, etc.)
   if (providerEnvEqual(currentProviderEnv, providerEnv)) return;
 
-  // Note: third-party → Anthropic cross-protocol switch is now handled by the frontend.
-  // Chat.tsx shows a ConfirmDialog and creates a new session in a new tab. See: #68
+  // Resume safety: switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl)
+  // requires a fresh session. Anthropic validates thinking block signatures that third-party
+  // providers don't, so resuming with third-party messages causes signature errors.
+  // Must check BEFORE updating currentProviderEnv.
+  // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
+  // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
+  const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
+  if (switchingFromThirdPartyToAnthropic) {
+    sessionRegistered = false;
+    console.log('[agent] provider switch: third-party → Anthropic — will create fresh session (signature incompatible)');
+  }
 
   currentProviderEnv = providerEnv;
   console.log(`[agent] session provider env set: ${oldLabel} → ${newLabel}`);
@@ -4029,9 +4038,20 @@ export async function enqueueUserMessage(
     const toLabel = effectiveProviderEnv?.baseUrl ?? 'anthropic';
     if (isDebugMode) console.log(`[agent] provider changed from ${fromLabel} to ${toLabel}, restarting session`);
 
-    // Note: third-party → Anthropic cross-protocol switch is now handled by the frontend.
-    // Chat.tsx shows a ConfirmDialog and creates a new session in a new tab,
-    // so this backend path is no longer reached for that case. See: #68
+    // Resume logic: Anthropic official validates thinking block signatures, third-party providers don't.
+    // Only skip resume when switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl).
+    // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
+    // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
+    // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
+    const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !effectiveProviderEnv?.baseUrl;
+    if (switchingFromThirdPartyToAnthropic) {
+      sessionRegistered = false;
+      sessionId = randomUUID();
+      hasInitialPrompt = false;
+      messages.length = 0;
+      systemInitInfo = null;
+      console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
+    }
 
     // Update provider env BEFORE terminating so the new session picks it up
     currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
