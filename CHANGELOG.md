@@ -7,13 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.61] - 2026-04-08
-
-### Fixed
-- **HTTP MCP 工具不可用**：Notion 等 HTTP 类型 MCP 服务器完成 OAuth 授权后工具被过滤，AI 无法使用。根因为 SDK 自动从 claude.ai 加载代理服务器，命名格式（`claude_ai_Notion`）与 MyAgents 配置 ID（`notion`）不匹配导致权限检查拒绝
-
----
-
 ## [0.1.60] - 2026-04-07
 
 ### Added
