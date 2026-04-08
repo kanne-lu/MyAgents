@@ -1431,15 +1431,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Cross-runtime session detection: session was created by a DIFFERENT runtime than the current one.
   // Covers all mismatch scenarios: builtin↔CC, builtin↔Codex, CC↔Codex.
-  // sessionRuntime is null in two cases:
-  //   1. New session (no history) → skip detection (no point warning on empty session)
-  //   2. Loaded session with no runtime metadata (pre-v0.1.60 or multiAgentRuntime was OFF) → treat as 'builtin'
-  // Distinguish by checking if messages are loaded: messages.length > 0 means case 2.
-  const sessionHasHistory = messages.length > 0;
-  const effectiveSessionRuntime = sessionRuntime
-    ? sessionRuntime
-    : (sessionHasHistory ? 'builtin' : null);  // null = new/empty session → skip
-  const isCrossRuntimeSession = effectiveSessionRuntime !== null && effectiveSessionRuntime !== currentRuntime;
+  // sessionRuntime is null ONLY when session hasn't loaded yet (initial state).
+  // After loadSession, it's always a valid RuntimeType ('builtin' | 'codex' | 'claude-code')
+  // because: new sessions write runtime via createSessionMetadata (defaults to 'builtin'),
+  // old sessions get 'builtin' at load time (TabProvider: runtime || 'builtin').
+  const isCrossRuntimeSession = sessionRuntime !== null && sessionRuntime !== currentRuntime;
   const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
     text: string;
     images: ImageAttachment[];
@@ -2609,7 +2605,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {pendingCrossRuntimeMessage && (
         <ConfirmDialog
           title="跨 Runtime 会话"
-          message={`此会话由 ${effectiveSessionRuntime === 'codex' ? 'Codex' : effectiveSessionRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'} 创建，当前 Runtime 为 ${currentRuntime === 'codex' ? 'Codex' : currentRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'}，新消息将使用当前 Runtime 新开会话。`}
+          message={`此会话由 ${sessionRuntime === 'codex' ? 'Codex' : sessionRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'} 创建，当前 Runtime 为 ${currentRuntime === 'codex' ? 'Codex' : currentRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'}，新消息将使用当前 Runtime 新开会话。`}
           confirmText="新开会话并发送"
           cancelText="取消"
           onConfirm={confirmCrossRuntimeSend}

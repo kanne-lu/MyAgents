@@ -142,7 +142,7 @@ export function generateSessionTitle(message: string): string {
 /**
  * Create a new session metadata object
  */
-export function createSessionMetadata(agentDir: string): SessionMetadata {
+export function createSessionMetadata(agentDir: string, runtime: RuntimeType = 'builtin'): SessionMetadata {
     const now = new Date().toISOString();
     return {
         id: randomUUID(),
@@ -151,5 +151,6 @@ export function createSessionMetadata(agentDir: string): SessionMetadata {
         createdAt: now,
         lastActiveAt: now,
         unifiedSession: true,
+        runtime,  // Always present — pit of success: no null/undefined ambiguity
     };
 }

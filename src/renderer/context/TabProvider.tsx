@@ -2077,7 +2077,9 @@ export default function TabProvider({
             setIsSessionLoading(false);
             setHistoryMessages(loadedMessages);
             setStreamingMessage(null);
-            setSessionRuntime(response.session.runtime ?? null);
+            // Old sessions (pre-v0.1.60) have no runtime field → treat as 'builtin'.
+            // null is reserved strictly for "session not loaded yet" (initial state).
+            setSessionRuntime(response.session.runtime || 'builtin');
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
