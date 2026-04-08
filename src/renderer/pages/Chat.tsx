@@ -1429,9 +1429,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
   }, [currentProject?.id, patchProject]);
 
-  // Cross-runtime session detection: session was created by external runtime, but current is builtin.
-  // User should be warned before sending new messages (which would use a different runtime).
-  const isCrossRuntimeSession = !isExternalRuntime && !!sessionRuntime && sessionRuntime !== 'builtin';
+  // Cross-runtime session detection: session was created by a DIFFERENT runtime than the current one.
+  // Covers all mismatch scenarios: builtin↔CC, builtin↔Codex, CC↔Codex.
+  // sessionRuntime is null for new sessions (no history loaded yet) — skip detection.
+  // sessionRuntime is undefined for pre-v0.1.60 builtin sessions — treat as 'builtin'.
+  const effectiveSessionRuntime = sessionRuntime === null ? null : (sessionRuntime || 'builtin');
+  const isCrossRuntimeSession = effectiveSessionRuntime !== null && effectiveSessionRuntime !== currentRuntime;
   const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
     text: string;
     images: ImageAttachment[];
@@ -2601,7 +2604,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {pendingCrossRuntimeMessage && (
         <ConfirmDialog
           title="跨 Runtime 会话"
-          message={`此会话由 ${sessionRuntime === 'codex' ? 'Codex' : sessionRuntime === 'claude-code' ? 'Claude Code' : sessionRuntime} 创建，新消息将使用内置 Runtime 新开会话。`}
+          message={`此会话由 ${sessionRuntime === 'codex' ? 'Codex' : sessionRuntime === 'claude-code' ? 'Claude Code' : sessionRuntime === 'builtin' ? '内置 SDK' : sessionRuntime} 创建，当前 Runtime 为 ${currentRuntime === 'codex' ? 'Codex' : currentRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'}，新消息将使用当前 Runtime 新开会话。`}
           confirmText="新开会话并发送"
           cancelText="取消"
           onConfirm={confirmCrossRuntimeSend}

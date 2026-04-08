@@ -947,11 +947,24 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       }
       break;
 
-    case 'message_replay':
+    case 'message_replay': {
       // Skip assistant message replays during active streaming — CC sends both
       // stream_event deltas AND a complete assistant message, causing duplication.
       // Only replay user messages (for session resume scenarios).
-      if (event.message.role === 'user') {
+      const replayRole = event.message.role;
+      const replayContentPreview = typeof event.message.content === 'string'
+        ? event.message.content.slice(0, 100)
+        : JSON.stringify(event.message.content).slice(0, 100);
+      console.log(`[external-session] message_replay: role=${replayRole}, id=${event.message.id || '(none)'}, content=${replayContentPreview}`);
+
+      if (replayRole === 'user') {
+        // Guard: skip CC-echoed user messages — we already broadcast the user message
+        // when sendExternalMessage is called. CC's --include-partial-messages echoes
+        // user messages back, which would create duplicates in the frontend.
+        if (isRunning && allSessionMessages.some(m => m.role === 'user' && m.content === event.message.content)) {
+          console.log('[external-session] Skipping duplicate user message replay');
+          break;
+        }
         // Ensure timestamp exists — CC replay messages don't include it,
         // and frontend does new Date(msg.timestamp) → Invalid Date → NaN display
         const replayMsg = event.message.timestamp
@@ -962,6 +975,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // Assistant replays are intentionally dropped — the stream_event deltas
       // already delivered the content to the frontend incrementally.
       break;
+    }
 
     case 'raw':
       // Unrecognized event — ignore
