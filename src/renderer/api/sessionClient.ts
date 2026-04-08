@@ -86,10 +86,10 @@ export async function getSessions(agentDir?: string): Promise<SessionMetadata[]>
 /**
  * Create a new session
  */
-export async function createSession(agentDir: string): Promise<SessionMetadata> {
+export async function createSession(agentDir: string, runtime?: string): Promise<SessionMetadata> {
     const result = await apiPostJson<{ success: boolean; session: SessionMetadata }>(
         '/sessions',
-        { agentDir }
+        { agentDir, ...(runtime ? { runtime } : {}) }
     );
     return result.session;
 }

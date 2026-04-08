@@ -8,7 +8,7 @@
 import { broadcast } from '../sse';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
-import type { AgentRuntime, RuntimeProcess, UnifiedEvent } from './types';
+import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
@@ -353,6 +353,7 @@ export async function startExternalSession(options: {
   sessionId: string;
   workspacePath: string;
   initialMessage?: string;
+  initialImages?: ImagePayload[];
   model?: string;
   permissionMode?: string;
   scenario: InteractionScenario;
@@ -384,6 +385,7 @@ async function _doStartExternalSession(options: {
   sessionId: string;
   workspacePath: string;
   initialMessage?: string;
+  initialImages?: ImagePayload[];
   model?: string;
   permissionMode?: string;
   scenario: InteractionScenario;
@@ -460,6 +462,7 @@ async function _doStartExternalSession(options: {
         sessionId: options.sessionId,
         workspacePath: options.workspacePath,
         initialMessage: options.initialMessage,
+        initialImages: options.initialImages,
         systemPromptAppend,
         model: options.model,
         permissionMode: options.permissionMode,
@@ -505,11 +508,13 @@ export interface ExternalSendContext {
  */
 export async function sendExternalMessage(
   text: string,
-  _images?: unknown[],
+  images?: ImagePayload[],
   _permissionMode?: string,
   _model?: string,
   context?: ExternalSendContext,
 ): Promise<{ queued: boolean; error?: string }> {
+  const hasImages = images && images.length > 0;
+
   // Case 1: No previous session — start fresh
   if (!lastRuntimeSessionId && !isRunning) {
     if (!context) {
@@ -520,6 +525,7 @@ export async function sendExternalMessage(
         sessionId: context.sessionId,
         workspacePath: context.workspacePath,
         initialMessage: text,
+        initialImages: hasImages ? images : undefined,
         model: context.model,
         permissionMode: context.permissionMode,
         scenario: context.scenario,
@@ -542,6 +548,7 @@ export async function sendExternalMessage(
         sessionId: lastSessionId,
         workspacePath: lastWorkspacePath,
         initialMessage: text,
+        initialImages: hasImages ? images : undefined,
         model: lastModel || context?.model,
         permissionMode: lastPermissionMode || context?.permissionMode,
         scenario: lastScenario,
@@ -581,7 +588,7 @@ export async function sendExternalMessage(
     }
 
     broadcast('chat:status', { sessionState: 'running' });
-    await activeRuntime.sendMessage(activeProcess, text);
+    await activeRuntime.sendMessage(activeProcess, text, hasImages ? images : undefined);
     return { queued: true };
   } catch (err) {
     return { queued: false, error: err instanceof Error ? err.message : String(err) };

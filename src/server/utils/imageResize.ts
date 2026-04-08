@@ -13,7 +13,7 @@ const MAX_DIMENSION = 1568;
 /** Max dimension for MCP tool result images (e.g. browser screenshots). Aligned with API recommendation. */
 const MAX_TOOL_IMAGE_DIMENSION = 1568;
 
-type ImagePayload = { name: string; mimeType: string; data: string };
+import type { ImagePayload } from '../runtimes/types';
 
 /** MCP protocol image content block */
 type McpImageContent = { type: 'image'; data: string; mimeType: string };

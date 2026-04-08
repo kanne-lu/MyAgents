@@ -1606,10 +1606,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       // 1. Save runtime to agent config + refresh React state so new tab sees updated runtime
       await patchAgentConfig(currentAgent.id, { runtime });
       await refreshConfig();  // Must use refreshConfig (not refreshProviderData) to update config.agents
-      // 2. Create a new session and open in new Tab
+      // 2. Create a new session and open in new Tab (pass runtime to avoid cross-runtime mismatch)
       if (onForkSession && agentDir) {
         const { createSession } = await import('@/api/sessionClient');
-        const session = await createSession(agentDir);
+        const session = await createSession(agentDir, runtime);
         const runtimeLabel = runtime === 'claude-code' ? 'Claude Code' : runtime === 'codex' ? 'Codex' : 'MyAgents';
         onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
       }
@@ -1634,9 +1634,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         }
       }
       await refreshConfig();  // Sync React state so new tab sees updated provider
-      // 2. Create a new session and open in new Tab
+      // 2. Create a new session and open in new Tab (pass runtime to avoid cross-runtime mismatch)
       const { createSession } = await import('@/api/sessionClient');
-      const session = await createSession(agentDir);
+      const session = await createSession(agentDir, currentRuntime);
       const newProvider = providers.find(p => p.id === pending.providerId);
       onForkSession(session.id, agentDir, `${newProvider?.name ?? 'Claude'} 会话`);
     } catch (err) {
@@ -1644,26 +1644,29 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       toastRef.current.error('创建新会话失败');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId
-  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers]);
+  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentRuntime]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {
     const pending = pendingCrossRuntimeMessage;
-    setPendingCrossRuntimeMessage(null);
     if (!pending || !agentDir || !onForkSession) return;
     try {
       const { createSession } = await import('@/api/sessionClient');
-      const session = await createSession(agentDir);
+      // Pass currentRuntime so the new session has matching runtime metadata,
+      // preventing infinite cross-runtime detection loop.
+      const session = await createSession(agentDir, currentRuntime);
+      setPendingCrossRuntimeMessage(null);  // Clear only after success
       // Open new tab with the pending message as initialMessage
       if (pending.images.length > 0) {
         toastRef.current.warning('图片附件无法带入新会话，请重新添加');
       }
       onForkSession(session.id, agentDir, pending.text.slice(0, 40) || '新会话', pending.text);
     } catch (err) {
+      setPendingCrossRuntimeMessage(null);  // Clear on error too (dialog dismissed)
       console.error('[chat] Failed to create cross-runtime session:', err);
       toastRef.current.error('创建新会话失败');
     }
-  }, [pendingCrossRuntimeMessage, agentDir, onForkSession]);
+  }, [pendingCrossRuntimeMessage, agentDir, onForkSession, currentRuntime]);
 
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
   const handleOpenCronSettings = useCallback(() => setShowCronSettings(true), []);

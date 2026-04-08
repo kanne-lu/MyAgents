@@ -20,6 +20,7 @@ import { join } from 'path';
 
 import type { SessionMetadata, SessionData, SessionMessage, SessionStats } from './types/session';
 import { createSessionMetadata, generateSessionTitle } from './types/session';
+import type { RuntimeType } from '../shared/types/runtime';
 
 const MYAGENTS_DIR = join(homedir(), '.myagents');
 const SESSIONS_FILE = join(MYAGENTS_DIR, 'sessions.json');
@@ -595,10 +596,10 @@ export function updateSessionMetadata(
 /**
  * Create a new session for the given agent directory
  */
-export function createSession(agentDir: string): SessionMetadata {
-    const session = createSessionMetadata(agentDir);
+export function createSession(agentDir: string, runtime?: RuntimeType): SessionMetadata {
+    const session = createSessionMetadata(agentDir, runtime);
     saveSessionMetadata(session);
-    console.log(`[SessionStore] Created session ${session.id} for ${agentDir}`);
+    console.log(`[SessionStore] Created session ${session.id} for ${agentDir} runtime=${session.runtime}`);
     return session;
 }
 

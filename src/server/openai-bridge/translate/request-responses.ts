@@ -3,11 +3,13 @@
 import type { AnthropicRequest, AnthropicMessage, AnthropicToolResultBlock, AnthropicSystemBlock } from '../types/anthropic';
 import type { ResponsesRequest, ResponsesInputItem, ResponsesInputContentPart, ResponsesInputFunctionCall, ResponsesToolChoice } from '../types/openai-responses';
 import type { BridgeConfig } from '../types/bridge';
+import type { ToolImageSaver } from './multimodal';
 
 
 export interface TranslateRequestResponsesOptions {
   modelMapping?: BridgeConfig['modelMapping'];
   modelOverride?: string;
+  imageSaver?: ToolImageSaver;
 }
 
 /** Translate Anthropic Messages API request → OpenAI Responses API request */
@@ -37,7 +39,7 @@ export function translateRequestToResponses(
   }
 
   // 3. Input messages
-  const input = translateMessagesToResponses(req.messages);
+  const input = translateMessagesToResponses(req.messages, options?.imageSaver);
 
   // 4. Build request
   // NOTE: max_output_tokens, temperature, top_p are intentionally NOT forwarded.
@@ -86,7 +88,7 @@ function translateToolChoiceToResponses(choice: NonNullable<AnthropicRequest['to
   }
 }
 
-function translateMessagesToResponses(messages: AnthropicMessage[]): ResponsesInputItem[] {
+function translateMessagesToResponses(messages: AnthropicMessage[], imageSaver?: ToolImageSaver): ResponsesInputItem[] {
   const result: ResponsesInputItem[] = [];
 
   // Collect known tool_use_ids for orphan detection
@@ -103,7 +105,7 @@ function translateMessagesToResponses(messages: AnthropicMessage[]): ResponsesIn
 
   for (const msg of messages) {
     if (msg.role === 'user') {
-      translateUserMessageToResponses(msg, result, knownToolUseIds);
+      translateUserMessageToResponses(msg, result, knownToolUseIds, imageSaver);
     } else if (msg.role === 'assistant') {
       translateAssistantMessageToResponses(msg, result);
     }
@@ -116,6 +118,7 @@ function translateUserMessageToResponses(
   msg: AnthropicMessage,
   result: ResponsesInputItem[],
   knownToolUseIds: Set<string>,
+  imageSaver?: ToolImageSaver,
 ): void {
   if (typeof msg.content === 'string') {
     result.push({ role: 'user', content: msg.content });
@@ -131,7 +134,7 @@ function translateUserMessageToResponses(
       if (knownToolUseIds.has(block.tool_use_id)) {
         toolResults.push(block);
       } else {
-        const content = extractToolResultText(block);
+        const content = extractToolResultText(block, imageSaver);
         if (content) orphanTexts.push(`[Previous tool result]:\n${content}`);
       }
     } else if (block.type === 'text') {
@@ -152,7 +155,7 @@ function translateUserMessageToResponses(
     result.push({
       type: 'function_call_output',
       call_id: tr.tool_use_id,
-      output: extractToolResultText(tr),
+      output: extractToolResultText(tr, imageSaver),
     });
   }
 
@@ -212,7 +215,7 @@ function translateAssistantMessageToResponses(msg: AnthropicMessage, result: Res
   }
 }
 
-function extractToolResultText(tr: AnthropicToolResultBlock): string {
+function extractToolResultText(tr: AnthropicToolResultBlock, imageSaver?: ToolImageSaver): string {
   const isError = tr.is_error === true;
   if (!tr.content) return isError ? '<error></error>' : '';
 
@@ -225,7 +228,16 @@ function extractToolResultText(tr: AnthropicToolResultBlock): string {
       if (c.type === 'text') {
         parts.push(c.text);
       } else if (c.type === 'image') {
-        parts.push('[Image content omitted - tool returned an image]');
+        if (imageSaver && c.source?.data) {
+          try {
+            const relPath = imageSaver(c.source.data, c.source.media_type || 'image/png');
+            parts.push(`[Tool returned an image, saved to ${relPath}]`);
+          } catch {
+            parts.push('[Tool returned an image, failed to save]');
+          }
+        } else {
+          parts.push('[Image content omitted - tool returned an image]');
+        }
       }
     }
     text = parts.join('\n');

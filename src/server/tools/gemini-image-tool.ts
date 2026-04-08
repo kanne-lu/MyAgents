@@ -7,6 +7,7 @@ import { z } from 'zod/v4';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
+import { ensureGitignorePattern } from '../utils/gitignore';
 import { randomUUID } from 'crypto';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
@@ -60,18 +61,11 @@ export function clearGeminiImageConfig(): void {
 function getGeneratedDir(): string {
   const workspace = geminiImageConfig?.workspace;
   const dir = workspace
-    ? join(workspace, 'myagents-generated', 'images')
+    ? join(workspace, 'myagents_files', 'generated_images')
     : join(homedir(), '.myagents', 'generated');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
-    // Ensure .gitignore in myagents-generated/ parent to prevent accidental commits
-    if (workspace) {
-      const parentDir = join(workspace, 'myagents-generated');
-      const gitignorePath = join(parentDir, '.gitignore');
-      if (!existsSync(gitignorePath)) {
-        writeFileSync(gitignorePath, '*\n');
-      }
-    }
+    if (workspace) ensureGitignorePattern(workspace, 'myagents_files/');
   }
   return dir;
 }

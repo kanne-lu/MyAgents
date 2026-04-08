@@ -7,13 +7,14 @@ import type {
   AnthropicToolResultBlock,
 } from '../types/anthropic';
 import type { OpenAIMessage, OpenAIAssistantMessage, OpenAIContentPart } from '../types/openai';
-import { translateImageBlock } from './multimodal';
+import { translateImageBlock, type ToolImageSaver } from './multimodal';
 
 /** Convert Anthropic system + messages to OpenAI messages array */
 export function translateMessages(
   system: string | AnthropicSystemBlock[] | undefined,
   messages: AnthropicMessage[],
   thinkingEnabled = false,
+  imageSaver?: ToolImageSaver,
 ): OpenAIMessage[] {
   const result: OpenAIMessage[] = [];
 
@@ -54,7 +55,7 @@ export function translateMessages(
   // 3. Translate each message
   for (const msg of messages) {
     if (msg.role === 'user') {
-      translateUserMessage(msg, result, knownToolUseIds);
+      translateUserMessage(msg, result, knownToolUseIds, imageSaver);
     } else if (msg.role === 'assistant') {
       translateAssistantMessage(msg, result, effectiveThinkingEnabled);
     }
@@ -67,6 +68,7 @@ function translateUserMessage(
   msg: AnthropicMessage,
   result: OpenAIMessage[],
   knownToolUseIds: Set<string>,
+  imageSaver?: ToolImageSaver,
 ): void {
   // String content → simple user message
   if (typeof msg.content === 'string') {
@@ -97,13 +99,13 @@ function translateUserMessage(
     result.push({
       role: 'tool',
       tool_call_id: tr.tool_use_id,
-      content: extractToolResultContent(tr),
+      content: extractToolResultContent(tr, imageSaver),
     });
   }
 
   // Convert orphan tool_results to user text (session rewind can leave orphan references)
   for (const tr of orphanToolResults) {
-    const content = extractToolResultContent(tr);
+    const content = extractToolResultContent(tr, imageSaver);
     if (content) {
       otherBlocks.push({
         type: 'text',
@@ -173,7 +175,7 @@ function translateAssistantMessage(msg: AnthropicMessage, result: OpenAIMessage[
   result.push(assistantMsg);
 }
 
-function extractToolResultContent(tr: AnthropicToolResultBlock): string {
+function extractToolResultContent(tr: AnthropicToolResultBlock, imageSaver?: ToolImageSaver): string {
   const isError = tr.is_error === true;
 
   if (!tr.content) return isError ? '<error></error>' : '';
@@ -187,7 +189,17 @@ function extractToolResultContent(tr: AnthropicToolResultBlock): string {
       if (c.type === 'text') {
         parts.push(c.text);
       } else if (c.type === 'image') {
-        parts.push('[Image content omitted - tool returned an image]');
+        // Save image to workspace if saver is available, otherwise use placeholder
+        if (imageSaver && c.source?.data) {
+          try {
+            const relPath = imageSaver(c.source.data, c.source.media_type || 'image/png');
+            parts.push(`[Tool returned an image, saved to ${relPath}]`);
+          } catch {
+            parts.push('[Tool returned an image, failed to save]');
+          }
+        } else {
+          parts.push('[Image content omitted - tool returned an image]');
+        }
       }
     }
     text = parts.join('\n');

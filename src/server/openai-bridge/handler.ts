@@ -8,6 +8,7 @@ import { translateRequest } from './translate/request';
 import { translateResponse } from './translate/response';
 import { translateRequestToResponses } from './translate/request-responses';
 import { translateResponsesResponse, ResponsesApiError } from './translate/response-responses';
+import { createToolImageSaver, type ToolImageSaver } from './translate/multimodal';
 import { StreamTranslator } from './translate/stream';
 import { ResponsesStreamTranslator } from './translate/stream-responses';
 import { translateError } from './translate/errors';
@@ -58,6 +59,9 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
   const log = config.logger === null ? () => {} : (config.logger ?? console.log);
   const timeout = config.upstreamTimeout ?? DEFAULT_TIMEOUT;
   const translateReasoning = config.translateReasoning ?? true;
+  const imageSaver: ToolImageSaver | undefined = config.workspacePath
+    ? createToolImageSaver(config.workspacePath)
+    : undefined;
 
   // Cache tool_call_id → thought_signature across requests.
   // Gemini thinking models require round-tripping thought_signature on every request
@@ -93,8 +97,8 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
 
     // 4. Translate request (choose format based on upstream config)
     const translatedReq = isResponses
-      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: config.modelMapping })
-      : translateRequest(anthropicReq, { modelMapping: config.modelMapping, modelOverride: upstream.model });
+      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: config.modelMapping, imageSaver })
+      : translateRequest(anthropicReq, { modelMapping: config.modelMapping, modelOverride: upstream.model, imageSaver });
 
     // 4a. Normalize thought_signatures on tool_calls (Gemini thinking models).
     // Gemini requires thought_signature on tool_calls in conversation history.

@@ -1,5 +1,8 @@
 // Image content block translation
 
+import { writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'fs';
+import { join } from 'path';
+import { ensureGitignorePattern } from '../../utils/gitignore';
 import type { AnthropicImageBlock } from '../types/anthropic';
 import type { OpenAIContentPart } from '../types/openai';
 
@@ -17,5 +20,50 @@ export function translateImageBlock(block: AnthropicImageBlock): OpenAIContentPa
   return {
     type: 'image_url',
     image_url: { url: `data:${mediaType};base64,${data}` },
+  };
+}
+
+/**
+ * Callback type for saving tool result images to disk.
+ * Returns the relative path (e.g., "myagents_files/temp/tool_xxx.png").
+ */
+export type ToolImageSaver = (base64: string, mimeType: string) => string;
+
+/**
+ * Create a ToolImageSaver that writes images to {workspace}/myagents_files/temp/.
+ * Tool result images are temporary — the AI references them by relative path.
+ */
+export function createToolImageSaver(workspacePath: string): ToolImageSaver {
+  const dir = join(workspacePath, 'myagents_files', 'temp');
+  let dirEnsured = false;
+
+  return (base64: string, mimeType: string): string => {
+    // Lazy dir creation + stale cleanup (once per session)
+    if (!dirEnsured) {
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true });
+      }
+      ensureGitignorePattern(workspacePath, 'myagents_files/');
+      // Clean up stale temp images older than 1 hour
+      try {
+        const cutoff = Date.now() - 60 * 60 * 1000;
+        for (const file of readdirSync(dir)) {
+          try {
+            const fp = join(dir, file);
+            if (statSync(fp).mtimeMs < cutoff) unlinkSync(fp);
+          } catch { /* ignore individual file errors */ }
+        }
+      } catch { /* ignore cleanup errors */ }
+      dirEnsured = true;
+    }
+
+    const subtype = mimeType.split('/')[1]?.split('+')[0] || 'png';
+    const ext = subtype === 'jpeg' ? 'jpg' : subtype;
+    const filename = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
+    const filepath = join(dir, filename);
+    writeFileSync(filepath, Buffer.from(base64, 'base64'));
+
+    // Return relative path from workspace root (for AI reference)
+    return `myagents_files/temp/${filename}`;
   };
 }

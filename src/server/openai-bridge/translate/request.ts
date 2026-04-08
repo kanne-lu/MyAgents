@@ -5,12 +5,15 @@ import type { OpenAIRequest } from '../types/openai';
 import type { BridgeConfig } from '../types/bridge';
 import { translateMessages } from './messages';
 import { translateToolDefinitions, translateToolChoice } from './tools';
+import type { ToolImageSaver } from './multimodal';
 
 
 export interface TranslateRequestOptions {
   modelMapping?: BridgeConfig['modelMapping'];
   /** Override model name (highest priority) */
   modelOverride?: string;
+  /** Callback to save tool result images to disk (returns relative path) */
+  imageSaver?: ToolImageSaver;
 }
 
 /** Translate Anthropic Messages API request → OpenAI Chat Completions request */
@@ -33,7 +36,7 @@ export function translateRequest(
 
   // 2. Messages (system extraction + role mapping + tool_result splitting)
   const thinkingEnabled = req.thinking?.type === 'enabled';
-  const messages = translateMessages(req.system, req.messages, thinkingEnabled);
+  const messages = translateMessages(req.system, req.messages, thinkingEnabled, options?.imageSaver);
 
   // 3. Build request
   // NOTE: max_tokens, temperature, top_p, stop are intentionally NOT forwarded.

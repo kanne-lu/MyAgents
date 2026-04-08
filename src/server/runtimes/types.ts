@@ -5,12 +5,22 @@ import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetec
 import type { InteractionScenario } from '../system-prompt';
 
 /**
+ * Image payload from frontend (base64-encoded)
+ */
+export interface ImagePayload {
+  name: string;
+  mimeType: string;
+  data: string;  // base64 without data URL prefix
+}
+
+/**
  * Options for starting a runtime session
  */
 export interface SessionStartOptions {
   sessionId: string;
   workspacePath: string;
   initialMessage?: string;
+  initialImages?: ImagePayload[];
   systemPromptAppend?: string;
   model?: string;
   permissionMode?: string;
@@ -117,7 +127,7 @@ export interface AgentRuntime {
   ): Promise<RuntimeProcess>;
 
   /** Send a follow-up user message to an active session */
-  sendMessage(process: RuntimeProcess, message: string, images?: unknown[]): Promise<void>;
+  sendMessage(process: RuntimeProcess, message: string, images?: ImagePayload[]): Promise<void>;
 
   /** Respond to a permission request from the runtime */
   respondPermission(

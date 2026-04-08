@@ -175,12 +175,7 @@ import {
   setExternalPermissionMode,
   didLastTurnSucceed,
 } from './runtimes/external-session';
-
-type ImagePayload = {
-  name: string;
-  mimeType: string;
-  data: string; // base64
-};
+import type { ImagePayload } from './runtimes/types';
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
 
@@ -1322,6 +1317,7 @@ async function main() {
 
   // Create OpenAI bridge handler (lazy: only processes requests when bridge config is active)
   const bridgeHandler = createBridgeHandler({
+    workspacePath: agentDir || undefined,
     getUpstreamConfig: () => {
       const config = getOpenAiBridgeConfig();
       if (!config) throw new Error('Bridge not active');
@@ -2315,9 +2311,9 @@ async function main() {
 
       // POST /sessions - Create a new session
       if (pathname === '/sessions' && request.method === 'POST') {
-        let payload: { agentDir: string };
+        let payload: { agentDir: string; runtime?: string };
         try {
-          payload = (await request.json()) as { agentDir: string };
+          payload = (await request.json()) as { agentDir: string; runtime?: string };
         } catch {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
@@ -2327,7 +2323,11 @@ async function main() {
           return jsonResponse({ success: false, error: 'agentDir is required.' }, 400);
         }
 
-        const session = createSession(agentDirValue);
+        const VALID_RUNTIMES = ['builtin', 'claude-code', 'codex'] as const;
+        const runtimeValue = VALID_RUNTIMES.includes(payload?.runtime as typeof VALID_RUNTIMES[number])
+          ? (payload.runtime as import('../shared/types/runtime').RuntimeType)
+          : undefined;
+        const session = createSession(agentDirValue, runtimeValue);
         return jsonResponse({ success: true, session });
       }
 
@@ -3655,14 +3655,18 @@ async function main() {
             return jsonResponse({ success: false, error: 'Missing path parameter' }, 400);
           }
 
-          // Security: allow reading from workspace/myagents-generated/images/ or legacy ~/.myagents/generated/
+          // Security: allow reading from workspace/myagents_files/{generated_images,temp}/ or legacy paths
           const resolvedPath = resolve(imagePath);
           const legacyDir = join(homedir(), '.myagents', 'generated');
-          const workspaceDir = currentAgentDir ? join(currentAgentDir, 'myagents-generated', 'images') : '';
           const legacyDirSep = legacyDir.endsWith(sep) ? legacyDir : legacyDir + sep;
-          const workspaceDirSep = workspaceDir ? (workspaceDir.endsWith(sep) ? workspaceDir : workspaceDir + sep) : '';
+          // New unified paths + backward compat with myagents-generated/images/
+          const allowedDirs = currentAgentDir ? [
+            join(currentAgentDir, 'myagents_files', 'generated_images'),
+            join(currentAgentDir, 'myagents_files', 'temp'),
+            join(currentAgentDir, 'myagents-generated', 'images'), // backward compat
+          ] : [];
           const allowed = resolvedPath.startsWith(legacyDirSep)
-            || (workspaceDirSep && resolvedPath.startsWith(workspaceDirSep));
+            || allowedDirs.some(d => resolvedPath.startsWith(d.endsWith(sep) ? d : d + sep));
           if (!allowed) {
             return jsonResponse({ success: false, error: 'Access denied: path must be within generated directory' }, 403);
           }
@@ -3698,14 +3702,17 @@ async function main() {
             return jsonResponse({ success: false, error: 'Missing path parameter' }, 400);
           }
 
-          // Security: allow reading from workspace/myagents-generated/audio/ or legacy ~/.myagents/generated_audio/
+          // Security: allow reading from workspace/myagents_files/generated_audio/ or legacy paths
           const resolvedPath = resolve(audioPath);
           const legacyAudioDir = join(homedir(), '.myagents', 'generated_audio');
-          const workspaceAudioDir = currentAgentDir ? join(currentAgentDir, 'myagents-generated', 'audio') : '';
           const legacyAudioDirSep = legacyAudioDir.endsWith(sep) ? legacyAudioDir : legacyAudioDir + sep;
-          const workspaceAudioDirSep = workspaceAudioDir ? (workspaceAudioDir.endsWith(sep) ? workspaceAudioDir : workspaceAudioDir + sep) : '';
+          // New unified path + backward compat with myagents-generated/audio/
+          const allowedAudioDirs = currentAgentDir ? [
+            join(currentAgentDir, 'myagents_files', 'generated_audio'),
+            join(currentAgentDir, 'myagents-generated', 'audio'), // backward compat
+          ] : [];
           const audioAllowed = resolvedPath.startsWith(legacyAudioDirSep)
-            || (workspaceAudioDirSep && resolvedPath.startsWith(workspaceAudioDirSep));
+            || allowedAudioDirs.some(d => resolvedPath.startsWith(d.endsWith(sep) ? d : d + sep));
           if (!audioAllowed) {
             return jsonResponse({ success: false, error: 'Access denied: path must be within generated_audio directory' }, 403);
           }
@@ -6860,7 +6867,7 @@ async function main() {
             permissionMode?: string;
             providerEnv?: ProviderEnv;
             model?: string;
-            images?: Array<{ name: string; mimeType: string; data: string }>;
+            images?: ImagePayload[];
             botId?: string;
             botName?: string;
             // Group context fields (v0.1.28)
@@ -6974,7 +6981,7 @@ async function main() {
               reminder += '\n你的回复会自动发送到群里，直接回复即可。\n群内不同人的消息会以 [from: 名字 时间] 标注发送者。';
               if (isAlways) {
                 const mentionExample = payload.botName ? `（即 @${botName}）` : '';
-                reminder += `\n\n[回复规则]\n你必须非常克制，大多数消息不需要你回复。仅在以下情况回复：\n1. 消息明确 @你${mentionExample}\n2. 消息回复了你之前的消息\n3. 有人直接向你提问或请求帮助\n4. 你确信能提供明确价值的信息\n\n以下情况必须保持沉默：\n- 消息 @的是其他人或其他机器人\n- 普通闲聊、与你无关的讨论\n- 你不确定是否该回复时\n\n不需要回复时，只回复 <NO_REPLY>，不要添加任何其他内容。`;
+                reminder += `\n\n[回复规则]\n你必须非常克制，大多数消息不需要你回复。仅在以下情况回复：\n1. 消息明确 @你${mentionExample}（即使消息同时也 @了其他人，只要 @了你就必须回复）\n2. 消息回复了你之前的消息\n3. 有人直接向你提问或请求帮助\n4. 你确信能提供明确价值的信息\n\n以下情况必须保持沉默：\n- 消息没有 @你，只 @了其他人或其他机器人\n- 普通闲聊、与你无关的讨论\n- 你不确定是否该回复时\n\n判断是否 @了你：看 [本条消息 @了你] 标记，而不是看消息正文中的 @用户名。\n不需要回复时，只回复 <NO_REPLY>，不要添加任何其他内容。`;
               }
               if (payload.groupSystemPrompt) {
                 reminder += `\n\n[群聊指令]\n${payload.groupSystemPrompt}`;
@@ -6983,7 +6990,7 @@ async function main() {
               parts.push(reminder);
             } else if (isAlways) {
               // Brief per-turn reminder (Always mode only) — prevents multi-bot confusion
-              parts.push(`<system-reminder>\n你是「${botName}」，当前处于群聊的全部消息模式 — 你会收到群聊内的全部信息，你需要自主判断是否需要回复消息，与自己无关的消息不要回复，@其他人的消息不要回复。当你判断不需要回复消息时，只输出字符<NO_REPLY>\n</system-reminder>`);
+              parts.push(`<system-reminder>\n你是「${botName}」，当前处于群聊的全部消息模式 — 你会收到群聊内的全部信息，你需要自主判断是否需要回复消息。与自己无关的消息不要回复，没有 @你、仅 @了其他人的消息不要回复。注意：[本条消息 @了你] 标记才是判断依据，消息正文中可能同时 @了多人。当你判断不需要回复消息时，只输出字符<NO_REPLY>\n</system-reminder>`);
             }
 
             // Pending history (accumulated non-triggered messages, Mention mode only)
@@ -6999,7 +7006,7 @@ async function main() {
             const ts = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
             let messageBlock = '';
             if (isAlways) {
-              messageBlock += payload.isMention ? '[本条消息 @了你]\n' : '[本条消息未 @你]\n';
+              messageBlock += payload.isMention ? '[本条消息 @了你，你需要回复]\n' : '[本条消息未 @你]\n';
             }
             messageBlock += payload.senderName ? `[from: ${sanitize(payload.senderName)} ${ts}]\n` : '';
             messageBlock += finalMessage;
@@ -7029,13 +7036,10 @@ async function main() {
 
           // ─── External Runtime branch (CC/Codex) ───
           if (shouldUseExternalRuntime()) {
-            if (payload.images?.length) {
-              console.warn(`[im/chat] External runtime does not support image attachments, ${payload.images.length} image(s) dropped`);
-            }
             const imSource = payload.source.split('_')[0];
             const imSourceType = payload.source.includes('group') ? 'group' as const : 'private' as const;
             const ccResult = await sendExternalMessage(
-              finalMessage, undefined, undefined, undefined,
+              finalMessage, payload.images ?? undefined, undefined, undefined,
               {
                 sessionId: getSessionId(),
                 workspacePath: agentDir,

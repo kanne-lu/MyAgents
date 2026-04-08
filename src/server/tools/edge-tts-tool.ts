@@ -5,6 +5,7 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod/v4';
 import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { ensureGitignorePattern } from '../utils/gitignore';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createHash, randomBytes, randomUUID } from 'crypto';
@@ -65,18 +66,11 @@ export function clearEdgeTtsConfig(): void {
 function getGeneratedAudioDir(): string {
   const workspace = edgeTtsConfig?.workspace;
   const dir = workspace
-    ? join(workspace, 'myagents-generated', 'audio')
+    ? join(workspace, 'myagents_files', 'generated_audio')
     : join(homedir(), '.myagents', 'generated_audio');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
-    // Ensure .gitignore in myagents-generated/ parent to prevent accidental commits
-    if (workspace) {
-      const parentDir = join(workspace, 'myagents-generated');
-      const gitignorePath = join(parentDir, '.gitignore');
-      if (!existsSync(gitignorePath)) {
-        writeFileSync(gitignorePath, '*\n');
-      }
-    }
+    if (workspace) ensureGitignorePattern(workspace, 'myagents_files/');
   }
   return dir;
 }

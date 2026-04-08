@@ -7,10 +7,67 @@
 // Session: thread/start (new) / thread/resume (continuing)
 
 import { spawn, type Subprocess } from 'bun';
+import { writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'fs';
+import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
-import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback } from './types';
+import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand } from './env-utils';
+
+// ─── Temp image directory for Codex (which requires file paths, not base64) ───
+const TEMP_IMG_DIR = join(
+  process.env.HOME || process.env.USERPROFILE || '/tmp',
+  '.myagents', 'tmp', 'codex-images',
+);
+
+/**
+ * Write base64 image to a temp file and return its path.
+ * Codex CLI accepts `localImage` input with file paths.
+ */
+function writeImageToTempFile(img: ImagePayload): string {
+  if (!existsSync(TEMP_IMG_DIR)) {
+    mkdirSync(TEMP_IMG_DIR, { recursive: true });
+  }
+  const subtype = img.mimeType.split('/')[1]?.split('+')[0] || 'png';  // 'jpeg' from 'image/jpeg', 'svg' from 'image/svg+xml'
+  const ext = subtype === 'jpeg' ? 'jpg' : subtype;
+  const filename = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+  const filepath = join(TEMP_IMG_DIR, filename);
+  writeFileSync(filepath, Buffer.from(img.data, 'base64'));
+  return filepath;
+}
+
+/**
+ * Clean up stale temp images older than 1 hour.
+ * Called at session start to prevent unbounded directory growth.
+ */
+function cleanupStaleTempImages(): void {
+  try {
+    if (!existsSync(TEMP_IMG_DIR)) return;
+    const cutoff = Date.now() - 60 * 60 * 1000; // 1 hour
+    for (const file of readdirSync(TEMP_IMG_DIR)) {
+      const filepath = join(TEMP_IMG_DIR, file);
+      try {
+        if (statSync(filepath).mtimeMs < cutoff) unlinkSync(filepath);
+      } catch { /* ignore individual file errors */ }
+    }
+  } catch { /* ignore cleanup errors */ }
+}
+
+/**
+ * Build Codex input array with optional images.
+ * Images are written to temp files and referenced via `localImage` type.
+ */
+function buildCodexInput(text: string, images?: ImagePayload[]): unknown[] {
+  const input: unknown[] = [];
+  if (images && images.length > 0) {
+    for (const img of images) {
+      const filepath = writeImageToTempFile(img);
+      input.push({ type: 'localImage', path: filepath });
+    }
+  }
+  input.push({ type: 'text', text, text_elements: [] });
+  return input;
+}
 
 // ─── Model cache ───
 
@@ -343,6 +400,9 @@ export class CodexRuntime implements AgentRuntime {
     options: SessionStartOptions,
     onEvent: UnifiedEventCallback,
   ): Promise<RuntimeProcess> {
+    // Clean up stale temp images from previous sessions
+    cleanupStaleTempImages();
+
     const proc = spawn([resolveCommand('codex'), 'app-server'], {
       stdout: 'pipe',
       stderr: 'pipe',
@@ -471,9 +531,10 @@ export class CodexRuntime implements AgentRuntime {
 
       // 4. Send initial message if provided
       if (options.initialMessage) {
+        const input = buildCodexInput(options.initialMessage, options.initialImages);
         const turnResult = await codexProc.rpc.call('turn/start', {
           threadId: codexProc.threadId,
-          input: [{ type: 'text', text: options.initialMessage, text_elements: [] }],
+          input,
           summary: 'concise', // Enable reasoning summary streaming for thinking UI
         }, 15_000) as { turn: { id: string } };
         codexProc.currentTurnId = turnResult.turn.id;
@@ -488,13 +549,14 @@ export class CodexRuntime implements AgentRuntime {
     return codexProc;
   }
 
-  async sendMessage(process: RuntimeProcess, message: string): Promise<void> {
+  async sendMessage(process: RuntimeProcess, message: string, images?: ImagePayload[]): Promise<void> {
     const codexProc = process as CodexProcess;
     if (codexProc.exited) throw new Error('Codex process has exited');
 
+    const input = buildCodexInput(message, images);
     const turnResult = await codexProc.rpc.call('turn/start', {
       threadId: codexProc.threadId,
-      input: [{ type: 'text', text: message, text_elements: [] }],
+      input,
       summary: 'concise',
     }, 15_000) as { turn: { id: string } };
     codexProc.currentTurnId = turnResult.turn.id;

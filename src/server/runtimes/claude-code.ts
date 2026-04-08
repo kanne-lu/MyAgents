@@ -11,8 +11,31 @@ import { writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
-import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback } from './types';
+import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand } from './env-utils';
+
+/**
+ * Build CC CLI message content — string for text-only, array of content blocks for images+text.
+ * Matches Anthropic Messages API content format which CC CLI consumes natively.
+ */
+function buildMessageContent(text: string, images?: ImagePayload[]): string | unknown[] {
+  if (!images || images.length === 0) return text;
+  const blocks: unknown[] = [];
+  for (const img of images) {
+    blocks.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: img.mimeType,
+        data: img.data,
+      },
+    });
+  }
+  if (text) {
+    blocks.push({ type: 'text', text });
+  }
+  return blocks;
+}
 
 // ─── SessionStart Hook settings generator ───
 // CC's hooks fire on session lifecycle events. We inject a SessionStart hook
@@ -301,13 +324,14 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
     // Send initial message via stdin (must happen before reading stdout to avoid deadlock)
     if (options.initialMessage) {
+      const content = buildMessageContent(options.initialMessage, options.initialImages);
       const userMsg = {
         type: 'user',
-        message: { role: 'user', content: options.initialMessage },
+        message: { role: 'user', content },
         parent_tool_use_id: null,
       };
       await handle.writeLine(JSON.stringify(userMsg));
-      console.log(`[claude-code] Initial message sent via stdin (${options.initialMessage.length} chars)`);
+      console.log(`[claude-code] Initial message sent via stdin (${options.initialMessage.length} chars, ${options.initialImages?.length ?? 0} images)`);
     }
 
     // Read stderr for logging
@@ -338,10 +362,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     return handle;
   }
 
-  async sendMessage(process: RuntimeProcess, message: string): Promise<void> {
+  async sendMessage(process: RuntimeProcess, message: string, images?: ImagePayload[]): Promise<void> {
+    const content = buildMessageContent(message, images);
     const userMsg = {
       type: 'user',
-      message: { role: 'user', content: message },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
     };
     await process.writeLine(JSON.stringify(userMsg));
