@@ -612,7 +612,13 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       }
 
       case 'message_stop':
-        return { kind: 'turn_complete' };
+        // NOT turn_complete — CC's -p mode outputs multiple message_stop per turn
+        // (one for each API round-trip during tool loops). The true turn-end signal
+        // is the 'result' NDJSON event (mapped to session_complete).
+        // Mapping this to turn_complete causes: (1) premature end-of-message UI after
+        // each tool call, (2) broken multi-turn resume because session_complete's
+        // persistence is skipped when turnCompleted is already true. See: #71
+        return null;
 
       case 'message_start':
         return { kind: 'status_change', state: 'running' };

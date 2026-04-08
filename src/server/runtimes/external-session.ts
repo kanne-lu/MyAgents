@@ -527,7 +527,11 @@ export async function sendExternalMessage(
 
   // Case 2: Previous process exited — resume (CC -p mode multi-turn)
   if (!activeProcess || activeProcess.exited) {
-    console.log(`[external-session] Previous process exited, resuming session ${lastRuntimeSessionId}`);
+    // CC supports custom session IDs (--session-id) — resume with our MyAgents session ID.
+    // Codex doesn't support custom IDs — resume with Codex's own threadId (lastRuntimeSessionId).
+    const runtimeType = getCurrentRuntimeType();
+    const resumeId = runtimeType === 'claude-code' ? lastSessionId : lastRuntimeSessionId;
+    console.log(`[external-session] Previous process exited, resuming ${runtimeType} session ${resumeId}`);
     try {
       await startExternalSession({
         sessionId: lastSessionId,
@@ -536,7 +540,7 @@ export async function sendExternalMessage(
         model: lastModel || context?.model,
         permissionMode: lastPermissionMode || context?.permissionMode,
         scenario: lastScenario,
-        resumeSessionId: lastRuntimeSessionId, // --resume to continue conversation
+        resumeSessionId: resumeId, // CC: --resume <myagents-session-id>; Codex: --resume <threadId>
       });
       return { queued: true };
     } catch (err) {
@@ -891,10 +895,17 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           currentAssistantText += event.result;
           pendingTextBuffer += event.result;
         }
-        // Only broadcast if turn_complete didn't already
+        // Only broadcast if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
         if (!turnCompleted) {
+          lastTurnSucceeded = true;  // Successful turn — safe for cron/heartbeat to read
+          clearWatchdog();
+          const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
+
           // Flush and persist structured content
           flushAllPending();
+
+          const usageData = currentTurnUsage ? { inputTokens: currentTurnUsage.inputTokens, outputTokens: currentTurnUsage.outputTokens } : undefined;
+          const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
 
           if (currentContentBlocks.length > 0) {
             const content = JSON.stringify(currentContentBlocks);
@@ -903,7 +914,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
               role: 'assistant',
               content,
               timestamp: new Date().toISOString(),
-              durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
+              durationMs: turnDurationMs,
+              usage: usageData,
+              toolCount: turnToolCount || undefined,
             };
             allSessionMessages.push(assistantMsg);
             resetTurnAccumulators();
@@ -914,7 +927,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
               role: 'assistant',
               content: currentAssistantText,
               timestamp: new Date().toISOString(),
-              durationMs: currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined,
+              durationMs: turnDurationMs,
+              usage: usageData,
             };
             allSessionMessages.push(assistantMsg);
             resetTurnAccumulators();
@@ -932,7 +946,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
               console.error('[external-session] Failed to save session messages:', err);
             }
           }
-          broadcast('chat:message-complete', {});
+          broadcast('chat:message-complete', {
+            ...(usageData ? { input_tokens: usageData.inputTokens, output_tokens: usageData.outputTokens } : {}),
+            ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
+            ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
+          });
           fireImCallback('complete', '');
         }
       } else {
