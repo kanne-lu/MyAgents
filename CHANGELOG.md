@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.61] - 2026-04-09
+
+### Added
+- **外部 Runtime 图片支持**：使用 Claude Code CLI 或 Codex CLI 时，现在可以发送图片给 AI，不再提示"没有附带图片"
+- **三方供应商工具截图保存**：使用 DeepSeek/Gemini 等三方供应商时，MCP 工具返回的截图/图片不再丢失，自动保存到工作区并告知 AI 路径
+
+### Improved
+- **AI 回复排版优化**：Markdown 渲染全面对齐设计规范 — 标题行高、段落间距、代码配色、表格样式、有序列表序号，长文阅读更舒适
+- **工作区文件目录统一**：Gemini 生成图片、TTS 音频、工具截图等所有 AI 生成的文件统一放在 `myagents_files/` 目录下，不再散落在多个顶级目录
+- **错误提示优化**：API 临时异常（限流/重试）不再弹出红色错误横幅，只有真正失败时才提示
+
+### Fixed
+- **切换 Runtime 后无限弹窗**：切换到 Claude Code/Codex Runtime 后发送消息，反复弹出"此会话由其他 Runtime 创建"对话框并不断开新 Tab
+- **外部 Runtime 检测失败**：从 Finder 启动应用时，因系统 PATH 缺少 Homebrew 路径导致检测不到已安装的 Claude Code CLI 和 Codex CLI
+- **Markdown HTML 安全加固**：AI 回复中的 raw HTML 现在经过清理过滤，防止潜在的脚本注入风险
+
+---
+
 ## [0.1.60] - 2026-04-07
 
 ### Added
