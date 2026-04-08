@@ -20,6 +20,7 @@
   "reply-history",
   "reply-runtime",
   "routing",
+  "runtime-store",
   "setup",
   "temp-path",
   "text-runtime",
