@@ -659,13 +659,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         }
 
         // 2. Compute effective values BEFORE setState (avoid stale closure)
-        const effectivePermission = initialMessage.permissionMode ?? permissionMode;
+        // External runtime: read from runtimePermissionMode (CC/Codex modes), not permissionMode (builtin)
+        const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime ? runtimePermissionMode : permissionMode)) as PermissionMode;
         // External runtime uses runtimeModel as fallback (not selectedModel which is the builtin model).
         // When both are undefined (user picked "默认"), pass undefined to let the CLI use its own default.
         const effectiveModel = initialMessage.model ?? (isExternalRuntime ? runtimeModel : selectedModel);
 
         // 3. Update local UI state to reflect Launcher choices
-        if (initialMessage.permissionMode) setPermissionMode(initialMessage.permissionMode);
+        if (initialMessage.permissionMode) {
+          // External runtime has its own permission mode state (runtimePermissionMode),
+          // while builtin uses permissionMode. Set the correct one based on runtime.
+          if (isExternalRuntime) {
+            setRuntimePermissionMode(initialMessage.permissionMode);
+          } else {
+            setPermissionMode(initialMessage.permissionMode);
+          }
+        }
         if (initialMessage.model) {
           // External runtime (Codex/CC) uses runtimeModel; builtin uses selectedModel.
           // Setting the wrong one causes the model from Launcher to be ignored on subsequent messages.
@@ -738,7 +747,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       // Note: taskId, isFirstExecution, aiCanExit are available for future enhancements
       // (e.g., injecting cron context into system prompt)
       const providerEnv = buildProviderEnv(currentProvider);
-      await sendMessage(prompt, undefined, permissionMode, selectedModel, providerEnv, true /* isCron */);
+      // Use effective model/permission (runtime-aware) — not the builtin values
+      await sendMessage(prompt, undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, true /* isCron */);
     },
     onComplete: (task, reason) => {
       console.log('[Chat] Cron task completed:', task.id, reason);
@@ -1128,6 +1138,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // AgentConfig is source of truth, Project is fallback for non-agent workspaces
     const effectivePermission = (currentAgent?.permissionMode as PermissionMode | undefined) ?? currentProject.permissionMode ?? config.defaultPermissionMode;
     setPermissionMode(effectivePermission);
+    // Also sync runtime-specific permission mode from persisted runtimeConfig
+    // (without this, Chat defaults to 'full-auto'/'default' and ignores the saved value)
+    if (isExternalRuntime) {
+      const savedRuntimePerm = (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode;
+      if (savedRuntimePerm) setRuntimePermissionMode(savedRuntimePerm);
+    }
     // Sync provider (useState initializer runs when currentProject is still undefined).
     // Re-arm providerInitRef to suppress the deferred provider-change effect (fires next render)
     // that would otherwise override the project-stored model with provider's primaryModel.

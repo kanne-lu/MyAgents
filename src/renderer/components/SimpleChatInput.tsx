@@ -903,19 +903,25 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     setInputValue(newValue);
   }, [inputValue, showFileSearch, atPosition, showSlashMenu, slashPosition, isLauncherMode]);
 
-  // Cycle permission mode: auto → plan → fullAgency → auto
+  // Cycle permission mode — runtime-aware:
+  // Builtin: auto → plan → fullAgency → auto
+  // External: cycle through runtimePermissionModes (CC or Codex specific modes)
   const cyclePermissionMode = useCallback(() => {
-    const modeOrder: PermissionMode[] = ['auto', 'plan', 'fullAgency'];
+    const modeOrder: string[] = runtimePermissionModes?.length
+      ? runtimePermissionModes.map(m => m.value)
+      : ['auto', 'plan', 'fullAgency'];
     const currentIndex = modeOrder.indexOf(permissionMode);
-    const nextIndex = (currentIndex + 1) % modeOrder.length;
-    const nextMode = modeOrder[nextIndex];
+    // If current mode not in list (e.g., mode from a different runtime), start from first
+    const nextIndex = currentIndex < 0 ? 0 : (currentIndex + 1) % modeOrder.length;
+    const nextMode = modeOrder[nextIndex] as PermissionMode;
 
-    // Show warning toast for fullAgency mode (10 seconds)
-    if (nextMode === 'fullAgency') {
+    // Show warning toast for dangerous modes (runtime-agnostic string check)
+    const dangerousModes = new Set(['fullAgency', 'bypassPermissions', 'no-restrictions']);
+    if (dangerousModes.has(nextMode)) {
       toastRef.current.warning('自主行动已启用：Agent 可能做出不可挽回的操作，请谨慎使用', 5000);
     }
     onPermissionModeChange?.(nextMode);
-  }, [permissionMode, onPermissionModeChange]);
+  }, [permissionMode, onPermissionModeChange, runtimePermissionModes]);
 
   // Global Shift+Tab handler with capture phase to prevent default Tab behavior
   useEffect(() => {

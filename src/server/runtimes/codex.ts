@@ -503,7 +503,7 @@ export class CodexRuntime implements AgentRuntime {
   async respondPermission(
     process: RuntimeProcess,
     requestId: string,
-    approved: boolean,
+    decision: 'deny' | 'allow_once' | 'always_allow',
   ): Promise<void> {
     const codexProc = process as CodexProcess;
     if (codexProc.exited) return;
@@ -516,7 +516,7 @@ export class CodexRuntime implements AgentRuntime {
     }
 
     codexProc.rpc.respond(rpcId, {
-      decision: approved ? 'accept' : 'decline',
+      decision: decision === 'deny' ? 'decline' : 'accept',
     });
   }
 

@@ -350,12 +350,14 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   async respondPermission(
     process: RuntimeProcess,
     requestId: string,
-    approved: boolean,
+    decision: 'deny' | 'allow_once' | 'always_allow',
     reason?: string,
+    suggestions?: unknown[],
   ): Promise<void> {
-    // CC expects { behavior: "allow"/"deny" }, NOT { approved: true/false }
-    // See specs/research/claude_code_cli_reference.md Section 4.4.2
-    const response = approved
+    // CC control_response schema (PermissionPromptToolResultSchema.ts):
+    // allow: { behavior, updatedInput (required), updatedPermissions?, decisionClassification? }
+    // deny:  { behavior, message, interrupt?, decisionClassification? }
+    const response = decision !== 'deny'
       ? {
         type: 'control_response' as const,
         response: {
@@ -363,7 +365,11 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           subtype: 'success' as const,
           response: {
             behavior: 'allow' as const,
-            decisionClassification: 'user_temporary' as const,
+            updatedInput: {},  // Required by CC schema — empty = use original input
+            decisionClassification: decision === 'always_allow' ? 'user_permanent' as const : 'user_temporary' as const,
+            // For always_allow: echo permission_suggestions back as updatedPermissions
+            // so CC persists the rule and doesn't re-prompt for this tool
+            ...(decision === 'always_allow' && suggestions?.length ? { updatedPermissions: suggestions } : {}),
           },
         },
       }
@@ -532,6 +538,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
             toolName: (request.tool_name as string) || '',
             toolUseId: (request.tool_use_id as string) || '',
             input: (request.input as Record<string, unknown>) || {},
+            // Capture permission_suggestions — echoed back as updatedPermissions for "always_allow"
+            suggestions: Array.isArray(request.permission_suggestions) ? request.permission_suggestions : undefined,
           };
         }
         return null;

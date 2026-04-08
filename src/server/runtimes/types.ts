@@ -63,6 +63,8 @@ export type UnifiedEvent =
     toolName: string;
     toolUseId: string;
     input: Record<string, unknown>;
+    /** CC's suggested permission rules for "always allow" (echoed back as updatedPermissions) */
+    suggestions?: unknown[];
   }
 
   // === Session lifecycle ===
@@ -121,8 +123,10 @@ export interface AgentRuntime {
   respondPermission(
     process: RuntimeProcess,
     requestId: string,
-    approved: boolean,
+    decision: 'deny' | 'allow_once' | 'always_allow',
     reason?: string,
+    /** CC: echoed permission_suggestions for 'always_allow' → updatedPermissions */
+    suggestions?: unknown[],
   ): Promise<void>;
 
   /** Stop the session gracefully */

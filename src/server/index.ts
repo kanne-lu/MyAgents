@@ -1626,11 +1626,15 @@ async function main() {
       if (pathname === '/api/runtime/permission-response' && request.method === 'POST') {
         const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
         const requestId = body.requestId as string;
-        const approved = body.approved as boolean;
+        // Accept both legacy { approved: boolean } and new { decision: enum } format
+        const decision: 'deny' | 'allow_once' | 'always_allow' = (body.decision as string) === 'deny' ? 'deny'
+          : (body.decision as string) === 'always_allow' ? 'always_allow'
+          : (body.decision as string) === 'allow_once' ? 'allow_once'
+          : (body.approved === true) ? 'allow_once' : 'deny';
         const reason = body.reason as string | undefined;
         if (!requestId) return jsonResponse({ error: 'Missing requestId' }, 400);
         try {
-          await respondExternalPermission(requestId, approved, reason);
+          await respondExternalPermission(requestId, decision, reason);
           return jsonResponse({ success: true });
         } catch (error) {
           return jsonResponse({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
@@ -4592,9 +4596,8 @@ async function main() {
           };
 
           if (shouldUseExternalRuntime() && isExternalSessionActive()) {
-            // External runtime: translate decision enum → boolean approved
-            const approved = payload.decision !== 'deny';
-            await respondExternalPermission(payload.requestId, approved);
+            // External runtime: pass full decision so CC can persist "always_allow" rules
+            await respondExternalPermission(payload.requestId, payload.decision);
             return jsonResponse({ success: true });
           }
 
@@ -7469,8 +7472,7 @@ description: >
           };
 
           if (shouldUseExternalRuntime() && isExternalSessionActive()) {
-            const approved = payload.decision !== 'deny';
-            await respondExternalPermission(payload.requestId, approved);
+            await respondExternalPermission(payload.requestId, payload.decision);
             return jsonResponse({ success: true });
           }
 

@@ -165,6 +165,11 @@ type ImStreamCallback = (
 let imStreamCallback: ImStreamCallback | null = null;
 let imCallbackNulledDuringTurn = false; // Prevents stale turn events leaking to new callback
 
+// Pending permission suggestions — keyed by requestId, consumed by respondExternalPermission.
+// CC sends permission_suggestions in control_request; we echo them back as updatedPermissions
+// in control_response for "always_allow" so CC persists the rule.
+const pendingPermissionSuggestions = new Map<string, unknown[] | undefined>();
+
 /** Fire IM callback only if not stale (guard mirrors agent-session.ts pattern) */
 function fireImCallback(event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string): void {
   if (imStreamCallback && !imCallbackNulledDuringTurn) {
@@ -392,7 +397,7 @@ async function _doStartExternalSession(options: {
   // Build system prompt using MyAgents' three-layer architecture
   const systemPromptAppend = buildSystemPromptAppend(options.scenario);
 
-  console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}`);
+  console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${options.model || '(default)'}, permissionMode=${options.permissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
   turnCompleted = false;
   lastTurnSucceeded = false;  // Reset — success only set after turn_complete
   resetTurnAccumulators();
@@ -584,18 +589,25 @@ export async function sendExternalMessage(
 }
 
 /**
- * Respond to a permission request from the external runtime
+ * Respond to a permission request from the external runtime.
+ * @param decision - 'deny' | 'allow_once' | 'always_allow'
+ *   For CC: always_allow includes updatedPermissions from the original permission_suggestions
+ *   so CC persists the rule and won't re-prompt for the same tool.
  */
 export async function respondExternalPermission(
   requestId: string,
-  approved: boolean,
+  decision: 'deny' | 'allow_once' | 'always_allow',
   reason?: string,
 ): Promise<void> {
   if (!activeProcess || !activeRuntime) {
     console.warn('[external-session] No active process for permission response');
     return;
   }
-  await activeRuntime.respondPermission(activeProcess, requestId, approved, reason);
+  // Retrieve and consume stored suggestions for this request
+  const suggestions = pendingPermissionSuggestions.get(requestId);
+  pendingPermissionSuggestions.delete(requestId);
+  console.log(`[external-session] Permission response: ${decision} for requestId=${requestId}${suggestions?.length ? `, with ${suggestions.length} suggestion(s)` : ''}`);
+  await activeRuntime.respondPermission(activeProcess, requestId, decision, reason, suggestions);
 }
 
 /**
@@ -837,6 +849,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'permission_request':
+      // Store suggestions so respondExternalPermission can echo them back for "always_allow"
+      pendingPermissionSuggestions.set(event.requestId, event.suggestions);
       broadcast('permission:request', {
         requestId: event.requestId,
         toolName: event.toolName,
@@ -938,7 +952,12 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // stream_event deltas AND a complete assistant message, causing duplication.
       // Only replay user messages (for session resume scenarios).
       if (event.message.role === 'user') {
-        broadcast('chat:message-replay', { message: event.message });
+        // Ensure timestamp exists — CC replay messages don't include it,
+        // and frontend does new Date(msg.timestamp) → Invalid Date → NaN display
+        const replayMsg = event.message.timestamp
+          ? event.message
+          : { ...event.message, timestamp: new Date().toISOString() };
+        broadcast('chat:message-replay', { message: replayMsg });
       }
       // Assistant replays are intentionally dropped — the stream_event deltas
       // already delivered the content to the frontend incrementally.
