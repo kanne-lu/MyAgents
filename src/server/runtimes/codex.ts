@@ -28,11 +28,13 @@ function writeImageToTempFile(img: ImagePayload): string {
   if (!existsSync(TEMP_IMG_DIR)) {
     mkdirSync(TEMP_IMG_DIR, { recursive: true });
   }
+  const buf = Buffer.from(img.data, 'base64');
+  if (buf.length === 0) throw new Error('Empty image data');
   const subtype = img.mimeType.split('/')[1]?.split('+')[0] || 'png';  // 'jpeg' from 'image/jpeg', 'svg' from 'image/svg+xml'
   const ext = subtype === 'jpeg' ? 'jpg' : subtype;
   const filename = `img-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
   const filepath = join(TEMP_IMG_DIR, filename);
-  writeFileSync(filepath, Buffer.from(img.data, 'base64'));
+  writeFileSync(filepath, buf);
   return filepath;
 }
 

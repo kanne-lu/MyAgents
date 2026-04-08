@@ -57,11 +57,13 @@ export function createToolImageSaver(workspacePath: string): ToolImageSaver {
       dirEnsured = true;
     }
 
+    const buf = Buffer.from(base64, 'base64');
+    if (buf.length === 0) throw new Error('Empty image data');
     const subtype = mimeType.split('/')[1]?.split('+')[0] || 'png';
-    const ext = subtype === 'jpeg' ? 'jpg' : subtype;
+    const ext = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(subtype) ? (subtype === 'jpeg' ? 'jpg' : subtype) : 'png';
     const filename = `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.${ext}`;
     const filepath = join(dir, filename);
-    writeFileSync(filepath, Buffer.from(base64, 'base64'));
+    writeFileSync(filepath, buf);
 
     // Return relative path from workspace root (for AI reference)
     return `myagents_files/temp/${filename}`;

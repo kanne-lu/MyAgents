@@ -1973,7 +1973,8 @@ async function main() {
 
         if (effectiveRunMode === 'new_session') {
           // Create a fresh session for each execution (no memory of previous runs)
-          const newSession = createSession(agentDir);
+          // Cron tasks always run on the builtin runtime (external runtimes not supported for cron yet)
+          const newSession = createSession(agentDir, 'builtin');
           const switched = await switchToSession(newSession.id);
           if (!switched) {
             console.error(`[cron] execute-sync taskId=${taskId} failed to switch to new session ${newSession.id}`);

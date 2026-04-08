@@ -16,6 +16,7 @@ import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -28,10 +29,32 @@ import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import { useTabApiOptional } from '@/context/TabContext';
 
+// Sanitize schema: allow safe HTML tags from rehype-raw, strip scripts/iframes/event handlers.
+// Extends the default GitHub-flavored schema with additional tags used in AI-generated content.
+const SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  tagNames: [
+    ...(defaultSchema.tagNames ?? []),
+    'details', 'summary',  // collapsible sections
+    'mark', 'ins', 'del',  // text highlighting
+    'sub', 'sup',           // subscript/superscript
+    'kbd', 'var', 'samp',  // technical inline elements
+  ],
+  attributes: {
+    ...defaultSchema.attributes,
+    // Allow class on code/span for syntax highlighting
+    code: [...(defaultSchema.attributes?.code ?? []), 'className'],
+    span: [...(defaultSchema.attributes?.span ?? []), 'className', 'style'],
+    // Allow KaTeX-generated markup
+    div: [...(defaultSchema.attributes?.div ?? []), 'className', 'style'],
+  },
+};
+
 // Static plugin arrays to avoid recreation on every render
 const REMARK_PLUGINS_DEFAULT = [remarkGfm, remarkMath];
 const REMARK_PLUGINS_WITH_BREAKS = [remarkGfm, remarkMath, remarkBreaks];
-const REHYPE_PLUGINS = [rehypeRaw, rehypeKatex];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- rehype plugin tuple typing
+const REHYPE_PLUGINS = [rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA], rehypeKatex] as any[];
 
 // Custom link component that opens links in embedded browser panel (if available)
 // or falls back to system browser. Supports text selection for copying.
