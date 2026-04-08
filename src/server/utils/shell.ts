@@ -31,6 +31,7 @@ function getFallbackPaths(): string[] {
     const paths = [
         '/opt/homebrew/bin',
         '/usr/local/bin',
+        process.env.HOME ? `${process.env.HOME}/.local/bin` : '',   // Claude Code / pipx / user-local installs
         process.env.HOME ? `${process.env.HOME}/.bun/bin` : '',
         process.env.HOME ? `${process.env.HOME}/.npm-global/bin` : '',
         process.env.HOME ? `${process.env.HOME}/Library/pnpm` : '',
