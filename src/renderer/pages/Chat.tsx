@@ -1431,9 +1431,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Cross-runtime session detection: session was created by a DIFFERENT runtime than the current one.
   // Covers all mismatch scenarios: builtin↔CC, builtin↔Codex, CC↔Codex.
-  // sessionRuntime is null for new sessions (no history loaded yet) — skip detection.
-  // sessionRuntime is undefined for pre-v0.1.60 builtin sessions — treat as 'builtin'.
-  const effectiveSessionRuntime = sessionRuntime === null ? null : (sessionRuntime || 'builtin');
+  // sessionRuntime is null in two cases:
+  //   1. New session (no history) → skip detection (no point warning on empty session)
+  //   2. Loaded session with no runtime metadata (pre-v0.1.60 or multiAgentRuntime was OFF) → treat as 'builtin'
+  // Distinguish by checking if messages are loaded: messages.length > 0 means case 2.
+  const sessionHasHistory = messages.length > 0;
+  const effectiveSessionRuntime = sessionRuntime
+    ? sessionRuntime
+    : (sessionHasHistory ? 'builtin' : null);  // null = new/empty session → skip
   const isCrossRuntimeSession = effectiveSessionRuntime !== null && effectiveSessionRuntime !== currentRuntime;
   const [pendingCrossRuntimeMessage, setPendingCrossRuntimeMessage] = useState<{
     text: string;
