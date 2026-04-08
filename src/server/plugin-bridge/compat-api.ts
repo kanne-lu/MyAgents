@@ -127,6 +127,10 @@ export function createCompatApi(config: Record<string, unknown>) {
     registerCli() {},
     registerAction() {},
     registerProvider() {},
+    registerHttpRoute(_route: Record<string, unknown>) {
+      // No-op in Bridge mode — MyAgents doesn't run OpenClaw's HTTP server.
+      // Plugins register webhook routes here; silently ignore.
+    },
 
     // Event emitter API — plugins register lifecycle hooks via api.on()
     on(_event: string, _handler: (...args: unknown[]) => void) {},
