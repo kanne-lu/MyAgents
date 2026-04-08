@@ -655,6 +655,67 @@ export function getRuntimePermissionModes(runtimeType: RuntimeType): unknown[] {
   }
 }
 
+// ─── Private: shared turn finalization (used by both turn_complete and session_complete) ───
+
+/** Flush accumulated content blocks, persist to SessionStore, and broadcast completion.
+ * Called by both turn_complete (Codex) and session_complete (CC) to avoid duplication. */
+function persistTurnResult(): void {
+  const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
+  flushAllPending();
+
+  const usageData = currentTurnUsage
+    ? { inputTokens: currentTurnUsage.inputTokens, outputTokens: currentTurnUsage.outputTokens }
+    : undefined;
+  const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
+
+  if (currentContentBlocks.length > 0) {
+    const content = JSON.stringify(currentContentBlocks);
+    allSessionMessages.push({
+      id: `assistant-${Date.now()}`,
+      role: 'assistant',
+      content,
+      timestamp: new Date().toISOString(),
+      durationMs: turnDurationMs,
+      usage: usageData,
+      toolCount: turnToolCount || undefined,
+    });
+    resetTurnAccumulators();
+  } else if (currentAssistantText.trim()) {
+    // Fallback: no structured blocks, just plain text (e.g. CC slash commands)
+    allSessionMessages.push({
+      id: `assistant-${Date.now()}`,
+      role: 'assistant',
+      content: currentAssistantText,
+      timestamp: new Date().toISOString(),
+      durationMs: turnDurationMs,
+      usage: usageData,
+    });
+    resetTurnAccumulators();
+  }
+
+  // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
+  if (allSessionMessages.length > 0 && lastSessionId) {
+    try {
+      saveSessionMessages(lastSessionId, allSessionMessages);
+      const lastMsg = allSessionMessages[allSessionMessages.length - 1];
+      updateSessionMetadata(lastSessionId, {
+        lastActiveAt: new Date().toISOString(),
+        lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
+      });
+    } catch (err) {
+      console.error('[external-session] Failed to save session messages:', err);
+    }
+  }
+
+  broadcast('chat:message-complete', {
+    ...(usageData ? { input_tokens: usageData.inputTokens, output_tokens: usageData.outputTokens } : {}),
+    ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
+    ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
+  });
+  broadcast('chat:status', { sessionState: 'idle' });
+  fireImCallback('complete', '');
+}
+
 // ─── Private: UnifiedEvent → SSE broadcast ───
 
 function handleUnifiedEvent(event: UnifiedEvent): void {
@@ -819,68 +880,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     }
 
     case 'turn_complete': {
-      // Mark turn complete — session_complete will follow for -p mode
+      // Mark turn complete — session_complete will follow for CC -p mode
       turnCompleted = true;
-      lastTurnSucceeded = true;  // Successful turn — safe for cron/heartbeat to read
+      lastTurnSucceeded = true;
       clearWatchdog();
-      const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
-      const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
-
-      broadcast('chat:message-complete', {
-        ...(currentTurnUsage ? { input_tokens: currentTurnUsage.inputTokens, output_tokens: currentTurnUsage.outputTokens } : {}),
-        ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
-        ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
-      });
-      broadcast('chat:status', { sessionState: 'idle' });
-      fireImCallback('complete', '');
-
-      // Flush any pending blocks (text, thinking, tool) and persist structured content
-      flushAllPending();
-
-      const usageData = currentTurnUsage ? { inputTokens: currentTurnUsage.inputTokens, outputTokens: currentTurnUsage.outputTokens } : undefined;
-
-      if (currentContentBlocks.length > 0) {
-        // Persist as JSON ContentBlock[] — matches builtin runtime format
-        const content = JSON.stringify(currentContentBlocks);
-        const assistantMsg: SessionMessage = {
-          id: `assistant-${Date.now()}`,
-          role: 'assistant',
-          content,
-          timestamp: new Date().toISOString(),
-          durationMs: turnDurationMs,
-          usage: usageData,
-          toolCount: turnToolCount || undefined,
-        };
-        allSessionMessages.push(assistantMsg);
-        resetTurnAccumulators();
-      } else if (currentAssistantText.trim()) {
-        // Fallback: no structured blocks, just plain text (e.g. CC slash commands)
-        const assistantMsg: SessionMessage = {
-          id: `assistant-${Date.now()}`,
-          role: 'assistant',
-          content: currentAssistantText,
-          timestamp: new Date().toISOString(),
-          durationMs: turnDurationMs,
-          usage: usageData,
-        };
-        allSessionMessages.push(assistantMsg);
-        resetTurnAccumulators();
-      }
-
-      // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
-      // Do NOT clear allSessionMessages — it must grow across turns for the contract to work
-      if (allSessionMessages.length > 0 && lastSessionId) {
-        try {
-          saveSessionMessages(lastSessionId, allSessionMessages);
-          const lastMsg = allSessionMessages[allSessionMessages.length - 1];
-          updateSessionMetadata(lastSessionId, {
-            lastActiveAt: new Date().toISOString(),
-            lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
-          });
-        } catch (err) {
-          console.error('[external-session] Failed to save session messages:', err);
-        }
-      }
+      persistTurnResult();
       break;
     }
 
@@ -895,63 +899,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           currentAssistantText += event.result;
           pendingTextBuffer += event.result;
         }
-        // Only broadcast if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
+        // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
         if (!turnCompleted) {
-          lastTurnSucceeded = true;  // Successful turn — safe for cron/heartbeat to read
-          clearWatchdog();
-          const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
-
-          // Flush and persist structured content
-          flushAllPending();
-
-          const usageData = currentTurnUsage ? { inputTokens: currentTurnUsage.inputTokens, outputTokens: currentTurnUsage.outputTokens } : undefined;
-          const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
-
-          if (currentContentBlocks.length > 0) {
-            const content = JSON.stringify(currentContentBlocks);
-            const assistantMsg: SessionMessage = {
-              id: `assistant-${Date.now()}`,
-              role: 'assistant',
-              content,
-              timestamp: new Date().toISOString(),
-              durationMs: turnDurationMs,
-              usage: usageData,
-              toolCount: turnToolCount || undefined,
-            };
-            allSessionMessages.push(assistantMsg);
-            resetTurnAccumulators();
-          } else if (currentAssistantText.trim()) {
-            // Fallback: plain text (CC slash commands)
-            const assistantMsg: SessionMessage = {
-              id: `assistant-${Date.now()}`,
-              role: 'assistant',
-              content: currentAssistantText,
-              timestamp: new Date().toISOString(),
-              durationMs: turnDurationMs,
-              usage: usageData,
-            };
-            allSessionMessages.push(assistantMsg);
-            resetTurnAccumulators();
-          }
-
-          if (allSessionMessages.length > 0 && lastSessionId) {
-            try {
-              saveSessionMessages(lastSessionId, allSessionMessages);
-              const lastMsg = allSessionMessages[allSessionMessages.length - 1];
-              updateSessionMetadata(lastSessionId, {
-                lastActiveAt: new Date().toISOString(),
-                lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
-              });
-            } catch (err) {
-              console.error('[external-session] Failed to save session messages:', err);
-            }
-          }
-          broadcast('chat:message-complete', {
-            ...(usageData ? { input_tokens: usageData.inputTokens, output_tokens: usageData.outputTokens } : {}),
-            ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
-            ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
-          });
-          fireImCallback('complete', '');
+          lastTurnSucceeded = true;
+          persistTurnResult();
         }
       } else {
         broadcast('chat:message-error', event.result || 'Session ended with error');
