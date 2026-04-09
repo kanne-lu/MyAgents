@@ -609,8 +609,10 @@ export default function App() {
       }
     };
 
-    // Fire and forget - cleanup runs in background
-    void cleanupResources();
+    // Runs in background — catch ensures no unhandled rejection
+    cleanupResources().catch(err =>
+      console.error(`[App] Unhandled cleanup error for tab ${tabId}:`, err)
+    );
   }, []);
 
   // Close tab — if AI is generating, close immediately and let it finish in background.

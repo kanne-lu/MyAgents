@@ -23,7 +23,7 @@ import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
-import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage } from './types/session';
+import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
 import { broadcast } from './sse';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
@@ -362,7 +362,7 @@ export type MessageWire = {
     isImage?: boolean;
   }[];
   metadata?: {
-    source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
+    source: SessionSource;
     sourceId?: string;
     senderName?: string;
   };
@@ -3985,7 +3985,7 @@ export async function enqueueUserMessage(
   permissionMode?: PermissionMode,
   model?: string,
   providerEnv?: ProviderEnv | 'subscription',
-  metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group'; sourceId?: string; senderName?: string },
+  metadata?: { source: SessionSource; sourceId?: string; senderName?: string },
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await sessionTerminationPromise 需要数秒），

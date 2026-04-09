@@ -541,6 +541,16 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const [ttsPreviewPlaying, setTtsPreviewPlaying] = useState(false);
     const ttsAudioRef = useRef<HTMLAudioElement | null>(null);
 
+    // OAuth polling cleanup refs (P0-7: prevent interval leak on unmount)
+    const oauthPollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+    const oauthPollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+        return () => {
+            if (oauthPollIntervalRef.current) clearInterval(oauthPollIntervalRef.current);
+            if (oauthPollTimeoutRef.current) clearTimeout(oauthPollTimeoutRef.current);
+        };
+    }, []);
+
     // Playwright MCP custom settings dialog
     const [playwrightSettings, setPlaywrightSettings] = useState<{
         mode: 'persistent' | 'isolated';
@@ -1262,12 +1272,16 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                 await openExternal(result.authUrl);
                 toast.success('已在浏览器中打开授权页面，请完成授权');
                 setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connecting' }));
-                // Poll for token status
+                // Clean up any previous poll
+                if (oauthPollIntervalRef.current) clearInterval(oauthPollIntervalRef.current);
+                if (oauthPollTimeoutRef.current) clearTimeout(oauthPollTimeoutRef.current);
+                // Poll for token status (refs ensure cleanup on unmount)
                 const pollInterval = setInterval(async () => {
                     try {
                         const status = await apiGetJson<{ success: boolean; status: string }>(`/api/mcp/oauth/status/${encodeURIComponent(serverId)}`);
                         if (status.success && status.status === 'connected') {
                             clearInterval(pollInterval);
+                            oauthPollIntervalRef.current = null;
                             setMcpOAuthStatus(prev => ({ ...prev, [serverId]: 'connected' }));
                             setMcpOAuthConnecting(null);
                             toast.success('OAuth 授权成功');
@@ -1275,6 +1289,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                             setMcpOAuthConnecting(prev => {
                                 if (prev === serverId) {
                                     clearInterval(pollInterval);
+                                    oauthPollIntervalRef.current = null;
                                     setMcpOAuthStatus(p => ({ ...p, [serverId]: 'disconnected' }));
                                     return null;
                                 }
@@ -1283,8 +1298,11 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                         }
                     } catch { /* ignore poll errors */ }
                 }, 2000);
-                setTimeout(() => {
+                oauthPollIntervalRef.current = pollInterval;
+                oauthPollTimeoutRef.current = setTimeout(() => {
                     clearInterval(pollInterval);
+                    oauthPollIntervalRef.current = null;
+                    oauthPollTimeoutRef.current = null;
                     setMcpOAuthConnecting(null);
                 }, 5 * 60 * 1000);
             } else {

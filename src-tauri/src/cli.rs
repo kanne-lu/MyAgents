@@ -85,6 +85,10 @@ pub fn run(args: &[String]) -> i32 {
         cmd.env("MYAGENTS_PORT", p);
     }
 
+    // Protect localhost from system proxy (Bun's fetch() reads HTTP_PROXY)
+    cmd.env("NO_PROXY", crate::proxy_config::LOCALHOST_NO_PROXY);
+    cmd.env("no_proxy", crate::proxy_config::LOCALHOST_NO_PROXY);
+
     match cmd.status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(e) => {

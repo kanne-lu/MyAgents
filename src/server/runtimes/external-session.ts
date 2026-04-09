@@ -65,6 +65,28 @@ let pendingThinkingText = '';       // thinking_delta accumulator for current th
 let pendingThinkingIndex = 0;       // index of current thinking block
 const pendingToolInputs = new Map<string, { name: string; inputJson: string }>(); // toolUseId → input accumulator
 
+/** Reset all module-level state for a clean session transition.
+ *  Prevents cross-session contamination when Sidecar is reused (Handover scenario 4). */
+function resetModuleState(): void {
+  activeProcess = null;
+  activeRuntime = null;
+  isRunning = false;
+  turnCompleted = false;
+  startingPromise = null;
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  lastRuntimeSessionId = '';
+  lastModel = '';
+  lastPermissionMode = '';
+  allSessionMessages = [];
+  currentAssistantText = '';
+  currentTurnStartTime = 0;
+  currentContentBlocks = [];
+  pendingTextBuffer = '';
+  pendingThinkingText = '';
+  pendingThinkingIndex = 0;
+  pendingToolInputs.clear();
+}
+
 /** Flush accumulated text into a text content block */
 function flushPendingText(): void {
   if (pendingTextBuffer) {
@@ -196,6 +218,10 @@ export function restoreExternalSessionState(
   workspacePath: string,
   scenario: InteractionScenario,
 ): void {
+  // If switching to a different session, reset all accumulated state to prevent contamination
+  if (sessionId !== lastSessionId) {
+    resetModuleState();
+  }
   lastSessionId = sessionId;
   lastWorkspacePath = workspacePath;
   lastScenario = scenario;

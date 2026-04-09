@@ -29,8 +29,8 @@ export interface SessionMetadata {
     stats?: SessionStats;
     /** Associated cron task ID (if this session is used by a scheduled task) */
     cronTaskId?: string;
-    /** Session origin — undefined or 'desktop' for Desktop, IM sources for Telegram */
-    source?: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
+    /** Session origin — undefined or 'desktop' for Desktop, '{platform}_{type}' for IM/channels */
+    source?: SessionSource;
     /** Preview of the last user message (truncated, for Task Center display) */
     lastMessagePreview?: string;
     /** How the title was set: default (first message truncation), auto (AI-generated), user (manually renamed) */
@@ -88,11 +88,14 @@ export interface MessageUsage {
     modelUsage?: Record<string, ModelUsageEntry>;
 }
 
+/** Session source: 'desktop' for desktop, '{platform}_{private|group}' for IM/channels (supports bridge plugins with dynamic platform names) */
+export type SessionSource = 'desktop' | `${string}_private` | `${string}_group`;
+
 /**
  * Message source metadata (IM integration)
  */
 export interface MessageSourceMetadata {
-    source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
+    source: SessionSource;
     sourceId?: string;
     senderName?: string;
 }
