@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.62] - 2026-04-10
+
+### Added
+- **日志面板搜索**：⌘F 打开搜索，关键词高亮 + 上下跳转，快速定位问题日志
+
+### Improved
+- **外部 Runtime 日志诊断**：Claude Code CLI 和 Codex CLI 的日志增加完整参数（模型、工具、token 用量等），排查问题不再需要猜测
+- **Runtime 切换稳定性**：切换 Runtime 后旧会话不再错误尝试恢复，已有会话始终使用创建时的 Runtime
+
+### Fixed
+- **短回复空白问题**：使用 Claude Code CLI 时，AI 简短回复（如数学计算）偶尔显示空白，现已修复
+- **Windows 频繁崩溃**：Windows 用户编辑配置文件后应用反复崩溃（UTF-8 BOM 导致），现已自动兼容
+- **外部 Runtime 默认模型**：模型选择器显示的默认模型（如 gpt-5.4）未实际传递给 Runtime，现已修复
+- **macOS 外部 CLI 检测**：从 Finder 启动时，NVM/fnm 安装的 claude/codex CLI 检测不到，现已修复
+
+### Security
+- **路径遍历防护**：工作区文件读写接口增加路径验证，阻止访问系统敏感目录
+- **XSS 防护加强**：AI 回复中的 HTML 预览使用 DOMParser 替代正则清理，Mermaid 图表启用 strict 安全模式
+- **OAuth 安全**：Token 端点强制 HTTPS（localhost 除外），撤销授权时尝试服务端 token 撤销
+
+---
+
 ## [0.1.61] - 2026-04-09
 
 ### Added
