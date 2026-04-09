@@ -204,21 +204,21 @@ export function restoreExternalSessionState(
   // Three cases:
   // 1. Codex session with runtimeSessionId persisted → use it (threadId)
   // 2. CC session (no runtimeSessionId, but has runtime + messages) → sessionId (CC uses our ID)
-  // 3. Brand new session (no metadata) → empty string → sendExternalMessage hits Case 1 (fresh start)
+  // 3. Brand new session (no messages, or no metadata) → empty string → sendExternalMessage hits Case 1 (fresh start)
   const meta = getSessionMetadata(sessionId);
+  const data = getSessionData(sessionId);
+  const hasExistingMessages = !!(data?.messages?.length);
+
   if (meta?.runtimeSessionId) {
     lastRuntimeSessionId = meta.runtimeSessionId;
-  } else if (meta?.runtime && meta.runtime !== 'builtin') {
+  } else if (meta?.runtime && meta.runtime !== 'builtin' && hasExistingMessages) {
     lastRuntimeSessionId = sessionId; // CC: session ID === runtime session ID
   } else {
     lastRuntimeSessionId = ''; // New session: nothing to resume
   }
 
-  // Load existing messages for correct incremental save
-  const data = getSessionData(sessionId);
-  if (data?.messages?.length) {
-    allSessionMessages = data.messages;
-  }
+  // Load existing messages for correct incremental save (or clear stale in-memory state)
+  allSessionMessages = hasExistingMessages ? data!.messages : [];
   console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages)`);
 }
 
