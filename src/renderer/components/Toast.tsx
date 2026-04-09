@@ -71,7 +71,7 @@ function ToastItem({ toast, onClose }: { toast: Toast; onClose: () => void }) {
             <button
                 type="button"
                 onClick={onClose}
-                className={`ml-2 p-0.5 rounded-md hover:bg-black/5 transition-colors ${config.text}`}
+                className={`ml-2 p-0.5 rounded-md hover:bg-black/5 dark:hover:bg-white/10 transition-colors ${config.text}`}
             >
                 <X className="h-4 w-4" />
             </button>

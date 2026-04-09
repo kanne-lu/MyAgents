@@ -1095,7 +1095,9 @@ export default function ChannelWizard({
                                     </div>
                                 )}
                                 {wecomQrStatus === 'waiting' && wecomQrImageUrl && (
-                                    <img src={wecomQrImageUrl} alt="企业微信扫码" className="h-[200px] w-[200px] rounded-xl border border-[var(--line)]" />
+                                    <div className="rounded-xl border border-[var(--line)] bg-white p-1.5">
+                                        <img src={wecomQrImageUrl} alt="企业微信扫码" className="h-[200px] w-[200px] rounded-lg" />
+                                    </div>
                                 )}
                                 {wecomQrStatus === 'success' && (
                                     <div className="flex h-[200px] w-[200px] flex-col items-center justify-center rounded-xl border border-[var(--success)] bg-[var(--success-bg)]">

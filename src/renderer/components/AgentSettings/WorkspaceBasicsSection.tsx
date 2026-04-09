@@ -219,7 +219,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
         {openPopup === 'icon' && (
           <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpenPopup(null)} />
+            <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenPopup(null); }} />
             <div className="absolute left-20 top-10 z-50 max-h-[260px] w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
               <div className="flex flex-wrap gap-1.5">
                 <button
@@ -303,7 +303,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
         {openPopup === 'model' && (
           <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpenPopup(null)} />
+            <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenPopup(null); }} />
             <div className="absolute left-20 top-0 z-50 max-h-[300px] w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
               {providers.map(provider => (
                 <div key={provider.id} className="mb-1">
@@ -343,7 +343,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
         {openPopup === 'permission' && (
           <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpenPopup(null)} />
+            <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenPopup(null); }} />
             <div className="absolute left-20 top-0 z-50 w-[280px] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
               {PERMISSION_MODES.map(mode => (
                 <button
@@ -382,7 +382,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
         {openPopup === 'mcp' && (
           <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpenPopup(null)} />
+            <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenPopup(null); }} />
             <div className="absolute left-20 top-0 z-50 max-h-[300px] w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
               {availableMcpServers.length === 0 ? (
                 <p className="px-3 py-2 text-xs text-[var(--ink-subtle)]">

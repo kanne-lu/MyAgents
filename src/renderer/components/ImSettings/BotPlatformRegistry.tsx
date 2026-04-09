@@ -275,7 +275,7 @@ export default function BotPlatformRegistry() {
                   <div className="flex items-center justify-center gap-1.5">
                     <p className="text-sm font-medium text-[var(--ink)]">{pp.name}</p>
                     {pp.badge === 'official' && (
-                      <span className="rounded-full bg-[#3370FF]/10 px-1.5 py-0.5 text-[10px] font-medium text-[#3370FF]">
+                      <span className="rounded-full bg-[var(--info-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--info)]">
                         官方
                       </span>
                     )}

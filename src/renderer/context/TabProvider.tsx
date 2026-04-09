@@ -508,11 +508,58 @@ export default function TabProvider({
         };
     }, [appendUnifiedLog]);
 
+    // ─── RAF batching for streaming chunks ───
+    // Accumulates text chunks and flushes once per animation frame (~16ms),
+    // reducing 50 render/s to ~16 render/s during streaming.
+    const pendingChunksRef = useRef<string[]>([]);
+    const rafIdRef = useRef<number | null>(null);
+
+    const flushPendingChunks = useCallback(() => {
+        rafIdRef.current = null;
+        const chunks = pendingChunksRef.current;
+        if (chunks.length === 0) return;
+        const merged = chunks.join('');
+        pendingChunksRef.current = [];
+
+        setStreamingMessage(prev => {
+            if (!prev || prev.role !== 'assistant' || !isStreamingRef.current) return prev;
+            if (typeof prev.content === 'string') {
+                return { ...prev, content: prev.content + merged };
+            }
+            const contentArray = closeOpenThinkingBlocks(prev.content);
+            const lastBlock = contentArray[contentArray.length - 1];
+            if (lastBlock?.type === 'text') {
+                return {
+                    ...prev,
+                    content: [...contentArray.slice(0, -1), { type: 'text', text: (lastBlock.text || '') + merged }]
+                };
+            }
+            return {
+                ...prev,
+                content: [...contentArray, { type: 'text', text: merged }]
+            };
+        });
+    }, [setStreamingMessage]);
+
+    // Cleanup RAF on unmount
+    useEffect(() => {
+        return () => { if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current); };
+    }, []);
+
     /**
      * Move the current streaming message into history, marking incomplete blocks as finished.
      * Replaces the old markIncompleteBlocksAsFinished — does everything in one atomic step.
      */
     const moveStreamingToHistory = useCallback((status: 'completed' | 'stopped' | 'failed') => {
+        // Flush any pending RAF-batched chunks before finalizing
+        if (rafIdRef.current) {
+            cancelAnimationFrame(rafIdRef.current);
+            rafIdRef.current = null;
+        }
+        if (pendingChunksRef.current.length > 0) {
+            flushPendingChunks();
+        }
+
         // CRITICAL: Use rawSetStreamingMessage updater to read the LATEST streaming message.
         // Reading streamingMessageRef.current directly would race with pending setStreamingMessage
         // updates (React 18 batching delays updater execution), causing the last few text chunks
@@ -579,7 +626,7 @@ export default function TabProvider({
             streamingMessageRef.current = null;
             return null;
         });
-    }, []);
+    }, [flushPendingChunks]);
 
     const recoverStreamingUi = useCallback((status: 'stopped' | 'failed') => {
         moveStreamingToHistory(status);
@@ -759,34 +806,25 @@ export default function TabProvider({
                 }
 
                 const chunk = data as string;
-                setStreamingMessage(prev => {
-                    if (prev?.role === 'assistant' && isStreamingRef.current) {
-                        if (typeof prev.content === 'string') {
-                            return { ...prev, content: prev.content + chunk };
-                        }
-                        const contentArray = closeOpenThinkingBlocks(prev.content);
-                        const lastBlock = contentArray[contentArray.length - 1];
-                        if (lastBlock?.type === 'text') {
-                            return {
-                                ...prev,
-                                content: [...contentArray.slice(0, -1), { type: 'text', text: (lastBlock.text || '') + chunk }]
-                            };
-                        }
-                        return {
-                            ...prev,
-                            content: [...contentArray, { type: 'text', text: chunk }]
-                        };
-                    }
-                    // First chunk - create new streaming message
+
+                // If no streaming message exists yet, create it immediately (first chunk)
+                if (!isStreamingRef.current) {
                     isStreamingRef.current = true;
                     setIsLoading(true);
-                    return {
+                    setStreamingMessage({
                         id: Date.now().toString(),
                         role: 'assistant',
                         content: chunk,
                         timestamp: new Date()
-                    };
-                });
+                    });
+                    break;
+                }
+
+                // Subsequent chunks: batch via RAF (reduces ~50 render/s to ~16 render/s)
+                pendingChunksRef.current.push(chunk);
+                if (!rafIdRef.current) {
+                    rafIdRef.current = requestAnimationFrame(flushPendingChunks);
+                }
                 break;
             }
 
@@ -1605,7 +1643,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);

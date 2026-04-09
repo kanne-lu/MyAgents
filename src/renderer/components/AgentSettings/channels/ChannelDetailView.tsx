@@ -773,7 +773,9 @@ export default function ChannelDetailView({
                                     <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-inset)] p-4">
                                         {wecomQrStatus === 'loading' && <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />}
                                         {wecomQrStatus === 'waiting' && wecomQrImageUrl && (
-                                            <img src={wecomQrImageUrl} alt="企业微信扫码" className="h-[180px] w-[180px] rounded-xl border border-[var(--line)]" />
+                                            <div className="rounded-xl border border-[var(--line)] bg-white p-1">
+                                                <img src={wecomQrImageUrl} alt="企业微信扫码" className="h-[180px] w-[180px] rounded-lg" />
+                                            </div>
                                         )}
                                         {wecomQrStatus === 'error' && <p className="text-sm text-[var(--error)]">获取二维码失败</p>}
                                         <p className="text-xs text-[var(--ink-muted)]">
@@ -945,7 +947,9 @@ export default function ChannelDetailView({
                                         <Loader2 className="h-6 w-6 animate-spin text-[var(--ink-muted)]" />
                                     )}
                                     {(qrStatus === 'waiting') && qrImageUrl && (
-                                        <img src={qrImageUrl} alt="扫码登录" className="h-40 w-40 rounded-lg" />
+                                        <div className="rounded-lg border border-[var(--line)] bg-white p-1">
+                                            <img src={qrImageUrl} alt="扫码登录" className="h-40 w-40 rounded-md" />
+                                        </div>
                                     )}
                                     {qrStatus === 'connected' && (
                                         <p className="text-sm font-medium text-[var(--accent-success)]">登录成功</p>

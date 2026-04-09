@@ -270,7 +270,7 @@ export default function HeartbeatConfigCard({
                                     </button>
                                     {tzOpen && (
                                         <>
-                                            <div className="fixed inset-0 z-40" onClick={() => setTzOpen(false)} />
+                                            <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setTzOpen(false); }} />
                                             <div className="absolute left-0 top-8 z-50 w-56 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1 shadow-lg">
                                                 {COMMON_TIMEZONES.map(tz => (
                                                     <button
