@@ -78,6 +78,12 @@ async function exchangeCodeForToken(
   codeVerifier: string,
   redirectUri: string,
 ): Promise<OAuthTokenData> {
+  // Security: only allow https token endpoints (prevent credential leak over plain HTTP)
+  // Exception: localhost for local dev servers
+  const parsedUrl = new URL(tokenUrl);
+  if (parsedUrl.protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(parsedUrl.hostname)) {
+    throw new Error(`Refusing non-HTTPS token endpoint: ${tokenUrl}`);
+  }
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,

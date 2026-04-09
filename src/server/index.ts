@@ -17,6 +17,7 @@ import {
 } from '../shared/slashCommands';
 import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
 import { isPreviewable } from '../shared/fileTypes';
+import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
@@ -1165,7 +1166,11 @@ function isValidFolderName(name: string): boolean {
 async function serveStatic(pathname: string): Promise<Response | null> {
   const distRoot = resolve(process.cwd(), 'dist');
   const resolvedPath = pathname === '/' ? 'index.html' : pathname.slice(1);
-  const filePath = join(distRoot, resolvedPath);
+  const filePath = resolve(distRoot, resolvedPath);
+  // Prevent path traversal: resolved path must stay within distRoot
+  if (!filePath.startsWith(distRoot + sep)) {
+    return null;
+  }
   const file = Bun.file(filePath);
   if (await file.exists()) {
     return new Response(file);
@@ -1185,7 +1190,17 @@ interface SwitchPayload {
 }
 
 // System event queue for heartbeat relay (cron completion, etc.)
+// Capped to prevent unbounded memory growth if heartbeat consumer is absent
+const SYSTEM_EVENT_QUEUE_MAX = 500;
 const systemEventQueue: Array<{ event: string; content: string; timestamp: number; taskId?: string }> = [];
+
+/** Push a system event, evicting oldest if at capacity */
+function pushSystemEvent(event: { event: string; content: string; timestamp: number; taskId?: string }) {
+  if (systemEventQueue.length >= SYSTEM_EVENT_QUEUE_MAX) {
+    systemEventQueue.splice(0, systemEventQueue.length - SYSTEM_EVENT_QUEUE_MAX + 1);
+  }
+  systemEventQueue.push(event);
+}
 
 /** Drain all pending system events (used by heartbeat endpoint) */
 export function drainSystemEvents(): Array<{ event: string; content: string; timestamp: number; taskId?: string }> {
@@ -2735,8 +2750,10 @@ async function main() {
             return jsonResponse([]);
           }
 
+          // Escape glob special characters in user query to prevent pattern injection
+          const safeQuery = query.replace(/[*?[\]{}()\\]/g, '\\$&');
           // Use glob to search files
-          const glob = new Bun.Glob(`**/*${query}*`);
+          const glob = new Bun.Glob(`**/*${safeQuery}*`);
           const results: { path: string; name: string; type: 'file' | 'dir' }[] = [];
 
           for await (const file of glob.scan({
@@ -3464,6 +3481,13 @@ async function main() {
           };
 
           for (const sourcePath of sourcePaths) {
+            // Validate source path safety (block sensitive directories)
+            const resolvedSource = resolve(sourcePath);
+            if (!isSafeReadPath(resolvedSource)) {
+              console.warn(`[api/files/copy] Blocked unsafe source path: ${sourcePath}`);
+              continue;
+            }
+
             // Validate source path exists
             if (!existsSync(sourcePath)) {
               console.warn(`[api/files/copy] Source not found: ${sourcePath}`);
@@ -3575,8 +3599,37 @@ async function main() {
             error?: string;
           }> = [];
 
+          // Allowed image extensions for this endpoint
+          const allowedImageExts = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'tiff', 'tif', 'avif']);
+
           for (const filePath of paths) {
             try {
+              // Only allow image files (this endpoint is specifically for image drops)
+              const ext = extname(filePath).toLowerCase().slice(1);
+              if (!allowedImageExts.has(ext)) {
+                results.push({
+                  path: filePath,
+                  name: basename(filePath),
+                  mimeType: '',
+                  data: '',
+                  error: 'Only image files are allowed',
+                });
+                continue;
+              }
+
+              // Block sensitive directories
+              const resolvedFilePath = resolve(filePath);
+              if (!isSafeReadPath(resolvedFilePath)) {
+                results.push({
+                  path: filePath,
+                  name: basename(filePath),
+                  mimeType: '',
+                  data: '',
+                  error: 'Access denied',
+                });
+                continue;
+              }
+
               // Validate file exists
               if (!existsSync(filePath)) {
                 results.push({
@@ -3608,7 +3661,6 @@ async function main() {
               const base64 = Buffer.from(arrayBuffer).toString('base64');
 
               // Determine MIME type from extension
-              const ext = extname(filePath).toLowerCase().slice(1);
               const mimeTypes: Record<string, string> = {
                 png: 'image/png',
                 jpg: 'image/jpeg',
@@ -5885,7 +5937,12 @@ async function main() {
 
                 if (!targetPath) continue;
 
-                const fullPath = join(skillDir, targetPath);
+                const fullPath = resolve(join(skillDir, targetPath));
+                // Zip-Slip protection: resolved path must stay within skillDir
+                if (!fullPath.startsWith(skillDir + sep) && fullPath !== skillDir) {
+                  console.warn(`[api/skill/upload] Blocked Zip-Slip path: ${entry.entryName}`);
+                  continue;
+                }
                 const dir = dirname(fullPath);
 
                 // Create subdirectories if needed
@@ -6862,7 +6919,7 @@ async function main() {
         try {
           const payload = (await request.json()) as {
             message: string;
-            source: 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
+            source: string; // '{platform}_{private|group}' — dynamic for bridge plugins
             sourceId: string;
             senderName?: string;
             permissionMode?: string;
@@ -7030,7 +7087,7 @@ async function main() {
           }
 
           const metadata = {
-            source: payload.source,
+            source: payload.source as SessionSource,
             sourceId: payload.sourceId,
             senderName: payload.senderName,
           };
@@ -7073,7 +7130,7 @@ async function main() {
           if (currentSessionId) {
             const sessionMeta = getSessionMetadata(currentSessionId);
             if (sessionMeta && !sessionMeta.source) {
-              updateSessionMetadata(currentSessionId, { source: payload.source });
+              updateSessionMetadata(currentSessionId, { source: payload.source as SessionSource });
             }
           }
 
@@ -7271,7 +7328,7 @@ description: >
             enrichedPrompt = buildCronEventPrompt(cronEvents);
             // Push back non-cron events so they aren't lost — next heartbeat cycle will pick them up
             for (const e of otherEvents) {
-              systemEventQueue.push(e);
+              pushSystemEvent(e);
             }
           } else {
             // Standard heartbeat prompt (from Rust)
@@ -7337,7 +7394,7 @@ description: >
               getSessionModel(),
               getSessionProviderEnv(),
               {
-                source: payload.source as 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group',
+                source: payload.source as SessionSource,
                 sourceId: payload.sourceId,
               },
             );
@@ -7381,7 +7438,7 @@ description: >
           // (after enqueueUserMessage, events are in the AI prompt — re-queuing would duplicate)
           if (!messageEnqueued && drainedEvents.length > 0) {
             for (const e of drainedEvents) {
-              systemEventQueue.push(e);
+              pushSystemEvent(e);
             }
             console.warn(`[im/heartbeat] Re-queued ${drainedEvents.length} drained events after pre-enqueue failure`);
           }
@@ -7459,7 +7516,7 @@ description: >
             taskId?: string;
           };
           // Store in queue for next heartbeat to pick up
-          systemEventQueue.push({ event, content, timestamp: Date.now(), taskId });
+          pushSystemEvent({ event, content, timestamp: Date.now(), taskId });
           console.log(`[system-event] Queued: ${event} (queue size: ${systemEventQueue.length})`);
           return jsonResponse({ ok: true });
         } catch (_err) {

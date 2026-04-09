@@ -10,20 +10,28 @@ const CUSTOM_INPUT_MARKER = '__CUSTOM_INPUT_7f3d8a2e__';
 
 /**
  * Sanitize HTML preview content from SDK to prevent XSS.
- * Strips script/iframe/object tags and dangerous event handlers.
+ * Uses browser-native DOMParser for robust sanitization — immune to regex bypass tricks.
  * The content originates from AI model output — not directly user-controlled,
  * but in Tauri WebView, XSS can access invoke() commands.
  */
 function sanitizePreviewHtml(html: string): string {
-    return html
-        // Remove script, iframe, object, embed, form tags and their content
-        .replace(/<\s*(script|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
-        // Remove self-closing dangerous tags
-        .replace(/<\s*(script|iframe|object|embed)\b[^>]*\/?>/gi, '')
-        // Remove event handler attributes (on*)
-        .replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-        // Remove javascript: URLs
-        .replace(/\b(href|src|action)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')/gi, '');
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    // Remove dangerous elements
+    const dangerousTags = doc.querySelectorAll(
+        'script, iframe, object, embed, form, style, link, meta, base, svg[onload], math'
+    );
+    dangerousTags.forEach(el => el.remove());
+    // Remove event handlers and javascript: URLs from all remaining elements
+    const allElements = doc.querySelectorAll('*');
+    allElements.forEach(el => {
+        for (const attr of Array.from(el.attributes)) {
+            if (attr.name.toLowerCase().startsWith('on') ||
+                attr.value.trim().toLowerCase().startsWith('javascript:')) {
+                el.removeAttribute(attr.name);
+            }
+        }
+    });
+    return doc.body?.innerHTML ?? '';
 }
 
 interface AskUserQuestionPromptProps {

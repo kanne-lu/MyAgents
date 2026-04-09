@@ -94,7 +94,7 @@
     "windows": {
       "certificateThumbprint": null,
       "timestampUrl": null,
-      "allowDowngrades": true,
+      "allowDowngrades": false,
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
       },

@@ -850,11 +850,80 @@ fn merge_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Validate that a file path does not target sensitive system or credential directories.
+/// Resolves `..` components to prevent path traversal. Mirrors `isSafeReadPath()` in Bun.
+fn validate_file_path(raw_path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(raw_path);
+
+    if !path.is_absolute() {
+        return Err("Path must be absolute".to_string());
+    }
+
+    // Resolve .. and . components without requiring the file to exist
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => { resolved.pop(); },
+            std::path::Component::CurDir => {},
+            _ => resolved.push(component),
+        }
+    }
+
+    let home = dirs::home_dir().unwrap_or_default();
+
+    // System directories blacklist
+    #[cfg(windows)]
+    let forbidden_system: Vec<PathBuf> = vec![
+        "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+        "C:\\ProgramData", "C:\\Recovery", "C:\\$Recycle.Bin",
+    ].into_iter().map(PathBuf::from).collect();
+
+    #[cfg(not(windows))]
+    let forbidden_system: Vec<PathBuf> = vec![
+        "/etc", "/var", "/usr", "/bin", "/sbin",
+        "/boot", "/root", "/sys", "/proc", "/dev",
+    ].into_iter().map(PathBuf::from).collect();
+
+    for dir in &forbidden_system {
+        if resolved.starts_with(dir) {
+            return Err("Access denied: protected system directory".to_string());
+        }
+    }
+
+    // Credential / key store directories
+    if !home.as_os_str().is_empty() {
+        let credential_dirs = [".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config/op"];
+        for name in &credential_dirs {
+            if resolved.starts_with(home.join(name)) {
+                return Err("Access denied: protected credential directory".to_string());
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            let mac_sensitive = ["Library/Keychains", "Library/Cookies", "Library/Mail", "Library/Messages", "Library/Safari"];
+            for name in &mac_sensitive {
+                if resolved.starts_with(home.join(name)) {
+                    return Err("Access denied: protected system directory".to_string());
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        if resolved.starts_with(home.join("AppData").join("Local").join("Microsoft")) {
+            return Err("Access denied: protected system directory".to_string());
+        }
+    }
+
+    Ok(resolved)
+}
+
 /// Read a workspace text file. Returns content if exists, null if not.
 /// Bypasses Tauri fs plugin scope (which only covers ~/.myagents).
 #[tauri::command]
 pub async fn cmd_read_workspace_file(path: String) -> Result<Option<String>, String> {
-    match tokio::fs::read_to_string(&path).await {
+    let resolved = validate_file_path(&path)?;
+    match tokio::fs::read_to_string(&resolved).await {
         Ok(content) => Ok(Some(content)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(format!("Failed to read {}: {}", path, e)),
@@ -865,12 +934,12 @@ pub async fn cmd_read_workspace_file(path: String) -> Result<Option<String>, Str
 /// Bypasses Tauri fs plugin scope (which only covers ~/.myagents).
 #[tauri::command]
 pub async fn cmd_write_workspace_file(path: String, content: String) -> Result<(), String> {
-    let file_path = std::path::Path::new(&path);
-    if let Some(parent) = file_path.parent() {
+    let resolved = validate_file_path(&path)?;
+    if let Some(parent) = resolved.parent() {
         tokio::fs::create_dir_all(parent).await
             .map_err(|e| format!("Failed to create directory: {}", e))?;
     }
-    tokio::fs::write(&path, content).await
+    tokio::fs::write(&resolved, content).await
         .map_err(|e| format!("Failed to write {}: {}", path, e))
 }
 
@@ -878,7 +947,8 @@ pub async fn cmd_write_workspace_file(path: String, content: String) -> Result<(
 /// Bypasses Tauri fs plugin scope (which only covers ~/.myagents).
 #[tauri::command]
 pub async fn cmd_delete_workspace_file(path: String) -> Result<bool, String> {
-    match tokio::fs::remove_file(&path).await {
+    let resolved = validate_file_path(&path)?;
+    match tokio::fs::remove_file(&resolved).await {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(format!("Failed to delete {}: {}", path, e)),
@@ -890,7 +960,8 @@ pub async fn cmd_delete_workspace_file(path: String) -> Result<bool, String> {
 #[tauri::command]
 pub async fn cmd_read_file_base64(path: String) -> Result<String, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-    let bytes = tokio::fs::read(&path).await.map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    let resolved = validate_file_path(&path)?;
+    let bytes = tokio::fs::read(&resolved).await.map_err(|e| format!("Failed to read {}: {}", path, e))?;
     Ok(BASE64.encode(&bytes))
 }
 

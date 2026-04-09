@@ -174,9 +174,36 @@ export async function authorizeServer(
 
 /**
  * Revoke OAuth authorization for an MCP server.
- * Clears token but preserves discovery and registration data.
+ * Attempts server-side token revocation (best effort), then clears local state.
+ * Preserves discovery and registration data for re-authorization.
  */
 export async function revokeAuthorization(serverId: string): Promise<void> {
+  const state = getServerState(serverId);
+  const token = state?.token;
+  const discovery = state?.discovery;
+
+  // Best-effort server-side revocation (RFC 7009)
+  if (token?.accessToken && discovery?.tokenEndpoint) {
+    try {
+      // Derive revocation endpoint: replace /token with /revoke (common convention)
+      const tokenUrl = new URL(discovery.tokenEndpoint);
+      const revocationUrl = new URL(tokenUrl.href.replace(/\/token$/, '/revoke'));
+      await fetch(revocationUrl.href, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          token: token.accessToken,
+          token_type_hint: 'access_token',
+        }).toString(),
+        signal: AbortSignal.timeout(5000),
+      });
+      console.log(`[mcp-oauth] Server-side revocation attempted for ${serverId}`);
+    } catch (err) {
+      // Server-side revocation is best-effort — local cleanup always happens
+      console.warn(`[mcp-oauth] Server-side revocation failed for ${serverId}:`, err);
+    }
+  }
+
   clearServerField(serverId, 'token');
   emitTokenChange(serverId, 'revoked');
   console.log(`[mcp-oauth] Authorization revoked for ${serverId}`);
