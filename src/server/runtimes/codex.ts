@@ -524,14 +524,15 @@ export class CodexRuntime implements AgentRuntime {
       // 3. Start or resume thread
       if (options.resumeSessionId) {
         // Resume existing thread
-        const result = await codexProc.rpc.call('thread/resume', {
+        const resumeParams = {
           threadId: options.resumeSessionId,
           model: options.model || null,
           approvalPolicy: approval,
           sandbox,
           developerInstructions: options.systemPromptAppend || null,
-          persistExtendedHistory: false,
-        }, 30_000) as { thread: { id: string } };
+        };
+        console.log(`[codex] RPC thread/resume: ${JSON.stringify(resumeParams)}`);
+        const result = await codexProc.rpc.call('thread/resume', resumeParams, 30_000) as { thread: { id: string } };
         codexProc.threadId = result.thread.id;
 
         // Emit synthetic session_init — thread/resume doesn't trigger notifications
@@ -545,16 +546,16 @@ export class CodexRuntime implements AgentRuntime {
         });
       } else {
         // New thread
-        const result = await codexProc.rpc.call('thread/start', {
+        const startParams = {
           cwd: options.workspacePath,
           model: options.model || null,
           approvalPolicy: approval,
           sandbox,
           developerInstructions: options.systemPromptAppend || null,
           ephemeral: false,
-          experimentalRawEvents: false,
-          persistExtendedHistory: false,
-        }, 30_000) as { thread: { id: string }; model: string };
+        };
+        console.log(`[codex] RPC thread/start: ${JSON.stringify(startParams)}`);
+        const result = await codexProc.rpc.call('thread/start', startParams, 30_000) as { thread: { id: string }; model: string };
         codexProc.threadId = result.thread.id;
 
         // Emit session_init so external-session.ts captures threadId

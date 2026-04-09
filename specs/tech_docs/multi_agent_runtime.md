@@ -133,10 +133,44 @@ Server → Client (Notification): {"jsonrpc":"2.0","method":"item/agentMessage/d
 | RPC 方法 | 用途 |
 |---------|------|
 | `initialize` | 握手，交换 capability |
-| `thread/start` | 创建新 thread（含 model、approvalPolicy、sandbox） |
-| `thread/resume` | 恢复已有 thread（含 threadId） |
+| `thread/start` | 创建新 thread |
+| `thread/resume` | 恢复已有 thread |
 | `turn/start` | 发送用户消息到 thread |
 | `turn/interrupt` | 中断当前 turn |
+
+### `thread/start` 参数 Schema（Codex v0.111.0）
+
+| 参数 | 类型 | MyAgents 对接 | 说明 |
+|------|------|-------------|------|
+| `cwd` | string? | ✅ `workspacePath` | 工作目录 |
+| `model` | string? | ✅ 用户选择的模型 | 模型覆盖（null=Codex 默认） |
+| `approvalPolicy` | enum? | ✅ mapped from permissionMode | `untrusted`/`on-failure`/`on-request`/`never` |
+| `sandbox` | enum? | ✅ mapped from permissionMode | `read-only`/`workspace-write`/`danger-full-access` |
+| `developerInstructions` | string? | ✅ `systemPromptAppend` | MyAgents 三层系统提示词 |
+| `ephemeral` | boolean? | ✅ `false` | 是否临时线程 |
+| `modelProvider` | string? | ❌ 未对接 | 模型供应商覆盖 |
+| `serviceTier` | enum? | ❌ 未对接 | `fast`/`flex` |
+| `personality` | enum? | ❌ 未对接 | `none`/`friendly`/`pragmatic` |
+| `baseInstructions` | string? | ❌ 未对接 | 基础系统指令（区别于 developerInstructions） |
+| `config` | object? | ❌ 未对接 | 通用配置对象（additionalProperties） |
+| `serviceName` | string? | ❌ 未对接 | 服务名称标识 |
+
+### `thread/resume` 参数 Schema
+
+| 参数 | 类型 | MyAgents 对接 | 说明 |
+|------|------|-------------|------|
+| `threadId` | **string (必填)** | ✅ `resumeSessionId` | 要恢复的线程 ID |
+| `model` | string? | ✅ | 模型覆盖 |
+| `approvalPolicy` | enum? | ✅ | 权限策略覆盖 |
+| `sandbox` | enum? | ✅ | 沙箱覆盖 |
+| `developerInstructions` | string? | ✅ | 系统提示词覆盖 |
+| `cwd` | string? | ❌ 未对接 | 工作目录覆盖 |
+| `modelProvider` | string? | ❌ 未对接 | 模型供应商覆盖 |
+| `serviceTier` | enum? | ❌ 未对接 | |
+| `personality` | enum? | ❌ 未对接 | |
+| `baseInstructions` | string? | ❌ 未对接 | |
+
+**注意**：Codex 不支持通过 `thread/start`/`thread/resume` 注入 MCP Server 配置。Codex 的 MCP 由其自身管理（`~/.codex/` 配置），MyAgents 无法控制。
 
 ### 事件映射
 
