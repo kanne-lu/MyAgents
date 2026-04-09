@@ -10,6 +10,7 @@ import {
 } from '@tauri-apps/plugin-fs';
 import { homeDir, join } from '@tauri-apps/api/path';
 import { isBrowserDevMode } from '@/utils/browserMock';
+import { stripBom } from '../../../shared/utils';
 
 // Re-export for convenience
 export { isBrowserDevMode };
@@ -97,7 +98,7 @@ export async function safeLoadJson<T>(
         if (!(await exists(path))) continue;
         try {
             const content = await readTextFile(path);
-            const parsed = JSON.parse(content);
+            const parsed = JSON.parse(stripBom(content));
             if (validate && !validate(parsed)) {
                 console.error(`[configStore] ${label} file has invalid structure, skipping`);
                 continue;

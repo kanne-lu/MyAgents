@@ -3748,6 +3748,13 @@ pub async fn cmd_propagate_proxy(
 
 // ─── Agent Runtime resolution (v0.1.59) ───
 
+/// Strip UTF-8 BOM (U+FEFF) from the beginning of a string.
+/// Windows editors (Notepad, etc.) commonly inject BOM into UTF-8 files.
+/// serde_json::from_str cannot handle BOM — it causes parse failures.
+fn strip_bom(content: &str) -> &str {
+    content.strip_prefix('\u{FEFF}').unwrap_or(content)
+}
+
 /// Look up the `runtime` field from the agent config in ~/.myagents/config.json
 /// matching the given workspace path. Returns None for "builtin" (the default).
 /// Used for NEW sessions (the agent config decides the default runtime for new conversations)
@@ -3755,7 +3762,7 @@ pub async fn cmd_propagate_proxy(
 fn resolve_agent_runtime_from_config(workspace_path: &std::path::Path) -> Option<String> {
     let config_path = dirs::home_dir()?.join(".myagents").join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
-    let cfg: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let cfg: serde_json::Value = serde_json::from_str(strip_bom(&content)).ok()?;
 
     // Gate: multi-agent runtime feature must be explicitly enabled (developer mode)
     // When off, all sidecars start as builtin regardless of agent config
@@ -3790,14 +3797,14 @@ fn resolve_session_runtime(session_id: &str) -> Option<String> {
     // Gate: multi-agent runtime feature must be enabled
     let config_path = dirs::home_dir()?.join(".myagents").join("config.json");
     let config_content = std::fs::read_to_string(&config_path).ok()?;
-    let cfg: serde_json::Value = serde_json::from_str(&config_content).ok()?;
+    let cfg: serde_json::Value = serde_json::from_str(strip_bom(&config_content)).ok()?;
     if !cfg.get("multiAgentRuntime").and_then(|v| v.as_bool()).unwrap_or(false) {
         return None;
     }
 
     let sessions_path = dirs::home_dir()?.join(".myagents").join("sessions.json");
     let content = std::fs::read_to_string(&sessions_path).ok()?;
-    let sessions: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let sessions: serde_json::Value = serde_json::from_str(strip_bom(&content)).ok()?;
     let sessions_arr = sessions.as_array()?;
 
     for session in sessions_arr {

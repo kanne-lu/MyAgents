@@ -9,6 +9,7 @@
 import { readFileSync, writeFileSync, copyFileSync, existsSync, renameSync, mkdirSync, readdirSync } from 'fs';
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
+import { stripBom } from '../../shared/utils';
 import type { McpServerDefinition } from '../../renderer/config/types';
 
 // ---------------------------------------------------------------------------
@@ -97,14 +98,14 @@ export function loadConfig(): AdminAppConfig {
   }
   try {
     const raw = readFileSync(configPath, 'utf-8');
-    return JSON.parse(raw) as AdminAppConfig;
+    return JSON.parse(stripBom(raw)) as AdminAppConfig;
   } catch {
     // Malformed JSON — try .bak fallback
     const bakPath = configPath + '.bak';
     if (existsSync(bakPath)) {
       try {
         console.warn('[admin-config] config.json parse failed, falling back to .bak');
-        return JSON.parse(readFileSync(bakPath, 'utf-8')) as AdminAppConfig;
+        return JSON.parse(stripBom(readFileSync(bakPath, 'utf-8'))) as AdminAppConfig;
       } catch { /* bak also corrupt */ }
     }
     console.error('[admin-config] config.json and .bak both unreadable, returning empty config');

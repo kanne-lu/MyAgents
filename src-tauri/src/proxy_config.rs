@@ -93,8 +93,11 @@ pub fn read_proxy_settings() -> Option<ProxySettings> {
         }
     };
 
+    // Strip UTF-8 BOM if present (Windows editors inject BOM into config.json)
+    let content = content.strip_prefix('\u{FEFF}').unwrap_or(&content);
+
     // Parse JSON
-    let config: PartialAppConfig = match serde_json::from_str(&content) {
+    let config: PartialAppConfig = match serde_json::from_str(content) {
         Ok(c) => c,
         Err(e) => {
             log::error!(

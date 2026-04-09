@@ -21,6 +21,7 @@ import { join } from 'path';
 import type { SessionMetadata, SessionData, SessionMessage, SessionStats } from './types/session';
 import { createSessionMetadata, generateSessionTitle } from './types/session';
 import type { RuntimeType } from '../shared/types/runtime';
+import { stripBom } from '../shared/utils';
 
 const MYAGENTS_DIR = join(homedir(), '.myagents');
 const SESSIONS_FILE = join(MYAGENTS_DIR, 'sessions.json');
@@ -306,7 +307,7 @@ export function getAllSessionMetadata(): SessionMetadata[] {
 
     try {
         const content = readFileSync(SESSIONS_FILE, 'utf-8');
-        return JSON.parse(content) as SessionMetadata[];
+        return JSON.parse(stripBom(content)) as SessionMetadata[];
     } catch (error) {
         console.error('[SessionStore] Failed to read sessions.json:', error);
         return [];

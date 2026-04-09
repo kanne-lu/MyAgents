@@ -51,6 +51,15 @@ export function sanitizeFolderName(name: string): string {
 }
 
 /**
+ * Strip UTF-8 BOM (U+FEFF) from the beginning of a string.
+ * Windows editors (Notepad, etc.) commonly inject BOM into UTF-8 files.
+ * JSON.parse / serde_json cannot handle BOM — it causes parse failures.
+ */
+export function stripBom(content: string): string {
+    return content.charCodeAt(0) === 0xFEFF ? content.slice(1) : content;
+}
+
+/**
  * Semantic version comparison
  * @param a - First version string (e.g., "1.2.3")
  * @param b - Second version string (e.g., "1.2.10")
