@@ -66,7 +66,9 @@ function createAndBroadcast(level: LogLevel, args: unknown[]): void {
     // Skip if the message is from our own debug logging (prevent infinite loop)
     const message = formatArgs(args);
     if (message.includes('[sse] getClients')) return; // Avoid recursion
-    if (message.startsWith('[sse]')) return; // Filter noisy SSE logs from UI
+    // NOTE: [sse] logs are no longer filtered — they're needed for diagnosing SSE delivery issues.
+    // The previous filter (`message.startsWith('[sse]')`) hid ALL broadcast logs from unified log,
+    // making it impossible to verify whether events were actually sent to SSE clients.
 
     const entry: LogEntry = {
         source: 'bun',

@@ -343,6 +343,29 @@ export default function TabProvider({
     // Refs for SSE handling
     const sseRef = useRef<SseConnection | null>(null);
     const isStreamingRef = useRef(false);
+    // Tracks whether the backend session is actively processing (system-init received → idle).
+    // Separate from isStreamingRef which means "a streaming message exists in React state".
+    // Used to prevent loadSession from running during pending→real session ID upgrade.
+    const isSessionActiveRef = useRef(false);
+
+    /**
+     * Clear all session-active state. Called when the session finishes, errors, or resets.
+     *
+     * WHY THIS EXISTS (pit-of-success):
+     * isStreamingRef ("streaming message exists in React") and isSessionActiveRef ("backend is
+     * processing") have identical clear-time but different set-time. isStreamingRef is set by the
+     * first message-chunk (via flushSync), while isSessionActiveRef is set by system-init (before
+     * any chunks). They MUST be cleared together — if one is forgotten, either loadSession runs
+     * during active sessions (disrupts streaming) or loadSession is permanently blocked (stale ref).
+     * A single clearSessionActive() makes it impossible to forget.
+     *
+     * If you add a new "session active" ref in the future, add its cleanup HERE.
+     */
+    const clearSessionActive = useCallback(() => {
+        isStreamingRef.current = false;
+        isSessionActiveRef.current = false;
+    }, []);
+
     // Ref for stop timeout cleanup
     const stopTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const seenIdsRef = useRef<Set<string>>(new Set());
@@ -398,7 +421,7 @@ export default function TabProvider({
         setStreamingMessage(null);
         seenIdsRef.current.clear();
         isNewSessionRef.current = true;
-        isStreamingRef.current = false;
+        clearSessionActive();
         toolNameMapRef.current.clear();
         setIsLoading(false);
         setSessionState('idle');  // Reset session state for new conversation
@@ -567,7 +590,7 @@ export default function TabProvider({
         // The updater's `prev` parameter is guaranteed by React to include all pending updates.
         rawSetStreamingMessage(prev => {
             if (!prev) {
-                isStreamingRef.current = false;
+                clearSessionActive();
                 streamingMessageRef.current = null;
                 return null;
             }
@@ -622,7 +645,7 @@ export default function TabProvider({
             // Set isStreamingRef inside the updater so pending message-chunk updaters
             // (which check isStreamingRef.current) still see true and correctly append
             // rather than creating a new message. Must NOT be set before this updater runs.
-            isStreamingRef.current = false;
+            clearSessionActive();
             streamingMessageRef.current = null;
             return null;
         });
@@ -631,12 +654,12 @@ export default function TabProvider({
     const recoverStreamingUi = useCallback((status: 'stopped' | 'failed') => {
         moveStreamingToHistory(status);
         flushSync(() => {
-            isStreamingRef.current = false;
+            clearSessionActive();
             setIsLoading(false);
             setSessionState('idle');
             setSystemStatus(null);
         });
-    }, [moveStreamingToHistory]);
+    }, [moveStreamingToHistory, clearSessionActive]);
 
     // Handle SSE events
     const handleSseEvent = useCallback((eventName: string, data: unknown) => {
@@ -669,7 +692,7 @@ export default function TabProvider({
                 if (initPayload?.sessionState) {
                     setSessionState(initPayload.sessionState);
                     if (initPayload.sessionState === 'idle') {
-                        isStreamingRef.current = false;
+                        clearSessionActive();
                         setIsLoading(false);
                         setSystemStatus(null);
                     }
@@ -746,7 +769,7 @@ export default function TabProvider({
                     setSessionState(payload.sessionState);
                     if (payload.sessionState === 'idle') {
                         // When backend reports 'idle', unconditionally reset frontend loading state.
-                        isStreamingRef.current = false;
+                        clearSessionActive();
                         setIsLoading(false);
                         setSystemStatus(null);
                     } else if (payload.sessionState === 'running' && !isStreamingRef.current) {
@@ -810,12 +833,17 @@ export default function TabProvider({
                 // If no streaming message exists yet, create it immediately (first chunk)
                 if (!isStreamingRef.current) {
                     isStreamingRef.current = true;
-                    setIsLoading(true);
-                    setStreamingMessage({
-                        id: Date.now().toString(),
-                        role: 'assistant',
-                        content: chunk,
-                        timestamp: new Date()
+                    // First chunk + message-complete can land in the same React batch for
+                    // very short responses. Commit the initial assistant message synchronously
+                    // so finalize logic always has a rendered message to move into history.
+                    flushSync(() => {
+                        setIsLoading(true);
+                        setStreamingMessage({
+                            id: Date.now().toString(),
+                            role: 'assistant',
+                            content: chunk,
+                            timestamp: new Date()
+                        });
                     });
                     break;
                 }
@@ -1080,14 +1108,14 @@ export default function TabProvider({
 
             case 'chat:message-complete': {
                 console.log(`[TabProvider ${tabId}] message-complete received`);
-                // NOTE: isStreamingRef.current is set to false inside moveStreamingToHistory's
-                // updater, NOT here. Setting it here would cause pending message-chunk updaters
-                // (queued by React 18 batching) to see false and create a new message instead
-                // of appending, losing the accumulated content.
-                moveStreamingToHistory('completed');
-                // Use flushSync to immediately update UI, bypassing React batching
-                // This prevents UI from getting stuck in loading state during rapid event streams
                 flushSync(() => {
+                    // NOTE: isStreamingRef.current is set to false inside moveStreamingToHistory's
+                    // updater, NOT here. Setting it here would cause pending message-chunk updaters
+                    // (queued by React batching) to see false and create a new message instead
+                    // of appending, losing the accumulated content.
+                    moveStreamingToHistory('completed');
+                    // Finalize the message in the same synchronous commit as the loading-state
+                    // cleanup so ultra-short one-chunk responses do not disappear between batches.
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status (e.g., 'compacting') when message completes
@@ -1181,10 +1209,9 @@ export default function TabProvider({
 
             case 'chat:message-stopped': {
                 console.log(`[TabProvider ${tabId}] message-stopped received`);
-                // isStreamingRef.current set inside moveStreamingToHistory's updater
-                moveStreamingToHistory('stopped');
-                // Use flushSync to immediately update UI
                 flushSync(() => {
+                    // isStreamingRef.current set inside moveStreamingToHistory's updater
+                    moveStreamingToHistory('stopped');
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status when user stops response
@@ -1204,10 +1231,9 @@ export default function TabProvider({
 
             case 'chat:message-error': {
                 console.log(`[TabProvider ${tabId}] message-error received`);
-                // isStreamingRef.current set inside moveStreamingToHistory's updater
-                moveStreamingToHistory('failed');
-                // Use flushSync to immediately update UI
                 flushSync(() => {
+                    // isStreamingRef.current set inside moveStreamingToHistory's updater
+                    moveStreamingToHistory('failed');
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle on error
                     setSystemStatus(null);  // Clear system status on error
@@ -1230,10 +1256,11 @@ export default function TabProvider({
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
 
-                    // CRITICAL: Mark session as active immediately when system-init arrives
-                    // This happens BEFORE message-chunk, so we must set isStreamingRef here
-                    // to prevent loadSession from aborting an active cron task during sessionId upgrade
-                    isStreamingRef.current = true;
+                    // Mark session as active (prevents loadSession from interrupting) and loading.
+                    // Do NOT set isStreamingRef — that must only be set when a streaming message
+                    // is actually created (first message-chunk via flushSync). Setting it here
+                    // without a streaming message causes chunks to skip the creation path.
+                    isSessionActiveRef.current = true;
                     setIsLoading(true);
 
                     // Auto-sync sessionId when a new session is created (e.g., first message in empty session)
@@ -1944,7 +1971,7 @@ export default function TabProvider({
                 // with isLoading=true because no chat:message-complete ever arrived.
                 if (response.alreadyStopped) {
                     flushSync(() => {
-                        isStreamingRef.current = false;
+                        clearSessionActive();
                         setIsLoading(false);
                         setSessionState(prev => prev === 'stopping' ? 'idle' : prev);
                     });
@@ -2115,7 +2142,7 @@ export default function TabProvider({
             // Clear current state and load new messages
             seenIdsRef.current.clear();
             isNewSessionRef.current = false; // Allow SSE replays again
-            isStreamingRef.current = false;  // Stop any streaming state
+            clearSessionActive();  // Stop any streaming/active state
             isLoadingSessionRef.current = false;
             setIsSessionLoading(false);
             setHistoryMessages(loadedMessages);
@@ -2235,9 +2262,9 @@ export default function TabProvider({
             // Case 2b: Session is currently running (e.g., cron task executing) - skip
             // CRITICAL: Do NOT call loadSession while AI is responding, as it would abort the current session!
             // The messages will come through SSE stream naturally.
-            // Use isStreamingRef (ref) to get the latest value, avoiding stale closure issues
-            if (isStreamingRef.current) {
-                console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, session is streaming, skipping loadSession`);
+            // Use isSessionActiveRef (set by system-init) OR isStreamingRef (set by first chunk).
+            if (isSessionActiveRef.current || isStreamingRef.current) {
+                console.log(`[TabProvider ${tabId}] SessionId upgraded from pending to ${sessionId}, session is active, skipping loadSession`);
                 initialSessionLoadedRef.current = true;  // Mark as loaded to prevent future attempts
                 return;
             }
@@ -2264,13 +2291,13 @@ export default function TabProvider({
             initialSessionLoadedRef.current = true;
             return;
         }
-        // Exception 2: session is actively streaming (session ID upgrade during first message).
+        // Exception 2: session is actively processing (session ID upgrade during first message).
         // This happens when: resetSession → sendMessage (clears isNewSessionRef) → chat:system-init
         // assigns real sessionId → parent re-renders with new prop → useEffect fires.
         // At this point isNewSessionRef is false but the session is actively processing.
         // loadSession would reset isLoading/sessionState, causing stop button to briefly disappear.
-        if (isStreamingRef.current) {
-            console.log(`[TabProvider ${tabId}] SessionId changed to ${sessionId} while streaming, skipping loadSession`);
+        if (isSessionActiveRef.current || isStreamingRef.current) {
+            console.log(`[TabProvider ${tabId}] SessionId changed to ${sessionId} while session active, skipping loadSession`);
             initialSessionLoadedRef.current = true;
             return;
         }
