@@ -67,6 +67,28 @@ const HIDE_FILTERS: { value: HideFilter; label: string }[] = [
 ];
 const DEFAULT_HIDE_FILTERS = new Set<HideFilter>(['stream_event', 'analytics']);
 
+/** Highlight all occurrences of `query` in `text` (case-insensitive) */
+function highlightText(text: string, query: string): React.ReactNode {
+    if (!query) return text;
+    const lowerText = text.toLowerCase();
+    const lowerQuery = query.toLowerCase();
+    const parts: React.ReactNode[] = [];
+    let lastIndex = 0;
+    let pos = lowerText.indexOf(lowerQuery);
+    while (pos !== -1) {
+        if (pos > lastIndex) parts.push(text.slice(lastIndex, pos));
+        parts.push(
+            <mark key={pos} className="rounded-sm bg-[var(--warning-bg)] px-0.5 text-inherit">
+                {text.slice(pos, pos + query.length)}
+            </mark>
+        );
+        lastIndex = pos + query.length;
+        pos = lowerText.indexOf(lowerQuery, lastIndex);
+    }
+    if (lastIndex < text.length) parts.push(text.slice(lastIndex));
+    return parts.length > 0 ? parts : text;
+}
+
 export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: UnifiedLogsPanelProps) {
     useCloseLayer(() => { if (!isVisible) return false; onClose(); return true; }, 50);
     // All logs (React + Bun + Rust) now come from sseLogs prop via TabProvider
@@ -75,6 +97,12 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
     const [hideFilters, setHideFilters] = useState<Set<HideFilter>>(new Set(DEFAULT_HIDE_FILTERS));
     const scrollRef = useRef<HTMLDivElement>(null);
     const autoScrollRef = useRef(true);
+
+    // ── Search state ──
+    const [searchQuery, setSearchQuery] = useState('');
+    const [activeMatchIndex, setActiveMatchIndex] = useState(0);
+    const searchInputRef = useRef<HTMLInputElement>(null);
+    const matchRowRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
     const toggleHideFilter = useCallback((f: HideFilter) => {
         setHideFilters(prev => {
@@ -121,6 +149,47 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
         return logs;
     }, [allLogs, filter, levelFilter, hideFilters]);
 
+    // Search: indices of matching rows in filteredLogs
+    const matchIndices = useMemo(() => {
+        if (!searchQuery.trim()) return [];
+        const q = searchQuery.toLowerCase();
+        const indices: number[] = [];
+        for (let i = 0; i < filteredLogs.length; i++) {
+            if (filteredLogs[i].message.toLowerCase().includes(q)) {
+                indices.push(i);
+            }
+        }
+        return indices;
+    }, [filteredLogs, searchQuery]);
+
+    // Clamp activeMatchIndex when matches change
+    useEffect(() => {
+        if (matchIndices.length === 0) {
+            setActiveMatchIndex(0);
+        } else if (activeMatchIndex >= matchIndices.length) {
+            setActiveMatchIndex(matchIndices.length - 1);
+        }
+    }, [matchIndices.length, activeMatchIndex]);
+
+    // Scroll to active match
+    useEffect(() => {
+        if (matchIndices.length === 0) return;
+        const rowIdx = matchIndices[activeMatchIndex];
+        const el = matchRowRefs.current.get(rowIdx);
+        if (el) {
+            el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+            autoScrollRef.current = false;
+        }
+    }, [activeMatchIndex, matchIndices]);
+
+    const navigateMatch = useCallback((direction: 'next' | 'prev') => {
+        if (matchIndices.length === 0) return;
+        setActiveMatchIndex(prev => {
+            if (direction === 'next') return (prev + 1) % matchIndices.length;
+            return (prev - 1 + matchIndices.length) % matchIndices.length;
+        });
+    }, [matchIndices.length]);
+
     // Count logs by source
     const logCounts = useMemo(() => {
         const counts = { react: 0, bun: 0, rust: 0 };
@@ -146,17 +215,26 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
         autoScrollRef.current = scrollTop < 50; // At top
     }, []);
 
-    // ESC key to close
+    // Keyboard shortcuts: Cmd+F to focus search, ESC to clear search or close
     useEffect(() => {
         if (!isVisible) return;
         const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                onClose();
+            if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+                e.preventDefault();
+                searchInputRef.current?.focus();
+                searchInputRef.current?.select();
+            } else if (e.key === 'Escape') {
+                if (searchQuery) {
+                    setSearchQuery('');
+                    searchInputRef.current?.blur();
+                } else {
+                    onClose();
+                }
             }
         };
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
-    }, [isVisible, onClose]);
+    }, [isVisible, onClose, searchQuery]);
 
     // Clear all logs (now all logs are managed by TabProvider)
     const handleClearAll = useCallback(() => {
@@ -201,6 +279,45 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                     </div>
 
                     <div className="flex items-center gap-2">
+                        {/* Search bar */}
+                        <div className="flex items-center gap-1 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-2 py-1">
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 text-[var(--ink-muted)]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+                            </svg>
+                            <input
+                                ref={searchInputRef}
+                                type="text"
+                                value={searchQuery}
+                                onChange={e => { setSearchQuery(e.target.value); setActiveMatchIndex(0); }}
+                                onKeyDown={e => {
+                                    if (e.key === 'Enter') {
+                                        e.preventDefault();
+                                        navigateMatch(e.shiftKey ? 'prev' : 'next');
+                                    }
+                                }}
+                                placeholder="搜索日志... (⌘F)"
+                                className="w-40 bg-transparent text-xs text-[var(--ink)] placeholder:text-[var(--ink-subtle)] focus:outline-none"
+                            />
+                            {searchQuery && (
+                                <>
+                                    <span className="text-[10px] text-[var(--ink-muted)] tabular-nums">
+                                        {matchIndices.length > 0 ? `${activeMatchIndex + 1}/${matchIndices.length}` : '0/0'}
+                                    </span>
+                                    <button onClick={() => navigateMatch('prev')} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title="上一个 (Shift+Enter)">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="18 15 12 9 6 15" /></svg>
+                                    </button>
+                                    <button onClick={() => navigateMatch('next')} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title="下一个 (Enter)">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6 9 12 15 18 9" /></svg>
+                                    </button>
+                                    <button onClick={() => { setSearchQuery(''); searchInputRef.current?.focus(); }} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title="清空">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+                                    </button>
+                                </>
+                            )}
+                        </div>
+
+                        <div className="h-4 w-px bg-[var(--line)]" />
+
                         {/* Download button */}
                         <button
                             onClick={handleDownload}
@@ -310,37 +427,44 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         </div>
                     ) : (
                         <div className="space-y-0.5">
-                            {filteredLogs.map((log, index) => (
-                                <div
-                                    key={`${log.timestamp}-${index}`}
-                                    className={`flex gap-3 rounded px-2 py-1 hover:bg-[var(--paper-inset)] ${LOG_LEVEL_COLORS[log.level]}`}
-                                >
-                                    {/* Source badge */}
-                                    <span
-                                        className={`flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${SOURCE_COLORS[log.source]}`}
+                            {filteredLogs.map((log, index) => {
+                                const isMatch = searchQuery && matchIndices.includes(index);
+                                const isActive = isMatch && matchIndices[activeMatchIndex] === index;
+                                return (
+                                    <div
+                                        key={`${log.timestamp}-${index}`}
+                                        ref={el => { if (el && isMatch) matchRowRefs.current.set(index, el); }}
+                                        className={`flex gap-3 rounded px-2 py-1 hover:bg-[var(--paper-inset)] ${LOG_LEVEL_COLORS[log.level]} ${isActive ? 'ring-2 ring-[var(--accent)] bg-[var(--accent-warm-subtle)]' : isMatch ? 'bg-[var(--accent-warm-subtle)]/50' : ''}`}
                                     >
-                                        {SOURCE_LABELS[log.source]}
-                                    </span>
-                                    {/* Timestamp */}
-                                    <span className="flex-shrink-0 text-[var(--ink-muted)]">
-                                        {new Date(log.timestamp).toLocaleTimeString('en-US', {
-                                            hour12: false,
-                                            hour: '2-digit',
-                                            minute: '2-digit',
-                                            second: '2-digit',
-                                            fractionalSecondDigits: 3,
-                                        })}
-                                    </span>
-                                    {/* Level indicator */}
-                                    {log.level !== 'info' && (
-                                        <span className={`flex-shrink-0 font-bold uppercase ${LOG_LEVEL_COLORS[log.level]}`}>
-                                            [{log.level}]
+                                        {/* Source badge */}
+                                        <span
+                                            className={`flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${SOURCE_COLORS[log.source]}`}
+                                        >
+                                            {SOURCE_LABELS[log.source]}
                                         </span>
-                                    )}
-                                    {/* Message */}
-                                    <span className="flex-1 break-all">{log.message}</span>
-                                </div>
-                            ))}
+                                        {/* Timestamp */}
+                                        <span className="flex-shrink-0 text-[var(--ink-muted)]">
+                                            {new Date(log.timestamp).toLocaleTimeString('en-US', {
+                                                hour12: false,
+                                                hour: '2-digit',
+                                                minute: '2-digit',
+                                                second: '2-digit',
+                                                fractionalSecondDigits: 3,
+                                            })}
+                                        </span>
+                                        {/* Level indicator */}
+                                        {log.level !== 'info' && (
+                                            <span className={`flex-shrink-0 font-bold uppercase ${LOG_LEVEL_COLORS[log.level]}`}>
+                                                [{log.level}]
+                                            </span>
+                                        )}
+                                        {/* Message — highlight search matches */}
+                                        <span className="flex-1 break-all">
+                                            {searchQuery ? highlightText(log.message, searchQuery) : log.message}
+                                        </span>
+                                    </div>
+                                );
+                            })}
                         </div>
                     )}
                 </div>
