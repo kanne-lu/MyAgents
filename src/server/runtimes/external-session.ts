@@ -785,6 +785,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'text_stop':
       // Text block ended — flush accumulated text into a content block
+      console.log(`[external-session] text_stop: accumulated ${currentAssistantText.length} chars`);
       flushPendingText();
       fireImCallback('block-end', '');
       break;
@@ -941,12 +942,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       turnCompleted = true;
       lastTurnSucceeded = true;
       clearWatchdog();
+      console.log(`[external-session] turn_complete: text=${currentAssistantText.length}chars, blocks=${currentContentBlocks.length}, elapsed=${currentTurnStartTime ? Date.now() - currentTurnStartTime : 0}ms`);
       persistTurnResult();
       break;
     }
 
     case 'session_complete':
       clearWatchdog();
+      console.log(`[external-session] session_complete: subtype=${event.subtype}, result=${(event.result || '').length > 0 ? `${(event.result || '').length}chars` : 'empty'}, turnCompleted=${turnCompleted}, assistantText=${currentAssistantText.length}chars`);
       if (event.subtype === 'success') {
         // CC slash commands (e.g. /context, /cost) return output directly in `result`
         // without streaming text_delta events. Only broadcast if NO turn completed

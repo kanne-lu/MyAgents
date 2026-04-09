@@ -44,3 +44,15 @@ export function resolveCommand(command: string): string {
   // Fallback: return as-is and let spawn fail with a clear error
   return command;
 }
+
+// eslint-disable-next-line no-control-regex -- Intentional ANSI escape code stripping for log output
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
+/**
+ * Strip ANSI terminal escape codes (color/style) from a string.
+ * External CLI tools (codex, claude) emit colored stderr — raw ANSI codes
+ * appear as garbage like `[2m`, `[31m` in unified log files.
+ */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, '');
+}

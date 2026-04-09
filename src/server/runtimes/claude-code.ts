@@ -12,7 +12,7 @@ import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
-import { augmentedProcessEnv, resolveCommand } from './env-utils';
+import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 
 /**
  * Build CC CLI message content — string for text-only, array of content blocks for images+text.
@@ -481,9 +481,52 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           }
           const event = this.parseLine(line);
           if (event) {
-            // Log non-delta events (deltas are too frequent)
-            if (event.kind !== 'text_delta' && event.kind !== 'thinking_delta' && event.kind !== 'tool_input_delta') {
-              console.log(`[claude-code] event: ${event.kind}`);
+            // Skip delta events from logging (too frequent — hundreds per turn)
+            if (event.kind === 'text_delta' || event.kind === 'thinking_delta' || event.kind === 'tool_input_delta') {
+              // no-op
+            } else {
+              let detail = '';
+              const e = event as Record<string, unknown>;
+              switch (event.kind) {
+                case 'session_init':
+                  detail = ` sessionId=${e.sessionId} model=${e.model} tools=${(e.tools as string[] || []).length}`;
+                  break;
+                case 'session_complete':
+                  detail = ` subtype=${e.subtype} result=${((e.result as string) || '').length > 0 ? `${((e.result as string) || '').length}chars` : 'empty'}`;
+                  break;
+                case 'message_replay': {
+                  const msg = (e.message as { role: string; content: unknown });
+                  const contentLen = typeof msg.content === 'string' ? msg.content.length : Array.isArray(msg.content) ? JSON.stringify(msg.content).length : 0;
+                  detail = ` role=${msg.role} content=${contentLen}chars`;
+                  break;
+                }
+                case 'tool_use_start':
+                  detail = ` tool=${e.toolName} id=${((e.toolUseId as string) || '').slice(0, 12)}`;
+                  break;
+                case 'tool_use_stop':
+                  detail = ` id=${((e.toolUseId as string) || '').slice(0, 12)}`;
+                  break;
+                case 'tool_result':
+                  detail = ` id=${((e.toolUseId as string) || '').slice(0, 12)} err=${e.isError || false} len=${((e.content as string) || '').length}`;
+                  break;
+                case 'permission_request':
+                  detail = ` tool=${e.toolName} id=${((e.requestId as string) || '').slice(0, 12)}`;
+                  break;
+                case 'status_change':
+                  detail = ` state=${e.state}`;
+                  break;
+                case 'text_stop':
+                  detail = ''; // external-session logs accumulated chars
+                  break;
+                case 'thinking_start':
+                case 'thinking_stop':
+                  detail = ` index=${e.index}`;
+                  break;
+                case 'log':
+                  detail = ` level=${e.level} msg=${(e.message as string) || ''}`;
+                  break;
+              }
+              console.log(`[claude-code] ${event.kind}${detail}`);
             }
             onEvent(event);
           }
@@ -507,7 +550,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         if (done) break;
         const text = decoder.decode(value, { stream: true });
         if (text.trim()) {
-          console.log(`[claude-code:stderr] ${text.trim()}`);
+          console.log(`[claude-code:stderr] ${stripAnsi(text.trim())}`);
         }
       }
     } catch { /* ignore */ } finally {

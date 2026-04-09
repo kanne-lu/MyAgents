@@ -12,7 +12,7 @@ import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
-import { augmentedProcessEnv, resolveCommand } from './env-utils';
+import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
 const TEMP_IMG_DIR = join(
@@ -427,9 +427,44 @@ export class CodexRuntime implements AgentRuntime {
 
     // Wire up notification handler to emit UnifiedEvents
     codexProc.rpc.setNotificationHandler((method, params) => {
-      // Log all v2 notifications for debugging (skip noisy legacy codex/event/* duplicates)
-      if (!method.startsWith('codex/event/') && !method.startsWith('account/')) {
-        console.log(`[codex] notification: ${method}`);
+      // Skip noisy notifications from logging: deltas, legacy duplicates, account events
+      const isNoisy = method.startsWith('codex/event/') || method.startsWith('account/')
+        || method === 'item/agentMessage/delta' || method === 'item/reasoning/summaryTextDelta'
+        || method === 'item/commandExecution/outputDelta' || method === 'item/fileChange/outputDelta';
+      if (!isNoisy) {
+        const p = params as Record<string, unknown> | undefined;
+        let detail = '';
+        if (method === 'item/started' || method === 'item/completed') {
+          const item = p?.item as Record<string, unknown> | undefined;
+          if (item) {
+            detail = ` type=${item.type}`;
+            if (item.id) detail += ` id=${(item.id as string).slice(0, 12)}`;
+            // Tool-specific context
+            if (item.type === 'commandExecution' && item.command) detail += ` cmd=${(item.command as string).slice(0, 80)}`;
+            if (item.type === 'fileChange' && Array.isArray(item.changes)) detail += ` files=${(item.changes as Array<{path:string}>).map(c => c.path).join(',')}`;
+            if ((item.type === 'mcpToolCall' || item.type === 'dynamicToolCall') && item.tool) detail += ` tool=${item.tool}`;
+            if (item.type === 'agentMessage' && typeof item.text === 'string') detail += ` text=${(item.text as string).length}chars`;
+            // Exit code / error for completed items
+            if (method === 'item/completed') {
+              if (item.exitCode != null) detail += ` exit=${item.exitCode}`;
+              if (item.error) detail += ` error=${((item.error as Record<string, unknown>).message as string || '')}`;
+            }
+          }
+        } else if (method === 'turn/completed') {
+          const turn = p?.turn as Record<string, unknown> | undefined;
+          detail = turn ? ` status=${turn.status}` : '';
+          if (turn?.error) detail += ` error=${((turn.error as Record<string, unknown>).message as string || '')}`;
+        } else if (method === 'thread/tokenUsage/updated') {
+          const usage = (p?.tokenUsage as Record<string, unknown>)?.total as Record<string, unknown> | undefined;
+          if (usage) detail = ` in=${usage.inputTokens} out=${usage.outputTokens}`;
+        } else if (method === 'thread/status/changed') {
+          const status = p?.status as Record<string, unknown> | undefined;
+          if (status) detail = ` type=${status.type}`;
+        } else if (method === 'thread/started') {
+          const thread = p?.thread as Record<string, unknown> | undefined;
+          if (thread?.id) detail = ` threadId=${thread.id}`;
+        }
+        console.log(`[codex] ${method}${detail}`);
       }
       const result = this.parseNotification(method, params);
       if (!result) return;
@@ -466,7 +501,7 @@ export class CodexRuntime implements AgentRuntime {
             const { done, value } = await reader.read();
             if (done) break;
             const text = decoder.decode(value, { stream: true }).trim();
-            if (text) console.error(`[codex-stderr] ${text}`);
+            if (text) console.error(`[codex-stderr] ${stripAnsi(text)}`);
           }
         } catch { /* ignore */ } finally {
           reader.releaseLock();
