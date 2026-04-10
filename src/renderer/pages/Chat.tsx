@@ -1380,7 +1380,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Protocol alone is not enough: many third-party providers expose Anthropic-compatible APIs,
     // and switching between "Anthropic protocol" / "OpenAI-compatible" third-party providers
     // should not force a new session.
-    const currentRequiresSignedHistory = requiresSignedSessionHistory(currentProvider?.id);
+    const currentRequiresSignedHistory = requiresSignedSessionHistory(selectedProviderId);
     const newRequiresSignedHistory = requiresSignedSessionHistory(providerId);
     if (!currentRequiresSignedHistory && newRequiresSignedHistory && messagesRef.current.length > 0) {
       setPendingProviderSwitch({ providerId, model });

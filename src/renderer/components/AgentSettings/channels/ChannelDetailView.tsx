@@ -13,7 +13,7 @@ import ConfirmDialog from '@/components/ConfirmDialog';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
-import { getProviderModels } from '@/config/types';
+import { getEffectiveModelAliases, getProviderModels } from '@/config/types';
 import { patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
 import { resolveEffectiveConfig } from '../../../../shared/types/agent';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
@@ -1172,11 +1172,16 @@ export default function ChannelDetailView({
                                 const newModel = provider ? provider.primaryModel : undefined;
                                 let providerEnvJson: string | undefined;
                                 if (provider && provider.type !== 'subscription') {
+                                    const aliases = getEffectiveModelAliases(provider, config.providerModelAliases);
                                     providerEnvJson = JSON.stringify({
                                         baseUrl: provider.config.baseUrl,
                                         apiKey: apiKeys[provider.id],
                                         authType: provider.authType,
                                         apiProtocol: provider.apiProtocol,
+                                        maxOutputTokens: provider.maxOutputTokens,
+                                        maxOutputTokensParamName: provider.maxOutputTokensParamName,
+                                        upstreamFormat: provider.upstreamFormat,
+                                        ...(aliases ? { modelAliases: aliases } : {}),
                                     });
                                 }
                                 await patchOverrides({ providerId, providerEnvJson, model: newModel });
