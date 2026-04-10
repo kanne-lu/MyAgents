@@ -57,6 +57,15 @@ const LazyBrowserPanel = lazy(() => import('@/components/BrowserPanel'));
 const LazyIntroductionOverlay = lazy(() => import('@/components/IntroductionOverlay'));
 // Terminal chrome now uses CSS tokens that auto-switch with light/dark theme.
 // No need for cached theme constants — the header uses var(--paper), var(--ink), etc.
+const SIGNED_HISTORY_PROVIDER_IDS = new Set(['anthropic-sub', 'anthropic-api']);
+
+function requiresSignedSessionHistory(providerId?: string): boolean {
+  if (!providerId) return false;
+  // Current behavior only covers the official Anthropic providers.
+  // If other suppliers add Claude models with the same session-signature constraint,
+  // extend this predicate instead of rewriting Chat switch logic.
+  return SIGNED_HISTORY_PROVIDER_IDS.has(providerId);
+}
 
 /** Inline-editable session title — click to edit, Enter/Blur to save, Esc to cancel */
 function SessionTitleEditor({ title, onRename }: { title: string; onRename: (newTitle: string) => void }) {
@@ -1367,15 +1376,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const newProvider = providers.find(p => p.id === providerId);
     const model = targetModel ?? newProvider?.primaryModel;
 
-    // Cross-protocol guard: third-party (OpenAI bridge) → Anthropic native.
-    // Anthropic validates thinking block signatures that third-party providers don't,
-    // so session history is incompatible. Show confirm dialog instead of switching inline.
-    // Only guard when there are existing messages (fresh sessions can switch freely).
-    // Use apiProtocol as primary discriminator (not baseUrl) to avoid false positives
-    // with Anthropic API preset which has baseUrl but is still Anthropic-native.
-    const currentIsThirdParty = currentProvider?.apiProtocol === 'openai';
-    const newIsAnthropicNative = !newProvider?.apiProtocol || newProvider.apiProtocol === 'anthropic';
-    if (currentIsThirdParty && newIsAnthropicNative && messagesRef.current.length > 0) {
+    // Claude session signatures only matter when entering the official Anthropic providers.
+    // Protocol alone is not enough: many third-party providers expose Anthropic-compatible APIs,
+    // and switching between "Anthropic protocol" / "OpenAI-compatible" third-party providers
+    // should not force a new session.
+    const currentRequiresSignedHistory = requiresSignedSessionHistory(selectedProviderId);
+    const newRequiresSignedHistory = requiresSignedSessionHistory(providerId);
+    if (!currentRequiresSignedHistory && newRequiresSignedHistory && messagesRef.current.length > 0) {
       setPendingProviderSwitch({ providerId, model });
       return;  // Don't update state — dialog will handle it
     }
@@ -1399,7 +1406,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.apiProtocol]);
+  }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.id]);
 
   // Handle model change with analytics tracking and project write-back
   const handleModelChange = useCallback((model: string) => {

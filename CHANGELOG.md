@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.63] - 2026-04-10
+
+### Improved
+- **Codex 工具结果展示**：使用 Codex Runtime 时，Bash/编辑/搜索等工具调用现在会显示更完整的过程与结果，命令输出阅读体验更接近终端
+- **Bash 卡片样式统一**：外部 Runtime 的 Bash 工具输入和输出统一为终端样式，查看命令与结果更直观
+
+### Fixed
+- **Claude 切换提示修正**：切换模型时的“需新开会话”提示只会在真正需要的 Anthropic 会话场景出现，不再在 Anthropic/OpenAI 兼容协议之间误弹
+- **Claude 历史签名保护补齐**：切换到受签名历史约束的 Claude 会话时，桌面端、Channel 等不同入口现在都会一致地安全处理历史记录
+- **最近任务恢复空白**：使用 Codex 或 Claude Code CLI 时，AI 在后台继续执行期间从最近任务重新打开会话，不会再先看到空白页
+
+---
+
 ## [0.1.62] - 2026-04-10
 
 ### Added

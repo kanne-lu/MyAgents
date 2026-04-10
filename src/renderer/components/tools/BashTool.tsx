@@ -1,7 +1,7 @@
 
 import type { BashInput, ToolUseSimple } from '@/types/chat';
 
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { ExpandableResult } from './utils';
 
 /** Try to parse SDK bash result JSON: {"stdout":"...","stderr":"...","interrupted":false} */
@@ -18,14 +18,68 @@ function parseBashResult(result: string): { stdout: string; stderr: string } | n
   return null;
 }
 
+type BashDisplayInput = BashInput & {
+  cwd?: string;
+  commandActions?: unknown[];
+};
+
+function parseBashInput(tool: ToolUseSimple): BashDisplayInput | null {
+  if (tool.parsedInput && typeof tool.parsedInput === 'object') {
+    return tool.parsedInput as BashDisplayInput;
+  }
+  if (!tool.inputJson) return null;
+  try {
+    const parsed = JSON.parse(tool.inputJson);
+    if (parsed && typeof parsed === 'object') {
+      return parsed as BashDisplayInput;
+    }
+  } catch {
+    // Older Codex mapping stored the raw command string instead of JSON.
+    return { command: tool.inputJson } as BashDisplayInput;
+  }
+  return null;
+}
+
+function formatDuration(durationMs?: number | null): string | null {
+  if (!durationMs || durationMs <= 0) return null;
+  if (durationMs < 1000) return `${durationMs}ms`;
+  const seconds = durationMs / 1000;
+  if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainSeconds = Math.round(seconds % 60);
+  return `${minutes}m ${remainSeconds}s`;
+}
+
+function buildTerminalOutput(tool: ToolUseSimple): string | null {
+  if (!tool.result) return null;
+
+  const parsed = parseBashResult(tool.result);
+  if (!parsed) return tool.result;
+
+  const sections: string[] = [];
+  if (parsed.stdout) sections.push(parsed.stdout);
+  if (parsed.stderr) sections.push(parsed.stdout ? `[stderr]\n${parsed.stderr}` : parsed.stderr);
+
+  return sections.join('\n\n') || '(no output)';
+}
+
 interface BashToolProps {
   tool: ToolUseSimple;
 }
 
 export default function BashTool({ tool }: BashToolProps) {
-  const input = tool.parsedInput as BashInput;
+  const input = parseBashInput(tool);
+  const durationLabel = formatDuration(tool.resultMeta?.durationMs);
+  const hasDisplayableInput = !!input?.command;
+  const output = buildTerminalOutput(tool);
+  const metaItems = [
+    input?.cwd || tool.resultMeta?.cwd,
+    durationLabel,
+    tool.resultMeta?.processId ? `PID ${tool.resultMeta.processId}` : null,
+    tool.resultMeta?.exitCode != null ? `exit ${tool.resultMeta.exitCode}` : null,
+  ].filter(Boolean) as string[];
 
-  if (!input) {
+  if (!hasDisplayableInput && !output) {
     return (
       <div className="flex items-center gap-2 text-sm text-[var(--ink-muted)]">
         <Loader2 className="size-3 animate-spin" />
@@ -34,71 +88,52 @@ export default function BashTool({ tool }: BashToolProps) {
     );
   }
 
-  // Try to parse structured bash result (JSON.parse already unescapes \n in JSON strings)
-  const parsed = tool.result ? parseBashResult(tool.result) : null;
-
   return (
     <div className="flex flex-col gap-3 font-sans select-none">
-      {/* Input label */}
-      <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Input</div>
-
-      {/* Command Display (Dark terminal style) */}
-      <div className="group relative overflow-hidden rounded-lg bg-[var(--code-bg)] p-3 text-sm text-[var(--code-text)] shadow-sm border border-[var(--line)] select-text">
-        <div className="flex items-start gap-3 font-mono leading-relaxed">
-          <span className="select-none text-[var(--success)] font-bold mt-0.5">$</span>
-          <span className="break-all whitespace-pre-wrap">{input.command}</span>
-        </div>
-        {input.run_in_background && (
-          <div className="absolute right-2 top-2 rounded border border-[var(--line)] bg-[var(--code-header-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--code-line-number)] uppercase tracking-wider">
-            Background
-          </div>
-        )}
-      </div>
-
-      {/* Parsed structured output (stdout + stderr) */}
-      {parsed && (parsed.stdout || parsed.stderr) && (
+      {hasDisplayableInput && (
         <div className="flex flex-col gap-2">
-          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Output</div>
-          {parsed.stdout && (
-            <ExpandableResult
-              content={parsed.stdout}
-              className="rounded-lg border border-[var(--line)] bg-[var(--code-bg)] p-3 text-sm text-[var(--code-text)]"
-              gradientFrom="from-[var(--code-bg)]"
-            />
-          )}
-          {parsed.stderr && (
-            <ExpandableResult
-              content={parsed.stderr}
-              className="rounded-lg border border-[var(--error)]/30 bg-[var(--error-bg)] p-3 text-sm text-[var(--error)]"
-              gradientFrom="from-[var(--error-bg)]"
-            />
-          )}
+          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Input</div>
+          <div className="relative overflow-hidden rounded-xl border border-[var(--line)] bg-[var(--code-bg)] px-4 py-3 text-[var(--code-text)] shadow-sm">
+            <pre className="overflow-x-auto font-mono text-sm whitespace-pre-wrap break-all select-text">
+              <span className="font-semibold text-[var(--success)]">$ </span>
+              {input.command}
+            </pre>
+            {input.run_in_background && (
+              <div className="absolute right-3 top-3 rounded-md border border-[var(--line)] bg-[var(--code-header-bg)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-[var(--code-line-number)]">
+                Background
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Fallback: raw result when JSON parse fails */}
-      {!parsed && tool.result && (
-        <div className="flex flex-col gap-1.5">
+      {metaItems.length > 0 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 font-mono text-[11px] text-[var(--ink-muted)]">
+          {metaItems.map(item => (
+            <span key={item}>{item}</span>
+          ))}
+        </div>
+      )}
+
+      {output && (
+        <div className="flex flex-col gap-2">
           <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Output</div>
           <ExpandableResult
-            content={tool.result}
-            className={`rounded-lg border p-3 text-sm shadow-sm transition-colors ${tool.isError
-              ? 'border-[var(--error)]/30 bg-[var(--error-bg)] text-[var(--error)]'
-              : 'border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 text-[var(--ink-secondary)]'
-            }`}
-            gradientFrom={tool.isError
-              ? 'from-[var(--error-bg)]'
-              : 'from-[var(--paper-inset)]'
-            }
+            content={output}
+            wrapperClassName="rounded-xl border border-[var(--line)] bg-[var(--code-bg)] shadow-sm"
+            className="px-4 py-3 text-sm text-[var(--code-text)]"
+            gradientFrom="from-[var(--code-bg)]"
           />
         </div>
       )}
 
-      {/* Error without result */}
-      {tool.isError && !tool.result && (
-        <div className="flex items-center gap-2 rounded-md bg-[var(--error-bg)] p-2 text-xs text-[var(--error)]">
-          <AlertCircle className="size-4" />
-          <span>Command execution failed</span>
+      {!output && tool.isLoading && (
+        <div className="flex flex-col gap-1.5">
+          <div className="px-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Output</div>
+          <div className="flex items-center gap-2 rounded-xl border border-[var(--line)] bg-[var(--code-bg)] px-4 py-3 font-mono text-sm text-[var(--code-text)]">
+            <Loader2 className="size-3.5 animate-spin text-[var(--code-line-number)]" />
+            <span>Running...</span>
+          </div>
         </div>
       )}
     </div>

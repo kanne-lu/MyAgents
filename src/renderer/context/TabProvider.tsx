@@ -924,9 +924,22 @@ export default function TabProvider({
                 toolNameMapRef.current.set(tool.id, tool.name);
 
                 // For Task tool, add taskStartTime and initial taskStats
+                const initialInputJson = Object.keys(tool.input ?? {}).length > 0
+                    ? JSON.stringify(tool.input, null, 2)
+                    : '';
+                const initialParsedInput = Object.keys(tool.input ?? {}).length > 0
+                    ? tool.input as unknown as ToolInput
+                    : undefined;
                 const toolSimple: ToolUseSimple = (tool.name === 'Task' || tool.name === 'Agent')
-                    ? { ...tool, inputJson: '', isLoading: true, taskStartTime: Date.now(), taskStats: { toolCount: 0, inputTokens: 0, outputTokens: 0 } }
-                    : { ...tool, inputJson: '', isLoading: true };
+                    ? {
+                        ...tool,
+                        inputJson: initialInputJson,
+                        parsedInput: initialParsedInput,
+                        isLoading: true,
+                        taskStartTime: Date.now(),
+                        taskStats: { toolCount: 0, inputTokens: 0, outputTokens: 0 },
+                      }
+                    : { ...tool, inputJson: initialInputJson, parsedInput: initialParsedInput, isLoading: true };
                 setStreamingMessage(prev => {
                     const toolBlock: ContentBlock = {
                         type: 'tool_use',
@@ -1058,7 +1071,13 @@ export default function TabProvider({
             case 'chat:tool-result-start':
             case 'chat:tool-result-delta':
             case 'chat:tool-result-complete': {
-                const payload = data as { toolUseId: string; content?: string; delta?: string; isError?: boolean };
+                const payload = data as {
+                    toolUseId: string;
+                    content?: string;
+                    delta?: string;
+                    isError?: boolean;
+                    metadata?: import('@/types/chat').ToolResultMeta;
+                };
 
                 setStreamingMessage(prev => {
                     if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
@@ -1073,7 +1092,11 @@ export default function TabProvider({
                     if (eventName === 'chat:tool-result-delta') {
                         updated[idx] = {
                             ...block,
-                            tool: { ...block.tool, result: (block.tool.result || '') + (payload.delta ?? ''), isLoading: true }
+                            tool: {
+                                ...block.tool,
+                                result: (block.tool.result || '') + (payload.delta ?? ''),
+                                isLoading: true,
+                            }
                         };
                     } else {
                         updated[idx] = {
@@ -1082,7 +1105,8 @@ export default function TabProvider({
                                 ...block.tool,
                                 result: payload.content ?? block.tool.result,
                                 isError: payload.isError,
-                                isLoading: eventName !== 'chat:tool-result-complete'
+                                isLoading: eventName !== 'chat:tool-result-complete',
+                                resultMeta: payload.metadata ?? block.tool.resultMeta,
                             }
                         };
                     }
@@ -2043,7 +2067,7 @@ export default function TabProvider({
                 }
             }
 
-            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }> } }>(`/sessions/${targetSessionId}`);
+            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }> } }>(`/sessions/${targetSessionId}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -2088,6 +2112,26 @@ export default function TabProvider({
                     metadata: msg.metadata,
                 };
             });
+
+            let liveStreamingMessage: Message | null = null;
+            const liveMsg = response.session.liveStreamingMessage;
+            if (liveMsg?.content) {
+                let parsedLiveContent: string | ContentBlock[] = liveMsg.content;
+                if (typeof liveMsg.content === 'string' && liveMsg.content.length > 0 && liveMsg.content.startsWith('[') && liveMsg.content.includes('"type"')) {
+                    try {
+                        parsedLiveContent = JSON.parse(liveMsg.content) as ContentBlock[];
+                    } catch {
+                        parsedLiveContent = liveMsg.content;
+                    }
+                }
+                liveStreamingMessage = {
+                    id: liveMsg.id,
+                    role: 'assistant',
+                    content: parsedLiveContent,
+                    timestamp: new Date(liveMsg.timestamp),
+                    sdkUuid: liveMsg.sdkUuid,
+                };
+            }
 
             // Reset auto-title state when switching sessions
             // Skip auto-title only if already has an AI-generated or user-renamed title
@@ -2146,15 +2190,22 @@ export default function TabProvider({
             isLoadingSessionRef.current = false;
             setIsSessionLoading(false);
             setHistoryMessages(loadedMessages);
-            setStreamingMessage(null);
+            if (liveStreamingMessage && response.session.liveSessionState === 'running') {
+                isStreamingRef.current = true;
+                isSessionActiveRef.current = true;
+                setStreamingMessage(liveStreamingMessage);
+            } else {
+                setStreamingMessage(null);
+            }
             // Old sessions (pre-v0.1.60) have no runtime field → treat as 'builtin'.
             // null is reserved strictly for "session not loaded yet" (initial state).
             setSessionRuntime(response.session.runtime || 'builtin');
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
             if (!options?.skipLoadingReset) {
-                setIsLoading(false);
-                setSessionState('idle');  // Reset session state when loading historical session
+                const isLiveRunning = response.session.liveSessionState === 'running';
+                setIsLoading(isLiveRunning);
+                setSessionState(isLiveRunning ? 'running' : 'idle');  // Preserve live external session state when reopening mid-turn
             }
             setSystemStatus(null);
             setAgentError(null);

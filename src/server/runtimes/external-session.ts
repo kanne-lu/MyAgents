@@ -14,6 +14,7 @@ import type { RuntimeType } from '../../shared/types/runtime';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
 import type { SessionMessage } from '../types/session';
+import type { SystemInitInfo } from '../../shared/types/system';
 
 // ─── Module state ───
 
@@ -51,8 +52,16 @@ interface PersistContentBlock {
     name: string;
     input: Record<string, unknown>;
     inputJson?: string;
+    isLoading?: boolean;
     result?: string;
     isError?: boolean;
+    resultMeta?: {
+      exitCode?: number | null;
+      durationMs?: number | null;
+      cwd?: string;
+      processId?: string | null;
+      status?: string;
+    };
     streamIndex: number;
   };
   thinking?: string;
@@ -64,6 +73,24 @@ let pendingTextBuffer = '';         // text_delta accumulator between block boun
 let pendingThinkingText = '';       // thinking_delta accumulator for current thinking block
 let pendingThinkingIndex = 0;       // index of current thinking block
 const pendingToolInputs = new Map<string, { name: string; inputJson: string }>(); // toolUseId → input accumulator
+type ExternalSessionState = 'idle' | 'running' | 'error';
+type ExternalPendingInteractiveRequest = {
+  type: 'permission:request';
+  data: {
+    requestId: string;
+    toolName: string;
+    toolUseId: string;
+    input: string;
+  };
+};
+let externalSessionState: ExternalSessionState = 'idle';
+let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string } | null = null;
+const pendingExternalInteractiveRequests = new Map<string, ExternalPendingInteractiveRequest>();
+
+function setExternalSessionState(state: ExternalSessionState): void {
+  externalSessionState = state;
+  broadcast('chat:status', { sessionState: state });
+}
 
 /** Reset all module-level state for a clean session transition.
  *  Prevents cross-session contamination when Sidecar is reused (Handover scenario 4). */
@@ -85,6 +112,10 @@ function resetModuleState(): void {
   pendingThinkingText = '';
   pendingThinkingIndex = 0;
   pendingToolInputs.clear();
+  pendingPermissionSuggestions.clear();
+  pendingExternalInteractiveRequests.clear();
+  externalSystemInitPayload = null;
+  externalSessionState = 'idle';
 }
 
 /** Flush accumulated text into a text content block */
@@ -314,6 +345,89 @@ export function shouldUseExternalRuntime(): boolean {
   return isExternalRuntime(getCurrentRuntimeType());
 }
 
+export function getExternalSessionState(): ExternalSessionState {
+  return externalSessionState;
+}
+
+export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string } | null {
+  return externalSystemInitPayload;
+}
+
+export function getExternalPendingInteractiveRequests(): ExternalPendingInteractiveRequest[] {
+  return Array.from(pendingExternalInteractiveRequests.values());
+}
+
+export function getExternalSessionId(): string {
+  return lastSessionId;
+}
+
+function buildCurrentAssistantSnapshotContent(): string | null {
+  const blocks: PersistContentBlock[] = currentContentBlocks.map((block) => ({
+    ...block,
+    ...(block.tool ? {
+      tool: {
+        ...block.tool,
+        input: { ...block.tool.input },
+        ...(block.tool.resultMeta ? { resultMeta: { ...block.tool.resultMeta } } : {}),
+      },
+    } : {}),
+  }));
+
+  if (pendingTextBuffer) {
+    blocks.push({ type: 'text', text: pendingTextBuffer });
+  }
+
+  if (pendingThinkingText) {
+    blocks.push({
+      type: 'thinking',
+      thinking: pendingThinkingText,
+      thinkingStreamIndex: pendingThinkingIndex,
+    });
+  }
+
+  for (const [toolId, entry] of pendingToolInputs) {
+    let parsedInput: Record<string, unknown> = {};
+    try { parsedInput = JSON.parse(entry.inputJson); } catch { /* keep empty */ }
+    blocks.push({
+      type: 'tool_use',
+      tool: {
+        id: toolId,
+        name: entry.name,
+        input: parsedInput,
+        inputJson: entry.inputJson,
+        isLoading: true,
+        streamIndex: blocks.length,
+      },
+    });
+  }
+
+  if (blocks.length > 0) {
+    return JSON.stringify(blocks);
+  }
+
+  if (currentAssistantText.trim()) {
+    return currentAssistantText;
+  }
+
+  return null;
+}
+
+export function getExternalLiveAssistantMessage(): SessionMessage | null {
+  if (!lastSessionId || externalSessionState !== 'running') {
+    return null;
+  }
+  const content = buildCurrentAssistantSnapshotContent();
+  if (!content) {
+    return null;
+  }
+  return {
+    id: `external-live-${lastSessionId}`,
+    role: 'assistant',
+    content,
+    timestamp: new Date(currentTurnStartTime || Date.now()).toISOString(),
+  };
+}
+
 /**
  * Get the current external runtime type, or null if builtin
  */
@@ -479,7 +593,7 @@ async function _doStartExternalSession(options: {
     }
   }
 
-  broadcast('chat:status', { sessionState: 'running' });
+  setExternalSessionState('running');
 
   // Set session context BEFORE startSession so that events fired during startup
   // (e.g., Codex's synchronous session_init) can reference lastSessionId for persistence.
@@ -516,7 +630,7 @@ async function _doStartExternalSession(options: {
     clearWatchdog();
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[external-session] Failed to start ${runtimeType}:`, message);
-    broadcast('chat:status', { sessionState: 'error' });
+    setExternalSessionState('error');
     broadcast('chat:agent-error', { message: `Failed to start ${runtimeType}: ${message}` });
     // Re-throw so the HTTP handler returns an error response
     throw err;
@@ -622,7 +736,7 @@ export async function sendExternalMessage(
       catch (err) { console.error('[external-session] Failed to persist user message:', err); }
     }
 
-    broadcast('chat:status', { sessionState: 'running' });
+    setExternalSessionState('running');
     await activeRuntime.sendMessage(activeProcess, text, hasImages ? images : undefined);
     return { queued: true };
   } catch (err) {
@@ -648,6 +762,7 @@ export async function respondExternalPermission(
   // Retrieve and consume stored suggestions for this request
   const suggestions = pendingPermissionSuggestions.get(requestId);
   pendingPermissionSuggestions.delete(requestId);
+  pendingExternalInteractiveRequests.delete(requestId);
   console.log(`[external-session] Permission response: ${decision} for requestId=${requestId}${suggestions?.length ? `, with ${suggestions.length} suggestion(s)` : ''}`);
   await activeRuntime.respondPermission(activeProcess, requestId, decision, reason, suggestions);
 }
@@ -670,9 +785,11 @@ export async function stopExternalSession(): Promise<boolean> {
     activeRuntime = null;
     isRunning = false;
     pendingPermissionSuggestions.clear();  // Prevent stale suggestions leaking across sessions
+    pendingExternalInteractiveRequests.clear();
+    externalSystemInitPayload = null;
     // Notify IM stream callback if active (prevents orphaned SSE streams on user-stop)
     fireImCallback('error', 'Session stopped');
-    broadcast('chat:status', { sessionState: 'idle' });
+    setExternalSessionState('idle');
   }
 }
 
@@ -767,7 +884,7 @@ function persistTurnResult(): void {
     ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
     ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
   });
-  broadcast('chat:status', { sessionState: 'idle' });
+  setExternalSessionState('idle');
   fireImCallback('complete', '');
 }
 
@@ -821,11 +938,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'tool_use_start':
       flushPendingText();  // Close any open text block before tool use
-      pendingToolInputs.set(event.toolUseId, { name: event.toolName, inputJson: '' });
+      pendingToolInputs.set(event.toolUseId, {
+        name: event.toolName,
+        inputJson: event.input ? JSON.stringify(event.input, null, 2) : '',
+      });
       broadcast('chat:tool-use-start', {
         id: event.toolUseId,
         name: event.toolName,
-        input: {},
+        input: event.input ?? {},
       });
       fireImCallback('activity', '');
       break;
@@ -868,12 +988,21 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
     }
 
+    case 'tool_result_delta':
+      broadcast('chat:tool-result-delta', {
+        toolUseId: event.toolUseId,
+        delta: event.delta,
+      });
+      resetWatchdog();
+      break;
+
     case 'tool_result':
       // Update the matching tool_use block's result
       for (let i = currentContentBlocks.length - 1; i >= 0; i--) {
         if (currentContentBlocks[i].type === 'tool_use' && currentContentBlocks[i].tool?.id === event.toolUseId) {
           currentContentBlocks[i].tool!.result = event.content;
           currentContentBlocks[i].tool!.isError = event.isError ?? false;
+          currentContentBlocks[i].tool!.resultMeta = event.metadata;
           break;
         }
       }
@@ -881,6 +1010,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolUseId: event.toolUseId,
         content: event.content,
         isError: event.isError ?? false,
+        metadata: event.metadata,
       });
       // Emit complete immediately — external runtimes deliver tool results as a single event
       // (no streaming delta). Frontend needs this to clear tool loading spinner + trigger file refresh.
@@ -888,6 +1018,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolUseId: event.toolUseId,
         content: event.content,
         isError: event.isError ?? false,
+        metadata: event.metadata,
       });
       resetWatchdog();
       break;
@@ -895,6 +1026,15 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'permission_request':
       // Store suggestions so respondExternalPermission can echo them back for "always_allow"
       pendingPermissionSuggestions.set(event.requestId, event.suggestions);
+      pendingExternalInteractiveRequests.set(event.requestId, {
+        type: 'permission:request',
+        data: {
+          requestId: event.requestId,
+          toolName: event.toolName,
+          toolUseId: event.toolUseId,
+          input: typeof event.input === 'object' ? JSON.stringify(event.input).slice(0, 500) : String(event.input ?? '').slice(0, 500),
+        },
+      });
       broadcast('permission:request', {
         requestId: event.requestId,
         toolName: event.toolName,
@@ -918,22 +1058,27 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           updateSessionMetadata(lastSessionId, { runtimeSessionId: event.sessionId });
         }
       }
+      const info: SystemInitInfo = {
+        timestamp: new Date().toISOString(),
+        session_id: event.sessionId,
+        model: event.model,
+        tools: event.tools,
+      };
       // Match builtin broadcast shape: { info: {...}, sessionId } — top-level sessionId
       // is read by frontend for session ID sync (TabProvider).
-      broadcast('chat:system-init', {
+      externalSystemInitPayload = {
         info: {
-          sessionId: event.sessionId,
-          model: event.model,
-          tools: event.tools,
+          ...info,
         },
         sessionId: lastSessionId,
-      });
+      };
+      broadcast('chat:system-init', externalSystemInitPayload);
       break;
 
     case 'status_change': {
       // Map runtime states to frontend session states (match builtin runtime behavior)
       const stateMap: Record<string, string> = { running: 'running', error: 'error', waiting_permission: 'running' };
-      broadcast('chat:status', { sessionState: stateMap[event.state ?? ''] ?? 'idle' });
+      setExternalSessionState((stateMap[event.state ?? ''] ?? 'idle') as ExternalSessionState);
       break;
     }
 
@@ -969,7 +1114,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         fireImCallback('error', event.result || 'Session ended with error');
         resetTurnAccumulators(); // Prevent stale content leaking into next turn
       }
-      broadcast('chat:status', { sessionState: 'idle' });
+      pendingPermissionSuggestions.clear();
+      pendingExternalInteractiveRequests.clear();
+      externalSystemInitPayload = null;
+      setExternalSessionState('idle');
       // Clean up module state — prevents stuck sessions on CC crash
       isRunning = false;
       activeProcess = null;

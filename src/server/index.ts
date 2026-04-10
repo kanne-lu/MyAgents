@@ -175,6 +175,11 @@ import {
   setExternalModel,
   setExternalPermissionMode,
   didLastTurnSucceed,
+  getExternalSessionState,
+  getExternalSystemInitPayload,
+  getExternalPendingInteractiveRequests,
+  getExternalSessionId,
+  getExternalLiveAssistantMessage,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
 
@@ -1406,7 +1411,9 @@ async function main() {
 
       // Session state endpoint - used by Rust background completion polling
       if (pathname === '/api/session-state' && request.method === 'GET') {
-        const { sessionState } = getAgentState();
+        const sessionState = shouldUseExternalRuntime()
+          ? getExternalSessionState()
+          : getAgentState().sessionState;
         return jsonResponse({ sessionState });
       }
 
@@ -1497,7 +1504,9 @@ async function main() {
 
       if (pathname === '/chat/stream' && request.method === 'GET') {
         const { client, response } = createSseClient(() => { });
-        const state = getAgentState();
+        const state = shouldUseExternalRuntime()
+          ? { ...getAgentState(), sessionState: getExternalSessionState() }
+          : getAgentState();
         client.send('chat:init', state);
         const allMessages = getMessages();
         // When a turn is in-flight, skip the streaming assistant message.
@@ -1516,13 +1525,23 @@ async function main() {
           client.send('chat:message-replay', { message: stripped });
         });
         client.send('chat:logs', { lines: getLogLines() });
-        const systemInitInfo = getSystemInitInfo();
-        if (systemInitInfo) {
-          client.send('chat:system-init', { info: systemInitInfo });
+        if (shouldUseExternalRuntime()) {
+          const externalSystemInitPayload = getExternalSystemInitPayload();
+          if (externalSystemInitPayload) {
+            client.send('chat:system-init', externalSystemInitPayload);
+          }
+        } else {
+          const systemInitInfo = getSystemInitInfo();
+          if (systemInitInfo) {
+            client.send('chat:system-init', { info: systemInitInfo });
+          }
         }
         // Replay pending interactive requests (permission, ask-user-question)
         // so that a Tab joining mid-session can display and respond to them.
-        for (const pending of getPendingInteractiveRequests()) {
+        const pendingRequests = shouldUseExternalRuntime()
+          ? getExternalPendingInteractiveRequests()
+          : getPendingInteractiveRequests();
+        for (const pending of pendingRequests) {
           client.send(pending.type, pending.data);
         }
         return response;
@@ -2466,13 +2485,31 @@ async function main() {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
 
+        let liveStreamingMessage: {
+          id: string;
+          role: 'assistant';
+          content: string;
+          timestamp: string;
+          sdkUuid?: string;
+        } | null = null;
+
         // If this is the currently active session, merge in-memory messages.
         // In-memory messages include the current turn's in-progress content
         // (thinking, text, tool_use) that hasn't been persisted to disk yet.
         // This is critical for shared Sidecar: when a Tab opens an IM session
         // mid-turn, it needs to see the partial assistant response.
         let mergedMessages = session.messages;
-        if (sessionId === getSessionId()) {
+        if (shouldUseExternalRuntime() && sessionId === getExternalSessionId()) {
+          const liveMessage = getExternalLiveAssistantMessage();
+          if (liveMessage) {
+            liveStreamingMessage = {
+              id: liveMessage.id,
+              role: 'assistant',
+              content: liveMessage.content,
+              timestamp: liveMessage.timestamp,
+            };
+          }
+        } else if (sessionId === getSessionId()) {
           const inMemory = getMessages();
           if (inMemory.length > 0) {
             const diskIds = new Set(session.messages.map(m => m.id));
@@ -2501,6 +2538,10 @@ async function main() {
         // Add previewUrl for image attachments
         const sessionWithPreview = {
           ...session,
+          liveStreamingMessage,
+          liveSessionState: shouldUseExternalRuntime() && sessionId === getExternalSessionId()
+            ? getExternalSessionState()
+            : undefined,
           messages: mergedMessages.map((msg) => ({
             ...msg,
             attachments: msg.attachments?.map((att) => ({
@@ -2570,8 +2611,9 @@ async function main() {
           return jsonResponse({ success: false, error: 'sessionId is required.' }, 400);
         }
 
-        // Stop external runtime subprocess before switching (prevents orphaned processes)
-        if (shouldUseExternalRuntime() && isExternalSessionActive()) {
+        // Stop external runtime subprocess before switching to a DIFFERENT session.
+        // Reopening the same running external session must attach, not interrupt the turn.
+        if (shouldUseExternalRuntime() && isExternalSessionActive() && payload.sessionId !== getExternalSessionId()) {
           await stopExternalSession();
         }
 

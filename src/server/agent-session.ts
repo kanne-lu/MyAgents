@@ -515,6 +515,25 @@ export type ProviderEnv = {
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
 
+function normalizeProviderBaseUrl(baseUrl?: string): string | undefined {
+  if (!baseUrl) return undefined;
+  try {
+    const url = new URL(baseUrl);
+    const pathname = url.pathname.replace(/\/+$/, '');
+    return `${url.origin}${pathname}`;
+  } catch {
+    return baseUrl.replace(/\/+$/, '');
+  }
+}
+
+function requiresSignedSessionHistory(providerEnv?: ProviderEnv): boolean {
+  if (!providerEnv) return true; // Anthropic subscription
+  const normalizedBaseUrl = normalizeProviderBaseUrl(providerEnv.baseUrl);
+  // Current behavior only covers official Anthropic providers. If future Claude suppliers
+  // enforce the same signed-history constraint, extend this predicate in one place.
+  return normalizedBaseUrl === 'https://api.anthropic.com';
+}
+
 // OpenAI Bridge: sidecar port for loopback, and active bridge config
 let sidecarPort: number = 0;
 
@@ -1079,14 +1098,15 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // Full equality check — all ProviderEnv fields affect subprocess env (authType, apiProtocol, etc.)
   if (providerEnvEqual(currentProviderEnv, providerEnv)) return;
 
-  // Resume safety: switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl)
-  // requires a fresh session. Anthropic validates thinking block signatures that third-party
-  // providers don't, so resuming with third-party messages causes signature errors.
+  // Resume safety: entering a provider that validates signed session history requires a fresh
+  // session when the previous provider did not. Anthropic validates thinking block signatures
+  // that third-party providers don't, so resuming with third-party messages causes errors.
   // Must check BEFORE updating currentProviderEnv.
   // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
   // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
-  const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
-  if (switchingFromThirdPartyToAnthropic) {
+  const currentRequiresSignedHistory = requiresSignedSessionHistory(currentProviderEnv);
+  const nextRequiresSignedHistory = requiresSignedSessionHistory(providerEnv);
+  if (!currentRequiresSignedHistory && nextRequiresSignedHistory) {
     sessionRegistered = false;
     console.log('[agent] provider switch: third-party → Anthropic — will create fresh session (signature incompatible)');
   }
@@ -4046,13 +4066,13 @@ export async function enqueueUserMessage(
     const toLabel = effectiveProviderEnv?.baseUrl ?? 'anthropic';
     if (isDebugMode) console.log(`[agent] provider changed from ${fromLabel} to ${toLabel}, restarting session`);
 
-    // Resume logic: Anthropic official validates thinking block signatures, third-party providers don't.
-    // Only skip resume when switching FROM third-party (has baseUrl) TO Anthropic official (no baseUrl).
-    // All other transitions (official→third-party, third-party→third-party, official→official) can safely resume.
+    // Resume logic: entering a provider that validates signed session history from one that
+    // doesn't requires a fresh session. All other transitions can safely resume.
     // Note: Desktop Chat also shows a ConfirmDialog for this case (see Chat.tsx), but this
     // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
-    const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !effectiveProviderEnv?.baseUrl;
-    if (switchingFromThirdPartyToAnthropic) {
+    const currentRequiresSignedHistory = requiresSignedSessionHistory(currentProviderEnv);
+    const nextRequiresSignedHistory = requiresSignedSessionHistory(effectiveProviderEnv);
+    if (!currentRequiresSignedHistory && nextRequiresSignedHistory) {
       sessionRegistered = false;
       sessionId = randomUUID();
       hasInitialPrompt = false;

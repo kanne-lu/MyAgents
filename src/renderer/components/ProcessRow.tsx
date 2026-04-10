@@ -44,7 +44,7 @@ const ProcessRow = memo(function ProcessRow({
     const isThinkingActive = isThinking && block.isComplete !== true && isStreaming;
 
     // Tool: 是最后一个 block 且正在 streaming 且没有 result 就是 active
-    const isToolActive = isTool && isLastBlock && isStreaming && !block.tool?.result;
+    const isToolActive = isTool && isLastBlock && isStreaming && (Boolean(block.tool?.isLoading) || !block.tool?.result);
     const isTaskRunning = isTaskTool && block.tool?.isLoading && !block.tool?.result;
 
     const isBlockActive = isThinkingActive || isToolActive;
