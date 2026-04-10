@@ -251,6 +251,7 @@ class CodexProcess implements RuntimeProcess {
   rpc: JsonRpcClient;
   threadId = '';
   currentTurnId = '';
+  agentMessageTextById = new Map<string, string>();
 
   constructor(proc: Subprocess) {
     this.proc = proc;
@@ -466,7 +467,7 @@ export class CodexRuntime implements AgentRuntime {
         }
         console.log(`[codex] ${method}${detail}`);
       }
-      const result = this.parseNotification(method, params);
+      const result = this.parseNotification(codexProc, method, params);
       if (!result) return;
       // parseNotification may return one event or an array (e.g., tool_use_stop + tool_result)
       const events = Array.isArray(result) ? result : [result];
@@ -651,7 +652,7 @@ export class CodexRuntime implements AgentRuntime {
 
   // ─── Notification parsing (v2 typed notifications) ───
 
-  private parseNotification(method: string, params: unknown): UnifiedEvent | UnifiedEvent[] | null {
+  private parseNotification(codexProc: CodexProcess, method: string, params: unknown): UnifiedEvent | UnifiedEvent[] | null {
     const p = params as Record<string, unknown>;
 
     switch (method) {
@@ -689,8 +690,14 @@ export class CodexRuntime implements AgentRuntime {
       }
 
       // ── Text streaming ──
-      case 'item/agentMessage/delta':
-        return { kind: 'text_delta', text: (p.delta as string) || '' };
+      case 'item/agentMessage/delta': {
+        const itemId = (p.itemId as string) || '';
+        const text = (p.delta as string) || '';
+        if (itemId && text) {
+          codexProc.agentMessageTextById.set(itemId, (codexProc.agentMessageTextById.get(itemId) || '') + text);
+        }
+        return { kind: 'text_delta', text };
+      }
 
       // ── Reasoning streaming ──
       case 'item/reasoning/summaryTextDelta':
@@ -889,8 +896,32 @@ export class CodexRuntime implements AgentRuntime {
             ];
           case 'reasoning':
             return { kind: 'thinking_stop', index: 0 };
-          case 'agentMessage':
+          case 'agentMessage': {
+            const finalText = typeof item.text === 'string' ? item.text : '';
+            const streamedText = codexProc.agentMessageTextById.get(item.id) || '';
+            codexProc.agentMessageTextById.delete(item.id);
+
+            if (finalText) {
+              if (!streamedText) {
+                console.log(`[codex] agentMessage completed without delta; backfilling ${finalText.length} chars`);
+                return [
+                  { kind: 'text_delta', text: finalText },
+                  { kind: 'text_stop' },
+                ];
+              }
+
+              if (finalText.startsWith(streamedText) && finalText.length > streamedText.length) {
+                const tail = finalText.slice(streamedText.length);
+                console.log(`[codex] agentMessage completed with missing tail; backfilling ${tail.length} chars`);
+                return [
+                  { kind: 'text_delta', text: tail },
+                  { kind: 'text_stop' },
+                ];
+              }
+            }
+
             return { kind: 'text_stop' };
+          }
           default:
             return null;
         }
