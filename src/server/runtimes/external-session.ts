@@ -65,13 +65,18 @@ interface PersistContentBlock {
     streamIndex: number;
   };
   thinking?: string;
+  thinkingStartedAt?: number;
+  thinkingDurationMs?: number;
   thinkingStreamIndex?: number;
+  isComplete?: boolean;
 }
 
 let currentContentBlocks: PersistContentBlock[] = [];
 let pendingTextBuffer = '';         // text_delta accumulator between block boundaries
 let pendingThinkingText = '';       // thinking_delta accumulator for current thinking block
 let pendingThinkingIndex = 0;       // index of current thinking block
+let pendingThinkingActive = false;  // reasoning block started, even if no delta text arrived yet
+let pendingThinkingStartedAt = 0;   // timestamp for duration calculation / history reopen parity
 const pendingToolInputs = new Map<string, { name: string; inputJson: string }>(); // toolUseId → input accumulator
 type ExternalSessionState = 'idle' | 'running' | 'error';
 type ExternalPendingInteractiveRequest = {
@@ -111,6 +116,8 @@ function resetModuleState(): void {
   pendingTextBuffer = '';
   pendingThinkingText = '';
   pendingThinkingIndex = 0;
+  pendingThinkingActive = false;
+  pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   pendingPermissionSuggestions.clear();
   pendingExternalInteractiveRequests.clear();
@@ -126,17 +133,40 @@ function flushPendingText(): void {
   }
 }
 
+function buildPendingThinkingBlock(isComplete: boolean): PersistContentBlock | null {
+  if (!pendingThinkingActive) return null;
+
+  return {
+    type: 'thinking',
+    thinking: pendingThinkingText,
+    thinkingStartedAt: pendingThinkingStartedAt || undefined,
+    thinkingDurationMs: isComplete && pendingThinkingStartedAt
+      ? Date.now() - pendingThinkingStartedAt
+      : undefined,
+    thinkingStreamIndex: pendingThinkingIndex,
+    isComplete,
+  };
+}
+
+function clearPendingThinking(): void {
+  pendingThinkingText = '';
+  pendingThinkingIndex = 0;
+  pendingThinkingActive = false;
+  pendingThinkingStartedAt = 0;
+}
+
+function flushPendingThinking(forceComplete: boolean): void {
+  const thinkingBlock = buildPendingThinkingBlock(forceComplete);
+  if (thinkingBlock) {
+    currentContentBlocks.push(thinkingBlock);
+  }
+  clearPendingThinking();
+}
+
 /** Flush any incomplete blocks (thinking/tool) at turn boundary — handles interrupts */
 function flushAllPending(): void {
   flushPendingText();
-  if (pendingThinkingText) {
-    currentContentBlocks.push({
-      type: 'thinking',
-      thinking: pendingThinkingText,
-      thinkingStreamIndex: pendingThinkingIndex,
-    });
-    pendingThinkingText = '';
-  }
+  flushPendingThinking(true);
   // Flush any uncompleted tool uses (interrupted mid-stream)
   for (const [toolId, entry] of pendingToolInputs) {
     let parsedInput: Record<string, unknown> = {};
@@ -186,6 +216,8 @@ function resetTurnAccumulators(): void {
   pendingTextBuffer = '';
   pendingThinkingText = '';
   pendingThinkingIndex = 0;
+  pendingThinkingActive = false;
+  pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   currentTurnUsage = null;
 }
@@ -377,12 +409,9 @@ function buildCurrentAssistantSnapshotContent(): string | null {
     blocks.push({ type: 'text', text: pendingTextBuffer });
   }
 
-  if (pendingThinkingText) {
-    blocks.push({
-      type: 'thinking',
-      thinking: pendingThinkingText,
-      thinkingStreamIndex: pendingThinkingIndex,
-    });
+  const pendingThinkingBlock = buildPendingThinkingBlock(false);
+  if (pendingThinkingBlock) {
+    blocks.push(pendingThinkingBlock);
   }
 
   for (const [toolId, entry] of pendingToolInputs) {
@@ -909,13 +938,25 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'thinking_start':
       flushPendingText();  // Close any open text block before thinking
+      if (pendingThinkingActive) {
+        // Defensive close: a new reasoning block implies the previous one ended,
+        // even if the runtime never sent an explicit stop.
+        flushPendingThinking(true);
+      }
       pendingThinkingText = '';
       pendingThinkingIndex = event.index;
+      pendingThinkingActive = true;
+      pendingThinkingStartedAt = Date.now();
       broadcast('chat:thinking-start', { index: event.index });
       fireImCallback('activity', '');
       break;
 
     case 'thinking_delta':
+      if (!pendingThinkingActive) {
+        pendingThinkingActive = true;
+        pendingThinkingIndex = event.index;
+        pendingThinkingStartedAt = Date.now();
+      }
       pendingThinkingText += event.text;
       // Frontend expects { index, delta } — match builtin SSE shape
       broadcast('chat:thinking-chunk', { index: event.index, delta: event.text });
@@ -923,15 +964,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'thinking_stop':
-      // Finalize thinking block
-      if (pendingThinkingText) {
-        currentContentBlocks.push({
-          type: 'thinking',
-          thinking: pendingThinkingText,
-          thinkingStreamIndex: pendingThinkingIndex,
-        });
-        pendingThinkingText = '';
-      }
+      flushPendingThinking(true);
       // Emit content-block-stop so frontend closes the thinking block
       broadcast('chat:content-block-stop', { index: event.index, type: 'thinking' });
       break;
