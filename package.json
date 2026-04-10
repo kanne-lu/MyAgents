@@ -71,7 +71,6 @@
     "monaco-editor": "^0.55.1",
     "qrcode": "^1.5.4",
     "react": "^19.2.0",
-    "react-arborist": "^3.4.3",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
     "react-syntax-highlighter": "^16.1.0",
