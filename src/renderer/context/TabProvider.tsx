@@ -924,9 +924,22 @@ export default function TabProvider({
                 toolNameMapRef.current.set(tool.id, tool.name);
 
                 // For Task tool, add taskStartTime and initial taskStats
+                const initialInputJson = Object.keys(tool.input ?? {}).length > 0
+                    ? JSON.stringify(tool.input, null, 2)
+                    : '';
+                const initialParsedInput = Object.keys(tool.input ?? {}).length > 0
+                    ? tool.input as unknown as ToolInput
+                    : undefined;
                 const toolSimple: ToolUseSimple = (tool.name === 'Task' || tool.name === 'Agent')
-                    ? { ...tool, inputJson: '', isLoading: true, taskStartTime: Date.now(), taskStats: { toolCount: 0, inputTokens: 0, outputTokens: 0 } }
-                    : { ...tool, inputJson: '', isLoading: true };
+                    ? {
+                        ...tool,
+                        inputJson: initialInputJson,
+                        parsedInput: initialParsedInput,
+                        isLoading: true,
+                        taskStartTime: Date.now(),
+                        taskStats: { toolCount: 0, inputTokens: 0, outputTokens: 0 },
+                      }
+                    : { ...tool, inputJson: initialInputJson, parsedInput: initialParsedInput, isLoading: true };
                 setStreamingMessage(prev => {
                     const toolBlock: ContentBlock = {
                         type: 'tool_use',
@@ -1058,7 +1071,13 @@ export default function TabProvider({
             case 'chat:tool-result-start':
             case 'chat:tool-result-delta':
             case 'chat:tool-result-complete': {
-                const payload = data as { toolUseId: string; content?: string; delta?: string; isError?: boolean };
+                const payload = data as {
+                    toolUseId: string;
+                    content?: string;
+                    delta?: string;
+                    isError?: boolean;
+                    metadata?: import('@/types/chat').ToolResultMeta;
+                };
 
                 setStreamingMessage(prev => {
                     if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
@@ -1073,7 +1092,11 @@ export default function TabProvider({
                     if (eventName === 'chat:tool-result-delta') {
                         updated[idx] = {
                             ...block,
-                            tool: { ...block.tool, result: (block.tool.result || '') + (payload.delta ?? ''), isLoading: true }
+                            tool: {
+                                ...block.tool,
+                                result: (block.tool.result || '') + (payload.delta ?? ''),
+                                isLoading: true,
+                            }
                         };
                     } else {
                         updated[idx] = {
@@ -1082,7 +1105,8 @@ export default function TabProvider({
                                 ...block.tool,
                                 result: payload.content ?? block.tool.result,
                                 isError: payload.isError,
-                                isLoading: eventName !== 'chat:tool-result-complete'
+                                isLoading: eventName !== 'chat:tool-result-complete',
+                                resultMeta: payload.metadata ?? block.tool.resultMeta,
                             }
                         };
                     }

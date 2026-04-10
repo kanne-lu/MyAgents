@@ -553,7 +553,13 @@ export function getToolLabel(tool: ToolUseSimple): string {
           return 'Kill Shell';
         }
       } catch {
-        // Ignore parse errors
+        if (tool.name === 'Bash') {
+          const raw = tool.inputJson.trim();
+          if (raw) {
+            const cmd = raw.split(' ')[0];
+            return cmd.length > 15 ? `${cmd.substring(0, 12)}...` : cmd;
+          }
+        }
       }
     }
     return tool.name;

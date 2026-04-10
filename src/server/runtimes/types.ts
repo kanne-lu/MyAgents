@@ -61,10 +61,23 @@ export type UnifiedEvent =
   | { kind: 'thinking_stop'; index: number }
 
   // === Tool use ===
-  | { kind: 'tool_use_start'; toolUseId: string; toolName: string }
+  | { kind: 'tool_use_start'; toolUseId: string; toolName: string; input?: Record<string, unknown> }
   | { kind: 'tool_input_delta'; toolUseId: string; delta: string }
   | { kind: 'tool_use_stop'; toolUseId: string }
-  | { kind: 'tool_result'; toolUseId: string; content: string; isError?: boolean }
+  | { kind: 'tool_result_delta'; toolUseId: string; delta: string }
+  | {
+    kind: 'tool_result';
+    toolUseId: string;
+    content: string;
+    isError?: boolean;
+    metadata?: {
+      exitCode?: number | null;
+      durationMs?: number | null;
+      cwd?: string;
+      processId?: string | null;
+      status?: string;
+    };
+  }
 
   // === Permission delegation ===
   | {

@@ -56,6 +56,14 @@ export interface SubagentToolCall {
   isError?: boolean;
 }
 
+export interface ToolResultMeta {
+  exitCode?: number | null;
+  durationMs?: number | null;
+  cwd?: string;
+  processId?: string | null;
+  status?: string;
+}
+
 // Task 工具运行统计
 export interface TaskStats {
   toolCount: number;
@@ -87,6 +95,8 @@ export interface ToolUseSimple extends ToolUse {
   isStopped?: boolean;
   // Whether tool failed due to error
   isFailed?: boolean;
+  // Runtime-specific metadata about the completed tool result
+  resultMeta?: ToolResultMeta;
   // Nested tool calls emitted by subagents (Task tool)
   subagentCalls?: SubagentToolCall[];
   // Task tool specific: start time for duration calculation

@@ -53,6 +53,13 @@ interface PersistContentBlock {
     inputJson?: string;
     result?: string;
     isError?: boolean;
+    resultMeta?: {
+      exitCode?: number | null;
+      durationMs?: number | null;
+      cwd?: string;
+      processId?: string | null;
+      status?: string;
+    };
     streamIndex: number;
   };
   thinking?: string;
@@ -821,11 +828,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'tool_use_start':
       flushPendingText();  // Close any open text block before tool use
-      pendingToolInputs.set(event.toolUseId, { name: event.toolName, inputJson: '' });
+      pendingToolInputs.set(event.toolUseId, {
+        name: event.toolName,
+        inputJson: event.input ? JSON.stringify(event.input, null, 2) : '',
+      });
       broadcast('chat:tool-use-start', {
         id: event.toolUseId,
         name: event.toolName,
-        input: {},
+        input: event.input ?? {},
       });
       fireImCallback('activity', '');
       break;
@@ -868,12 +878,21 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
     }
 
+    case 'tool_result_delta':
+      broadcast('chat:tool-result-delta', {
+        toolUseId: event.toolUseId,
+        delta: event.delta,
+      });
+      resetWatchdog();
+      break;
+
     case 'tool_result':
       // Update the matching tool_use block's result
       for (let i = currentContentBlocks.length - 1; i >= 0; i--) {
         if (currentContentBlocks[i].type === 'tool_use' && currentContentBlocks[i].tool?.id === event.toolUseId) {
           currentContentBlocks[i].tool!.result = event.content;
           currentContentBlocks[i].tool!.isError = event.isError ?? false;
+          currentContentBlocks[i].tool!.resultMeta = event.metadata;
           break;
         }
       }
@@ -881,6 +900,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolUseId: event.toolUseId,
         content: event.content,
         isError: event.isError ?? false,
+        metadata: event.metadata,
       });
       // Emit complete immediately — external runtimes deliver tool results as a single event
       // (no streaming delta). Frontend needs this to clear tool loading spinner + trigger file refresh.
@@ -888,6 +908,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolUseId: event.toolUseId,
         content: event.content,
         isError: event.isError ?? false,
+        metadata: event.metadata,
       });
       resetWatchdog();
       break;

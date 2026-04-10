@@ -725,50 +725,74 @@ export class CodexRuntime implements AgentRuntime {
           type: string; id: string;
           command?: string; cwd?: string; tool?: string; server?: string;
           text?: string; query?: string; arguments?: unknown;
-          path?: string; status?: string; revisedPrompt?: string;
+          path?: string; revisedPrompt?: string;
           changes?: Array<{ path: string }>;
+          commandActions?: unknown[];
         } | undefined;
         if (!item) return null;
         switch (item.type) {
           case 'commandExecution': {
-            // Map to 'Bash' — matches frontend toolBadgeConfig for Terminal icon + amber color
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'Bash' }];
-            if (item.command) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: item.command });
-            return events;
+            return {
+              kind: 'tool_use_start',
+              toolUseId: item.id,
+              toolName: 'Bash',
+              input: {
+                command: item.command ?? '',
+                ...(item.cwd ? { cwd: item.cwd } : {}),
+                ...(Array.isArray(item.commandActions) ? { commandActions: item.commandActions } : {}),
+              },
+            };
           }
           case 'fileChange': {
-            // Map to 'Edit' — matches frontend file edit badge (emerald color)
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'Edit' }];
-            // Show file paths being changed
-            if (item.changes?.length) {
-              const paths = (item.changes as Array<{ path: string }>).map(c => c.path).join(', ');
-              events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: paths });
-            }
-            return events;
+            const firstPath = item.changes?.[0]?.path;
+            return {
+              kind: 'tool_use_start',
+              toolUseId: item.id,
+              toolName: 'Edit',
+              input: {
+                ...(firstPath ? { file_path: firstPath } : {}),
+                ...(item.cwd ? { cwd: item.cwd } : {}),
+                ...(item.changes?.length ? { changes: item.changes } : {}),
+              },
+            };
           }
           case 'mcpToolCall': {
             // Prefix with mcp__ to match frontend MCP tool badge patterns
             const toolName = item.server && item.tool ? `mcp__${item.server}__${item.tool}` : (item.tool || 'MCP Tool');
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName }];
-            if (item.arguments) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: JSON.stringify(item.arguments) });
-            return events;
+            return {
+              kind: 'tool_use_start',
+              toolUseId: item.id,
+              toolName,
+              input: (item.arguments && typeof item.arguments === 'object')
+                ? item.arguments as Record<string, unknown>
+                : undefined,
+            };
           }
           case 'dynamicToolCall': {
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: item.tool || 'Tool' }];
-            if (item.arguments) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: JSON.stringify(item.arguments) });
-            return events;
+            return {
+              kind: 'tool_use_start',
+              toolUseId: item.id,
+              toolName: item.tool || 'Tool',
+              input: (item.arguments && typeof item.arguments === 'object')
+                ? item.arguments as Record<string, unknown>
+                : undefined,
+            };
           }
           case 'webSearch': {
-            // Map to 'WebFetch' — matches frontend web fetch badge (indigo color)
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'WebFetch' }];
-            if (item.query) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: item.query });
-            return events;
+            return {
+              kind: 'tool_use_start',
+              toolUseId: item.id,
+              toolName: 'WebSearch',
+              input: { query: item.query ?? '' },
+            };
           }
           case 'imageView': {
-            // Map to 'Read' — closest existing badge for viewing content
-            const events: UnifiedEvent[] = [{ kind: 'tool_use_start', toolUseId: item.id, toolName: 'Read' }];
-            if (item.path) events.push({ kind: 'tool_input_delta', toolUseId: item.id, delta: item.path });
-            return events;
+            return {
+              kind: 'tool_use_start',
+              toolUseId: item.id,
+              toolName: 'Read',
+              input: item.path ? { file_path: item.path } : undefined,
+            };
           }
           case 'imageGeneration':
             return { kind: 'tool_use_start', toolUseId: item.id, toolName: 'ImageGeneration' };
@@ -787,12 +811,12 @@ export class CodexRuntime implements AgentRuntime {
       case 'item/completed': {
         const item = p.item as {
           type: string; id: string;
-          command?: string; aggregatedOutput?: string; exitCode?: number;
+          command?: string; aggregatedOutput?: string; exitCode?: number; durationMs?: number; cwd?: string; processId?: string; status?: string;
           changes?: Array<{ path: string; kind: string; diff: string }>;
           tool?: string; result?: unknown; error?: { message: string };
           text?: string; summary?: string[];
           query?: string; action?: { type: string; url?: string; queries?: string[] };
-          path?: string; status?: string; revisedPrompt?: string;
+          path?: string; revisedPrompt?: string;
           contentItems?: Array<{ type: string; text?: string }>;
           success?: boolean;
         } | undefined;
@@ -804,7 +828,19 @@ export class CodexRuntime implements AgentRuntime {
           case 'commandExecution':
             return [
               { kind: 'tool_use_stop', toolUseId: item.id },
-              { kind: 'tool_result', toolUseId: item.id, content: item.aggregatedOutput || '', isError: item.exitCode != null && item.exitCode !== 0 },
+              {
+                kind: 'tool_result',
+                toolUseId: item.id,
+                content: item.aggregatedOutput || '',
+                isError: item.exitCode != null && item.exitCode !== 0,
+                metadata: {
+                  exitCode: item.exitCode ?? null,
+                  durationMs: item.durationMs ?? null,
+                  cwd: item.cwd,
+                  processId: item.processId ?? null,
+                  status: item.status,
+                },
+              },
             ];
           case 'fileChange': {
             // Show file paths and diffs for each changed file
@@ -863,7 +899,7 @@ export class CodexRuntime implements AgentRuntime {
       // ── Command execution output ──
       case 'item/commandExecution/outputDelta':
         return {
-          kind: 'tool_input_delta',
+          kind: 'tool_result_delta',
           toolUseId: (p.itemId as string) || '',
           delta: (p.delta as string) || '',
         };
@@ -871,7 +907,7 @@ export class CodexRuntime implements AgentRuntime {
       // ── File change output ──
       case 'item/fileChange/outputDelta':
         return {
-          kind: 'tool_input_delta',
+          kind: 'tool_result_delta',
           toolUseId: (p.itemId as string) || '',
           delta: (p.delta as string) || '',
         };
