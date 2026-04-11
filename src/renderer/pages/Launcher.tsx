@@ -19,6 +19,7 @@ import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, WorkspaceCard, WorkspaceEditDialog } from '@/components/launcher';
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
+import { useTaskCenterData } from '@/hooks/useTaskCenterData';
 import { type Project, type Provider, type PermissionMode, type McpServerDefinition } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
@@ -70,6 +71,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Poll agent statuses only when any project has proactive mode
     const hasAnyAgent = useMemo(() => visibleProjects.some(p => p.isAgent), [visibleProjects]);
     const { statuses: agentStatuses } = useAgentStatuses(hasAnyAgent);
+    const taskCenterData = useTaskCenterData({ isActive });
 
     // Build agent lookup: project path → { agent config, runtime status }
     const agentLookup = useMemo(() => {
@@ -641,7 +643,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                             onOpenTask={handleOpenTask}
                             onOpenOverlay={handleOpenOverlay}
                             onOpenCronDetail={handleOpenCronDetail}
-                            isActive={isActive}
+                            taskCenterData={taskCenterData}
                         />
                     </div>
 
@@ -732,7 +734,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     onOpenTask={handleOverlayOpenTask}
                     onOpenCronDetail={handleOpenCronDetail}
                     onClose={handleCloseOverlay}
-                    isActive={isActive}
+                    taskCenterData={taskCenterData}
                 />
             )}
 

@@ -5,8 +5,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { getSessions, type SessionMetadata } from '@/api/sessionClient';
+import { deleteSession as deleteSessionApi, getSessions, type SessionMetadata } from '@/api/sessionClient';
 import { getAllCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
+import { deactivateSession } from '@/api/tauriClient';
 import { loadAppConfig } from '@/config/configService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import type { CronTask } from '@/types/cronTask';
@@ -29,8 +30,23 @@ export interface TaskCenterData {
     cronBotInfoMap: Map<string, { name: string; platform: string }>;
     isLoading: boolean;
     error: string | null;
-    refresh: () => void;
-    removeSession: (sessionId: string) => void;
+    refresh: (scope?: TaskCenterRefreshScope, options?: TaskCenterRefreshOptions) => void;
+    actions: TaskCenterActions;
+}
+
+export type TaskCenterRefreshScope = 'all' | 'sessions' | 'cronTasks' | 'backgroundSessions' | 'agentStatuses';
+
+export interface TaskCenterRefreshOptions {
+    force?: boolean;
+    minIntervalMs?: number;
+    reason?: string;
+    silent?: boolean;
+}
+
+export interface TaskCenterActions {
+    deleteSession: (sessionId: string) => Promise<boolean>;
+    refreshSessions: () => void;
+    refreshCronTasks: () => void;
 }
 
 interface UseTaskCenterDataOptions {
@@ -40,6 +56,11 @@ interface UseTaskCenterDataOptions {
 // Constants
 const MAX_AUTO_RETRIES = 3;
 const RETRY_DELAY_MS = 2000;
+const BACKGROUND_REFRESH_INTERVAL_MS = 60_000;
+export const TASK_CENTER_FRESHNESS_TTL_MS = 2_000;
+
+const sortSessionsByLastActive = (data: SessionMetadata[]) =>
+    [...data].sort((a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime());
 
 export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskCenterData {
     const [sessions, setSessions] = useState<SessionMetadata[]>([]);
@@ -53,10 +74,50 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const sessionRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
     const agentRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const cronRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const backgroundRefreshTimerRef = useRef<NodeJS.Timeout | null>(null);
+    const lastFetchedAtRef = useRef<Partial<Record<TaskCenterRefreshScope, number>>>({});
+    const requestSeqRef = useRef(0);
+    const latestRequestSeqByScopeRef = useRef<Partial<Record<TaskCenterRefreshScope, number>>>({});
+    const deletedSessionIdsRef = useRef<Set<string>>(new Set());
 
-    const fetchData = useCallback(async (retryCount = 0) => {
-        if (retryCount === 0) setIsLoading(true);
-        setError(null);
+    const markFetched = useCallback((scope: TaskCenterRefreshScope) => {
+        const now = Date.now();
+        lastFetchedAtRef.current[scope] = now;
+        if (scope === 'all') {
+            lastFetchedAtRef.current.sessions = now;
+            lastFetchedAtRef.current.cronTasks = now;
+            lastFetchedAtRef.current.backgroundSessions = now;
+            lastFetchedAtRef.current.agentStatuses = now;
+        }
+    }, []);
+
+    const startRequest = useCallback((scope: TaskCenterRefreshScope) => {
+        const requestSeq = ++requestSeqRef.current;
+        latestRequestSeqByScopeRef.current[scope] = requestSeq;
+        if (scope === 'all') {
+            latestRequestSeqByScopeRef.current.sessions = requestSeq;
+            latestRequestSeqByScopeRef.current.cronTasks = requestSeq;
+            latestRequestSeqByScopeRef.current.backgroundSessions = requestSeq;
+            latestRequestSeqByScopeRef.current.agentStatuses = requestSeq;
+        }
+        return requestSeq;
+    }, []);
+
+    const isLatestRequest = useCallback((scope: TaskCenterRefreshScope, requestSeq: number) => {
+        return latestRequestSeqByScopeRef.current[scope] === requestSeq;
+    }, []);
+
+    const filterDeletedSessions = useCallback((data: SessionMetadata[]) => {
+        const deletedSessionIds = deletedSessionIdsRef.current;
+        if (deletedSessionIds.size === 0) return data;
+        return data.filter(session => !deletedSessionIds.has(session.id));
+    }, []);
+
+    const fetchData = useCallback(async (retryCount = 0, silent = false) => {
+        const requestSeq = startRequest('all');
+        if (retryCount === 0 && !silent) setIsLoading(true);
+        if (!silent) setError(null);
 
         try {
             const agentStatusPromise = isTauriEnvironment()
@@ -75,60 +136,120 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
 
             if (!isMountedRef.current) return;
 
-            // Sort sessions by lastActiveAt descending (spread to avoid mutating original)
-            const sorted = [...sessionsData].sort(
-                (a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
-            );
-            setSessions(sorted);
-            setCronTasks(tasksData);
-            setBackgroundSessionIds(bgSessions);
-            setAgentStatuses(agentStatusResult);
+            if (isLatestRequest('sessions', requestSeq)) {
+                setSessions(sortSessionsByLastActive(filterDeletedSessions(sessionsData)));
+            }
+            if (isLatestRequest('cronTasks', requestSeq)) setCronTasks(tasksData);
+            if (isLatestRequest('backgroundSessions', requestSeq)) setBackgroundSessionIds(bgSessions);
+            if (isLatestRequest('agentStatuses', requestSeq)) setAgentStatuses(agentStatusResult);
             setAgents(appConfig?.agents ?? []);
+            markFetched('all');
+            setError(null);
         } catch (err) {
             if (!isMountedRef.current) return;
             console.error('[useTaskCenterData] Failed to load data:', err);
-            if (retryCount < MAX_AUTO_RETRIES) {
+            if (!silent && retryCount < MAX_AUTO_RETRIES) {
                 retryTimeoutRef.current = setTimeout(() => {
-                    void fetchData(retryCount + 1);
+                    void fetchData(retryCount + 1, silent);
                 }, RETRY_DELAY_MS);
-            } else {
+            } else if (!silent) {
                 setError('加载失败，请稍后重试');
             }
         } finally {
-            if (isMountedRef.current) setIsLoading(false);
+            if (isMountedRef.current && !silent) setIsLoading(false);
         }
-    }, []);
+    }, [filterDeletedSessions, isLatestRequest, markFetched, startRequest]);
+
+    const refreshSessionsNow = useCallback(() => {
+        const requestSeq = startRequest('sessions');
+        getSessions().then(data => {
+            if (!isMountedRef.current) return;
+            if (!isLatestRequest('sessions', requestSeq)) return;
+            setSessions(sortSessionsByLastActive(filterDeletedSessions(data)));
+            markFetched('sessions');
+        }).catch(err => {
+            console.warn('[useTaskCenterData] Failed to refresh sessions:', err);
+        });
+    }, [filterDeletedSessions, isLatestRequest, markFetched, startRequest]);
+
+    const refreshCronTasksNow = useCallback(() => {
+        const requestSeq = startRequest('cronTasks');
+        getAllCronTasks().then(tasks => {
+            if (!isMountedRef.current) return;
+            if (!isLatestRequest('cronTasks', requestSeq)) return;
+            setCronTasks(tasks);
+            markFetched('cronTasks');
+        }).catch(err => {
+            console.warn('[useTaskCenterData] Failed to refresh cron tasks:', err);
+        });
+    }, [isLatestRequest, markFetched, startRequest]);
+
+    const refreshBackgroundSessionsNow = useCallback(() => {
+        const requestSeq = startRequest('backgroundSessions');
+        getBackgroundSessions().then(ids => {
+            if (!isMountedRef.current) return;
+            if (!isLatestRequest('backgroundSessions', requestSeq)) return;
+            setBackgroundSessionIds(ids);
+            markFetched('backgroundSessions');
+        }).catch(err => {
+            console.warn('[useTaskCenterData] Failed to refresh background sessions:', err);
+        });
+    }, [isLatestRequest, markFetched, startRequest]);
+
+    const refreshAgentStatusNow = useCallback(() => {
+        const requestSeq = startRequest('agentStatuses');
+        if (!isTauriEnvironment()) return;
+        import('@tauri-apps/api/core')
+            .then(({ invoke }) => {
+                invoke<AgentStatusMap>('cmd_all_agents_status')
+                    .then(statuses => {
+                        if (!isMountedRef.current) return;
+                        if (!isLatestRequest('agentStatuses', requestSeq)) return;
+                        setAgentStatuses(statuses);
+                        markFetched('agentStatuses');
+                    })
+                    .catch(err => {
+                        console.warn('[useTaskCenterData] Failed to refresh agent statuses:', err);
+                    });
+            })
+            .catch(err => {
+                console.warn('[useTaskCenterData] Failed to load Tauri API for agent statuses:', err);
+            });
+    }, [isLatestRequest, markFetched, startRequest]);
 
     // Debounced session refresh (avoids API flooding on rapid events)
     const refreshSessionsDebounced = useCallback((delayMs = 500) => {
         if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
         sessionRefreshTimerRef.current = setTimeout(() => {
             sessionRefreshTimerRef.current = null;
-            getSessions().then(data => {
-                if (!isMountedRef.current) return;
-                const sorted = [...data].sort(
-                    (a, b) => new Date(b.lastActiveAt).getTime() - new Date(a.lastActiveAt).getTime()
-                );
-                setSessions(sorted);
-            }).catch(() => {});
+            refreshSessionsNow();
         }, delayMs);
-    }, []);
+    }, [refreshSessionsNow]);
+
+    const refreshCronTasksDebounced = useCallback((delayMs = 500) => {
+        if (cronRefreshTimerRef.current) clearTimeout(cronRefreshTimerRef.current);
+        cronRefreshTimerRef.current = setTimeout(() => {
+            cronRefreshTimerRef.current = null;
+            refreshCronTasksNow();
+        }, delayMs);
+    }, [refreshCronTasksNow]);
+
+    const refreshBackgroundSessionsDebounced = useCallback((delayMs = 500) => {
+        if (backgroundRefreshTimerRef.current) clearTimeout(backgroundRefreshTimerRef.current);
+        backgroundRefreshTimerRef.current = setTimeout(() => {
+            backgroundRefreshTimerRef.current = null;
+            refreshBackgroundSessionsNow();
+        }, delayMs);
+    }, [refreshBackgroundSessionsNow]);
 
     // Debounced Agent status refresh
     const refreshAgentStatusDebounced = useCallback((delayMs = 1000) => {
         if (agentRefreshTimerRef.current) clearTimeout(agentRefreshTimerRef.current);
         agentRefreshTimerRef.current = setTimeout(() => {
             agentRefreshTimerRef.current = null;
-            if (!isTauriEnvironment()) return;
-            import('@tauri-apps/api/core')
-                .then(({ invoke }) => {
-                    invoke<AgentStatusMap>('cmd_all_agents_status')
-                        .then(statuses => { if (isMountedRef.current) setAgentStatuses(statuses); })
-                        .catch(() => {});
-                })
-                .catch(() => {});
+            refreshAgentStatusNow();
         }, delayMs);
-    }, []);
+    }, [refreshAgentStatusNow]);
 
     // Initial fetch
     useEffect(() => {
@@ -139,6 +260,8 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
             if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
             if (agentRefreshTimerRef.current) clearTimeout(agentRefreshTimerRef.current);
+            if (cronRefreshTimerRef.current) clearTimeout(cronRefreshTimerRef.current);
+            if (backgroundRefreshTimerRef.current) clearTimeout(backgroundRefreshTimerRef.current);
         };
     }, [fetchData]);
 
@@ -148,7 +271,16 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         const wasInactive = !prevIsActiveRef.current;
         prevIsActiveRef.current = isActive;
         if (!wasInactive || !isActive) return;
-        void fetchData(0);
+        void fetchData(0, true);
+    }, [isActive, fetchData]);
+
+    // Lightweight fallback: while Launcher is active, reconcile all task-center data once a minute.
+    useEffect(() => {
+        if (!isActive) return;
+        const interval = setInterval(() => {
+            void fetchData(0, true);
+        }, BACKGROUND_REFRESH_INTERVAL_MS);
+        return () => clearInterval(interval);
     }, [isActive, fetchData]);
 
     // Refresh sessions when a session title changes (auto-generated or user rename)
@@ -172,9 +304,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             // Background completion events
             const u1 = await listen('session:background-complete', () => {
                 if (!mounted) return;
-                getBackgroundSessions().then(ids => {
-                    if (mounted) setBackgroundSessionIds(ids);
-                }).catch(() => {});
+                refreshBackgroundSessionsDebounced();
                 refreshSessionsDebounced();
             });
             unlisteners.push(u1);
@@ -182,25 +312,19 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             // Cron task events
             const u2 = await listen('cron:task-stopped', () => {
                 if (!mounted) return;
-                getAllCronTasks().then(tasks => {
-                    if (mounted) setCronTasks(tasks);
-                }).catch(() => {});
+                refreshCronTasksDebounced();
             });
             unlisteners.push(u2);
 
             const u2b = await listen('cron:task-started', () => {
                 if (!mounted) return;
-                getAllCronTasks().then(tasks => {
-                    if (mounted) setCronTasks(tasks);
-                }).catch(() => {});
+                refreshCronTasksDebounced();
             });
             unlisteners.push(u2b);
 
             const u3 = await listen('cron:execution-complete', () => {
                 if (!mounted) return;
-                getAllCronTasks().then(tasks => {
-                    if (mounted) setCronTasks(tasks);
-                }).catch(() => {});
+                refreshCronTasksDebounced();
                 refreshSessionsDebounced();
             });
             unlisteners.push(u3);
@@ -208,9 +332,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             // Scheduler started (resume / recovery)
             const u4 = await listen('cron:scheduler-started', () => {
                 if (!mounted) return;
-                getAllCronTasks().then(tasks => {
-                    if (mounted) setCronTasks(tasks);
-                }).catch(() => {});
+                refreshCronTasksDebounced();
                 refreshSessionsDebounced();
             });
             unlisteners.push(u4);
@@ -218,18 +340,14 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             // Task deleted
             const u5 = await listen('cron:task-deleted', () => {
                 if (!mounted) return;
-                getAllCronTasks().then(tasks => {
-                    if (mounted) setCronTasks(tasks);
-                }).catch(() => {});
+                refreshCronTasksDebounced();
             });
             unlisteners.push(u5);
 
             // Task updated (fields edited via cmd_update_cron_task_fields)
             const u6 = await listen('cron:task-updated', () => {
                 if (!mounted) return;
-                getAllCronTasks().then(tasks => {
-                    if (mounted) setCronTasks(tasks);
-                }).catch(() => {});
+                refreshCronTasksDebounced();
             });
             unlisteners.push(u6);
 
@@ -247,8 +365,10 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             unlisteners.forEach(fn => fn());
             if (sessionRefreshTimerRef.current) clearTimeout(sessionRefreshTimerRef.current);
             if (agentRefreshTimerRef.current) clearTimeout(agentRefreshTimerRef.current);
+            if (cronRefreshTimerRef.current) clearTimeout(cronRefreshTimerRef.current);
+            if (backgroundRefreshTimerRef.current) clearTimeout(backgroundRefreshTimerRef.current);
         };
-    }, [refreshSessionsDebounced, refreshAgentStatusDebounced]);
+    }, [refreshSessionsDebounced, refreshCronTasksDebounced, refreshBackgroundSessionsDebounced, refreshAgentStatusDebounced]);
 
     // Compute session tags (memoized)
     const sessionTagsMap = useMemo(() => {
@@ -303,13 +423,50 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         return map;
     }, [agents]);
 
-    const refresh = useCallback(() => {
-        void fetchData(0);
-    }, [fetchData]);
+    const refresh = useCallback((scope: TaskCenterRefreshScope = 'all', options: TaskCenterRefreshOptions = {}) => {
+        if (!options.force && options.minIntervalMs) {
+            const lastFetchedAt = lastFetchedAtRef.current[scope] ?? 0;
+            if (Date.now() - lastFetchedAt < options.minIntervalMs) return;
+        }
+        if (scope === 'sessions') {
+            refreshSessionsNow();
+            return;
+        }
+        if (scope === 'cronTasks') {
+            refreshCronTasksNow();
+            return;
+        }
+        if (scope === 'backgroundSessions') {
+            refreshBackgroundSessionsNow();
+            return;
+        }
+        if (scope === 'agentStatuses') {
+            refreshAgentStatusNow();
+            return;
+        }
+        void fetchData(0, options.silent ?? false);
+    }, [fetchData, refreshAgentStatusNow, refreshBackgroundSessionsNow, refreshCronTasksNow, refreshSessionsNow]);
 
-    const removeSession = useCallback((sessionId: string) => {
-        setSessions(prev => prev.filter(s => s.id !== sessionId));
-    }, []);
+    const actions = useMemo<TaskCenterActions>(() => ({
+        deleteSession: async (sessionId: string) => {
+            const success = await deleteSessionApi(sessionId);
+            if (!success) return false;
+
+            deletedSessionIdsRef.current.add(sessionId);
+            setSessions(prev => prev.filter(s => s.id !== sessionId));
+
+            try {
+                await deactivateSession(sessionId);
+            } catch (err) {
+                console.warn('[useTaskCenterData] Failed to deactivate deleted session:', err);
+            }
+
+            refresh('sessions', { force: true, reason: 'delete-session', silent: true });
+            return true;
+        },
+        refreshSessions: () => refresh('sessions', { force: true, silent: true }),
+        refreshCronTasks: () => refresh('cronTasks', { force: true, silent: true }),
+    }), [refresh]);
 
     return {
         sessions,
@@ -319,6 +476,6 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         isLoading,
         error,
         refresh,
-        removeSession,
+        actions,
     };
 }
