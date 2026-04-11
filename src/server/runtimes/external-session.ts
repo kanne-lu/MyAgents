@@ -1233,8 +1233,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           persistTurnResult();
         }
       } else {
-        broadcast('chat:message-error', event.result || 'Session ended with error');
-        fireImCallback('error', event.result || 'Session ended with error');
+        const errorMessage = event.result || 'Session ended with error';
+        broadcast('chat:agent-error', { message: errorMessage });
+        broadcast('chat:message-error', errorMessage);
+        fireImCallback('error', errorMessage);
         resetTurnAccumulators(); // Prevent stale content leaking into next turn
       }
       pendingPermissionSuggestions.clear();

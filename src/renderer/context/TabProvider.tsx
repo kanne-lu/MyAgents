@@ -1255,9 +1255,17 @@ export default function TabProvider({
 
             case 'chat:message-error': {
                 console.log(`[TabProvider ${tabId}] message-error received`);
+                const errorMessage = typeof data === 'string'
+                    ? data
+                    : data && typeof data === 'object' && 'message' in data
+                        ? String((data as { message?: unknown }).message ?? '')
+                        : '';
                 flushSync(() => {
                     // isStreamingRef.current set inside moveStreamingToHistory's updater
                     moveStreamingToHistory('failed');
+                    if (errorMessage) {
+                        setAgentError(errorMessage);
+                    }
                     setIsLoading(false);
                     setSessionState('idle');  // Reset session state to idle on error
                     setSystemStatus(null);  // Clear system status on error
