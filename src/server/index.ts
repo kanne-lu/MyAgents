@@ -7687,28 +7687,6 @@ description: >
         }
       }
 
-      // POST /api/im/session/switch-workspace — Switch workspace and start new session
-      if (pathname === '/api/im/session/switch-workspace' && request.method === 'POST') {
-        try {
-          const payload = (await request.json()) as { workspacePath: string };
-          if (!payload.workspacePath) {
-            return jsonResponse({ success: false, error: 'workspacePath is required' }, 400);
-          }
-          // Reset session (workspace change will be handled by Rust layer restarting the Sidecar)
-          await resetSession();
-          return jsonResponse({
-            sessionId: getSessionId(),
-            workspacePath: payload.workspacePath,
-          });
-        } catch (error) {
-          console.error('[im/session/switch-workspace] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Switch error' },
-            500,
-          );
-        }
-      }
-
       // GET /api/im/session/:key/messages — Get messages for an IM session
       if (pathname.startsWith('/api/im/session/') && pathname.endsWith('/messages') && request.method === 'GET') {
         try {

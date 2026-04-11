@@ -1408,7 +1408,6 @@ async fn create_bot_instance<R: Runtime>(
                              可用命令：\n\
                              /help — 查看所有命令\n\
                              /new — 开始新对话\n\
-                             /workspace <路径> — 切换工作区\n\
                              /model — 查看或切换 AI 模型\n\
                              /provider — 查看或切换 AI 供应商\n\
                              /mode — 切换权限模式\n\
@@ -1424,8 +1423,6 @@ async fn create_bot_instance<R: Runtime>(
                         let mut help = String::from(
                             "📖 可用命令\n\n\
                              /new — 开始新对话（清空当前上下文）\n\
-                             /workspace — 查看当前工作区\n\
-                             /workspace <路径> — 切换工作区目录\n\
                              /model — 查看当前供应商的可用模型\n\
                              /model <序号或模型ID> — 切换模型\n\
                              /provider — 查看可用 AI 供应商\n\
@@ -1490,43 +1487,11 @@ async fn create_bot_instance<R: Runtime>(
                     // Note: /start and /help are already handled above (before this point),
                     // so they don't need to be listed here.
                     if msg.source_type == ImSourceType::Group
-                        && (text.starts_with("/workspace")
-                            || text.starts_with("/model")
+                        && (text.starts_with("/model")
                             || text.starts_with("/provider")
                             || text.starts_with("/mode")
                             || text == "/status")
                     {
-                        continue;
-                    }
-
-                    if text.starts_with("/workspace") {
-                        adapter_for_reply.ack_processing(&chat_id, &message_id).await;
-                        let path_arg = text.strip_prefix("/workspace").unwrap_or("").trim();
-                        let reply = if path_arg.is_empty() {
-                            // Show current workspace
-                            let router = router_clone.lock().await;
-                            let sessions = router.active_sessions();
-                            let current = sessions.iter().find(|s| s.session_key == session_key);
-                            match current {
-                                Some(s) => format!("📁 当前工作区: {}", s.workspace_path),
-                                None => "📁 尚未绑定工作区（发送消息后自动绑定默认工作区）".to_string(),
-                            }
-                        } else {
-                            // Switch workspace
-                            match router_clone
-                                .lock()
-                                .await
-                                .switch_workspace(&session_key, path_arg, &app_clone, &manager_clone)
-                                .await
-                            {
-                                Ok(_) => format!("✅ 已切换工作区: {}\n⚠️ 仅对当前对话生效，重启后恢复默认工作区", path_arg),
-                                Err(e) => format!("❌ 切换失败: {}", e),
-                            }
-                        };
-                        adapter_for_reply.ack_clear(&chat_id, &message_id).await;
-                        if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
-                            ulog_warn!("[im-cmd] send_message (/workspace) failed: {}", e);
-                        }
                         continue;
                     }
 

@@ -409,46 +409,6 @@ impl SessionRouter {
         Ok(uuid::Uuid::new_v4().to_string())
     }
 
-    /// Handle /workspace command — switch workspace for a peer
-    pub async fn switch_workspace<R: Runtime>(
-        &mut self,
-        session_key: &str,
-        workspace_path: &str,
-        _app_handle: &AppHandle<R>,
-        manager: &ManagedSidecarManager,
-    ) -> Result<String, String> {
-        // Release current Sidecar
-        if let Some(ps) = self.peer_sessions.remove(session_key) {
-            let owner = SidecarOwner::Agent(session_key.to_string());
-            let _ = release_session_sidecar(manager, &ps.session_id, &owner);
-        }
-
-        // The next message will auto-create a new Sidecar with the new workspace
-        // For now, update the default workspace for this peer
-        let new_workspace = PathBuf::from(workspace_path);
-
-        // Parse source type and source_id from session_key
-        let (source_type, source_id) = parse_session_key(session_key);
-
-        let new_session_id = uuid::Uuid::new_v4().to_string();
-
-        self.peer_sessions.insert(
-            session_key.to_string(),
-            PeerSession {
-                session_key: session_key.to_string(),
-                session_id: new_session_id.clone(),
-                sidecar_port: 0, // Will be assigned on next message
-                workspace_path: new_workspace,
-                source_type,
-                source_id,
-                message_count: 0,
-                last_active: Instant::now(),
-            },
-        );
-
-        Ok(new_session_id)
-    }
-
     /// Collect idle sessions that haven't been active for IDLE_TIMEOUT_SECS.
     /// Releases the Sidecar process but preserves the PeerSession (with port=0)
     /// so that the stable session_id can be reused for resume on next message.
