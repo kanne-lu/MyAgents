@@ -129,6 +129,8 @@ struct CreateCronRequest {
     model: Option<String>,
     permission_mode: Option<String>,
     provider_env: Option<TaskProviderEnv>,
+    runtime: Option<String>,
+    runtime_config: Option<serde_json::Value>,
     /// Fallback interval if no schedule provided
     interval_minutes: Option<u32>,
 }
@@ -243,6 +245,8 @@ async fn create_cron_handler(
         permission_mode: req.permission_mode.unwrap_or_else(|| "auto".to_string()),
         model: req.model,
         provider_env: req.provider_env,
+        runtime: req.runtime,
+        runtime_config: req.runtime_config,
         source_bot_id: req.source_bot_id,
         delivery: req.delivery,
         schedule: req.schedule,

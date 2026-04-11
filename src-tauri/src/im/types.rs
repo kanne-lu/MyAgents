@@ -289,6 +289,11 @@ pub struct ImConfig {
     pub provider_env_json: Option<String>,
     #[serde(default)]
     pub mcp_servers_json: Option<String>,
+    // ===== Agent Runtime (v0.1.64) =====
+    #[serde(default)]
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub runtime_config: Option<serde_json::Value>,
     // ===== Heartbeat (v0.1.21) =====
     #[serde(default)]
     pub heartbeat_config: Option<HeartbeatConfig>,
@@ -335,6 +340,8 @@ impl Default for ImConfig {
             model: None,
             provider_env_json: None,
             mcp_servers_json: None,
+            runtime: None,
+            runtime_config: None,
             heartbeat_config: None,
             group_permissions: Vec::new(),
             group_activation: None,
@@ -917,6 +924,8 @@ impl ChannelConfigRust {
                 .or_else(|| self.provider_env_json.clone())
                 .or_else(|| agent.provider_env_json.clone()),
             mcp_servers_json: agent.mcp_servers_json.clone(),
+            runtime: agent.runtime.clone(),
+            runtime_config: agent.runtime_config.clone(),
             heartbeat_config: agent.heartbeat.clone(),
             group_permissions: self.group_permissions.clone(),
             group_activation: self.group_activation.clone(),
@@ -942,6 +951,8 @@ pub struct AgentConfigPatch {
     pub permission_mode: Option<String>,
     pub mcp_enabled_servers: Option<Vec<String>>,
     pub mcp_servers_json: Option<String>,
+    pub runtime: Option<String>,
+    pub runtime_config: Option<serde_json::Value>,
     pub heartbeat_config_json: Option<String>,
     pub memory_auto_update_config_json: Option<String>,
     pub channels: Option<Vec<ChannelConfigRust>>,

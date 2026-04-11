@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.64] - 2026-04-11
+
+### Improved
+- **工作区文件树更稳定**：文件/文件夹拖拽移动保留原有交互体验，并解决多窗口或多标签场景下的界面渲染错误
+- **IM Bot 外部 Runtime 体验对齐**：使用 Codex 或 Claude Code CLI 时，Bot 会按当前 Runtime 的模型与权限运行，不再混用内置供应商配置
+- **IM Bot 模型与权限指令优化**：`/provider` 会清晰说明当前 Runtime 的供应商管理方式，`/model` 和 `/mode` 可用于查看或切换当前 Runtime 支持的选项
+- **日志体积优化**：流式输出和长内容日志更紧凑，排查问题时能保留关键信息并减少冗余刷屏
+
+### Fixed
+- **Codex Bot 模型串线**：工作区切到 Codex 后，微信等 IM Bot 不会再把内置模型传给 Codex 导致请求失败
+- **外部 Runtime 后台任务一致性**：Codex 与 Claude Code CLI 在 IM、心跳和定时任务入口下会使用一致的 Runtime 配置与权限策略
+- **任务列表刷新一致性**：最近任务和后台任务状态刷新更稳定，降低任务状态与实际会话不一致的情况
+
+---
+
 ## [0.1.63] - 2026-04-10
 
 ### Improved

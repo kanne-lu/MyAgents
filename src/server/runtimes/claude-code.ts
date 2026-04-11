@@ -240,14 +240,14 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     }
 
     // Permission mode
-    if (isImOrChannel || options.scenario.type === 'cron') {
+    if ((isImOrChannel || options.scenario.type === 'cron') && !options.permissionMode) {
       // IM/Cron: no human to approve → bypass
       // MUST pass --allow-dangerously-skip-permissions BEFORE --dangerously-skip-permissions
       args.push('--allow-dangerously-skip-permissions');
       args.push('--permission-mode', 'bypassPermissions');
       args.push('--dangerously-skip-permissions');
     } else {
-      // Desktop: delegate permission prompts to MyAgents UI
+      // Desktop and explicit runtime permission mode: delegate or bypass based on mode.
       const ccMode = options.permissionMode ? mapPermissionModeToCc(options.permissionMode) : 'default';
 
       if (ccMode === 'bypassPermissions') {
@@ -479,56 +479,65 @@ export class ClaudeCodeRuntime implements AgentRuntime {
             const preview = line.length > 500 ? line.slice(0, 500) + '...' : line;
             console.log(`[claude-code] stdout line #${lineCount}: ${preview}`);
           }
-          const event = this.parseLine(line);
-          if (event) {
-            // Skip delta events from logging (too frequent — hundreds per turn)
-            if (event.kind === 'text_delta' || event.kind === 'thinking_delta' || event.kind === 'tool_input_delta') {
-              // no-op
-            } else {
-              let detail = '';
-              const e = event as Record<string, unknown>;
-              switch (event.kind) {
-                case 'session_init':
-                  detail = ` sessionId=${e.sessionId} model=${e.model} tools=${(e.tools as string[] || []).length}`;
-                  break;
-                case 'session_complete':
-                  detail = ` subtype=${e.subtype} result=${((e.result as string) || '').length > 0 ? `${((e.result as string) || '').length}chars` : 'empty'}`;
-                  break;
-                case 'message_replay': {
-                  const msg = (e.message as { role: string; content: unknown });
-                  const contentLen = typeof msg.content === 'string' ? msg.content.length : Array.isArray(msg.content) ? JSON.stringify(msg.content).length : 0;
-                  detail = ` role=${msg.role} content=${contentLen}chars`;
-                  break;
+          const parsed = this.parseLine(line);
+          if (parsed) {
+            const events = Array.isArray(parsed) ? parsed : [parsed];
+            for (const event of events) {
+              // Skip delta events from logging (too frequent — hundreds per turn)
+              if (event.kind === 'text_delta' || event.kind === 'thinking_delta' || event.kind === 'tool_input_delta') {
+                // no-op
+              } else {
+                let detail = '';
+                const e = event as Record<string, unknown>;
+                switch (event.kind) {
+                  case 'session_init':
+                    detail = ` sessionId=${e.sessionId} model=${e.model} tools=${(e.tools as string[] || []).length}`;
+                    break;
+                  case 'session_complete':
+                    detail = ` subtype=${e.subtype} result=${((e.result as string) || '').length > 0 ? `${((e.result as string) || '').length}chars` : 'empty'}`;
+                    break;
+                  case 'message_replay': {
+                    const msg = (e.message as { role: string; content: unknown });
+                    const contentLen = typeof msg.content === 'string' ? msg.content.length : Array.isArray(msg.content) ? JSON.stringify(msg.content).length : 0;
+                    detail = ` role=${msg.role} content=${contentLen}chars`;
+                    break;
+                  }
+                  case 'tool_use_start':
+                    detail = ` tool=${e.toolName} id=${((e.toolUseId as string) || '').slice(0, 12)}`;
+                    break;
+                  case 'tool_use_stop':
+                    detail = ` id=${((e.toolUseId as string) || '').slice(0, 12)}`;
+                    break;
+                  case 'tool_result':
+                    detail = ` id=${((e.toolUseId as string) || '').slice(0, 12)} err=${e.isError || false} len=${((e.content as string) || '').length}`;
+                    break;
+                  case 'permission_request':
+                    detail = ` tool=${e.toolName} id=${((e.requestId as string) || '').slice(0, 12)}`;
+                    break;
+                  case 'status_change':
+                    detail = ` state=${e.state}`;
+                    break;
+                  case 'text_stop':
+                    detail = ''; // external-session logs accumulated chars
+                    break;
+                  case 'thinking_start':
+                  case 'thinking_stop':
+                    detail = ` index=${e.index}`;
+                    break;
+                  case 'usage':
+                    detail = ` in=${e.inputTokens} out=${e.outputTokens}`;
+                    break;
+                  case 'model_update':
+                    detail = ` model=${e.model}`;
+                    break;
+                  case 'log':
+                    detail = ` level=${e.level} msg=${(e.message as string) || ''}`;
+                    break;
                 }
-                case 'tool_use_start':
-                  detail = ` tool=${e.toolName} id=${((e.toolUseId as string) || '').slice(0, 12)}`;
-                  break;
-                case 'tool_use_stop':
-                  detail = ` id=${((e.toolUseId as string) || '').slice(0, 12)}`;
-                  break;
-                case 'tool_result':
-                  detail = ` id=${((e.toolUseId as string) || '').slice(0, 12)} err=${e.isError || false} len=${((e.content as string) || '').length}`;
-                  break;
-                case 'permission_request':
-                  detail = ` tool=${e.toolName} id=${((e.requestId as string) || '').slice(0, 12)}`;
-                  break;
-                case 'status_change':
-                  detail = ` state=${e.state}`;
-                  break;
-                case 'text_stop':
-                  detail = ''; // external-session logs accumulated chars
-                  break;
-                case 'thinking_start':
-                case 'thinking_stop':
-                  detail = ` index=${e.index}`;
-                  break;
-                case 'log':
-                  detail = ` level=${e.level} msg=${(e.message as string) || ''}`;
-                  break;
+                console.log(`[claude-code] ${event.kind}${detail}`);
               }
-              console.log(`[claude-code] ${event.kind}${detail}`);
+              onEvent(event);
             }
-            onEvent(event);
           }
         }
       }
@@ -560,7 +569,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   // ─── Private: NDJSON line parser ───
 
-  private parseLine(line: string): UnifiedEvent | null {
+  private parseLine(line: string): UnifiedEvent | UnifiedEvent[] | null {
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(line);
@@ -597,11 +606,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         return this.parseSystemMessage(msg);
 
       case 'result':
-        return {
-          kind: 'session_complete',
-          result: (msg.result as string) || '',
-          subtype: this.mapResultSubtype(msg.subtype as string),
-        };
+        return this.parseResultMessage(msg);
 
       case 'control_request': {
         const request = msg.request as Record<string, unknown> | undefined;
@@ -726,6 +731,55 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       default:
         return null;
     }
+  }
+
+  private parseResultMessage(msg: Record<string, unknown>): UnifiedEvent | UnifiedEvent[] {
+    const events: UnifiedEvent[] = [];
+    const usage = this.extractUsage(msg);
+    if (usage) {
+      events.push({ kind: 'usage', ...usage, semantics: 'delta' });
+    }
+    if (typeof msg.model === 'string' && msg.model) {
+      events.push({ kind: 'model_update', model: msg.model });
+    }
+    events.push({
+      kind: 'session_complete',
+      result: (msg.result as string) || '',
+      subtype: this.mapResultSubtype(msg.subtype as string),
+    });
+    return events.length === 1 ? events[0]! : events;
+  }
+
+  private extractUsage(msg: Record<string, unknown>): Omit<Extract<UnifiedEvent, { kind: 'usage' }>, 'kind' | 'semantics'> | null {
+    const usage = msg.usage as Record<string, unknown> | undefined;
+    if (!usage) return null;
+
+    const inputTokens = this.readNumber(usage.input_tokens, usage.inputTokens);
+    const outputTokens = this.readNumber(usage.output_tokens, usage.outputTokens);
+    const cacheReadTokens = this.readNumber(
+      usage.cache_read_input_tokens,
+      usage.cacheReadInputTokens,
+      (usage.input_tokens_details as Record<string, unknown> | undefined)?.cached_tokens,
+    );
+    const cacheCreationTokens = this.readNumber(
+      usage.cache_creation_input_tokens,
+      usage.cacheCreationInputTokens,
+    );
+
+    return {
+      inputTokens,
+      outputTokens,
+      cacheReadTokens: cacheReadTokens || undefined,
+      cacheCreationTokens: cacheCreationTokens || undefined,
+      model: typeof msg.model === 'string' ? msg.model : undefined,
+    };
+  }
+
+  private readNumber(...values: unknown[]): number {
+    for (const value of values) {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    }
+    return 0;
   }
 
   private mapResultSubtype(subtype: string): 'success' | 'error' | 'error_max_turns' | 'error_max_budget' {

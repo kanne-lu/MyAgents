@@ -6149,9 +6149,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         trackServer('ai_turn_complete', {
           source: currentScenario.type,
           platform: currentScenario.type === 'im' ? currentScenario.platform : null,
+          runtime: 'builtin',
           model: currentTurnUsage.model ?? null,
           input_tokens: currentTurnUsage.inputTokens,
           output_tokens: currentTurnUsage.outputTokens,
+          cache_read_tokens: currentTurnUsage.cacheReadTokens,
+          cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
           tool_count: currentTurnToolCount,
           duration_ms: durationMs,
         });

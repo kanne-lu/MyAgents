@@ -37,6 +37,8 @@ struct HeartbeatRequest {
     source_id: String,
     ack_max_chars: u32,
     is_high_priority: bool,
+    runtime: String,
+    runtime_config: Option<serde_json::Value>,
 }
 
 /// HeartbeatRunner manages the periodic heartbeat loop for an IM Bot.
@@ -51,6 +53,8 @@ pub struct HeartbeatRunner {
     current_model: Arc<RwLock<Option<String>>>,
     current_provider_env: Arc<RwLock<Option<serde_json::Value>>>,
     mcp_servers_json: Arc<RwLock<Option<String>>>,
+    runtime: Arc<RwLock<String>>,
+    runtime_config: Arc<RwLock<Option<serde_json::Value>>>,
     // Memory auto-update (v0.1.43)
     memory_update_config: Arc<RwLock<Option<super::types::MemoryAutoUpdateConfig>>>,
     memory_update_running: Arc<AtomicBool>,
@@ -65,6 +69,8 @@ impl HeartbeatRunner {
         current_model: Arc<RwLock<Option<String>>>,
         current_provider_env: Arc<RwLock<Option<serde_json::Value>>>,
         mcp_servers_json: Arc<RwLock<Option<String>>>,
+        runtime: Arc<RwLock<String>>,
+        runtime_config: Arc<RwLock<Option<serde_json::Value>>>,
         memory_update_config: Option<super::types::MemoryAutoUpdateConfig>,
     ) -> (Self, Arc<RwLock<HeartbeatConfig>>, Arc<RwLock<Option<super::types::MemoryAutoUpdateConfig>>>, Arc<AtomicBool>) {
         let config = Arc::new(RwLock::new(config));
@@ -80,6 +86,8 @@ impl HeartbeatRunner {
             current_model,
             current_provider_env,
             mcp_servers_json,
+            runtime,
+            runtime_config,
             memory_update_config: Arc::clone(&mau_config),
             memory_update_running: Arc::clone(&mau_running),
         };
@@ -380,12 +388,20 @@ impl HeartbeatRunner {
             let model = self.current_model.read().await.clone();
             let penv = self.current_provider_env.read().await.clone();
             let mcp = self.mcp_servers_json.read().await.clone();
+            let runtime = self.runtime.read().await.clone();
+            let runtime_config = self.runtime_config.read().await.clone();
             let http_client = {
                 let rg = router.lock().await;
                 rg.http_client().clone()
             };
             super::router::SessionRouter::sync_ai_config_with_client(
-                &http_client, port, model.as_deref(), mcp.as_deref(), penv.as_ref(),
+                &http_client,
+                port,
+                &runtime,
+                runtime_config.as_ref(),
+                model.as_deref(),
+                mcp.as_deref(),
+                penv.as_ref(),
             ).await;
             ulog_info!("[heartbeat] Woke up sidecar for {} on port {}", self.bot_label, port);
         }
@@ -425,6 +441,8 @@ impl HeartbeatRunner {
             source_id: source_id.clone(),
             ack_max_chars,
             is_high_priority,
+            runtime: self.runtime.read().await.clone(),
+            runtime_config: self.runtime_config.read().await.clone(),
         };
 
         let url = format!("http://127.0.0.1:{}/api/im/heartbeat", port);

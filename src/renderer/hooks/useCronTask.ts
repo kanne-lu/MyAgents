@@ -1,6 +1,7 @@
 // Hook for managing cron task state within a Tab
 import { useState, useCallback, useRef, useEffect } from 'react';
 import type { CronTask, CronTaskConfig, CronDelivery, CronEndConditions, CronRunMode, CronTaskTriggerPayload, CronSchedule } from '@/types/cronTask';
+import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
 import {
   createCronTask,
   startCronTask,
@@ -32,6 +33,10 @@ export interface CronTaskState {
     permissionMode?: string;
     /** Provider environment (captured at task creation time) */
     providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+    /** Agent runtime snapshot for external Runtime tasks */
+    runtime?: RuntimeType;
+    /** Runtime-scoped config snapshot for external Runtime tasks */
+    runtimeConfig?: RuntimeConfig;
     /** Flexible schedule (overrides intervalMinutes when present) */
     schedule?: CronSchedule;
     /** Execution target: current_session (legacy) or new_task (standalone) */
@@ -109,6 +114,8 @@ export function useCronTask(options: UseCronTaskOptions) {
         model: config.model,
         permissionMode: config.permissionMode,
         providerEnv: config.providerEnv,
+        runtime: config.runtime,
+        runtimeConfig: config.runtimeConfig,
         schedule: config.schedule,
         executionTarget: config.executionTarget,
         delivery: config.delivery,
@@ -189,6 +196,8 @@ export function useCronTask(options: UseCronTaskOptions) {
         model: currentConfig.model,
         permissionMode: currentConfig.permissionMode,
         providerEnv: currentConfig.providerEnv,
+        runtime: currentConfig.runtime,
+        runtimeConfig: currentConfig.runtimeConfig,
         schedule: currentConfig.schedule,
         delivery: currentConfig.delivery,
       });
@@ -647,6 +656,8 @@ export function useCronTask(options: UseCronTaskOptions) {
           model: task.model,
           permissionMode: task.permissionMode,
           providerEnv: task.providerEnv,
+          runtime: task.runtime,
+          runtimeConfig: task.runtimeConfig,
           delivery: task.delivery,
         },
         task,

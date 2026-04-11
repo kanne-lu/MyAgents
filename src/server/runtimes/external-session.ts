@@ -13,8 +13,16 @@ import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './
 import type { RuntimeType } from '../../shared/types/runtime';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
-import type { SessionMessage } from '../types/session';
+import type { MessageUsage, SessionMessage } from '../types/session';
 import type { SystemInitInfo } from '../../shared/types/system';
+import { trackServer } from '../analytics';
+import {
+  addUsageTotals,
+  diffUsageTotals,
+  getPrimaryModel,
+  normalizeUsage,
+  restoreRuntimeUsageTotals,
+} from './usage-utils';
 
 // ─── Module state ───
 
@@ -31,7 +39,9 @@ let lastWorkspacePath = '';
 let lastScenario: InteractionScenario = { type: 'desktop' };
 let lastRuntimeSessionId = '';  // Runtime's session ID (CC: from hook/init; Codex: threadId)
 let lastModel = '';             // Latest model from config sync (passed on resume)
+let lastRuntimeReportedModel = ''; // Actual model reported by runtime (session_init/model_update)
 let lastPermissionMode = '';    // Latest permission mode from config sync
+let lastPersistedRuntimeUsageTotals: MessageUsage | null = null;
 
 // Message accumulation for SessionStore persistence
 // allSessionMessages grows across turns — saveSessionMessages expects the FULL cumulative array
@@ -108,7 +118,9 @@ function resetModuleState(): void {
   if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
   lastRuntimeSessionId = '';
   lastModel = '';
+  lastRuntimeReportedModel = '';
   lastPermissionMode = '';
+  lastPersistedRuntimeUsageTotals = null;
   allSessionMessages = [];
   currentAssistantText = '';
   currentTurnStartTime = 0;
@@ -207,7 +219,8 @@ function clearWatchdog(): void {
 let lastTurnSucceeded = false;
 
 // ─── Token usage accumulation ───
-let currentTurnUsage: { inputTokens: number; outputTokens: number } | null = null;
+type ExternalTurnUsage = MessageUsage & { semantics?: 'delta' | 'running_total' };
+let currentTurnUsage: ExternalTurnUsage | null = null;
 
 /** Reset all per-turn accumulators */
 function resetTurnAccumulators(): void {
@@ -220,6 +233,41 @@ function resetTurnAccumulators(): void {
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   currentTurnUsage = null;
+}
+
+function buildPersistedTurnUsage(): MessageUsage | undefined {
+  const fallbackModel = currentTurnUsage?.model
+    || lastRuntimeReportedModel
+    || lastModel
+    || getPrimaryModel(currentTurnUsage?.modelUsage);
+
+  if (!currentTurnUsage) {
+    if (!fallbackModel) return undefined;
+    return {
+      inputTokens: 0,
+      outputTokens: 0,
+      model: fallbackModel,
+    };
+  }
+
+  const normalizedCurrent = normalizeUsage({
+    ...currentTurnUsage,
+    model: fallbackModel,
+  });
+  if (!normalizedCurrent) return undefined;
+
+  if (currentTurnUsage.semantics === 'running_total') {
+    const delta = normalizeUsage(diffUsageTotals(lastPersistedRuntimeUsageTotals, normalizedCurrent));
+    lastPersistedRuntimeUsageTotals = normalizedCurrent;
+    return delta ?? {
+      inputTokens: 0,
+      outputTokens: 0,
+      model: fallbackModel,
+    };
+  }
+
+  lastPersistedRuntimeUsageTotals = addUsageTotals(lastPersistedRuntimeUsageTotals, normalizedCurrent);
+  return normalizedCurrent;
 }
 
 /** Check if content looks like JSON ContentBlock[] (matches frontend heuristic in TabProvider.tsx:1969) */
@@ -317,6 +365,17 @@ export function restoreExternalSessionState(
 
   // Load existing messages for correct incremental save (or clear stale in-memory state)
   allSessionMessages = hasExistingMessages ? data!.messages : [];
+  lastPersistedRuntimeUsageTotals = restoreRuntimeUsageTotals(
+    currentRuntimeType,
+    allSessionMessages,
+    meta?.runtimeUsageTotals,
+  );
+  lastRuntimeReportedModel = meta?.runtimeUsageTotals?.model
+    || allSessionMessages
+      .slice()
+      .reverse()
+      .find((msg) => msg.role === 'assistant' && msg.usage?.model)?.usage?.model
+    || '';
   console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages)`);
 }
 
@@ -584,8 +643,8 @@ async function _doStartExternalSession(options: {
   resetWatchdog();  // Start watchdog — will kill process if no activity for 10 min
   currentTurnStartTime = 0;
   // Track latest config for resume
-  if (options.model) lastModel = options.model;
-  if (options.permissionMode) lastPermissionMode = options.permissionMode;
+  if (options.model !== undefined) lastModel = options.model;
+  if (options.permissionMode !== undefined) lastPermissionMode = options.permissionMode;
   // Only clear message history for new sessions, not resumes
   if (!options.resumeSessionId) {
     allSessionMessages = [];
@@ -720,6 +779,9 @@ export async function sendExternalMessage(
     // Codex doesn't support custom IDs — resume with Codex's own threadId (lastRuntimeSessionId).
     const runtimeType = getCurrentRuntimeType();
     const resumeId = runtimeType === 'claude-code' ? lastSessionId : lastRuntimeSessionId;
+    const nextScenario = context?.scenario ?? lastScenario;
+    const nextModel = context ? context.model : lastModel;
+    const nextPermissionMode = context ? context.permissionMode : lastPermissionMode;
     console.log(`[external-session] Previous process exited, resuming ${runtimeType} session ${resumeId}`);
     try {
       await startExternalSession({
@@ -727,9 +789,9 @@ export async function sendExternalMessage(
         workspacePath: lastWorkspacePath,
         initialMessage: text,
         initialImages: hasImages ? images : undefined,
-        model: lastModel || context?.model,
-        permissionMode: lastPermissionMode || context?.permissionMode,
-        scenario: lastScenario,
+        model: nextModel,
+        permissionMode: nextPermissionMode,
+        scenario: nextScenario,
         resumeSessionId: resumeId, // CC: --resume <myagents-session-id>; Codex: --resume <threadId>
       });
       return { queued: true };
@@ -864,10 +926,9 @@ function persistTurnResult(): void {
   const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
   flushAllPending();
 
-  const usageData = currentTurnUsage
-    ? { inputTokens: currentTurnUsage.inputTokens, outputTokens: currentTurnUsage.outputTokens }
-    : undefined;
+  const usageData = buildPersistedTurnUsage();
   const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
+  const runtimeType = getCurrentRuntimeType();
 
   if (currentContentBlocks.length > 0) {
     const content = JSON.stringify(currentContentBlocks);
@@ -902,6 +963,7 @@ function persistTurnResult(): void {
       updateSessionMetadata(lastSessionId, {
         lastActiveAt: new Date().toISOString(),
         lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
+        runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
       });
     } catch (err) {
       console.error('[external-session] Failed to save session messages:', err);
@@ -909,9 +971,27 @@ function persistTurnResult(): void {
   }
 
   broadcast('chat:message-complete', {
-    ...(usageData ? { input_tokens: usageData.inputTokens, output_tokens: usageData.outputTokens } : {}),
+    ...(usageData ? {
+      model: usageData.model,
+      input_tokens: usageData.inputTokens,
+      output_tokens: usageData.outputTokens,
+      cache_read_tokens: usageData.cacheReadTokens,
+      cache_creation_tokens: usageData.cacheCreationTokens,
+    } : {}),
     ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
     ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
+  });
+  trackServer('ai_turn_complete', {
+    source: lastScenario.type,
+    platform: lastScenario.type === 'im' ? lastScenario.platform : null,
+    runtime: runtimeType,
+    model: usageData?.model || lastRuntimeReportedModel || lastModel || null,
+    input_tokens: usageData?.inputTokens ?? 0,
+    output_tokens: usageData?.outputTokens ?? 0,
+    cache_read_tokens: usageData?.cacheReadTokens ?? 0,
+    cache_creation_tokens: usageData?.cacheCreationTokens ?? 0,
+    tool_count: turnToolCount,
+    duration_ms: turnDurationMs ?? 0,
   });
   setExternalSessionState('idle');
   fireImCallback('complete', '');
@@ -1081,7 +1161,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       }));
       break;
 
-    case 'session_init':
+    case 'session_init': {
       // Capture runtime's session ID for multi-turn resume
       // CC: session_id from hook; Codex: threadId from thread/start response
       if (event.sessionId) {
@@ -1097,6 +1177,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         model: event.model,
         tools: event.tools,
       };
+      if (event.model) {
+        lastRuntimeReportedModel = event.model;
+      }
       // Match builtin broadcast shape: { info: {...}, sessionId } — top-level sessionId
       // is read by frontend for session ID sync (TabProvider).
       externalSystemInitPayload = {
@@ -1106,6 +1189,16 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         sessionId: lastSessionId,
       };
       broadcast('chat:system-init', externalSystemInitPayload);
+      break;
+    }
+
+    case 'model_update':
+      if (event.model) {
+        lastRuntimeReportedModel = event.model;
+        if (currentTurnUsage) {
+          currentTurnUsage.model = event.model;
+        }
+      }
       break;
 
     case 'status_change': {
@@ -1143,8 +1236,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           persistTurnResult();
         }
       } else {
-        broadcast('chat:message-error', event.result || 'Session ended with error');
-        fireImCallback('error', event.result || 'Session ended with error');
+        const errorMessage = event.result || 'Session ended with error';
+        broadcast('chat:agent-error', { message: errorMessage });
+        broadcast('chat:message-error', errorMessage);
+        fireImCallback('error', errorMessage);
         resetTurnAccumulators(); // Prevent stale content leaking into next turn
       }
       pendingPermissionSuggestions.clear();
@@ -1158,11 +1253,16 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'usage':
-      // Store latest token usage — Codex emits running totals (not deltas),
-      // so we replace rather than accumulate to avoid double-counting.
+      // Store latest token usage.
+      // Codex emits running totals, while other runtimes may emit per-turn deltas.
       currentTurnUsage = {
         inputTokens: event.inputTokens,
         outputTokens: event.outputTokens,
+        cacheReadTokens: event.cacheReadTokens,
+        cacheCreationTokens: event.cacheCreationTokens,
+        model: event.model || currentTurnUsage?.model || lastRuntimeReportedModel || undefined,
+        modelUsage: event.modelUsage,
+        semantics: event.semantics,
       };
       break;
 

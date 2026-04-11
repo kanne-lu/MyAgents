@@ -61,11 +61,211 @@ use dingtalk::DingtalkAdapter;
 use feishu::FeishuAdapter;
 use health::HealthManager;
 use router::{
-    create_sidecar_stream_client, RouteError, SessionRouter, GLOBAL_CONCURRENCY,
+    create_sidecar_stream_client, EnsureSidecarPrep, RouteError, SessionRouter, GLOBAL_CONCURRENCY,
 };
 use telegram::TelegramAdapter;
 use group_history::{GroupHistoryBuffer, GroupHistoryEntry};
 use types::{BotConfigPatch, GroupActivation, GroupEvent, GroupPermission, GroupPermissionStatus, ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
+
+fn normalize_runtime_type(runtime: Option<&str>) -> String {
+    match runtime {
+        Some("claude-code") => "claude-code".to_string(),
+        Some("codex") => "codex".to_string(),
+        _ => "builtin".to_string(),
+    }
+}
+
+fn is_external_runtime_type(runtime: &str) -> bool {
+    matches!(runtime, "claude-code" | "codex")
+}
+
+fn runtime_display_name(runtime: &str) -> &'static str {
+    match runtime {
+        "codex" => "Codex",
+        "claude-code" => "Claude Code CLI",
+        _ => "MyAgents Builtin SDK",
+    }
+}
+
+fn runtime_config_string(config: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    config
+        .and_then(|v| v.get(key))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+fn runtime_config_with_string(
+    current: Option<serde_json::Value>,
+    key: &str,
+    value: Option<String>,
+) -> serde_json::Value {
+    let mut map = current
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    match value {
+        Some(value) if !value.is_empty() => {
+            map.insert(key.to_string(), serde_json::Value::String(value));
+        }
+        _ => {
+            map.remove(key);
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+#[derive(Debug, Clone)]
+struct RuntimeModelChoice {
+    value: String,
+    display_name: String,
+    is_default: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimePermissionChoice {
+    value: String,
+    label: String,
+    description: String,
+}
+
+fn fallback_runtime_models(runtime: &str) -> Vec<RuntimeModelChoice> {
+    match runtime {
+        "claude-code" => vec![
+            RuntimeModelChoice { value: String::new(), display_name: "默认".to_string(), is_default: true },
+            RuntimeModelChoice { value: "sonnet".to_string(), display_name: "Sonnet".to_string(), is_default: false },
+            RuntimeModelChoice { value: "opus".to_string(), display_name: "Opus".to_string(), is_default: false },
+            RuntimeModelChoice { value: "haiku".to_string(), display_name: "Haiku".to_string(), is_default: false },
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn runtime_permission_choices(runtime: &str) -> Vec<RuntimePermissionChoice> {
+    match runtime {
+        "codex" => vec![
+            RuntimePermissionChoice { value: "suggest".to_string(), label: "Suggest".to_string(), description: "仅信任的命令自动执行，其他需确认".to_string() },
+            RuntimePermissionChoice { value: "auto-edit".to_string(), label: "Auto-Edit".to_string(), description: "自动编辑文件，沙箱内执行命令".to_string() },
+            RuntimePermissionChoice { value: "full-auto".to_string(), label: "Full Auto".to_string(), description: "沙箱内自主执行，按需询问".to_string() },
+            RuntimePermissionChoice { value: "no-restrictions".to_string(), label: "No Restrictions".to_string(), description: "跳过所有审批和沙箱限制".to_string() },
+        ],
+        "claude-code" => vec![
+            RuntimePermissionChoice { value: "default".to_string(), label: "Default".to_string(), description: "每次工具调用都需要确认".to_string() },
+            RuntimePermissionChoice { value: "plan".to_string(), label: "Plan".to_string(), description: "规划模式，只读不执行".to_string() },
+            RuntimePermissionChoice { value: "acceptEdits".to_string(), label: "Accept Edits".to_string(), description: "自动接受文件编辑，其他需确认".to_string() },
+            RuntimePermissionChoice { value: "bypassPermissions".to_string(), label: "Bypass Permissions".to_string(), description: "跳过所有权限确认".to_string() },
+        ],
+        _ => Vec::new(),
+    }
+}
+
+async fn ensure_sidecar_port_for_command<R: Runtime>(
+    router: &Arc<Mutex<SessionRouter>>,
+    session_key: &str,
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+) -> Result<u16, String> {
+    let prep = {
+        let mut router_guard = router.lock().await;
+        router_guard.prepare_ensure_sidecar(session_key).await
+    };
+
+    match prep {
+        EnsureSidecarPrep::Healthy(port) => Ok(port),
+        EnsureSidecarPrep::NeedCreate(info) => {
+            let port = SessionRouter::create_sidecar_blocking(
+                info.clone(),
+                app_handle,
+                manager,
+            ).await?;
+            let mut router_guard = router.lock().await;
+            router_guard.commit_ensure_sidecar(session_key, &info, port);
+            Ok(port)
+        }
+    }
+}
+
+async fn query_runtime_models_from_sidecar(
+    client: &Client,
+    port: u16,
+    runtime: &str,
+) -> Result<Vec<RuntimeModelChoice>, String> {
+    let url = format!(
+        "http://127.0.0.1:{}/api/runtime/models?type={}",
+        port,
+        runtime,
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("查询 Runtime 模型失败: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("查询 Runtime 模型失败: HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("解析 Runtime 模型失败: {}", e))?;
+    let models = body
+        .get("models")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|m| {
+                    let value = m.get("value").and_then(|v| v.as_str())?;
+                    let display_name = m
+                        .get("displayName")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(value);
+                    let is_default = m.get("isDefault").and_then(|v| v.as_bool()).unwrap_or(false);
+                    Some(RuntimeModelChoice {
+                        value: value.to_string(),
+                        display_name: display_name.to_string(),
+                        is_default,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(models)
+}
+
+async fn sync_runtime_config_to_sidecars(
+    router: &Arc<Mutex<SessionRouter>>,
+    runtime: &str,
+    runtime_config: &serde_json::Value,
+) {
+    let (client, ports) = {
+        let router = router.lock().await;
+        (router.http_client().clone(), router.active_sidecar_ports())
+    };
+    if ports.is_empty() {
+        return;
+    }
+    for port in ports {
+        let url = format!("http://127.0.0.1:{}/api/runtime/config", port);
+        match client
+            .post(&url)
+            .json(&json!({
+                "runtime": runtime,
+                "runtimeConfig": runtime_config,
+            }))
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                ulog_info!("[im] Synced runtime config for {} to port {}", runtime, port);
+            }
+            Ok(resp) => {
+                ulog_warn!("[im] Failed to sync runtime config to port {}: HTTP {}", port, resp.status());
+            }
+            Err(e) => {
+                ulog_warn!("[im] Failed to sync runtime config to port {}: {}", port, e);
+            }
+        }
+    }
+}
 
 /// Platform-agnostic adapter enum — avoids dyn dispatch overhead.
 pub(crate) enum AnyAdapter {
@@ -371,6 +571,8 @@ pub struct ImBotInstance {
     pub(crate) current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
     pub(crate) permission_mode: Arc<tokio::sync::RwLock<String>>,
     pub(crate) mcp_servers_json: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub(crate) runtime: Arc<tokio::sync::RwLock<String>>,
+    pub(crate) runtime_config: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
     pub(crate) allowed_users: Arc<tokio::sync::RwLock<Vec<String>>>,
     // ===== Group Chat (v0.1.28) =====
     pub(crate) group_permissions: Arc<tokio::sync::RwLock<Vec<GroupPermission>>>,
@@ -394,6 +596,8 @@ pub(crate) struct AgentChannelLink {
     pub agent_id: String,
     /// Shared with `AgentInstance.last_active_channel` — the processing loop writes here.
     pub last_active_channel: Arc<RwLock<Option<LastActiveChannel>>>,
+    /// Shared with `AgentInstance.runtime_config` so IM commands update the agent-level runtime profile.
+    pub runtime_config: Arc<RwLock<Option<serde_json::Value>>>,
 }
 
 /// Shared, write-after-spawn link — the processing loop reads this via Arc.
@@ -422,6 +626,8 @@ pub struct AgentInstance {
     pub current_provider_env: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
     pub permission_mode: Arc<tokio::sync::RwLock<String>>,
     pub mcp_servers_json: Arc<tokio::sync::RwLock<Option<String>>>,
+    pub runtime: Arc<tokio::sync::RwLock<String>>,
+    pub runtime_config: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
     // Memory auto-update (v0.1.43)
     pub memory_update_config: Option<Arc<tokio::sync::RwLock<Option<types::MemoryAutoUpdateConfig>>>>,
     pub memory_update_running: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -933,6 +1139,8 @@ async fn create_bot_instance<R: Runtime>(
     let app_clone = app_handle.clone();
     let manager_clone = Arc::clone(sidecar_manager);
     let permission_mode = Arc::new(tokio::sync::RwLock::new(config.permission_mode.clone()));
+    let runtime = Arc::new(tokio::sync::RwLock::new(normalize_runtime_type(config.runtime.as_deref())));
+    let runtime_config = Arc::new(tokio::sync::RwLock::new(config.runtime_config.clone()));
     // Parse provider env from config (for per-message forwarding to Sidecar)
     // Wrapped in RwLock so /provider command can update it at runtime
     let provider_env: Option<serde_json::Value> = config
@@ -949,6 +1157,8 @@ async fn create_bot_instance<R: Runtime>(
     let current_model_for_loop = Arc::clone(&current_model);
     let current_provider_env_for_loop = Arc::clone(&current_provider_env);
     let permission_mode_for_loop = Arc::clone(&permission_mode);
+    let runtime_for_loop = Arc::clone(&runtime);
+    let runtime_config_for_loop = Arc::clone(&runtime_config);
     let mcp_servers_json_for_loop = Arc::clone(&mcp_servers_json);
     let pending_approvals_for_loop = Arc::clone(&pending_approvals);
     let approval_tx_for_loop = approval_tx.clone();
@@ -1198,7 +1408,6 @@ async fn create_bot_instance<R: Runtime>(
                              可用命令：\n\
                              /help — 查看所有命令\n\
                              /new — 开始新对话\n\
-                             /workspace <路径> — 切换工作区\n\
                              /model — 查看或切换 AI 模型\n\
                              /provider — 查看或切换 AI 供应商\n\
                              /mode — 切换权限模式\n\
@@ -1214,8 +1423,6 @@ async fn create_bot_instance<R: Runtime>(
                         let mut help = String::from(
                             "📖 可用命令\n\n\
                              /new — 开始新对话（清空当前上下文）\n\
-                             /workspace — 查看当前工作区\n\
-                             /workspace <路径> — 切换工作区目录\n\
                              /model — 查看当前供应商的可用模型\n\
                              /model <序号或模型ID> — 切换模型\n\
                              /provider — 查看可用 AI 供应商\n\
@@ -1280,43 +1487,11 @@ async fn create_bot_instance<R: Runtime>(
                     // Note: /start and /help are already handled above (before this point),
                     // so they don't need to be listed here.
                     if msg.source_type == ImSourceType::Group
-                        && (text.starts_with("/workspace")
-                            || text.starts_with("/model")
+                        && (text.starts_with("/model")
                             || text.starts_with("/provider")
                             || text.starts_with("/mode")
                             || text == "/status")
                     {
-                        continue;
-                    }
-
-                    if text.starts_with("/workspace") {
-                        adapter_for_reply.ack_processing(&chat_id, &message_id).await;
-                        let path_arg = text.strip_prefix("/workspace").unwrap_or("").trim();
-                        let reply = if path_arg.is_empty() {
-                            // Show current workspace
-                            let router = router_clone.lock().await;
-                            let sessions = router.active_sessions();
-                            let current = sessions.iter().find(|s| s.session_key == session_key);
-                            match current {
-                                Some(s) => format!("📁 当前工作区: {}", s.workspace_path),
-                                None => "📁 尚未绑定工作区（发送消息后自动绑定默认工作区）".to_string(),
-                            }
-                        } else {
-                            // Switch workspace
-                            match router_clone
-                                .lock()
-                                .await
-                                .switch_workspace(&session_key, path_arg, &app_clone, &manager_clone)
-                                .await
-                            {
-                                Ok(_) => format!("✅ 已切换工作区: {}\n⚠️ 仅对当前对话生效，重启后恢复默认工作区", path_arg),
-                                Err(e) => format!("❌ 切换失败: {}", e),
-                            }
-                        };
-                        adapter_for_reply.ack_clear(&chat_id, &message_id).await;
-                        if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
-                            ulog_warn!("[im-cmd] send_message (/workspace) failed: {}", e);
-                        }
                         continue;
                     }
 
@@ -1342,120 +1517,272 @@ async fn create_bot_instance<R: Runtime>(
                         continue;
                     }
 
-                    // /model — show or switch AI model (dynamic list from current provider)
+                    // /model — show or switch AI model (runtime-aware)
                     if text.starts_with("/model") {
                         let arg = text.strip_prefix("/model").unwrap_or("").trim().to_string();
+                        let current_runtime = runtime_for_loop.read().await.clone();
 
-                        // Find current provider's models from availableProvidersJson (lazy-read from disk)
-                        let models: Vec<serde_json::Value> = {
-                            let providers: Vec<serde_json::Value> = {
-                                let ap = tokio::task::spawn_blocking(read_available_providers_from_disk)
-                                    .await.ok().flatten();
-                                ap.as_ref()
-                                    .and_then(|json| serde_json::from_str(json).ok())
-                                    .unwrap_or_default()
-                            };
-                            let current_env = current_provider_env_for_loop.read().await;
-                            let current_provider = if current_env.is_none() {
-                                // Subscription (Anthropic) — find provider whose id contains "sub"
-                                providers.iter().find(|p| {
-                                    p["id"].as_str().map(|s| s.contains("sub")).unwrap_or(false)
-                                }).cloned()
-                            } else {
-                                // Match by baseUrl
-                                let base_url = current_env.as_ref()
-                                    .and_then(|v| v["baseUrl"].as_str());
-                                providers.iter()
-                                    .find(|p| p["baseUrl"].as_str() == base_url)
-                                    .cloned()
-                            };
-                            current_provider
-                                .and_then(|p| p["models"].as_array().cloned())
-                                .unwrap_or_default()
-                        };
+                        if is_external_runtime_type(&current_runtime) {
+                            let current_runtime_config = runtime_config_for_loop.read().await.clone();
+                            let current_display = runtime_config_string(
+                                current_runtime_config.as_ref(),
+                                "model",
+                            ).unwrap_or_else(|| "(默认)".to_string());
 
-                        if arg.is_empty() {
-                            let current = current_model_for_loop.read().await;
-                            let display = current.as_deref().unwrap_or("(默认)");
-
+                            let mut models = fallback_runtime_models(&current_runtime);
                             if models.is_empty() {
-                                // Fallback: no models info available
-                                let help = format!(
-                                    "📊 当前模型: {}\n\n提示: 可直接输入模型 ID 切换\n用法: /model <模型ID>",
-                                    display,
-                                );
-                                if let Err(e) = adapter_for_reply.send_message(&chat_id, &help).await {
-                                    ulog_warn!("[im-cmd] send_message (/model help) failed: {}", e);
+                                match ensure_sidecar_port_for_command(
+                                    &router_clone,
+                                    &session_key,
+                                    &app_clone,
+                                    &manager_clone,
+                                ).await {
+                                    Ok(port) => {
+                                        let client = {
+                                            let router = router_clone.lock().await;
+                                            router.http_client().clone()
+                                        };
+                                        match query_runtime_models_from_sidecar(
+                                            &client,
+                                            port,
+                                            &current_runtime,
+                                        ).await {
+                                            Ok(remote_models) => models = remote_models,
+                                            Err(e) => {
+                                                if arg.is_empty() {
+                                                    let reply = format!(
+                                                        "❌ 查询 {} 模型列表失败：{}\n\n你仍可以直接使用 /model <模型ID> 设置模型。",
+                                                        runtime_display_name(&current_runtime),
+                                                        e,
+                                                    );
+                                                    if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
+                                                        ulog_warn!("[im-cmd] send_message (/model runtime query failed) failed: {}", e);
+                                                    }
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if arg.is_empty() {
+                                            let reply = format!(
+                                                "❌ 启动 {} Runtime 以查询模型失败：{}\n\n你仍可以直接使用 /model <模型ID> 设置模型。",
+                                                runtime_display_name(&current_runtime),
+                                                e,
+                                            );
+                                            if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
+                                                ulog_warn!("[im-cmd] send_message (/model runtime ensure failed) failed: {}", e);
+                                            }
+                                            continue;
+                                        }
+                                    }
                                 }
-                            } else {
-                                let mut menu = format!("📊 当前模型: {}\n\n可用模型:\n", display);
-                                for (i, m) in models.iter().enumerate() {
-                                    let model_id = m["model"].as_str().unwrap_or("?");
-                                    let model_name = m["modelName"].as_str().unwrap_or(model_id);
-                                    menu.push_str(&format!("{}. {} ({})\n", i + 1, model_name, model_id));
+                            }
+
+                            if arg.is_empty() {
+                                let mut menu = format!(
+                                    "📊 当前 Runtime：{}\n当前模型: {}\n\n可用模型:\n",
+                                    runtime_display_name(&current_runtime),
+                                    current_display,
+                                );
+                                if models.is_empty() {
+                                    menu.push_str("(未能获取模型列表，可直接输入模型 ID)\n");
+                                } else {
+                                    for (i, m) in models.iter().enumerate() {
+                                        let value_display = if m.value.is_empty() { "default" } else { m.value.as_str() };
+                                        let suffix = if m.is_default { " [默认]" } else { "" };
+                                        menu.push_str(&format!(
+                                            "{}. {} ({}){}\n",
+                                            i + 1,
+                                            m.display_name,
+                                            value_display,
+                                            suffix,
+                                        ));
+                                    }
                                 }
                                 menu.push_str("\n用法: /model <序号或模型ID>");
                                 if let Err(e) = adapter_for_reply.send_message(&chat_id, &menu).await {
-                                    ulog_warn!("[im-cmd] send_message (/model list) failed: {}", e);
+                                    ulog_warn!("[im-cmd] send_message (/model runtime list) failed: {}", e);
+                                }
+                            } else {
+                                let model_id = if let Ok(idx) = arg.parse::<usize>() {
+                                    if idx == 0 {
+                                        None
+                                    } else {
+                                        models.get(idx - 1).map(|m| m.value.clone())
+                                    }
+                                } else {
+                                    Some(arg)
+                                };
+
+                                match model_id {
+                                    Some(id) => {
+                                        let new_config = runtime_config_with_string(
+                                            current_runtime_config,
+                                            "model",
+                                            Some(id.clone()),
+                                        );
+                                        *runtime_config_for_loop.write().await = Some(new_config.clone());
+                                        let sync_config = if id.is_empty() {
+                                            let mut map = new_config.as_object().cloned().unwrap_or_default();
+                                            map.insert("model".to_string(), serde_json::Value::Null);
+                                            serde_json::Value::Object(map)
+                                        } else {
+                                            new_config.clone()
+                                        };
+                                        sync_runtime_config_to_sidecars(
+                                            &router_clone,
+                                            &current_runtime,
+                                            &sync_config,
+                                        ).await;
+
+                                        let link = agent_link_for_loop.read().await.clone();
+                                        if let Some(link) = link {
+                                            *link.runtime_config.write().await = Some(new_config.clone());
+                                            let agent_id = link.agent_id.clone();
+                                            let config_for_disk = new_config.clone();
+                                            tokio::task::spawn_blocking(move || {
+                                                let patch = AgentConfigPatch {
+                                                    runtime_config: Some(config_for_disk),
+                                                    ..Default::default()
+                                                };
+                                                if let Err(e) = persist_agent_config_patch(&agent_id, &patch) {
+                                                    ulog_warn!("[im] /model runtime persist failed: {}", e);
+                                                }
+                                            });
+                                            let _ = app_clone.emit("agent:config-changed", json!({}));
+                                        }
+                                        let display = if id.is_empty() { "(默认)".to_string() } else { id.clone() };
+                                        ulog_info!("[im] /model: set {} runtime model to {}", current_runtime, display);
+                                        if let Err(e) = adapter_for_reply.send_message(
+                                            &chat_id,
+                                            &format!("✅ {} 模型已切换为: {}", runtime_display_name(&current_runtime), display),
+                                        ).await {
+                                            ulog_warn!("[im-cmd] send_message (/model runtime switch) failed: {}", e);
+                                        }
+                                    }
+                                    None => {
+                                        if let Err(e) = adapter_for_reply.send_message(
+                                            &chat_id,
+                                            "❌ 无效的序号，请使用 /model 查看可用列表",
+                                        ).await {
+                                            ulog_warn!("[im-cmd] send_message (/model runtime invalid) failed: {}", e);
+                                        }
+                                    }
                                 }
                             }
                         } else {
-                            // Resolve target model: by index (1-based) or by model ID
-                            let model_id = if let Ok(idx) = arg.parse::<usize>() {
-                                if idx == 0 {
-                                    None // invalid: 1-based index
+                            // Find current provider's models from availableProvidersJson (lazy-read from disk)
+                            let models: Vec<serde_json::Value> = {
+                                let providers: Vec<serde_json::Value> = {
+                                    let ap = tokio::task::spawn_blocking(read_available_providers_from_disk)
+                                        .await.ok().flatten();
+                                    ap.as_ref()
+                                        .and_then(|json| serde_json::from_str(json).ok())
+                                        .unwrap_or_default()
+                                };
+                                let current_env = current_provider_env_for_loop.read().await;
+                                let current_provider = if current_env.is_none() {
+                                    // Subscription (Anthropic) — find provider whose id contains "sub"
+                                    providers.iter().find(|p| {
+                                        p["id"].as_str().map(|s| s.contains("sub")).unwrap_or(false)
+                                    }).cloned()
                                 } else {
-                                    models.get(idx - 1)
-                                        .and_then(|m| m["model"].as_str())
-                                        .map(|s| s.to_string())
-                                }
-                            } else {
-                                Some(arg) // accept any string as model ID
+                                    // Match by baseUrl
+                                    let base_url = current_env.as_ref()
+                                        .and_then(|v| v["baseUrl"].as_str());
+                                    providers.iter()
+                                        .find(|p| p["baseUrl"].as_str() == base_url)
+                                        .cloned()
+                                };
+                                current_provider
+                                    .and_then(|p| p["models"].as_array().cloned())
+                                    .unwrap_or_default()
                             };
 
-                            match model_id {
-                                Some(id) => {
-                                    // Update shared model state
-                                    {
-                                        let mut model_guard = current_model_for_loop.write().await;
-                                        *model_guard = Some(id.clone());
-                                    }
-                                    // If peer has an active Sidecar, log it
-                                    let router = router_clone.lock().await;
-                                    let sessions = router.active_sessions();
-                                    if let Some(s) = sessions.iter().find(|s| s.session_key == session_key) {
-                                        drop(router);
-                                        ulog_info!("[im] /model: set to {} (session={})", id, s.session_key);
-                                    }
-                                    if let Err(e) = adapter_for_reply.send_message(
-                                        &chat_id,
-                                        &format!("✅ 模型已切换为: {}", id),
-                                    ).await {
-                                        ulog_warn!("[im-cmd] send_message (/model switch) failed: {}", e);
-                                    }
+                            if arg.is_empty() {
+                                let current = current_model_for_loop.read().await;
+                                let display = current.as_deref().unwrap_or("(默认)");
 
-                                    // Persist to config.json + notify frontend
-                                    let bid = bot_id_for_loop.clone();
-                                    let model_str = id.clone();
-                                    tokio::task::spawn_blocking(move || {
-                                        let patch = BotConfigPatch {
-                                            model: Some(model_str),
-                                            ..Default::default()
-                                        };
-                                        if let Err(e) = persist_bot_config_patch(&bid, &patch) {
-                                            ulog_warn!("[im] /model persist failed: {}", e);
-                                        }
-                                    });
-                                    let _ = app_clone.emit("im:bot-config-changed", json!({
-                                        "botId": bot_id_for_loop,
-                                    }));
+                                if models.is_empty() {
+                                    // Fallback: no models info available
+                                    let help = format!(
+                                        "📊 当前模型: {}\n\n提示: 可直接输入模型 ID 切换\n用法: /model <模型ID>",
+                                        display,
+                                    );
+                                    if let Err(e) = adapter_for_reply.send_message(&chat_id, &help).await {
+                                        ulog_warn!("[im-cmd] send_message (/model help) failed: {}", e);
+                                    }
+                                } else {
+                                    let mut menu = format!("📊 当前模型: {}\n\n可用模型:\n", display);
+                                    for (i, m) in models.iter().enumerate() {
+                                        let model_id = m["model"].as_str().unwrap_or("?");
+                                        let model_name = m["modelName"].as_str().unwrap_or(model_id);
+                                        menu.push_str(&format!("{}. {} ({})\n", i + 1, model_name, model_id));
+                                    }
+                                    menu.push_str("\n用法: /model <序号或模型ID>");
+                                    if let Err(e) = adapter_for_reply.send_message(&chat_id, &menu).await {
+                                        ulog_warn!("[im-cmd] send_message (/model list) failed: {}", e);
+                                    }
                                 }
-                                None => {
-                                    if let Err(e) = adapter_for_reply.send_message(
-                                        &chat_id,
-                                        "❌ 无效的序号，请使用 /model 查看可用列表",
-                                    ).await {
-                                        ulog_warn!("[im-cmd] send_message (/model invalid) failed: {}", e);
+                            } else {
+                                // Resolve target model: by index (1-based) or by model ID
+                                let model_id = if let Ok(idx) = arg.parse::<usize>() {
+                                    if idx == 0 {
+                                        None // invalid: 1-based index
+                                    } else {
+                                        models.get(idx - 1)
+                                            .and_then(|m| m["model"].as_str())
+                                            .map(|s| s.to_string())
+                                    }
+                                } else {
+                                    Some(arg) // accept any string as model ID
+                                };
+
+                                match model_id {
+                                    Some(id) => {
+                                        // Update shared model state
+                                        {
+                                            let mut model_guard = current_model_for_loop.write().await;
+                                            *model_guard = Some(id.clone());
+                                        }
+                                        // If peer has an active Sidecar, log it
+                                        let router = router_clone.lock().await;
+                                        let sessions = router.active_sessions();
+                                        if let Some(s) = sessions.iter().find(|s| s.session_key == session_key) {
+                                            drop(router);
+                                            ulog_info!("[im] /model: set to {} (session={})", id, s.session_key);
+                                        }
+                                        if let Err(e) = adapter_for_reply.send_message(
+                                            &chat_id,
+                                            &format!("✅ 模型已切换为: {}", id),
+                                        ).await {
+                                            ulog_warn!("[im-cmd] send_message (/model switch) failed: {}", e);
+                                        }
+
+                                        // Persist to config.json + notify frontend
+                                        let bid = bot_id_for_loop.clone();
+                                        let model_str = id.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            let patch = BotConfigPatch {
+                                                model: Some(model_str),
+                                                ..Default::default()
+                                            };
+                                            if let Err(e) = persist_bot_config_patch(&bid, &patch) {
+                                                ulog_warn!("[im] /model persist failed: {}", e);
+                                            }
+                                        });
+                                        let _ = app_clone.emit("im:bot-config-changed", json!({
+                                            "botId": bot_id_for_loop,
+                                        }));
+                                    }
+                                    None => {
+                                        if let Err(e) = adapter_for_reply.send_message(
+                                            &chat_id,
+                                            "❌ 无效的序号，请使用 /model 查看可用列表",
+                                        ).await {
+                                            ulog_warn!("[im-cmd] send_message (/model invalid) failed: {}", e);
+                                        }
                                     }
                                 }
                             }
@@ -1466,6 +1793,29 @@ async fn create_bot_instance<R: Runtime>(
                     // /provider — show or switch AI provider
                     if text.starts_with("/provider") {
                         let arg = text.strip_prefix("/provider").unwrap_or("").trim().to_string();
+                        let current_runtime = runtime_for_loop.read().await.clone();
+
+                        if is_external_runtime_type(&current_runtime) {
+                            let runtime_name = runtime_display_name(&current_runtime);
+                            let reply = if arg.is_empty() {
+                                format!(
+                                    "📡 当前 Runtime：{}\n\n供应商/账号由 {} 管理，IM Bot 不能通过 /provider 切换 MyAgents 供应商。\n如需切换模型，请使用 /model 查看 {} 可用模型。",
+                                    runtime_name,
+                                    runtime_name,
+                                    runtime_name,
+                                )
+                            } else {
+                                format!(
+                                    "❌ 当前 Runtime 是 {}，不能通过 /provider 切换 MyAgents 供应商。\n供应商/账号由 {} 管理。如需切换模型，请使用 /model。",
+                                    runtime_name,
+                                    runtime_name,
+                                )
+                            };
+                            if let Err(e) = adapter_for_reply.send_message(&chat_id, &reply).await {
+                                ulog_warn!("[im-cmd] send_message (/provider runtime) failed: {}", e);
+                            }
+                            continue;
+                        }
 
                         // Parse available providers from config (lazy-read from disk)
                         let providers: Vec<serde_json::Value> = {
@@ -1584,75 +1934,163 @@ async fn create_bot_instance<R: Runtime>(
                     // /mode — show or switch permission mode
                     if text.starts_with("/mode") {
                         let arg = text.strip_prefix("/mode").unwrap_or("").trim().to_lowercase();
-                        let current = permission_mode_for_loop.read().await.clone();
+                        let current_runtime = runtime_for_loop.read().await.clone();
 
-                        if arg.is_empty() {
-                            let display = match current.as_str() {
-                                "plan" => "🛡 计划模式 (plan) — AI 执行操作前需要审批",
-                                "auto" => "⚡ 自动模式 (auto) — 安全操作自动执行，敏感操作需审批",
-                                "fullAgency" => "🚀 全自主模式 (fullAgency) — 所有操作自动执行",
-                                _ => "❓ 未知模式",
-                            };
-                            if let Err(e) = adapter_for_reply.send_message(
-                                &chat_id,
-                                &format!(
-                                    "🔐 当前权限模式\n\n{}\n\n\
-                                     可选模式：\n\
-                                     • plan — 计划模式（最安全）\n\
-                                     • auto — 自动模式（推荐）\n\
-                                     • full — 全自主模式\n\n\
-                                     用法: /mode <模式>",
-                                    display,
-                                ),
-                            ).await {
-                                ulog_warn!("[im-cmd] send_message (/mode display) failed: {}", e);
-                            }
-                        } else {
-                            let new_mode = match arg.as_str() {
-                                "plan" => "plan",
-                                "auto" => "auto",
-                                "full" | "fullagency" => "fullAgency",
-                                _ => {
+                        if is_external_runtime_type(&current_runtime) {
+                            let choices = runtime_permission_choices(&current_runtime);
+                            let current_runtime_config = runtime_config_for_loop.read().await.clone();
+                            let current = runtime_config_string(
+                                current_runtime_config.as_ref(),
+                                "permissionMode",
+                            ).unwrap_or_else(|| "(默认)".to_string());
+
+                            if arg.is_empty() {
+                                let mut menu = format!(
+                                    "🔐 当前 Runtime：{}\n当前权限模式: {}\n\n可选模式：\n",
+                                    runtime_display_name(&current_runtime),
+                                    current,
+                                );
+                                for choice in &choices {
+                                    menu.push_str(&format!(
+                                        "• {} — {}（{}）\n",
+                                        choice.value,
+                                        choice.label,
+                                        choice.description,
+                                    ));
+                                }
+                                menu.push_str("\n用法: /mode <模式>");
+                                if let Err(e) = adapter_for_reply.send_message(&chat_id, &menu).await {
+                                    ulog_warn!("[im-cmd] send_message (/mode runtime display) failed: {}", e);
+                                }
+                            } else {
+                                let target = choices
+                                    .iter()
+                                    .find(|choice| choice.value.eq_ignore_ascii_case(&arg))
+                                    .cloned();
+                                let Some(target) = target else {
+                                    let allowed = choices.iter().map(|c| c.value.as_str()).collect::<Vec<_>>().join(" / ");
                                     if let Err(e) = adapter_for_reply.send_message(
                                         &chat_id,
-                                        "❌ 无效模式，可选: plan / auto / full",
+                                        &format!("❌ 无效模式，可选: {}", allowed),
                                     ).await {
-                                        ulog_warn!("[im-cmd] send_message (/mode invalid) failed: {}", e);
+                                        ulog_warn!("[im-cmd] send_message (/mode runtime invalid) failed: {}", e);
                                     }
                                     continue;
-                                }
-                            };
-                            *permission_mode_for_loop.write().await = new_mode.to_string();
-
-                            let display = match new_mode {
-                                "plan" => "🛡 计划模式 — AI 执行操作前需要审批",
-                                "auto" => "⚡ 自动模式 — 安全操作自动执行",
-                                "fullAgency" => "🚀 全自主模式 — 所有操作自动执行",
-                                _ => unreachable!(),
-                            };
-                            ulog_info!("[im] /mode: switched to {} (session={})", new_mode, session_key);
-                            if let Err(e) = adapter_for_reply.send_message(
-                                &chat_id,
-                                &format!("✅ 权限模式已切换\n\n{}", display),
-                            ).await {
-                                ulog_warn!("[im-cmd] send_message (/mode switch) failed: {}", e);
-                            }
-
-                            // Persist to config.json + notify frontend
-                            let bid = bot_id_for_loop.clone();
-                            let mode_str = new_mode.to_string();
-                            tokio::task::spawn_blocking(move || {
-                                let patch = BotConfigPatch {
-                                    permission_mode: Some(mode_str),
-                                    ..Default::default()
                                 };
-                                if let Err(e) = persist_bot_config_patch(&bid, &patch) {
-                                    ulog_warn!("[im] /mode persist failed: {}", e);
+
+                                let new_config = runtime_config_with_string(
+                                    current_runtime_config,
+                                    "permissionMode",
+                                    Some(target.value.clone()),
+                                );
+                                *runtime_config_for_loop.write().await = Some(new_config.clone());
+                                sync_runtime_config_to_sidecars(
+                                    &router_clone,
+                                    &current_runtime,
+                                    &new_config,
+                                ).await;
+
+                                let link = agent_link_for_loop.read().await.clone();
+                                if let Some(link) = link {
+                                    *link.runtime_config.write().await = Some(new_config.clone());
+                                    let agent_id = link.agent_id.clone();
+                                    let config_for_disk = new_config.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        let patch = AgentConfigPatch {
+                                            runtime_config: Some(config_for_disk),
+                                            ..Default::default()
+                                        };
+                                        if let Err(e) = persist_agent_config_patch(&agent_id, &patch) {
+                                            ulog_warn!("[im] /mode runtime persist failed: {}", e);
+                                        }
+                                    });
+                                    let _ = app_clone.emit("agent:config-changed", json!({}));
                                 }
-                            });
-                            let _ = app_clone.emit("im:bot-config-changed", json!({
-                                "botId": bot_id_for_loop,
-                            }));
+
+                                ulog_info!("[im] /mode: set {} runtime permission to {}", current_runtime, target.value);
+                                if let Err(e) = adapter_for_reply.send_message(
+                                    &chat_id,
+                                    &format!(
+                                        "✅ {} 权限模式已切换为: {}\n\n{}",
+                                        runtime_display_name(&current_runtime),
+                                        target.value,
+                                        target.description,
+                                    ),
+                                ).await {
+                                    ulog_warn!("[im-cmd] send_message (/mode runtime switch) failed: {}", e);
+                                }
+                            }
+                        } else {
+                            let current = permission_mode_for_loop.read().await.clone();
+
+                            if arg.is_empty() {
+                                let display = match current.as_str() {
+                                    "plan" => "🛡 计划模式 (plan) — AI 执行操作前需要审批",
+                                    "auto" => "⚡ 自动模式 (auto) — 安全操作自动执行，敏感操作需审批",
+                                    "fullAgency" => "🚀 全自主模式 (fullAgency) — 所有操作自动执行",
+                                    _ => "❓ 未知模式",
+                                };
+                                if let Err(e) = adapter_for_reply.send_message(
+                                    &chat_id,
+                                    &format!(
+                                        "🔐 当前权限模式\n\n{}\n\n\
+                                         可选模式：\n\
+                                         • plan — 计划模式（最安全）\n\
+                                         • auto — 自动模式（推荐）\n\
+                                         • full — 全自主模式\n\n\
+                                         用法: /mode <模式>",
+                                        display,
+                                    ),
+                                ).await {
+                                    ulog_warn!("[im-cmd] send_message (/mode display) failed: {}", e);
+                                }
+                            } else {
+                                let new_mode = match arg.as_str() {
+                                    "plan" => "plan",
+                                    "auto" => "auto",
+                                    "full" | "fullagency" => "fullAgency",
+                                    _ => {
+                                        if let Err(e) = adapter_for_reply.send_message(
+                                            &chat_id,
+                                            "❌ 无效模式，可选: plan / auto / full",
+                                        ).await {
+                                            ulog_warn!("[im-cmd] send_message (/mode invalid) failed: {}", e);
+                                        }
+                                        continue;
+                                    }
+                                };
+                                *permission_mode_for_loop.write().await = new_mode.to_string();
+
+                                let display = match new_mode {
+                                    "plan" => "🛡 计划模式 — AI 执行操作前需要审批",
+                                    "auto" => "⚡ 自动模式 — 安全操作自动执行",
+                                    "fullAgency" => "🚀 全自主模式 — 所有操作自动执行",
+                                    _ => unreachable!(),
+                                };
+                                ulog_info!("[im] /mode: switched to {} (session={})", new_mode, session_key);
+                                if let Err(e) = adapter_for_reply.send_message(
+                                    &chat_id,
+                                    &format!("✅ 权限模式已切换\n\n{}", display),
+                                ).await {
+                                    ulog_warn!("[im-cmd] send_message (/mode switch) failed: {}", e);
+                                }
+
+                                // Persist to config.json + notify frontend
+                                let bid = bot_id_for_loop.clone();
+                                let mode_str = new_mode.to_string();
+                                tokio::task::spawn_blocking(move || {
+                                    let patch = BotConfigPatch {
+                                        permission_mode: Some(mode_str),
+                                        ..Default::default()
+                                    };
+                                    if let Err(e) = persist_bot_config_patch(&bid, &patch) {
+                                        ulog_warn!("[im] /mode persist failed: {}", e);
+                                    }
+                                });
+                                let _ = app_clone.emit("im:bot-config-changed", json!({
+                                    "botId": bot_id_for_loop,
+                                }));
+                            }
                         }
                         continue;
                     }
@@ -1815,6 +2253,8 @@ async fn create_bot_instance<R: Runtime>(
                     let task_perm = permission_mode_for_loop.read().await.clone();
                     let task_provider_env = Arc::clone(&current_provider_env_for_loop);
                     let task_model = Arc::clone(&current_model_for_loop);
+                    let task_runtime = runtime_for_loop.read().await.clone();
+                    let task_runtime_config = runtime_config_for_loop.read().await.clone();
                     let task_mcp_json = mcp_servers_json_for_loop.read().await.clone();
                     let task_stream_client = stream_client.clone();
                     let task_sem = Arc::clone(&global_semaphore);
@@ -1879,6 +2319,8 @@ async fn create_bot_instance<R: Runtime>(
                                 .await
                                 .sync_ai_config(
                                     port,
+                                    &task_runtime,
+                                    task_runtime_config.as_ref(),
                                     model.as_deref(),
                                     task_mcp_json.as_deref(),
                                     penv.as_ref(),
@@ -1973,6 +2415,8 @@ async fn create_bot_instance<R: Runtime>(
                             &task_perm,
                             penv.as_ref(),
                             task_model_val.as_deref(),
+                            &task_runtime,
+                            task_runtime_config.as_ref(),
                             images,
                             &task_pending_approvals,
                             Some(&task_bot_id),
@@ -2095,6 +2539,8 @@ async fn create_bot_instance<R: Runtime>(
                                         &task_perm,
                                         penv.as_ref(),
                                         task_model_val.as_deref(),
+                                        &task_runtime,
+                                        task_runtime_config.as_ref(),
                                         None, // buffered messages don't preserve attachments
                                         &task_pending_approvals,
                                         Some(&task_bot_id),
@@ -2378,6 +2824,8 @@ async fn create_bot_instance<R: Runtime>(
             Arc::clone(&current_model),
             Arc::clone(&current_provider_env),
             Arc::clone(&mcp_servers_json),
+            Arc::clone(&runtime),
+            Arc::clone(&runtime_config),
             None, // Memory auto-update: not used for per-channel heartbeat (Agent-level only)
         );
         let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
@@ -2433,6 +2881,8 @@ async fn create_bot_instance<R: Runtime>(
         current_provider_env,
         permission_mode,
         mcp_servers_json,
+        runtime,
+        runtime_config,
         allowed_users,
         // Group Chat (v0.1.28)
         group_permissions,
@@ -2600,6 +3050,8 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     permission_mode: &str,
     provider_env: Option<&serde_json::Value>,
     model: Option<&str>,
+    runtime: &str,
+    runtime_config: Option<&serde_json::Value>,
     images: Option<&Vec<serde_json::Value>>,
     pending_approvals: &PendingApprovals,
     bot_id: Option<&str>,
@@ -2632,11 +3084,17 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         "senderName": msg.sender_name,
         "permissionMode": permission_mode,
     });
-    if let Some(env) = provider_env {
-        body["providerEnv"] = env.clone();
+    if !is_external_runtime_type(runtime) {
+        if let Some(env) = provider_env {
+            body["providerEnv"] = env.clone();
+        }
+        if let Some(m) = model {
+            body["model"] = json!(m);
+        }
     }
-    if let Some(m) = model {
-        body["model"] = json!(m);
+    body["runtime"] = json!(runtime);
+    if let Some(config) = runtime_config {
+        body["runtimeConfig"] = config.clone();
     }
     if let Some(imgs) = images {
         if !imgs.is_empty() {
@@ -3850,7 +4308,12 @@ fn persist_agent_config_patch(agent_id: &str, patch: &AgentConfigPatch) -> Resul
     apply_field!(provider_env_json, "providerEnvJson");
     apply_field!(permission_mode, "permissionMode");
     apply_field!(mcp_enabled_servers, "mcpEnabledServers");
+    apply_field!(runtime, "runtime");
     apply_field!(setup_completed, "setupCompleted");
+
+    if let Some(ref runtime_config) = patch.runtime_config {
+        agent["runtimeConfig"] = runtime_config.clone();
+    }
 
     if let Some(ref channels) = patch.channels {
         agent["channels"] = serde_json::to_value(channels)
@@ -4024,6 +4487,8 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                     )),
                                     permission_mode: Arc::new(RwLock::new(agent_config.permission_mode.clone())),
                                     mcp_servers_json: Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
+                                    runtime: Arc::new(RwLock::new(normalize_runtime_type(agent_config.runtime.as_deref()))),
+                                    runtime_config: Arc::new(RwLock::new(agent_config.runtime_config.clone())),
                                     memory_update_config: None,
                                     memory_update_running: None,
                                 }
@@ -4033,6 +4498,7 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                 channel_id: channel.id.clone(),
                                 agent_id: agent_config.id.clone(),
                                 last_active_channel: Arc::clone(&shared_lac),
+                                runtime_config: Arc::clone(&agent_instance.runtime_config),
                             };
                             *bot_instance.agent_link.write().await = Some(link);
 
@@ -4450,6 +4916,7 @@ pub async fn monitor_agent_channels(
                             channel_id: channel_id.clone(),
                             agent_id: agent_id.clone(),
                             last_active_channel: Arc::clone(&agent.last_active_channel),
+                            runtime_config: Arc::clone(&agent.runtime_config),
                         };
                         *bot_instance.agent_link.write().await = Some(link);
 
@@ -4581,6 +5048,8 @@ pub async fn cmd_start_im_bot(
         model,
         provider_env_json: providerEnvJson,
         mcp_servers_json: mcpServersJson,
+        runtime: None,
+        runtime_config: None,
         heartbeat_config,
         group_permissions: existing.map(|c| c.group_permissions.clone()).unwrap_or_default(),
         group_activation: existing.and_then(|c| c.group_activation.clone()),
@@ -5023,6 +5492,8 @@ async fn update_bot_config_internal<R: Runtime>(
             // 4. Sidecar push (model / MCP / workspace / permissionMode)
             {
                 let mut router = inst.router.lock().await;
+                let runtime = inst.runtime.read().await.clone();
+                let runtime_config = inst.runtime_config.read().await.clone();
                 // Workspace (mut, sync)
                 if let Some(ref wp) = patch_workspace {
                     if !wp.is_empty() {
@@ -5038,17 +5509,35 @@ async fn update_bot_config_internal<R: Runtime>(
                 if patch_provider_env.is_some() {
                     for port in &ports {
                         if let Some(ref penv) = parsed_provider_env {
-                            router.sync_ai_config(*port, None, None, Some(penv)).await;
+                            router.sync_ai_config(
+                                *port,
+                                &runtime,
+                                runtime_config.as_ref(),
+                                None,
+                                None,
+                                Some(penv),
+                            ).await;
                         } else {
-                            // Clearing provider (switch to subscription) — POST null explicitly.
-                            // sync_ai_config skips None provider_env, so POST directly.
-                            let url = format!("http://127.0.0.1:{}/api/provider/set", *port);
-                            match router.http_client().post(&url)
-                                .json(&json!({ "providerEnv": null }))
-                                .send().await
-                            {
-                                Ok(_) => ulog_info!("[im] Cleared provider env on port {}", port),
-                                Err(e) => ulog_warn!("[im] Failed to clear provider env on port {}: {}", port, e),
+                            if is_external_runtime_type(&runtime) {
+                                router.sync_ai_config(
+                                    *port,
+                                    &runtime,
+                                    runtime_config.as_ref(),
+                                    None,
+                                    None,
+                                    None,
+                                ).await;
+                            } else {
+                                // Clearing provider (switch to subscription) — POST null explicitly.
+                                // sync_ai_config skips None provider_env, so POST directly.
+                                let url = format!("http://127.0.0.1:{}/api/provider/set", *port);
+                                match router.http_client().post(&url)
+                                    .json(&json!({ "providerEnv": null }))
+                                    .send().await
+                                {
+                                    Ok(_) => ulog_info!("[im] Cleared provider env on port {}", port),
+                                    Err(e) => ulog_warn!("[im] Failed to clear provider env on port {}: {}", port, e),
+                                }
                             }
                         }
                     }
@@ -5056,19 +5545,35 @@ async fn update_bot_config_internal<R: Runtime>(
                 // Model sync
                 if patch_model.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, patch_model.as_deref(), None, None).await;
+                        router.sync_ai_config(
+                            *port,
+                            &runtime,
+                            runtime_config.as_ref(),
+                            patch_model.as_deref(),
+                            None,
+                            None,
+                        ).await;
                     }
                 }
                 // MCP sync (runtime JSON, not enabled-list)
                 if patch_mcp_json.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, None, patch_mcp_json.as_deref(), None).await;
+                        router.sync_ai_config(
+                            *port,
+                            &runtime,
+                            runtime_config.as_ref(),
+                            None,
+                            patch_mcp_json.as_deref(),
+                            None,
+                        ).await;
                     }
                 }
                 // Permission mode sync to Sidecar
                 if let Some(ref pm) = patch_perm {
-                    for port in &ports {
-                        router.sync_permission_mode(*port, pm).await;
+                    if !is_external_runtime_type(&runtime) {
+                        for port in &ports {
+                            router.sync_permission_mode(*port, pm).await;
+                        }
                     }
                 }
             }
@@ -5197,6 +5702,8 @@ pub async fn cmd_get_im_bot_runtime_config(
         let provider_env = instance.current_provider_env.read().await.clone();
         let permission_mode = instance.permission_mode.read().await.clone();
         let mcp_servers_json = instance.mcp_servers_json.read().await.clone();
+        let runtime = instance.runtime.read().await.clone();
+        let runtime_config = instance.runtime_config.read().await.clone();
         let allowed_users = instance.allowed_users.read().await.clone();
         Ok(json!({
             "running": true,
@@ -5204,6 +5711,8 @@ pub async fn cmd_get_im_bot_runtime_config(
             "providerEnv": provider_env,
             "permissionMode": permission_mode,
             "mcpServersJson": mcp_servers_json,
+            "runtime": runtime,
+            "runtimeConfig": runtime_config,
             "allowedUsers": allowed_users,
         }))
     } else {
@@ -5597,6 +6106,13 @@ pub async fn cmd_restart_channels_using_plugin(
                             .map(|a| Arc::clone(&a.last_active_channel))
                             .unwrap_or_else(|| Arc::new(RwLock::new(None)))
                     },
+                    runtime_config: {
+                        let agents = agentState.lock().await;
+                        agents
+                            .get(&agent_id)
+                            .map(|a| Arc::clone(&a.runtime_config))
+                            .unwrap_or_else(|| Arc::new(RwLock::new(None)))
+                    },
                 };
                 *new_instance.agent_link.write().await = Some(link);
 
@@ -5713,6 +6229,8 @@ pub async fn cmd_start_agent_channel(
             )),
             permission_mode: Arc::new(RwLock::new(agentConfig.permission_mode.clone())),
             mcp_servers_json: Arc::new(RwLock::new(agentConfig.mcp_servers_json.clone())),
+            runtime: Arc::new(RwLock::new(normalize_runtime_type(agentConfig.runtime.as_deref()))),
+            runtime_config: Arc::new(RwLock::new(agentConfig.runtime_config.clone())),
             memory_update_config: None,
             memory_update_running: None,
         }
@@ -5723,6 +6241,7 @@ pub async fn cmd_start_agent_channel(
         channel_id: channelId.clone(),
         agent_id: agentId.clone(),
         last_active_channel: Arc::clone(&agent_instance.last_active_channel),
+        runtime_config: Arc::clone(&agent_instance.runtime_config),
     };
     *bot_instance.agent_link.write().await = Some(link);
 
@@ -6082,6 +6601,7 @@ pub async fn cmd_all_agents_status(
 pub async fn cmd_update_agent_config(
     app_handle: AppHandle,
     agentState: tauri::State<'_, ManagedAgents>,
+    sidecarManager: tauri::State<'_, ManagedSidecarManager>,
     agentId: String,
     patch: AgentConfigPatch,
 ) -> Result<(), String> {
@@ -6116,6 +6636,25 @@ pub async fn cmd_update_agent_config(
             *agent.mcp_servers_json.write().await = Some(mcp.clone());
             for (_ch_id, ch_inst) in &agent.channels {
                 *ch_inst.bot_instance.mcp_servers_json.write().await = Some(mcp.clone());
+            }
+        }
+        if let Some(ref runtime) = patch.runtime {
+            let normalized = normalize_runtime_type(Some(runtime.as_str()));
+            *agent.runtime.write().await = normalized.clone();
+            for (_ch_id, ch_inst) in &agent.channels {
+                *ch_inst.bot_instance.runtime.write().await = normalized.clone();
+                ch_inst
+                    .bot_instance
+                    .router
+                    .lock()
+                    .await
+                    .release_all(&sidecarManager);
+            }
+        }
+        if let Some(ref runtime_config) = patch.runtime_config {
+            *agent.runtime_config.write().await = Some(runtime_config.clone());
+            for (_ch_id, ch_inst) in &agent.channels {
+                *ch_inst.bot_instance.runtime_config.write().await = Some(runtime_config.clone());
             }
         }
         // Hot-reload heartbeat config
@@ -6170,38 +6709,95 @@ pub async fn cmd_update_agent_config(
             .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() });
         for (_ch_id, ch_inst) in &agent.channels {
             let router = ch_inst.bot_instance.router.lock().await;
+            let runtime = ch_inst.bot_instance.runtime.read().await.clone();
+            let runtime_config = ch_inst.bot_instance.runtime_config.read().await.clone();
             let ports = router.active_sidecar_ports();
             if !ports.is_empty() {
                 if patch.provider_env_json.is_some() {
                     for port in &ports {
                         if let Some(ref penv) = parsed_provider_env {
-                            router.sync_ai_config(*port, None, None, Some(penv)).await;
+                            router.sync_ai_config(
+                                *port,
+                                &runtime,
+                                runtime_config.as_ref(),
+                                None,
+                                None,
+                                Some(penv),
+                            ).await;
                         } else {
-                            // Clearing provider — POST null so Bun detects the change
-                            let url = format!("http://127.0.0.1:{}/api/provider/set", *port);
-                            match router.http_client().post(&url)
-                                .json(&json!({ "providerEnv": null }))
-                                .send().await
-                            {
-                                Ok(_) => ulog_info!("[im] Cleared provider env on port {}", port),
-                                Err(e) => ulog_warn!("[im] Failed to clear provider env on port {}: {}", port, e),
+                            if is_external_runtime_type(&runtime) {
+                                router.sync_ai_config(
+                                    *port,
+                                    &runtime,
+                                    runtime_config.as_ref(),
+                                    None,
+                                    None,
+                                    None,
+                                ).await;
+                            } else {
+                                // Clearing provider — POST null so Bun detects the change
+                                let url = format!("http://127.0.0.1:{}/api/provider/set", *port);
+                                match router.http_client().post(&url)
+                                    .json(&json!({ "providerEnv": null }))
+                                    .send().await
+                                {
+                                    Ok(_) => ulog_info!("[im] Cleared provider env on port {}", port),
+                                    Err(e) => ulog_warn!("[im] Failed to clear provider env on port {}: {}", port, e),
+                                }
                             }
                         }
                     }
                 }
                 if patch.model.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, patch.model.as_deref(), None, None).await;
+                        router.sync_ai_config(
+                            *port,
+                            &runtime,
+                            runtime_config.as_ref(),
+                            patch.model.as_deref(),
+                            None,
+                            None,
+                        ).await;
                     }
                 }
                 if patch.mcp_servers_json.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(*port, None, patch.mcp_servers_json.as_deref(), None).await;
+                        router.sync_ai_config(
+                            *port,
+                            &runtime,
+                            runtime_config.as_ref(),
+                            None,
+                            patch.mcp_servers_json.as_deref(),
+                            None,
+                        ).await;
                     }
                 }
                 if let Some(ref pm) = patch.permission_mode {
-                    for port in &ports {
-                        router.sync_permission_mode(*port, pm).await;
+                    if !is_external_runtime_type(&runtime) {
+                        for port in &ports {
+                            router.sync_permission_mode(*port, pm).await;
+                        }
+                    }
+                }
+                if patch.runtime_config.is_some() && is_external_runtime_type(&runtime) {
+                    if let Some(ref config) = runtime_config {
+                        for port in &ports {
+                            let url = format!("http://127.0.0.1:{}/api/runtime/config", *port);
+                            match router.http_client().post(&url)
+                                .json(&json!({ "runtime": runtime, "runtimeConfig": config }))
+                                .send().await
+                            {
+                                Ok(resp) if resp.status().is_success() => {
+                                    ulog_info!("[im] Synced runtime config for {} to port {}", runtime, port);
+                                }
+                                Ok(resp) => {
+                                    ulog_warn!("[im] Failed to sync runtime config to port {}: HTTP {}", port, resp.status());
+                                }
+                                Err(e) => {
+                                    ulog_warn!("[im] Failed to sync runtime config to port {}: {}", port, e);
+                                }
+                            }
+                        }
                     }
                 }
             }

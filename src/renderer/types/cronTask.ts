@@ -1,4 +1,5 @@
 // Types for scheduled (cron) tasks
+import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
 
 /**
  * Run mode for cron tasks
@@ -64,6 +65,8 @@ export interface CronTask {
   permissionMode?: string;
   model?: string;
   providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+  runtime?: RuntimeType;
+  runtimeConfig?: RuntimeConfig;
   lastError?: string;
   /** Source IM Bot ID that created this task */
   sourceBotId?: string;
@@ -111,6 +114,8 @@ export interface CronTaskConfig {
   permissionMode?: string;
   model?: string;
   providerEnv?: CronTaskProviderEnv;
+  runtime?: RuntimeType;
+  runtimeConfig?: RuntimeConfig;
   /** Flexible schedule (overrides intervalMinutes) */
   schedule?: CronSchedule;
   /** Human-readable name */

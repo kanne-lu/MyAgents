@@ -251,6 +251,12 @@ pub struct CronTask {
     /// Provider environment (API key, base URL)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<TaskProviderEnv>,
+    /// Agent runtime snapshot for external Runtime tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// Runtime-scoped config snapshot for external Runtime tasks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_config: Option<serde_json::Value>,
     /// Last error message (if any)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
@@ -303,6 +309,10 @@ pub struct CronTaskConfig {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<TaskProviderEnv>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_config: Option<serde_json::Value>,
     // ===== IM Bot cron fields (v0.1.21) =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_bot_id: Option<String>,
@@ -1306,6 +1316,8 @@ impl CronTaskManager {
             permission_mode: config.permission_mode,
             model: config.model,
             provider_env: config.provider_env,
+            runtime: config.runtime,
+            runtime_config: config.runtime_config,
             last_error: None,
             source_bot_id: config.source_bot_id,
             delivery: config.delivery,
@@ -1769,6 +1781,8 @@ async fn execute_task_directly(
             max_output_tokens_param_name: env.max_output_tokens_param_name.clone(),
             upstream_format: env.upstream_format.clone(),
         }),
+        runtime: task.runtime.clone(),
+        runtime_config: task.runtime_config.clone(),
         run_mode: Some(run_mode_str.to_string()),
         interval_minutes: Some(task.interval_minutes),
         execution_number: Some(execution_number),
@@ -2252,7 +2266,7 @@ async fn deliver_cron_result_to_bot(
 
     // Extract Arc refs from instance, then drop guard early to avoid
     // holding the lock during potentially slow ensure_sidecar (~2s).
-    let (router, current_model, current_provider_env, mcp_servers_json, wake_tx) = {
+    let (router, current_model, current_provider_env, mcp_servers_json, runtime, runtime_config, wake_tx) = {
         // Try Agent state first (v0.1.41)
         let agent_refs = if let Some(agent_state) = handle.try_state::<crate::im::ManagedAgents>() {
             let agents_guard = agent_state.lock().await;
@@ -2264,6 +2278,8 @@ async fn deliver_cron_result_to_bot(
                         std::sync::Arc::clone(&ch.bot_instance.current_model),
                         std::sync::Arc::clone(&ch.bot_instance.current_provider_env),
                         std::sync::Arc::clone(&ch.bot_instance.mcp_servers_json),
+                        std::sync::Arc::clone(&ch.bot_instance.runtime),
+                        std::sync::Arc::clone(&ch.bot_instance.runtime_config),
                         ch.bot_instance.heartbeat_wake_tx.clone(),
                     ));
                     break;
@@ -2296,6 +2312,8 @@ async fn deliver_cron_result_to_bot(
                 std::sync::Arc::clone(&instance.current_model),
                 std::sync::Arc::clone(&instance.current_provider_env),
                 std::sync::Arc::clone(&instance.mcp_servers_json),
+                std::sync::Arc::clone(&instance.runtime),
+                std::sync::Arc::clone(&instance.runtime_config),
                 instance.heartbeat_wake_tx.clone(),
             )
         }
@@ -2335,8 +2353,17 @@ async fn deliver_cron_result_to_bot(
             let model = current_model.read().await.clone();
             let penv = current_provider_env.read().await.clone();
             let mcp = mcp_servers_json.read().await.clone();
+            let runtime = runtime.read().await.clone();
+            let runtime_config = runtime_config.read().await.clone();
             router.lock().await
-                .sync_ai_config(port, model.as_deref(), mcp.as_deref(), penv.as_ref())
+                .sync_ai_config(
+                    port,
+                    &runtime,
+                    runtime_config.as_ref(),
+                    model.as_deref(),
+                    mcp.as_deref(),
+                    penv.as_ref(),
+                )
                 .await;
             ulog_info!("[CronTask] Woke up sidecar for bot {} on port {}", delivery.bot_id, port);
         }

@@ -7,27 +7,96 @@
  * File: ~/.myagents/mcp_oauth_state.json (mode 0o600)
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import type { McpOAuthState, McpOAuthStateStore, LegacyOAuthToken } from './types';
 
-const CONFIG_DIR = join(homedir(), '.myagents');
-const STATE_FILE = join(CONFIG_DIR, 'mcp_oauth_state.json');
-const LEGACY_TOKEN_FILE = join(CONFIG_DIR, 'mcp_oauth_tokens.json');
+export function getOAuthConfigDir(): string {
+  return process.env.MYAGENTS_CONFIG_DIR || join(homedir(), '.myagents');
+}
+
+function getStateFile(): string {
+  return join(getOAuthConfigDir(), 'mcp_oauth_state.json');
+}
+
+function getLegacyTokenFile(): string {
+  return join(getOAuthConfigDir(), 'mcp_oauth_tokens.json');
+}
 
 /** 24h discovery cache validity */
 export const DISCOVERY_TTL_MS = 24 * 60 * 60 * 1000;
+const WRITE_LOCK_TIMEOUT_MS = 10 * 1000;
+const WRITE_LOCK_STALE_MS = 30 * 1000;
+const WRITE_LOCK_RETRY_MS = 50;
 
 function ensureDir(): void {
-  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
+  const configDir = getOAuthConfigDir();
+  if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function acquireWriteLock(): () => void {
+  const locksDir = join(getOAuthConfigDir(), 'mcp_oauth_locks');
+  const lockDir = join(locksDir, 'state-store.lock');
+  const startedAt = Date.now();
+
+  mkdirSync(locksDir, { recursive: true });
+
+  while (true) {
+    try {
+      mkdirSync(lockDir, { mode: 0o700 });
+      writeFileSync(join(lockDir, 'owner'), `${process.pid}\n`, { encoding: 'utf-8' });
+      return () => {
+        try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* noop */ }
+      };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST') throw err;
+
+      try {
+        const ageMs = Date.now() - statSync(lockDir).mtimeMs;
+        if (ageMs > WRITE_LOCK_STALE_MS) {
+          rmSync(lockDir, { recursive: true, force: true });
+          continue;
+        }
+      } catch {
+        if (!existsSync(lockDir)) continue;
+      }
+
+      if (Date.now() - startedAt > WRITE_LOCK_TIMEOUT_MS) {
+        throw new Error('Timed out waiting for OAuth state store write lock');
+      }
+
+      sleepSync(WRITE_LOCK_RETRY_MS);
+    }
+  }
+}
+
+function withWriteLock<T>(fn: () => T): T {
+  if (writeLockDepth > 0) {
+    return fn();
+  }
+
+  const release = acquireWriteLock();
+  writeLockDepth++;
+  try {
+    return fn();
+  } finally {
+    writeLockDepth--;
+    release();
+  }
 }
 
 /** Migrate legacy mcp_oauth_tokens.json to new state format */
 function migrateFromLegacy(): McpOAuthStateStore {
   try {
-    if (!existsSync(LEGACY_TOKEN_FILE)) return {};
-    const raw = readFileSync(LEGACY_TOKEN_FILE, 'utf-8');
+    const legacyTokenFile = getLegacyTokenFile();
+    if (!existsSync(legacyTokenFile)) return {};
+    const raw = readFileSync(legacyTokenFile, 'utf-8');
     const legacy = JSON.parse(raw) as Record<string, LegacyOAuthToken>;
     const migrated: McpOAuthStateStore = {};
 
@@ -61,15 +130,23 @@ function migrateFromLegacy(): McpOAuthStateStore {
   }
 }
 
-// In-memory cache — avoids disk I/O on every getServerState() / resolveAuthHeaders() call
+// In-memory mirror of the last parsed store. Disk remains the source of truth
+// because OAuth state is shared by multiple sidecar processes.
 let memoryCache: McpOAuthStateStore | null = null;
+let memoryCacheFile: string | null = null;
+let writeLockDepth = 0;
 
-/** Load the full OAuth state store (from memory cache or disk) */
-export function loadStateStore(): McpOAuthStateStore {
-  if (memoryCache) return memoryCache;
+/** Load the full OAuth state store from disk */
+export function loadStateStore(_forceReload = false): McpOAuthStateStore {
+  const stateFile = getStateFile();
+  if (memoryCacheFile !== stateFile) {
+    memoryCache = null;
+    memoryCacheFile = stateFile;
+  }
+
   try {
-    if (existsSync(STATE_FILE)) {
-      const raw = readFileSync(STATE_FILE, 'utf-8');
+    if (existsSync(stateFile)) {
+      const raw = readFileSync(stateFile, 'utf-8');
       memoryCache = JSON.parse(raw) as McpOAuthStateStore;
       return memoryCache;
     }
@@ -77,23 +154,34 @@ export function loadStateStore(): McpOAuthStateStore {
     const migrated = migrateFromLegacy();
     if (Object.keys(migrated).length > 0) {
       saveStateStore(migrated);
+    } else {
+      memoryCache = migrated;
     }
-    memoryCache = migrated;
     return migrated;
   } catch (err) {
     console.error('[mcp-oauth] Failed to load state store:', err);
-    return {};
+    return memoryCache ?? {};
+  }
+}
+
+function saveStateStoreUnlocked(store: McpOAuthStateStore): void {
+  const stateFile = getStateFile();
+  try {
+    ensureDir();
+    const tmpFile = `${stateFile}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmpFile, JSON.stringify(store, null, 2), { encoding: 'utf-8', mode: 0o600 });
+    renameSync(tmpFile, stateFile);
+    memoryCache = store;
+    memoryCacheFile = stateFile;
+  } catch (err) {
+    console.error('[mcp-oauth] Failed to save state store:', err);
   }
 }
 
 /** Save the full state store to disk (atomic write via tmp+rename) and update cache */
 export function saveStateStore(store: McpOAuthStateStore): void {
-  memoryCache = store;
   try {
-    ensureDir();
-    const tmpFile = STATE_FILE + '.tmp';
-    writeFileSync(tmpFile, JSON.stringify(store, null, 2), { encoding: 'utf-8', mode: 0o600 });
-    renameSync(tmpFile, STATE_FILE);
+    withWriteLock(() => saveStateStoreUnlocked(store));
   } catch (err) {
     console.error('[mcp-oauth] Failed to save state store:', err);
   }
@@ -106,21 +194,33 @@ export function getServerState(serverId: string): McpOAuthState | undefined {
 
 /** Update state for a specific server (merge) */
 export function updateServerState(serverId: string, patch: Partial<McpOAuthState>): void {
-  const store = loadStateStore();
-  store[serverId] = { ...store[serverId], ...patch };
-  saveStateStore(store);
+  try {
+    withWriteLock(() => {
+      const store = loadStateStore(true);
+      store[serverId] = { ...store[serverId], ...patch };
+      saveStateStoreUnlocked(store);
+    });
+  } catch (err) {
+    console.error(`[mcp-oauth] Failed to update state for ${serverId}:`, err);
+  }
 }
 
 /** Clear a specific field from server state */
 export function clearServerField(serverId: string, field: keyof McpOAuthState): void {
-  const store = loadStateStore();
-  if (store[serverId]) {
-    delete store[serverId][field];
-    // Remove empty entries
-    if (Object.keys(store[serverId]).length === 0) {
-      delete store[serverId];
-    }
-    saveStateStore(store);
+  try {
+    withWriteLock(() => {
+      const store = loadStateStore(true);
+      if (store[serverId]) {
+        delete store[serverId][field];
+        // Remove empty entries
+        if (Object.keys(store[serverId]).length === 0) {
+          delete store[serverId];
+        }
+        saveStateStoreUnlocked(store);
+      }
+    });
+  } catch (err) {
+    console.error(`[mcp-oauth] Failed to clear ${field} for ${serverId}:`, err);
   }
 }
 
@@ -128,4 +228,10 @@ export function clearServerField(serverId: string, field: keyof McpOAuthState): 
 export function isDiscoveryCacheValid(discovery: McpOAuthState['discovery']): boolean {
   if (!discovery?.discoveredAt) return false;
   return Date.now() - discovery.discoveredAt < DISCOVERY_TTL_MS;
+}
+
+export function resetStateStoreCacheForTests(): void {
+  memoryCache = null;
+  memoryCacheFile = null;
+  writeLockDepth = 0;
 }

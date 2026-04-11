@@ -45,6 +45,8 @@ export interface SessionMetadata {
     /** Runtime's own session/thread ID (Codex: threadId, CC: session_id from hook).
      *  Different from our session `id` — used for resume across Sidecar restarts. */
     runtimeSessionId?: string;
+    /** Runtime-level cumulative usage totals for restore-safe delta calculation. */
+    runtimeUsageTotals?: MessageUsage;
 }
 
 /**

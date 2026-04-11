@@ -25,7 +25,7 @@ export async function dynamicRegister(
   const body = {
     redirect_uris: [redirectUri],
     token_endpoint_auth_method: 'none',
-    grant_types: ['authorization_code'],
+    grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'],
     client_name: 'MyAgents Desktop',
     ...(scopes?.length ? { scope: scopes.join(' ') } : {}),

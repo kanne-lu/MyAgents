@@ -3,6 +3,7 @@
 
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetection } from '../../shared/types/runtime';
 import type { InteractionScenario } from '../system-prompt';
+import type { ModelUsageEntry } from '../types/session';
 
 /**
  * Image payload from frontend (base64-encoded)
@@ -101,7 +102,18 @@ export type UnifiedEvent =
   }
 
   // === Metadata ===
-  | { kind: 'usage'; inputTokens: number; outputTokens: number; costUsd?: number }
+  | {
+    kind: 'usage';
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    costUsd?: number;
+    model?: string;
+    modelUsage?: Record<string, ModelUsageEntry>;
+    semantics?: 'delta' | 'running_total';
+  }
+  | { kind: 'model_update'; model: string }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string }
 
   // === Message replay (for session resume) ===

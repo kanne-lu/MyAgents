@@ -4,6 +4,7 @@
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod/v4';
+import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -21,6 +22,8 @@ interface ImCronContext {
   model?: string;
   permissionMode?: string;
   providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+  runtime?: RuntimeType;
+  runtimeConfig?: RuntimeConfig;
 }
 
 let imCronContext: ImCronContext | null = null;
@@ -47,6 +50,8 @@ export interface SessionCronContext {
   model?: string;
   permissionMode?: string;
   providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+  runtime?: RuntimeType;
+  runtimeConfig?: RuntimeConfig;
 }
 
 let sessionCronContext: SessionCronContext | null = null;
@@ -218,6 +223,8 @@ async function imCronToolHandler(args: {
           model: addCtx.model,
           permissionMode: addCtx.permissionMode ?? 'auto',
           providerEnv: addCtx.providerEnv,
+          runtime: addCtx.runtime,
+          runtimeConfig: addCtx.runtimeConfig,
           intervalMinutes: args.job.schedule.kind === 'every' ? args.job.schedule.minutes : 30,
         };
 

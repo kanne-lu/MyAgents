@@ -134,5 +134,7 @@ export function resolveEffectiveConfig(agent: AgentConfig, channel: ChannelConfi
     toolsDeny: channel.overrides?.toolsDeny ?? [],
     workspacePath: agent.workspacePath,               // Always Agent's
     heartbeat: agent.heartbeat,                       // Always Agent's
+    runtime: agent.runtime ?? 'builtin',
+    runtimeConfig: agent.runtimeConfig,
   };
 }

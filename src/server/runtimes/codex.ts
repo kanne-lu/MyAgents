@@ -519,7 +519,7 @@ export class CodexRuntime implements AgentRuntime {
 
       // 2. Determine permission mode
       const isImOrCron = options.scenario.type === 'im' || options.scenario.type === 'agent-channel' || options.scenario.type === 'cron';
-      const permMode = isImOrCron ? 'no-restrictions' : (options.permissionMode || 'full-auto');
+      const permMode = options.permissionMode || (isImOrCron ? 'no-restrictions' : 'full-auto');
       const { approval, sandbox } = mapPermissionMode(permMode);
 
       // 3. Start or resume thread
@@ -951,6 +951,7 @@ export class CodexRuntime implements AgentRuntime {
             kind: 'usage',
             inputTokens: usage.total.inputTokens || 0,
             outputTokens: usage.total.outputTokens || 0,
+            semantics: 'running_total',
           };
         }
         return null;
@@ -963,10 +964,22 @@ export class CodexRuntime implements AgentRuntime {
       }
 
       // ── Thread name / diff / plan updates ──
+      case 'model/rerouted': {
+        const model = typeof p.model === 'string'
+          ? p.model
+          : typeof p.routedModel === 'string'
+            ? p.routedModel
+            : typeof p.to === 'string'
+              ? p.to
+              : typeof p.newModel === 'string'
+                ? p.newModel
+                : '';
+        return model ? { kind: 'model_update', model } : null;
+      }
+
       case 'thread/name/updated':
       case 'turn/diff/updated':
       case 'turn/plan/updated':
-      case 'model/rerouted':
       case 'deprecationNotice':
       case 'configWarning':
       case 'skills/changed':

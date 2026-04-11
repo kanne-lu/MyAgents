@@ -182,6 +182,7 @@ import {
   getExternalLiveAssistantMessage,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
+import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
 
@@ -214,6 +215,7 @@ type SendMessagePayload = {
   text?: string;
   images?: ImagePayload[];
   permissionMode?: PermissionMode;
+  runtimeConfig?: RuntimeConfig;
   model?: string;
   // 'subscription' = explicit switch to Anthropic subscription (from desktop)
   // undefined/missing = "keep current provider" (safe default for IM/Cron callers)
@@ -229,6 +231,16 @@ type SendMessagePayload = {
   } | 'subscription';
 };
 
+function getRuntimeConfigModel(runtimeConfig?: RuntimeConfig | null): string | undefined {
+  const model = runtimeConfig?.model?.trim();
+  return model ? model : undefined;
+}
+
+function getRuntimeConfigPermissionMode(runtimeConfig?: RuntimeConfig | null): string | undefined {
+  const permissionMode = runtimeConfig?.permissionMode?.trim();
+  return permissionMode ? permissionMode : undefined;
+}
+
 // Cron task execution payload
 type CronExecutePayload = {
   taskId: string;
@@ -238,6 +250,8 @@ type CronExecutePayload = {
   isFirstExecution?: boolean;
   aiCanExit?: boolean;
   permissionMode?: PermissionMode;
+  runtime?: RuntimeType;
+  runtimeConfig?: RuntimeConfig;
   model?: string;
   providerEnv?: {
     baseUrl?: string;
@@ -1653,6 +1667,33 @@ async function main() {
         return jsonResponse({ modes });
       }
 
+      if (pathname === '/api/runtime/config' && request.method === 'POST') {
+        const body = (await request.json().catch(() => ({}))) as {
+          runtime?: string;
+          runtimeConfig?: {
+            model?: string | null;
+            permissionMode?: string | null;
+          } | null;
+        };
+        const activeRuntime = getActiveRuntimeType();
+        if (activeRuntime === 'builtin') {
+          return jsonResponse({ success: false, error: 'Runtime config endpoint is only for external runtimes' }, 400);
+        }
+        if (body.runtime && body.runtime !== activeRuntime) {
+          return jsonResponse({ success: false, error: `Runtime mismatch: sidecar=${activeRuntime}, payload=${body.runtime}` }, 400);
+        }
+
+        const runtimeConfig = body.runtimeConfig ?? {};
+        if ('model' in runtimeConfig) {
+          await setExternalModel(runtimeConfig.model ?? '');
+        }
+        if ('permissionMode' in runtimeConfig) {
+          await setExternalPermissionMode(runtimeConfig.permissionMode ?? '');
+        }
+
+        return jsonResponse({ success: true, runtime: activeRuntime });
+      }
+
       if (pathname === '/api/runtime/permission-response' && request.method === 'POST') {
         const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
         const requestId = body.requestId as string;
@@ -1957,9 +1998,26 @@ async function main() {
           console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} interval=${intervalMinutes}min exec#=${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
           // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
           const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
-          // Cron tasks are unattended — bypass all permissions so tool requests
-          // don't block indefinitely waiting for a user who isn't present.
-          await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
+          if (shouldUseExternalRuntime()) {
+            const runtimeConfig = payload.runtimeConfig ?? null;
+            const runtimeResult = await sendExternalMessage(
+              wrappedPrompt, undefined, undefined, undefined,
+              {
+                sessionId: getSessionId(),
+                workspacePath: agentDir,
+                scenario: { type: 'cron', taskId, intervalMinutes: intervalMinutes ?? 15, aiCanExit: aiCanExit ?? false },
+                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
+                model: getRuntimeConfigModel(runtimeConfig),
+              },
+            );
+            if (!runtimeResult.queued) {
+              return jsonResponse({ success: false, error: runtimeResult.error ?? 'Failed to start cron via external runtime' }, 503);
+            }
+          } else {
+            // Cron tasks are unattended — bypass all permissions so tool requests
+            // don't block indefinitely waiting for a user who isn't present.
+            await enqueueUserMessage(wrappedPrompt, [], 'fullAgency', model, providerEnv);
+          }
           // Reset scenario after enqueue — already consumed by startStreamingSession()
           resetInteractionScenario();
           return jsonResponse({ success: true });
@@ -2007,8 +2065,7 @@ async function main() {
 
         if (effectiveRunMode === 'new_session') {
           // Create a fresh session for each execution (no memory of previous runs)
-          // Cron tasks always run on the builtin runtime (external runtimes not supported for cron yet)
-          const newSession = createSession(agentDir, 'builtin');
+          const newSession = createSession(agentDir, payload.runtime ?? getActiveRuntimeType());
           const switched = await switchToSession(newSession.id);
           if (!switched) {
             console.error(`[cron] execute-sync taskId=${taskId} failed to switch to new session ${newSession.id}`);
@@ -2072,14 +2129,15 @@ async function main() {
 
           if (shouldUseExternalRuntime()) {
             // ─── External Runtime (CC/Codex): cron task ───
+            const runtimeConfig = payload.runtimeConfig ?? null;
             const ccResult = await sendExternalMessage(
               wrappedPrompt, undefined, undefined, undefined,
               {
                 sessionId: getSessionId(),
                 workspacePath: agentDir,
                 scenario: { type: 'cron', taskId: taskId ?? 'unknown', intervalMinutes: intervalMinutes ?? 0, aiCanExit: aiCanExit ?? false },
-                permissionMode: 'fullAgency',
-                model: undefined,
+                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
+                model: getRuntimeConfigModel(runtimeConfig),
               },
             );
             if (!ccResult.queued) {
@@ -6967,6 +7025,8 @@ async function main() {
             permissionMode?: string;
             providerEnv?: ProviderEnv;
             model?: string;
+            runtime?: RuntimeType;
+            runtimeConfig?: RuntimeConfig;
             images?: ImagePayload[];
             botId?: string;
             botName?: string;
@@ -6998,14 +7058,21 @@ async function main() {
           // Set IM cron context for the im-cron tool (v0.1.21)
           if (payload.botId && process.env.MYAGENTS_MANAGEMENT_PORT) {
             const { getSessionModel } = await import('./agent-session');
+            const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
+            const payloadRuntimeConfig = payload.runtimeConfig ?? null;
+            const imCronModel = payloadRuntime === 'builtin'
+              ? (payload.model ?? getSessionModel())
+              : getRuntimeConfigModel(payloadRuntimeConfig);
             setImCronContext({
               botId: payload.botId,
               chatId: payload.sourceId,
               platform: payload.source.split('_')[0], // "telegram" or "feishu"
               workspacePath: agentDir,
-              model: payload.model ?? getSessionModel(),
-              permissionMode: payload.permissionMode,
-              providerEnv: payload.providerEnv ? {
+              model: imCronModel,
+              permissionMode: payloadRuntime === 'builtin'
+                ? payload.permissionMode
+                : getRuntimeConfigPermissionMode(payloadRuntimeConfig),
+              providerEnv: payloadRuntime === 'builtin' && payload.providerEnv ? {
                 baseUrl: payload.providerEnv.baseUrl,
                 apiKey: payload.providerEnv.apiKey,
                 authType: payload.providerEnv.authType,
@@ -7014,6 +7081,8 @@ async function main() {
                 maxOutputTokensParamName: payload.providerEnv.maxOutputTokensParamName,
                 upstreamFormat: payload.providerEnv.upstreamFormat,
               } : undefined,
+              runtime: payloadRuntime,
+              runtimeConfig: payloadRuntime === 'builtin' ? undefined : payloadRuntimeConfig ?? undefined,
             });
 
             // Set IM media context for the im-media tool (send_media)
@@ -7138,14 +7207,19 @@ async function main() {
           if (shouldUseExternalRuntime()) {
             const imSource = payload.source.split('_')[0];
             const imSourceType = payload.source.includes('group') ? 'group' as const : 'private' as const;
+            const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
+            const runtimeConfig = payload.runtimeConfig ?? null;
+            if (payloadRuntime !== getActiveRuntimeType()) {
+              console.warn(`[im/chat] Runtime mismatch: sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}`);
+            }
             const ccResult = await sendExternalMessage(
               finalMessage, payload.images ?? undefined, undefined, undefined,
               {
                 sessionId: getSessionId(),
                 workspacePath: agentDir,
                 scenario: { type: 'agent-channel' as const, platform: imSource, sourceType: imSourceType, botName: payload.botName },
-                permissionMode: 'fullAgency',
-                model: undefined, // CC uses its own configured model
+                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
+                model: getRuntimeConfigModel(runtimeConfig),
               },
             );
             if (!ccResult.queued) {
@@ -7315,6 +7389,8 @@ async function main() {
             sourceId: string;
             ackMaxChars?: number;
             isHighPriority?: boolean;
+            runtime?: RuntimeType;
+            runtimeConfig?: RuntimeConfig;
           };
 
           if (!payload.prompt) {
@@ -7401,14 +7477,15 @@ description: >
 
           if (shouldUseExternalRuntime()) {
             // ─── External Runtime (CC/Codex): heartbeat ───
+            const runtimeConfig = payload.runtimeConfig ?? null;
             const ccResult = await sendExternalMessage(
               enrichedPrompt, undefined, undefined, undefined,
               {
                 sessionId: getSessionId(),
                 workspacePath: agentDir,
                 scenario: { type: 'agent-channel', platform: payload.source?.split('_')[0] ?? 'unknown', sourceType: 'private' },
-                permissionMode: 'fullAgency',
-                model: undefined,
+                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
+                model: getRuntimeConfigModel(runtimeConfig),
               },
             );
             if (!ccResult.queued) {
@@ -7605,28 +7682,6 @@ description: >
           console.error('[im/session/new] Error:', error);
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Reset error' },
-            500,
-          );
-        }
-      }
-
-      // POST /api/im/session/switch-workspace — Switch workspace and start new session
-      if (pathname === '/api/im/session/switch-workspace' && request.method === 'POST') {
-        try {
-          const payload = (await request.json()) as { workspacePath: string };
-          if (!payload.workspacePath) {
-            return jsonResponse({ success: false, error: 'workspacePath is required' }, 400);
-          }
-          // Reset session (workspace change will be handled by Rust layer restarting the Sidecar)
-          await resetSession();
-          return jsonResponse({
-            sessionId: getSessionId(),
-            workspacePath: payload.workspacePath,
-          });
-        } catch (error) {
-          console.error('[im/session/switch-workspace] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Switch error' },
             500,
           );
         }

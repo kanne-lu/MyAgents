@@ -6,10 +6,8 @@
 import { memo, useCallback, useMemo, useState } from 'react';
 import { AlertCircle, ArrowRight, BarChart2, Clock, MessageSquare, Plus, RefreshCw, Timer, Trash2 } from 'lucide-react';
 
-import { useTaskCenterData } from '@/hooks/useTaskCenterData';
+import type { TaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from './WorkspaceIcon';
-import { deleteSession } from '@/api/sessionClient';
-import { deactivateSession } from '@/api/tauriClient';
 import SessionTagBadge from '@/components/SessionTagBadge';
 import SessionStatsModal from '@/components/SessionStatsModal';
 import ConfirmDialog from '@/components/ConfirmDialog';
@@ -36,7 +34,7 @@ interface RecentTasksProps {
     onOpenTask: (session: SessionMetadata, project: Project) => void;
     onOpenOverlay: () => void;
     onOpenCronDetail: (task: CronTask) => void;
-    isActive?: boolean;
+    taskCenterData: TaskCenterData;
 }
 
 type ActiveTab = 'sessions' | 'cron';
@@ -46,10 +44,9 @@ export default memo(function RecentTasks({
     onOpenTask,
     onOpenOverlay,
     onOpenCronDetail,
-    isActive,
+    taskCenterData,
 }: RecentTasksProps) {
-    const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, isLoading, error, refresh, removeSession } =
-        useTaskCenterData({ isActive });
+    const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, isLoading, error, refresh, actions } = taskCenterData;
     const toast = useToast();
 
     const [activeTab, setActiveTab] = useState<ActiveTab>('sessions');
@@ -103,10 +100,8 @@ export default memo(function RecentTasks({
         const { id } = pendingDeleteSession;
         setPendingDeleteSession(null);
         try {
-            const success = await deleteSession(id);
+            const success = await actions.deleteSession(id);
             if (success) {
-                await deactivateSession(id);
-                removeSession(id);
                 toast.success('已删除');
             } else {
                 toast.error('删除失败，请重试');
@@ -115,17 +110,34 @@ export default memo(function RecentTasks({
             console.error('[RecentTasks] Delete session failed:', err);
             toast.error('删除失败');
         }
-    }, [pendingDeleteSession, removeSession, toast]);
+    }, [actions, pendingDeleteSession, toast]);
 
     const handleShowStats = useCallback((e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
         setStatsSession({ id: session.id, title: getSessionDisplayText(session) });
     }, []);
 
+    const handleTabChange = useCallback((tab: ActiveTab) => {
+        setActiveTab(tab);
+        refresh(tab === 'sessions' ? 'sessions' : 'cronTasks', {
+            force: true,
+            reason: 'recent-tasks-tab-change',
+            silent: true,
+        });
+    }, [refresh]);
+
+    const handleCreated = useCallback(() => {
+        refresh('all', { force: true, reason: 'recent-tasks-cron-created', silent: true });
+    }, [refresh]);
+
+    const handleRetry = useCallback(() => {
+        refresh('all', { force: true, reason: 'recent-tasks-retry' });
+    }, [refresh]);
+
     if (isLoading) {
         return (
             <div className="mb-8">
-                <TabHeader activeTab={activeTab} onTabChange={setActiveTab} />
+                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} />
                 <div className={`${LIST_MIN_HEIGHT} flex items-center`}>
                     <div className="py-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</div>
                 </div>
@@ -136,13 +148,13 @@ export default memo(function RecentTasks({
     if (error) {
         return (
             <div className="mb-8">
-                <TabHeader activeTab={activeTab} onTabChange={setActiveTab} />
+                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} />
                 <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
                     <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
                         <AlertCircle className="mx-auto mb-2 h-4 w-4 text-amber-500/70" />
                         <p className="mb-2 text-[13px] text-[var(--ink-muted)]">{error}</p>
                         <button
-                            onClick={refresh}
+                            onClick={handleRetry}
                             className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                         >
                             <RefreshCw className="h-3.5 w-3.5" />
@@ -156,7 +168,7 @@ export default memo(function RecentTasks({
 
     return (
         <div className="mb-8">
-            <TabHeader activeTab={activeTab} onTabChange={setActiveTab} />
+            <TabHeader activeTab={activeTab} onTabChange={handleTabChange} />
 
             {/* Sessions tab */}
             {activeTab === 'sessions' && (
@@ -336,7 +348,7 @@ export default memo(function RecentTasks({
             {showCreateModal && (
                 <TaskCreateModal
                     onClose={() => setShowCreateModal(false)}
-                    onCreated={refresh}
+                    onCreated={handleCreated}
                 />
             )}
         </div>

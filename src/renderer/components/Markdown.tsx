@@ -11,7 +11,7 @@
 
 import 'katex/dist/katex.min.css';
 
-import { memo, useContext, useEffect, useMemo, useState } from 'react';
+import { memo, useContext, useEffect, useMemo, useState, type ComponentProps } from 'react';
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
@@ -28,6 +28,7 @@ import { openExternal, isExternalUrl } from '@/utils/openExternal';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { getTabServerUrl, proxyFetch, isTauri } from '@/api/tauriClient';
 import { useTabApiOptional } from '@/context/TabContext';
+import { preprocessMarkdownContent } from '@/utils/markdownPreprocess';
 
 // Sanitize schema: allow safe HTML tags from rehype-raw, strip scripts/iframes/event handlers.
 // Extends the default GitHub-flavored schema with additional tags used in AI-generated content.
@@ -53,8 +54,11 @@ const SANITIZE_SCHEMA = {
 // Static plugin arrays to avoid recreation on every render
 const REMARK_PLUGINS_DEFAULT = [remarkGfm, remarkMath];
 const REMARK_PLUGINS_WITH_BREAKS = [remarkGfm, remarkMath, remarkBreaks];
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- rehype plugin tuple typing
-const REHYPE_PLUGINS = [rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA], rehypeKatex] as any[];
+const REHYPE_PLUGINS: ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [
+  rehypeRaw,
+  [rehypeSanitize, SANITIZE_SCHEMA],
+  rehypeKatex,
+];
 
 // Custom link component that opens links in embedded browser panel (if available)
 // or falls back to system browser. Supports text selection for copying.
@@ -397,84 +401,6 @@ function MarkdownImage({ src, alt, basePath, tabId }: {
 }
 
 /**
- * Preprocess markdown content for better streaming compatibility.
- *
- * Markdown Priority (highest to lowest):
- * 1. Code blocks (``` ```) - content is literal, no parsing
- * 2. Inline code (` `) - content is literal, no parsing
- * 3. Everything else (headers, lists, emphasis, etc.)
- *
- * This function respects the priority by:
- * 1. Extracting and protecting code blocks and inline code
- * 2. Applying format fixes to the remaining content
- * 3. Restoring the protected code
- */
-function preprocessContent(content: string): string {
-  if (!content) return '';
-
-  // Step 1: Extract and protect code blocks and inline code
-  const protected_: string[] = [];
-  let processed = content;
-
-  // Protect fenced code blocks (``` ... ```)
-  processed = processed.replace(/```[\s\S]*?```/g, (match) => {
-    protected_.push(match);
-    return `\x00CODE${protected_.length - 1}\x00`;
-  });
-
-  // Protect inline code (` ... `) - handle both single and multiple backticks
-  processed = processed.replace(/`[^`]+`/g, (match) => {
-    protected_.push(match);
-    return `\x00CODE${protected_.length - 1}\x00`;
-  });
-
-  // Protect GFM table blocks (2+ consecutive lines starting with |)
-  // Without this, regexes below (e.g. heading fix) corrupt table cells containing #
-  processed = processed.replace(/(?:^[ \t]*\|[^\n]*(?:\n|$)){2,}/gm, (match) => {
-    protected_.push(match);
-    return `\x00CODE${protected_.length - 1}\x00`;
-  });
-
-  // Step 2: Apply format fixes to unprotected content
-
-  // 2a. Escape currency dollar signs ($100, $3,000, $1.50 etc.)
-  // remark-math treats $...$ as inline LaTeX, causing false positives like
-  // "$3000 亿...$1880 亿" being rendered as a math expression.
-  // Pattern: $ followed by digit, not preceded by another $ (preserves $$...$$)
-  processed = processed.replace(/(?<!\$)\$(?=\d)/g, '\\$');
-
-  // 2b. Ensure headers have a blank line before them (except at the start)
-  // "text## Header" -> "text\n\n## Header"
-  // But NOT "## Title" (already correct - don't break multi-hash headers)
-  processed = processed.replace(/([^\n#])(#{1,6}\s+)(?=\S)/g, '$1\n\n$2');
-
-  // 2c. Ensure headers at the start of lines have a space after # (if missing)
-  // "##Title" -> "## Title" (only at line start)
-  processed = processed.replace(/^(#{1,6})([^\s#\n])/gm, '$1 $2');
-
-  // 2d. Fix unordered list items at LINE START ONLY
-  // "-item" -> "- item"
-  processed = processed.replace(/^-([^\s\-\n])/gm, '- $1');
-
-  // 2e. Fix ordered list items at LINE START ONLY
-  // "1.item" -> "1. item"
-  processed = processed.replace(/^(\d+\.)([^\s\n])/gm, '$1 $2');
-
-  // Step 3: Restore protected code blocks and inline code
-  // Multiple passes needed: table blocks may contain inline code placeholders,
-  // so restoring the table in one pass leaves inner placeholders unresolved.
-  // eslint-disable-next-line no-control-regex -- Intentional use of NUL as placeholder
-  while (/\x00CODE\d+\x00/.test(processed)) {
-    // eslint-disable-next-line no-control-regex
-    processed = processed.replace(/\x00CODE(\d+)\x00/g, (_, index) => {
-      return protected_[parseInt(index, 10)];
-    });
-  }
-
-  return processed;
-}
-
-/**
  * Convert YAML frontmatter (---\n...\n---) to a fenced yaml code block
  * so the existing CodeBlock component renders it with syntax highlighting.
  * Only applied in raw/file-preview mode where skill/agent .md files are displayed.
@@ -490,7 +416,7 @@ function convertFrontmatter(content: string): string {
 const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath }: MarkdownProps) {
   // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages
   // In raw mode, convert YAML frontmatter to a fenced code block for proper rendering
-  const processedContent = raw ? convertFrontmatter(children) : preprocessContent(children);
+  const processedContent = raw ? convertFrontmatter(children) : preprocessMarkdownContent(children);
 
   // Get tabId for image loading (only needed when basePath is provided)
   const tabApi = useTabApiOptional();
@@ -522,4 +448,3 @@ const Markdown = memo(function Markdown({ children, compact = false, preserveNew
 });
 
 export default Markdown;
-

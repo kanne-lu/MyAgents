@@ -350,6 +350,14 @@ async function syncAgentRuntime(
     runtimePatch.permissionMode = patch.permissionMode ?? null;
     hasRuntimeChanges = true;
   }
+  if ('runtime' in patch) {
+    runtimePatch.runtime = patch.runtime ?? null;
+    hasRuntimeChanges = true;
+  }
+  if ('runtimeConfig' in patch) {
+    runtimePatch.runtimeConfig = patch.runtimeConfig ?? null;
+    hasRuntimeChanges = true;
+  }
   if ('heartbeat' in patch) {
     runtimePatch.heartbeatConfigJson = patch.heartbeat ? JSON.stringify(patch.heartbeat) : null;
     hasRuntimeChanges = true;
@@ -447,6 +455,8 @@ export async function invokeStartAgentChannel(
       model: effective.model,
       providerEnvJson: effective.providerEnvJson,
       permissionMode: effective.permissionMode,
+      runtime: effective.runtime,
+      runtimeConfig: effective.runtimeConfig,
       mcpEnabledServers: agent.mcpEnabledServers,
       mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
       heartbeat: agent.heartbeat,

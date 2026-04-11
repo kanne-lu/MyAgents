@@ -3,6 +3,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { isTauriEnvironment } from '@/utils/browserMock';
+import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
 
 /** Sidecar status returned from Rust backend */
 export interface SidecarStatus {
@@ -975,7 +976,9 @@ export async function executeCronTask(
     aiCanExit?: boolean,
     permissionMode?: string,
     model?: string,
-    providerEnv?: ProviderEnv
+    providerEnv?: ProviderEnv,
+    runtime?: RuntimeType,
+    runtimeConfig?: RuntimeConfig
 ): Promise<CronExecuteResponse> {
     if (!isTauri()) {
         return { success: false, error: 'Not in Tauri environment' };
@@ -992,6 +995,8 @@ export async function executeCronTask(
             permissionMode: permissionMode ?? null,
             model: model ?? null,
             providerEnv: providerEnv ?? null,
+            runtime: runtime ?? null,
+            runtimeConfig: runtimeConfig ?? null,
         });
         console.debug(`[tauriClient] Cron task ${taskId} execution completed:`, response);
         return response;

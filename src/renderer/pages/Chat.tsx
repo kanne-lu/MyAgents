@@ -42,8 +42,8 @@ import {
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
-import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, getDefaultRuntimePermissionMode } from '../../shared/types/runtime';
+import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
 
@@ -624,6 +624,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const effectivePermissionMode = isExternalRuntime
     ? runtimePermissionMode as PermissionMode
     : permissionMode;
+
+  const buildCronRuntimeConfig = useCallback((): RuntimeConfig | undefined => {
+    if (!isExternalRuntime) return undefined;
+    const base = { ...((currentAgent?.runtimeConfig as RuntimeConfig | undefined) ?? {}) };
+    if (runtimeModel !== undefined) {
+      base.model = runtimeModel;
+    }
+    const hasPersistedPermission = typeof (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode === 'string';
+    if (hasPersistedPermission || runtimePermissionMode !== getDefaultRuntimePermissionMode(currentRuntime)) {
+      base.permissionMode = runtimePermissionMode;
+    }
+    return Object.keys(base).length > 0 ? base : undefined;
+  }, [isExternalRuntime, currentAgent?.runtimeConfig, runtimeModel, runtimePermissionMode, currentRuntime]);
 
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
@@ -1510,6 +1523,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               model: cron.config.model,
               permissionMode: cron.config.permissionMode,
               providerEnv: cron.config.providerEnv,
+              runtime: cron.config.runtime,
+              runtimeConfig: cron.config.runtimeConfig,
               schedule: cron.config.schedule,
               delivery: cron.config.delivery,
             });
@@ -2691,9 +2706,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           // The difference is handled at send time based on executionTarget
           const enrichedConfig = {
             ...config,
-            model: selectedModel,
-            permissionMode: permissionMode,
-            providerEnv: providerEnv,
+            model: isExternalRuntime ? undefined : selectedModel,
+            permissionMode: isExternalRuntime ? undefined : permissionMode,
+            providerEnv: isExternalRuntime ? undefined : providerEnv,
+            runtime: currentRuntime,
+            runtimeConfig: buildCronRuntimeConfig(),
             executionTarget: config.executionTarget,
           };
 

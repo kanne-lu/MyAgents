@@ -2273,6 +2273,24 @@ pub fn ensure_session_sidecar<R: Runtime>(
     workspace_path: &std::path::Path,
     owner: SidecarOwner,
 ) -> Result<EnsureSidecarResult, String> {
+    ensure_session_sidecar_with_runtime_override(
+        app_handle,
+        manager,
+        session_id,
+        workspace_path,
+        owner,
+        None,
+    )
+}
+
+pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+    workspace_path: &std::path::Path,
+    owner: SidecarOwner,
+    runtime_override: Option<String>,
+) -> Result<EnsureSidecarResult, String> {
     ulog_info!("[sidecar] ensure_session_sidecar called for session: {}, owner: {:?}", session_id, owner);
 
     // Ensure file descriptor limit is high enough for Bun
@@ -2385,13 +2403,25 @@ pub fn ensure_session_sidecar<R: Runtime>(
         }
 
         return create_new_session_sidecar(
-            app_handle, manager, session_id, workspace_path, owner, manager_guard
+            app_handle,
+            manager,
+            session_id,
+            workspace_path,
+            owner,
+            manager_guard,
+            runtime_override.as_deref(),
         );
     }
 
     // No existing sidecar found, create a new one with the original guard
     create_new_session_sidecar(
-        app_handle, manager, session_id, workspace_path, owner, manager_guard
+        app_handle,
+        manager,
+        session_id,
+        workspace_path,
+        owner,
+        manager_guard,
+        runtime_override.as_deref(),
     )
 }
 
@@ -2404,6 +2434,7 @@ fn create_new_session_sidecar<R: Runtime>(
     workspace_path: &std::path::Path,
     owner: SidecarOwner,
     mut manager_guard: std::sync::MutexGuard<'_, SidecarManager>,
+    runtime_override: Option<&str>,
 ) -> Result<EnsureSidecarResult, String> {
 
     // Guard against double-creation: if another thread already created a sidecar for this
@@ -2473,7 +2504,8 @@ fn create_new_session_sidecar<R: Runtime>(
     //         → agent config (fallback for pending/new sessions without metadata yet)
     // This ensures existing sessions always get the correct runtime, even after the user
     // changes the agent's default runtime in settings.
-    let resolved_runtime = resolve_session_runtime(session_id)
+    let resolved_runtime = runtime_override.map(|runtime| runtime.to_string())
+        .or_else(|| resolve_session_runtime(session_id))
         .or_else(|| resolve_agent_runtime_from_config(workspace_path));
     if let Some(runtime) = resolved_runtime {
         cmd.env("MYAGENTS_RUNTIME", &runtime);
@@ -3400,6 +3432,10 @@ pub struct CronExecutePayload {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<ProviderEnv>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_config: Option<serde_json::Value>,
     /// Run mode: "single_session" (keep context) or "new_session" (fresh each time)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_mode: Option<String>,
@@ -3482,10 +3518,18 @@ pub async fn execute_cron_task<R: Runtime>(
     let workspace_clone = workspace_path.to_string();
     let task_id_clone = payload.task_id.clone();
     let owner = SidecarOwner::CronTask(task_id_clone.clone());
+    let runtime_override = payload.runtime.clone();
 
     let result = tokio::task::spawn_blocking(move || {
         let workspace = PathBuf::from(&workspace_clone);
-        ensure_session_sidecar(&app_handle_clone, &manager_clone, &session_id_clone, &workspace, owner)
+        ensure_session_sidecar_with_runtime_override(
+            &app_handle_clone,
+            &manager_clone,
+            &session_id_clone,
+            &workspace,
+            owner,
+            runtime_override,
+        )
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {}", e))?
@@ -3625,6 +3669,8 @@ pub async fn cmd_execute_cron_task(
     permissionMode: Option<String>,
     model: Option<String>,
     providerEnv: Option<ProviderEnv>,
+    runtime: Option<String>,
+    runtimeConfig: Option<serde_json::Value>,
     runMode: Option<String>,
     intervalMinutes: Option<u32>,
     executionNumber: Option<u32>,
@@ -3638,6 +3684,8 @@ pub async fn cmd_execute_cron_task(
         permission_mode: permissionMode,
         model,
         provider_env: providerEnv,
+        runtime,
+        runtime_config: runtimeConfig,
         run_mode: runMode,
         interval_minutes: intervalMinutes,
         execution_number: executionNumber,
@@ -3819,4 +3867,3 @@ fn resolve_session_runtime(session_id: &str) -> Option<String> {
     }
     None
 }
-

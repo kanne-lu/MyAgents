@@ -4,15 +4,13 @@
  * Right column: cron tasks list.
  */
 
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { BarChart2, Clock, Plus, Trash2, X } from 'lucide-react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
-import { useTaskCenterData } from '@/hooks/useTaskCenterData';
+import { TASK_CENTER_FRESHNESS_TTL_MS, type TaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
-import { deleteSession } from '@/api/sessionClient';
-import { deactivateSession } from '@/api/tauriClient';
 import SessionTagBadge from '@/components/SessionTagBadge';
 import SessionStatsModal from '@/components/SessionStatsModal';
 import ConfirmDialog from '@/components/ConfirmDialog';
@@ -36,7 +34,7 @@ interface TaskCenterOverlayProps {
     onOpenTask: (session: SessionMetadata, project: Project) => void;
     onOpenCronDetail: (task: CronTask) => void;
     onClose: () => void;
-    isActive?: boolean;
+    taskCenterData: TaskCenterData;
 }
 
 type StatusFilter = 'all' | 'active' | 'desktop' | 'bot';
@@ -53,12 +51,10 @@ export default memo(function TaskCenterOverlay({
     onOpenTask,
     onOpenCronDetail,
     onClose,
-    isActive,
+    taskCenterData,
 }: TaskCenterOverlayProps) {
     useCloseLayer(() => { onClose(); return true; }, 40);
-    const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, removeSession } = useTaskCenterData({
-        isActive,
-    });
+    const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, refresh, actions } = taskCenterData;
     const toast = useToast();
 
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
@@ -66,6 +62,14 @@ export default memo(function TaskCenterOverlay({
     const [pendingDeleteSession, setPendingDeleteSession] = useState<{ id: string; title: string } | null>(null);
     const [statsSession, setStatsSession] = useState<{ id: string; title: string } | null>(null);
     const [showCreateModal, setShowCreateModal] = useState(false);
+
+    useEffect(() => {
+        refresh('all', {
+            minIntervalMs: TASK_CENTER_FRESHNESS_TTL_MS,
+            reason: 'task-center-overlay-open',
+            silent: true,
+        });
+    }, [refresh]);
 
     // Unique workspace entries for dropdown (name + icon)
     const workspaceOptions = useMemo(() => {
@@ -162,10 +166,8 @@ export default memo(function TaskCenterOverlay({
         const { id } = pendingDeleteSession;
         setPendingDeleteSession(null);
         try {
-            const success = await deleteSession(id);
+            const success = await actions.deleteSession(id);
             if (success) {
-                await deactivateSession(id);
-                removeSession(id);
                 toast.success('已删除');
             } else {
                 toast.error('删除失败，请重试');
@@ -174,12 +176,16 @@ export default memo(function TaskCenterOverlay({
             console.error('[TaskCenterOverlay] Delete session failed:', err);
             toast.error('删除失败');
         }
-    }, [pendingDeleteSession, removeSession, toast]);
+    }, [actions, pendingDeleteSession, toast]);
 
     const handleShowStats = useCallback((e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
         setStatsSession({ id: session.id, title: getSessionDisplayText(session) });
     }, []);
+
+    const handleCreated = useCallback(() => {
+        refresh('all', { force: true, reason: 'task-center-cron-created', silent: true });
+    }, [refresh]);
 
     return (
         <OverlayBackdrop onClose={onClose} className="z-40" style={{ animation: 'overlayFadeIn 200ms ease-out' }}>
@@ -410,6 +416,7 @@ export default memo(function TaskCenterOverlay({
             {showCreateModal && (
                 <TaskCreateModal
                     onClose={() => setShowCreateModal(false)}
+                    onCreated={handleCreated}
                 />
             )}
         </OverlayBackdrop>
