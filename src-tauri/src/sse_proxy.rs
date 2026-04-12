@@ -325,7 +325,26 @@ fn is_binary_content_type(content_type: &str) -> bool {
 pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<HttpResponse, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use crate::logger;
-    
+
+    // CRITICAL: Validate URL is absolute before forwarding to reqwest.
+    // Relative URLs (e.g., "/api/something") cause reqwest to fail with an opaque
+    // "relative URL without a base" builder error. This cascades into:
+    //   IPC error → frontend treats as sidecar crash → SSE reconnect → Global Sidecar restart
+    //   → full UI re-render (all tabs rebuilt). See: #78
+    //
+    // This guard catches the issue at the source with a clear error message.
+    if !request.url.starts_with("http://") && !request.url.starts_with("https://") {
+        // Truncate safely (chars, not bytes) to prevent panic on multi-byte UTF-8
+        let display_url: String = request.url.chars().take(200).collect();
+        let err = format!(
+            "[proxy] Blocked relative URL: '{}'. Expected absolute URL (http://...). \
+             This usually means the sidecar port was not resolved before making this request.",
+            display_url
+        );
+        logger::warn(&app, &err);
+        return Err(err);
+    }
+
     // Skip logging for high-frequency polling paths (matches Bun-side skip list).
     // Extract path (before '?') from full URL for precise matching.
     let url_path = request.url.split('?').next().unwrap_or(&request.url);

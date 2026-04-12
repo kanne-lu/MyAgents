@@ -250,6 +250,21 @@ export async function proxyFetch(
         return fetch(url, options);
     }
 
+    // GUARD: In Tauri mode, URLs MUST be absolute (http://127.0.0.1:PORT/...).
+    // Relative URLs (e.g., "/api/something") happen when the sidecar port could not
+    // be resolved (race condition: sidecar died between URL construction and send).
+    // Without this guard, reqwest fails with "relative URL without a base" which
+    // cascades into SSE disconnect → Global Sidecar restart → full UI re-render. (#78)
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        const truncated = url.length > 100 ? url.slice(0, 100) + '...' : url;
+        const error = new Error(
+            `[proxyFetch] Blocked relative URL: "${truncated}". ` +
+            'Sidecar port may not be resolved yet. This request will be dropped to prevent cascading failures.'
+        );
+        console.warn(error.message);
+        throw error;
+    }
+
     const method = options?.method || 'GET';
     const body = options?.body ? String(options.body) : undefined;
 
