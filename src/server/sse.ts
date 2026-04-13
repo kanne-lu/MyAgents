@@ -296,6 +296,20 @@ const SILENT_EVENTS = new Set([
 const CHUNK_COALESCE_MS = 40;
 const chunkBuffers = new Map<string, { merged: string; timer: ReturnType<typeof setTimeout> }>();
 
+// Events that don't carry ordering semantics with the text stream and must
+// NOT cause a pending-chunk buffer drain. `chat:log` fires from inside the
+// text-delta handler on verbose providers; treating it as a flush boundary
+// would defeat coalescing entirely under heavy logging. Anything else
+// (tool-use-start, message-complete, permission prompts, …) must still
+// flush so the consumer's strict ordering invariants hold.
+const NON_FLUSHING_EVENTS = new Set<string>(['chat:log']);
+
+// Coalesce buffer scope: module-level Map. Each Sidecar is one Bun process
+// serving a single session under the project's Tab-scoped Sidecar isolation
+// (see specs/tech_docs/architecture.md § "Tab-scoped 隔离"), so cross-session
+// mixing cannot happen here. If that invariant ever changes, key the buffer
+// by client id instead.
+
 function flushCoalescedChunk(event: string): void {
   const entry = chunkBuffers.get(event);
   if (!entry) return;
@@ -345,8 +359,11 @@ export function broadcast(event: string, data: unknown): void {
   }
   // Every non-coalesced event flushes pending chunk buffers first so that
   // a tool-use-start or message-complete never lands before the text delta
-  // that preceded it.
-  if (chunkBuffers.size > 0) flushAllCoalesced();
+  // that preceded it — except for events declared non-ordering above, which
+  // pass through without disturbing the in-flight coalesce window.
+  if (chunkBuffers.size > 0 && !NON_FLUSHING_EVENTS.has(event)) {
+    flushAllCoalesced();
+  }
   broadcastImmediate(event, data);
 }
 

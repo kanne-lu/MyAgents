@@ -144,14 +144,15 @@ fn build_response(request: &Request<Vec<u8>>) -> Response<Vec<u8>> {
         .unwrap()
 }
 
-/// Async URI scheme handler. File I/O runs on a worker thread so a large image
-/// read never blocks the webview thread.
+/// Async URI scheme handler. File I/O runs on Tauri's pooled blocking executor
+/// so a large image read never blocks the webview thread, and rapid scrolling
+/// through a paginated gallery doesn't spawn one fresh OS thread per request.
 pub fn handle<R: Runtime>(
     _ctx: UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
     responder: UriSchemeResponder,
 ) {
-    std::thread::spawn(move || {
+    tauri::async_runtime::spawn_blocking(move || {
         let response = build_response(&request);
         responder.respond(response);
     });

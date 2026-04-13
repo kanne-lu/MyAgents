@@ -434,11 +434,25 @@ export default function TabProvider({
         clearAllBackgroundTaskStatuses();
     }, []);
 
+    // Reset pagination state (firstItemIndex + hasMoreBefore + in-flight guard)
+    // on any boundary where historyMessages is cleared or replaced without a
+    // subsequent loadSession: resetSession, chat:init SSE-reconnect clear path,
+    // and as a fallback for places that drop history. loadSession has its own
+    // inline reset that uses the server's `hasMoreBefore` value from the
+    // response, so it deliberately does not call this helper.
+    const resetPaginationState = useCallback(() => {
+        setFirstItemIndex(PAGINATION_START_INDEX);
+        setHasMoreBefore(false);
+        hasMoreBeforeRef.current = false;
+        loadingOlderRef.current = false;
+    }, []);
+
     const resetSession = useCallback(async (): Promise<boolean> => {
         console.log(`[TabProvider ${tabId}] resetSession: starting...`);
 
         // 1. Clear frontend state immediately for responsive UI
         setHistoryMessages([]);
+        resetPaginationState();
         setStreamingMessage(null);
         seenIdsRef.current.clear();
         isNewSessionRef.current = true;
@@ -486,7 +500,7 @@ export default function TabProvider({
             console.error(`[TabProvider ${tabId}] resetSession error:`, error);
             return false;
         }
-    }, [tabId, postJson, setStreamingMessage, clearInteractiveState, clearSessionActive]);
+    }, [tabId, postJson, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
 
     // Append log
     const appendLog = useCallback((line: string) => {
@@ -700,6 +714,13 @@ export default function TabProvider({
                 if (!isLoadingSessionRef.current) {
                     seenIdsRef.current.clear();
                     setHistoryMessages([]);
+                    // Mirror the reset-pagination behaviour: clearing history
+                    // without a follow-up loadSession (e.g. SSE reconnect on a
+                    // fresh session) would otherwise leave firstItemIndex at
+                    // whatever value the previous older-page fetches left it,
+                    // and could let hasMoreBefore=true fire startReached against
+                    // an empty list.
+                    resetPaginationState();
                     setStreamingMessage(null);
                     setAgentError(null);
                     clearInteractiveState();
@@ -1322,6 +1343,11 @@ export default function TabProvider({
                     const newSessionId = payload.sessionId;
                     if (newSessionId && currentSessionIdRef.current !== newSessionId) {
                         console.log(`[TabProvider ${tabId}] Auto-syncing sessionId from system_init: ${newSessionId}`);
+                        // Update the ref synchronously alongside the state dispatch so that
+                        // async handlers (cron sync, loadOlderMessages) running their
+                        // post-await session-match guard see the new id immediately, rather
+                        // than waiting until the next render commits line 233's assignment.
+                        currentSessionIdRef.current = newSessionId;
                         setCurrentSessionId(newSessionId);
                         // Notify parent (App.tsx) to update Tab.sessionId for Session singleton constraint
                         // This ensures history dropdown can detect if this session is already open
@@ -1732,7 +1758,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, clearSessionActive]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, clearSessionActive, resetPaginationState]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -2274,7 +2300,13 @@ export default function TabProvider({
             setSystemStatus(null);
             setAgentError(null);
             clearInteractiveState();
-            // Update current session ID to reflect the loaded session
+            // Update current session ID to reflect the loaded session.
+            // Ref is updated synchronously so that any in-flight async handler
+            // (cron incremental sync, loadOlderMessages) checking `currentSessionIdRef`
+            // after its await resolves sees the new id immediately — otherwise
+            // its post-await guard would pass against the old id and dispatch a
+            // stale setHistoryMessages onto the already-switched session.
+            currentSessionIdRef.current = targetSessionId;
             setCurrentSessionId(targetSessionId);
 
             // Update tab title from session metadata (fixes title not showing after session switch)
