@@ -396,8 +396,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         handleLaunch(project, session.id);
     }, [handleLaunch]);
 
-    const handleOpenOverlay = useCallback(() => { track('task_center_open', {}); setShowOverlay(true); }, []);
-    const handleCloseOverlay = useCallback(() => setShowOverlay(false), []);
+    const [overlayMode, setOverlayMode] = useState<'default' | 'search'>('default');
+    const handleOpenOverlay = useCallback((mode: 'default' | 'search' = 'default') => { track('task_center_open', {}); setOverlayMode(mode); setShowOverlay(true); }, []);
+    const handleCloseOverlay = useCallback(() => { setShowOverlay(false); setOverlayMode('default'); }, []);
     const handleOpenCronDetail = useCallback((task: CronTask) => setSelectedCronTask(task), []);
     const handleCloseCronDetail = useCallback(() => setSelectedCronTask(null), []);
 
@@ -735,6 +736,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     onOpenCronDetail={handleOpenCronDetail}
                     onClose={handleCloseOverlay}
                     taskCenterData={taskCenterData}
+                    initialMode={overlayMode}
                 />
             )}
 

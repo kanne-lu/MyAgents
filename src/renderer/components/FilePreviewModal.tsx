@@ -70,6 +70,8 @@ interface FilePreviewModalProps {
     onFullscreen?: (currentContent?: string) => void;
     /** Switch to browser preview (only for HTML files with an active browser panel) */
     onSwitchToBrowser?: () => void;
+    /** Initial line to scroll to */
+    initialLineNumber?: number;
 }
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
@@ -125,6 +127,7 @@ export default function FilePreviewModal({
     embedded = false,
     onFullscreen,
     onSwitchToBrowser,
+    initialLineNumber,
 }: FilePreviewModalProps) {
     // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
     // Embedded mode (split-panel) has no z-index overlay and is handled separately.
@@ -406,6 +409,7 @@ export default function FilePreviewModal({
                             value={editContent}
                             onChange={setEditContent}
                             language={effectiveMonacoLanguage}
+                            initialLineNumber={initialLineNumber}
                         />
                     </div>
                 </Suspense>
@@ -448,6 +452,7 @@ export default function FilePreviewModal({
                         language={effectiveMonacoLanguage}
                         readOnly={!isDirectEdit}
                         onSave={isDirectEdit ? handleManualFlush : undefined}
+                        initialLineNumber={initialLineNumber}
                     />
                 </div>
             </Suspense>

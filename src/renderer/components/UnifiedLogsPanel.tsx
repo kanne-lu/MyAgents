@@ -163,6 +163,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
     }, [filteredLogs, searchQuery]);
 
     // Clamp activeMatchIndex when matches change
+    /* eslint-disable react-hooks/set-state-in-effect */
     useEffect(() => {
         if (matchIndices.length === 0) {
             setActiveMatchIndex(0);
@@ -170,6 +171,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
             setActiveMatchIndex(matchIndices.length - 1);
         }
     }, [matchIndices.length, activeMatchIndex]);
+    /* eslint-enable react-hooks/set-state-in-effect */
 
     // Scroll to active match
     useEffect(() => {

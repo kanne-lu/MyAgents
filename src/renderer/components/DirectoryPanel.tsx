@@ -12,9 +12,11 @@ import {
   SlidersHorizontal,
   Trash2,
   Upload,
-  PanelRightClose,
   ExternalLink,
   TerminalSquare,
+  Search,
+  PanelRightClose,
+  X,
 } from "lucide-react";
 import Tip from "@/components/Tip";
 import {
@@ -58,6 +60,21 @@ import { shortenPathForDisplay } from "@/utils/pathDetection";
 
 import ConfirmDialog from "./ConfirmDialog";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
+import { searchWorkspaceFiles, refreshWorkspaceFileIndex, type FileSearchHit } from "@/api/searchClient";
+import FileSearchResults from "./search/FileSearchResults";
+
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+  return debouncedValue;
+}
 import RenameDialog from "./RenameDialog";
 import AgentCapabilitiesPanel from "./AgentCapabilitiesPanel";
 import WorkspaceIcon from "./launcher/WorkspaceIcon";
@@ -245,8 +262,56 @@ const DirectoryPanel = memo(
     const loadingDirsRef = useRef<Set<string>>(new Set());
     const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set());
 
+    // Search state
+    const [isSearchMode, setIsSearchMode] = useState(false);
+    const [searchQuery, setSearchQuery] = useState("");
+    const [isSearching, setIsSearching] = useState(false);
+    const [searchResults, setSearchResults] = useState<FileSearchHit[]>([]);
+    const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+    const searchInputRef = useRef<HTMLInputElement>(null);
+
+    const debouncedSearchQuery = useDebounce(searchQuery, 300);
+
     // Image preview context
     const { openPreview } = useImagePreview();
+
+    // When entering search mode, incrementally refresh the Tantivy file index
+    // against the current filesystem. `refreshWorkspaceFileIndex` walks metadata
+    // only and re-indexes just the files whose mtime/size changed — cheap on a
+    // warm cache, full-build on cold. This picks up any files the AI / user
+    // created since the last session without paying the 20s full-reindex cost.
+    useEffect(() => {
+      if (isSearchMode) {
+        refreshWorkspaceFileIndex(agentDir).catch(() => {});
+      }
+    }, [isSearchMode, agentDir]);
+
+    // Trigger search
+    useEffect(() => {
+      if (!isSearchMode) return;
+      if (debouncedSearchQuery.trim() === "") {
+        setSearchResults([]);
+        setIsSearching(false);
+        return;
+      }
+      let isMounted = true;
+      const runSearch = async () => {
+        setIsSearching(true);
+        try {
+          const result = await searchWorkspaceFiles(debouncedSearchQuery, agentDir);
+          if (isMounted) {
+            setSearchResults(result.hits);
+            setExpandedFiles(new Set(result.hits.map(h => h.path)));
+          }
+        } catch (err) {
+          console.error("File search failed:", err);
+        } finally {
+          if (isMounted) setIsSearching(false);
+        }
+      };
+      runSearch();
+      return () => { isMounted = false; };
+    }, [debouncedSearchQuery, agentDir, isSearchMode]);
 
     // Toast for notifications
     const toast = useToast();
@@ -300,6 +365,14 @@ const DirectoryPanel = memo(
 
     // Raw refresh — fetches full directory tree from backend.
     // Not debounced; used for initial load and explicit user actions (manual refresh button).
+    //
+    // MUST NOT invalidate the file search index here. This runs on every file
+    // watcher event (AI tool completion, Monaco save, external edits), so
+    // invalidating would thrash the Tantivy index and force a full rebuild of
+    // ~1000+ files on every keystroke in the search box while the agent is
+    // actively writing files. The search index is invalidated in a dedicated
+    // effect that fires ONLY when search mode is entered, so each search
+    // session gets a fresh index exactly once.
     const rawRefresh = useCallback(() => {
       setError(null);
       apiGet<DirectoryTree>("/agent/dir")
@@ -321,7 +394,7 @@ const DirectoryPanel = memo(
           );
           console.error("[DirectoryPanel] Failed to refresh:", err);
         });
-    }, [apiGet]);
+    }, [apiGet, agentDir]);
 
     // Debounced refresh — coalesces rapid triggers (file watcher + tool completion
     // can fire within 500ms of each other) into a single API call.
@@ -549,6 +622,29 @@ const DirectoryPanel = memo(
           setPreviewError(
             err instanceof Error ? err.message : "Failed to preview file.",
           );
+        }
+      } finally {
+        setIsPreviewLoading(false);
+      }
+    };
+
+    const handleSearchItemClick = async (path: string, initialLineNumber?: number) => {
+      setIsPreviewLoading(true);
+      try {
+        const payload = await apiGet<Omit<FilePreview, "path">>(`/agent/file?path=${encodeURIComponent(path)}`);
+        const fileData = { ...payload, path, initialLineNumber };
+        if (onFilePreviewExternal) {
+          onFilePreviewExternal(fileData);
+        } else {
+          setPreview(fileData);
+          setPreviewError(null);
+        }
+      } catch (err) {
+        if (onFilePreviewExternal) {
+          toast.error("文件预览失败");
+        } else {
+          setPreview(null);
+          setPreviewError(err instanceof Error ? err.message : "Failed to preview file.");
         }
       } finally {
         setIsPreviewLoading(false);
@@ -1369,7 +1465,7 @@ const DirectoryPanel = memo(
               </button>
             )}
             <span className="text-base font-semibold text-[var(--ink)]">
-              项目工作区
+              工作区
             </span>
             {/* Terminal button — next to title */}
             {onOpenTerminal && (
@@ -1383,13 +1479,13 @@ const DirectoryPanel = memo(
                     e.stopPropagation();
                     onOpenTerminal();
                   }}
-                  className={`relative flex h-5 w-5 items-center justify-center rounded transition-colors ${
+                  className={`relative flex h-6 w-6 items-center justify-center rounded transition-colors ${
                     terminalAlive
                       ? "text-[var(--accent-warm)] hover:bg-[var(--accent-warm-subtle)]"
                       : "text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                   }`}
                 >
-                  <TerminalSquare className="h-3.5 w-3.5" />
+                  <TerminalSquare className="h-4 w-4" />
                   {/* Alive indicator dot */}
                   {terminalAlive && (
                     <span className="absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--success)]" />
@@ -1397,6 +1493,28 @@ const DirectoryPanel = memo(
                 </button>
               </Tip>
             )}
+            {/* Search toggle button — same size as Terminal */}
+            <Tip label={isSearchMode ? "关闭搜索" : "文件搜索"} position="bottom">
+              <button
+                  type="button"
+                  onClick={(e) => {
+                      e.stopPropagation();
+                      setIsSearchMode(!isSearchMode);
+                      if (!isSearchMode) {
+                          setTimeout(() => searchInputRef.current?.focus(), 50);
+                      } else {
+                          setSearchQuery('');
+                      }
+                  }}
+                  className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
+                      isSearchMode
+                          ? "bg-[var(--accent)] text-white hover:bg-[var(--accent-warm-hover)]"
+                          : "text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                  }`}
+              >
+                  <Search className="h-4 w-4" />
+              </button>
+            </Tip>
           </div>
           {/* Right side buttons */}
           <div className="flex items-center gap-1">
@@ -1439,45 +1557,77 @@ const DirectoryPanel = memo(
             {/* Inset divider: header → folder info */}
             <div className="mx-4 border-b border-[var(--line-subtle)]" />
 
-            {/* Folder header — icon left, two-row text right (matches Launcher card layout) */}
-            <div className="flex items-center gap-3 px-4 pb-2 pt-3">
-              <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center">
-                <WorkspaceIcon icon={projectIcon} size={28} />
-              </span>
-              <div className="min-w-0 flex-1">
-                {/* First row: name, git branch, stats */}
-                <div className="flex items-center gap-2">
-                  <span className="truncate text-[13px] font-medium text-[var(--ink)]">
-                    {projectDisplayName || folderName}
-                  </span>
-                  {gitBranch && (
-                    <span className="flex items-center gap-0.5 rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
-                      <GitBranch className="h-3 w-3" />
-                      {gitBranch}
-                    </span>
-                  )}
-                  {directoryInfo && (
-                    <span className="ml-auto flex-shrink-0 text-[11px] text-[var(--ink-muted)]">
-                      {directoryInfo.summary.totalFiles} 文件 ·{" "}
-                      {directoryInfo.summary.totalDirs} 文件夹
-                    </span>
-                  )}
-                </div>
-                {/* Second row: path */}
-                <div className="mt-0.5 truncate text-[11px] text-[var(--ink-muted)]">
-                  {shortenPathForDisplay(agentDir)}
-                </div>
+            {/* Folder header OR Search Input */}
+            {isSearchMode ? (
+              <div className="flex h-[52px] items-center gap-2 px-4 py-2 border-b border-[var(--line-subtle)] flex-shrink-0">
+                  <div className="relative flex-1 flex items-center">
+                      <Search className="absolute left-2.5 h-3.5 w-3.5 text-[var(--ink-muted)]" />
+                      <input
+                          ref={searchInputRef}
+                          type="text"
+                          value={searchQuery}
+                          onChange={(e) => setSearchQuery(e.target.value)}
+                          placeholder="搜索文件及内容..."
+                          className="h-7 w-full rounded-md border border-[var(--line)] bg-transparent pl-8 pr-8 text-[12px] text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none transition-colors focus:border-[var(--accent)]"
+                          onKeyDown={(e) => {
+                              if (e.key === 'Escape') {
+                                  setIsSearchMode(false);
+                                  setSearchQuery('');
+                              }
+                          }}
+                      />
+                      <button
+                          onClick={() => {
+                              setIsSearchMode(false);
+                              setSearchQuery('');
+                          }}
+                          title="退出搜索"
+                          className="absolute right-2 flex items-center text-[var(--ink-muted)]/50 transition-colors hover:text-[var(--ink)]"
+                      >
+                          <X className="h-3.5 w-3.5" />
+                      </button>
+                  </div>
               </div>
-              {/* Hidden file input for import functionality */}
-              <input
-                ref={importInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(event) => handleImport(event.target.files)}
-                disabled={isUploading}
-              />
-            </div>
+            ) : (
+              <div className="flex items-center gap-3 px-4 pb-2 pt-3">
+                <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center">
+                  <WorkspaceIcon icon={projectIcon} size={28} />
+                </span>
+                <div className="min-w-0 flex-1">
+                  {/* First row: name, git branch, stats */}
+                  <div className="flex items-center gap-2">
+                    <span className="truncate text-[13px] font-medium text-[var(--ink)]">
+                      {projectDisplayName || folderName}
+                    </span>
+                    {gitBranch && (
+                      <span className="flex items-center gap-0.5 rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+                        <GitBranch className="h-3 w-3" />
+                        {gitBranch}
+                      </span>
+                    )}
+                    {directoryInfo && (
+                      <span className="ml-auto flex-shrink-0 text-[11px] text-[var(--ink-muted)]">
+                        {directoryInfo.summary.totalFiles} 文件 ·{" "}
+                        {directoryInfo.summary.totalDirs} 文件夹
+                      </span>
+                    )}
+                  </div>
+                  {/* Second row: path */}
+                  <div className="mt-0.5 truncate text-[11px] text-[var(--ink-muted)]">
+                    {shortenPathForDisplay(agentDir)}
+                  </div>
+                </div>
+                {/* Hidden file input for import functionality */}
+                <input
+                  ref={importInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => handleImport(event.target.files)}
+                  disabled={isUploading}
+                />
+              </div>
+            )}
 
             {/* Tree + Capabilities container (60/40 split) */}
             <div className="flex min-h-0 flex-1 flex-col">
@@ -1501,18 +1651,51 @@ const DirectoryPanel = memo(
                 }}
                 data-tree-root
               >
-                {error && (
-                  <div className="px-4 py-3 text-xs text-[var(--error)]">
-                    {error}
-                  </div>
-                )}
-                {!error && !directoryInfo && (
-                  <div className="px-4 py-3 text-xs text-[var(--ink-muted)]">
-                    Loading...
-                  </div>
-                )}
-                {directoryInfo && (
-                  <DndContext
+                {isSearchMode ? (
+                  <FileSearchResults
+                    results={searchResults}
+                    isLoading={isSearching}
+                    query={debouncedSearchQuery}
+                    expandedFiles={expandedFiles}
+                    onToggleFile={(path) => {
+                      setExpandedFiles((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(path)) next.delete(path);
+                        else next.add(path);
+                        return next;
+                      });
+                    }}
+                    onFileClick={(path) => handleSearchItemClick(path)}
+                    onMatchClick={(path, line) => handleSearchItemClick(path, line)}
+                    onContextMenu={(e, path) => {
+                      const findInTree = (nodes: DirectoryTreeNode[], p: string): DirectoryTreeNode | null => {
+                        for (const n of nodes) {
+                           if (n.path === p) return n;
+                           if (n.children && n.type === "dir") {
+                               const res = findInTree(n.children, p);
+                               if (res) return res;
+                           }
+                        }
+                        return null;
+                      };
+                      const n = findInTree(directoryInfo?.tree.children || [], path);
+                      if (n) handleContextMenu(e, n);
+                    }}
+                  />
+                ) : (
+                  <>
+                    {error && (
+                      <div className="px-4 py-3 text-xs text-[var(--error)]">
+                        {error}
+                      </div>
+                    )}
+                    {!error && !directoryInfo && (
+                      <div className="px-4 py-3 text-xs text-[var(--ink-muted)]">
+                        Loading...
+                      </div>
+                    )}
+                    {directoryInfo && (
+                      <DndContext
                     sensors={dndSensors}
                     onDragStart={handleDndDragStart}
                     onDragOver={handleDndDragOver}
@@ -1653,7 +1836,9 @@ const DirectoryPanel = memo(
                         </div>
                       )}
                     </DragOverlay>
-                  </DndContext>
+                      </DndContext>
+                    )}
+                  </>
                 )}
               </div>
 

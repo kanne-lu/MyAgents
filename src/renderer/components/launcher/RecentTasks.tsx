@@ -4,7 +4,7 @@
  */
 
 import { memo, useCallback, useMemo, useState } from 'react';
-import { AlertCircle, ArrowRight, BarChart2, Clock, MessageSquare, Plus, RefreshCw, Timer, Trash2 } from 'lucide-react';
+import { AlertCircle, ArrowRight, BarChart2, Clock, MessageSquare, Plus, RefreshCw, Timer, Trash2, Search } from 'lucide-react';
 
 import type { TaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from './WorkspaceIcon';
@@ -32,7 +32,7 @@ const LIST_MIN_HEIGHT = 'min-h-[188px]';
 interface RecentTasksProps {
     projects: Project[];
     onOpenTask: (session: SessionMetadata, project: Project) => void;
-    onOpenOverlay: () => void;
+    onOpenOverlay: (mode?: 'default' | 'search') => void;
     onOpenCronDetail: (task: CronTask) => void;
     taskCenterData: TaskCenterData;
 }
@@ -137,7 +137,7 @@ export default memo(function RecentTasks({
     if (isLoading) {
         return (
             <div className="mb-8">
-                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} />
+                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} />
                 <div className={`${LIST_MIN_HEIGHT} flex items-center`}>
                     <div className="py-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</div>
                 </div>
@@ -148,7 +148,7 @@ export default memo(function RecentTasks({
     if (error) {
         return (
             <div className="mb-8">
-                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} />
+                <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} />
                 <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
                     <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
                         <AlertCircle className="mx-auto mb-2 h-4 w-4 text-amber-500/70" />
@@ -168,7 +168,7 @@ export default memo(function RecentTasks({
 
     return (
         <div className="mb-8">
-            <TabHeader activeTab={activeTab} onTabChange={handleTabChange} />
+            <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} />
 
             {/* Sessions tab */}
             {activeTab === 'sessions' && (
@@ -317,17 +317,6 @@ export default memo(function RecentTasks({
                 </div>
             )}
 
-            {/* Bottom: "查看全部" */}
-            <div className="mt-2 flex justify-center">
-                <button
-                    onClick={onOpenOverlay}
-                    className="inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-[12px] text-[var(--ink-muted)]/60 transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink-muted)]"
-                >
-                    查看全部
-                    <ArrowRight className="h-3 w-3" />
-                </button>
-            </div>
-
             {pendingDeleteSession && (
                 <ConfirmDialog
                     title="删除对话"
@@ -359,38 +348,59 @@ export default memo(function RecentTasks({
 function TabHeader({
     activeTab,
     onTabChange,
+    onOpenOverlay
 }: {
     activeTab: ActiveTab;
-    onTabChange: (tab: ActiveTab) => void;
+    onTabChange: (t: ActiveTab) => void;
+    onOpenOverlay: (mode?: 'default' | 'search') => void;
 }) {
     return (
-        <div className="mb-3 flex items-center gap-4">
-            <button
-                onClick={() => onTabChange('sessions')}
-                className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
-                    activeTab === 'sessions'
-                        ? 'text-[var(--ink-muted)]'
-                        : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
-                }`}
-            >
-                最近任务
-                {activeTab === 'sessions' && (
-                    <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
-                )}
-            </button>
-            <button
-                onClick={() => onTabChange('cron')}
-                className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
-                    activeTab === 'cron'
-                        ? 'text-[var(--ink-muted)]'
-                        : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
-                }`}
-            >
-                定时任务
-                {activeTab === 'cron' && (
-                    <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
-                )}
-            </button>
+        <div className="mb-3 flex items-center justify-between">
+            <div className="flex gap-4">
+                <button
+                    onClick={() => onTabChange('sessions')}
+                    className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
+                        activeTab === 'sessions'
+                            ? 'text-[var(--ink-muted)]'
+                            : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
+                    }`}
+                >
+                    最近任务
+                    {activeTab === 'sessions' && (
+                        <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
+                    )}
+                </button>
+                <button
+                    onClick={() => onTabChange('cron')}
+                    className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
+                        activeTab === 'cron'
+                            ? 'text-[var(--ink-muted)]'
+                            : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
+                    }`}
+                >
+                    定时任务
+                    {activeTab === 'cron' && (
+                        <div className="absolute -bottom-1 left-0 right-0 h-[2px] rounded-full bg-[var(--accent)]" />
+                    )}
+                </button>
+            </div>
+            
+            <div className="flex items-center gap-1">
+                <button
+                    onClick={() => onOpenOverlay('search')}
+                    className="flex h-6 w-6 items-center justify-center rounded p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                    title="搜索任务"
+                >
+                    <Search className="h-3.5 w-3.5" />
+                </button>
+                <button
+                    onClick={() => onOpenOverlay('default')}
+                    className="group flex h-6 items-center gap-1 rounded px-1.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                >
+                    全部
+                    <ArrowRight className="h-3 w-3 opacity-60 transition-transform group-hover:translate-x-0.5 group-hover:opacity-100" />
+                </button>
+            </div>
         </div>
     );
 }

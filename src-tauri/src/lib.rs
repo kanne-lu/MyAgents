@@ -16,6 +16,7 @@ mod sidecar;
 mod sse_proxy;
 pub mod terminal;
 pub mod browser;
+pub mod search;
 mod tray;
 mod updater;
 
@@ -132,6 +133,7 @@ pub fn run() {
         .manage(agent_state)
         .manage(terminal_state)
         .manage(browser_state)
+        // SearchEngine will be added as managed state in .setup()
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
             commands::cmd_start_sidecar,
@@ -268,6 +270,12 @@ pub fn run() {
             commands::cmd_delete_workspace_file,
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
+            // Full-text search commands
+            search::cmd_search_sessions,
+            search::cmd_search_workspace_files,
+            search::cmd_search_index_status,
+            search::cmd_invalidate_workspace_index,
+            search::cmd_refresh_workspace_index,
         ])
         .setup(|app| {
             // Initialize logging FIRST — acquire_lock() and cleanup_stale_sidecars()
@@ -474,6 +482,20 @@ pub fn run() {
                 cron_task::initialize_cron_manager(cron_app_handle).await;
             });
             ulog_info!("[App] Cron task manager initialization scheduled");
+
+            // Initialize SearchEngine (full-text search)
+            if let Some(data_dir) = app_dirs::myagents_data_dir() {
+                match search::SearchEngine::new(data_dir) {
+                    Ok(engine) => {
+                        engine.start_background_indexing();
+                        app.manage(Arc::new(engine));
+                        ulog_info!("[App] SearchEngine initialized");
+                    }
+                    Err(e) => {
+                        ulog_error!("[App] Failed to create SearchEngine: {}", e);
+                    }
+                }
+            }
 
             // Auto-start IM Bot if previously enabled (3s delay)
             im::schedule_auto_start(app.handle().clone());

@@ -296,7 +296,7 @@ export default memo(function AgentCapabilitiesPanel({
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Terminal className="h-3 w-3 shrink-0 text-[var(--success)]" />
-                                            <p className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink)]">/{item.name}</p>
+                                            <p className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink)]">{item.name}</p>
                                         </button>
                                     </ItemTooltip>
                                 ))}

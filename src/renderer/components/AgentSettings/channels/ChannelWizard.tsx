@@ -564,7 +564,7 @@ export default function ChannelWizard({
         } finally {
             if (isMountedRef.current) setStarting(false);
         }
-    }, [buildChannelConfig, agent, platform, startChannel, refreshConfig]);
+    }, [buildChannelConfig, agent, platform, startChannel, refreshConfig, bindingStep]);
 
     // QR Login: start channel then initiate QR login flow
     const startQrLogin = useCallback(async () => {

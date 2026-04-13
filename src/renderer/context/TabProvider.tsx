@@ -29,6 +29,7 @@ import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar } from '@/api/tauriClient';
+import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import type { PermissionMode } from '@/config/types';
 import type { QueuedMessageInfo } from '@/types/queue';
 import {
@@ -465,7 +466,7 @@ export default function TabProvider({
             console.error(`[TabProvider ${tabId}] resetSession error:`, error);
             return false;
         }
-    }, [tabId, postJson, setStreamingMessage, clearInteractiveState]);
+    }, [tabId, postJson, setStreamingMessage, clearInteractiveState, clearSessionActive]);
 
     // Append log
     const appendLog = useCallback((line: string) => {
@@ -649,7 +650,7 @@ export default function TabProvider({
             streamingMessageRef.current = null;
             return null;
         });
-    }, [flushPendingChunks]);
+    }, [flushPendingChunks, clearSessionActive]);
 
     const recoverStreamingUi = useCallback((status: 'stopped' | 'failed') => {
         moveStreamingToHistory(status);
@@ -1702,7 +1703,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, clearSessionActive]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -1713,6 +1714,17 @@ export default function TabProvider({
     // Unmount guard for async recovery
     const isMountedRef = useRef(true);
     useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
+
+    // Warm the workspace file search index on tab open. Cold cache → full
+    // build; warm cache → metadata-only walk + diff. Fire-and-forget — the
+    // user's search UX doesn't depend on the result, and the Rust side is
+    // serialized by an internal mutex so duplicate calls across tabs of the
+    // same workspace are safe. Search-mode entry triggers a second refresh
+    // (see DirectoryPanel) to catch anything written after tab open.
+    useEffect(() => {
+        if (!isTauri() || !agentDir) return;
+        refreshWorkspaceFileIndex(agentDir).catch(() => {});
+    }, [agentDir]);
 
     // Recover a dead Session Sidecar: re-ensure + reconnect SSE.
     // Called when SSE retries exhaust OR when Rust health monitor restarts the sidecar.

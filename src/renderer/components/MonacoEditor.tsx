@@ -59,6 +59,8 @@ interface MonacoEditorProps {
     autoFocus?: boolean;
     /** Cmd/Ctrl+S handler — registered as Monaco keybinding */
     onSave?: () => void;
+    /** Initial line to scroll to and select */
+    initialLineNumber?: number;
 }
 
 export default function MonacoEditor({
@@ -69,6 +71,7 @@ export default function MonacoEditor({
     className = '',
     autoFocus = false,
     onSave,
+    initialLineNumber,
 }: MonacoEditorProps) {
     const handleChange = useCallback((newValue: string | undefined) => {
         onChange(newValue ?? '');
@@ -217,11 +220,19 @@ export default function MonacoEditor({
             () => { onSaveRef.current?.(); }
         );
 
+        if (initialLineNumber) {
+            // Give it a tiny delay to ensure layout is done
+            setTimeout(() => {
+                editor.revealLineInCenter(initialLineNumber);
+                editor.setPosition({ lineNumber: initialLineNumber, column: 1 });
+            }, 50);
+        }
+
         if (autoFocus) {
             // Use setTimeout to ensure editor is fully ready
             setTimeout(() => editor.focus(), 0);
         }
-    }, [autoFocus, activeTheme]);
+    }, [autoFocus, activeTheme, initialLineNumber]);
 
     // Monaco editor options optimized for performance
     const options = useMemo(() => ({

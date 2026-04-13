@@ -4,10 +4,11 @@
  * Right column: cron tasks list.
  */
 
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
-import { BarChart2, Clock, Plus, Trash2, X } from 'lucide-react';
+import { memo, useCallback, useEffect, useMemo, useState, useRef } from 'react';
+import { Search, Loader2, BarChart2, Clock, Plus, Trash2, X } from 'lucide-react';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import { searchSessions, type SessionSearchHit } from '@/api/searchClient';
 
 import { TASK_CENTER_FRESHNESS_TTL_MS, type TaskCenterData } from '@/hooks/useTaskCenterData';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
@@ -28,6 +29,7 @@ import {
 } from '@/types/cronTask';
 import TaskCreateModal from '@/components/scheduled-tasks/TaskCreateModal';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
+import SessionSearchItem from '@/components/search/SessionSearchItem';
 
 interface TaskCenterOverlayProps {
     projects: Project[];
@@ -35,6 +37,7 @@ interface TaskCenterOverlayProps {
     onOpenCronDetail: (task: CronTask) => void;
     onClose: () => void;
     taskCenterData: TaskCenterData;
+    initialMode?: 'default' | 'search';
 }
 
 type StatusFilter = 'all' | 'active' | 'desktop' | 'bot';
@@ -52,10 +55,18 @@ export default memo(function TaskCenterOverlay({
     onOpenCronDetail,
     onClose,
     taskCenterData,
+    initialMode = 'default',
 }: TaskCenterOverlayProps) {
     useCloseLayer(() => { onClose(); return true; }, 40);
     const { sessions, cronTasks, sessionTagsMap, cronBotInfoMap, refresh, actions } = taskCenterData;
     const toast = useToast();
+
+    // Search state
+    const [isSearchMode, setIsSearchMode] = useState(initialMode === 'search');
+    const [searchQuery, setSearchQuery] = useState('');
+    const [isSearching, setIsSearching] = useState(false);
+    const [searchResults, setSearchResults] = useState<SessionSearchHit[]>([]);
+    const searchInputRef = useRef<HTMLInputElement>(null);
 
     const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
     const [workspaceFilter, setWorkspaceFilter] = useState<string>('all');
@@ -70,6 +81,14 @@ export default memo(function TaskCenterOverlay({
             silent: true,
         });
     }, [refresh]);
+
+    // Auto-focus search input on mount when overlay opens in search mode
+    useEffect(() => {
+        if (initialMode === 'search') {
+            const id = setTimeout(() => searchInputRef.current?.focus(), 50);
+            return () => clearTimeout(id);
+        }
+    }, [initialMode]);
 
     // Unique workspace entries for dropdown (name + icon)
     const workspaceOptions = useMemo(() => {
@@ -145,6 +164,38 @@ export default memo(function TaskCenterOverlay({
         });
     }, [cronTasks]);
 
+    // Search effect
+    useEffect(() => {
+        if (!isSearchMode) return;
+        
+        let isStale = false;
+        const timeout = setTimeout(async () => {
+            if (!searchQuery.trim()) {
+                setSearchResults([]);
+                setIsSearching(false);
+                return;
+            }
+            
+            setIsSearching(true);
+            try {
+                const result = await searchSessions(searchQuery);
+                if (!isStale) {
+                    setSearchResults(result.hits);
+                }
+            } catch (err) {
+                console.error('[TaskCenterOverlay] Session search failed:', err);
+                if (!isStale) setSearchResults([]);
+            } finally {
+                if (!isStale) setIsSearching(false);
+            }
+        }, 300); // 300ms debounce
+        
+        return () => {
+            isStale = true;
+            clearTimeout(timeout);
+        };
+    }, [searchQuery, isSearchMode]);
+
     const getProjectForSession = useCallback(
         (session: SessionMetadata): Project | undefined =>
             projects.find(p => p.path === session.agentDir),
@@ -212,34 +263,84 @@ export default memo(function TaskCenterOverlay({
                             最近任务
                         </h3>
 
-                        {/* Filter bar */}
-                        <div className="mb-3 flex flex-wrap items-center gap-2">
-                            {/* Status pills */}
-                            <div className="flex gap-1">
-                                {FILTER_OPTIONS.map(opt => (
-                                    <button
-                                        key={opt.key}
-                                        onClick={() => setStatusFilter(opt.key)}
-                                        className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                                            statusFilter === opt.key
-                                                ? 'bg-[var(--button-primary-bg)] text-[var(--button-primary-text)]'
-                                                : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
-                                        }`}
-                                    >
-                                        {opt.label}
-                                    </button>
-                                ))}
-                            </div>
+                        {/* Filter bar / Search Input */}
+                        <div className="mb-3 flex flex-wrap items-center gap-2 h-8">
+                            {isSearchMode ? (
+                                <div className="relative flex-1 h-full">
+                                    <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-2.5 text-[var(--ink-muted)]/50">
+                                        <Search className="h-3.5 w-3.5" />
+                                    </div>
+                                    <input
+                                        ref={searchInputRef}
+                                        type="text"
+                                        value={searchQuery}
+                                        onChange={(e) => setSearchQuery(e.target.value)}
+                                        placeholder="搜索历史记录的内容或标题..."
+                                        className="h-full w-full rounded-md outline-none border border-[var(--line)] bg-transparent py-1 pl-8 pr-10 text-[12px] text-[var(--ink)] transition-colors placeholder:text-[var(--ink-muted)]/60 focus:border-[var(--accent)]"
+                                        onKeyDown={(e) => {
+                                            if (e.key === "Escape") {
+                                                setIsSearchMode(false);
+                                                setSearchQuery("");
+                                            }
+                                        }}
+                                    />
+                                    <div className="absolute inset-y-0 right-0 flex items-center gap-1 pr-2">
+                                        {isSearching && (
+                                            <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--ink-muted)]/50" />
+                                        )}
+                                        <button
+                                            onClick={() => {
+                                                setIsSearchMode(false);
+                                                setSearchQuery("");
+                                                setSearchResults([]);
+                                            }}
+                                            title="退出搜索"
+                                            className="flex items-center text-[var(--ink-muted)]/50 transition-colors hover:text-[var(--ink)]"
+                                        >
+                                            <X className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <>
+                                    {/* Status pills */}
+                                    <div className="flex gap-1">
+                                        {FILTER_OPTIONS.map(opt => (
+                                            <button
+                                                key={opt.key}
+                                                onClick={() => setStatusFilter(opt.key)}
+                                                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                                                    statusFilter === opt.key
+                                                        ? 'bg-[var(--button-primary-bg)] text-[var(--button-primary-text)]'
+                                                        : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
+                                                }`}
+                                            >
+                                                {opt.label}
+                                            </button>
+                                        ))}
+                                    </div>
 
-                            {/* Workspace dropdown */}
-                            {workspaceOptions.length > 1 && (
-                                <CustomSelect
-                                    value={workspaceFilter}
-                                    options={workspaceSelectOptions}
-                                    onChange={setWorkspaceFilter}
-                                    compact
-                                    className="w-[140px]"
-                                />
+                                    {/* Workspace dropdown */}
+                                    {workspaceOptions.length > 1 && (
+                                        <CustomSelect
+                                            value={workspaceFilter}
+                                            options={workspaceSelectOptions}
+                                            onChange={setWorkspaceFilter}
+                                            compact
+                                            className="w-[140px]"
+                                        />
+                                    )}
+                                    <div className="flex-1" />
+                                    <button
+                                        onClick={() => {
+                                            setIsSearchMode(true);
+                                            setTimeout(() => searchInputRef.current?.focus(), 50);
+                                        }}
+                                        className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                    >
+                                        <Search className="h-4 w-4" />
+                                    </button>
+                                </>
                             )}
                         </div>
 
@@ -251,76 +352,103 @@ export default memo(function TaskCenterOverlay({
                                 </div>
                             ) : (
                                 <div className="space-y-0.5">
-                                    {filteredSessions.map(session => {
-                                        const project = getProjectForSession(session);
-                                        if (!project) return null;
-                                        const tags = sessionTagsMap.get(session.id) ?? [];
-                                        const displayText = getSessionDisplayText(session);
-                                        const msgCount = formatMessageCount(session);
+                                    {isSearchMode && searchQuery.trim() !== '' ? (
+                                        searchResults.length === 0 && !isSearching ? (
+                                            <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
+                                                未找到结果
+                                            </div>
+                                        ) : (
+                                            searchResults.map(hit => {
+                                                const session = sessions.find(s => s.id === hit.sessionId);
+                                                const project = projects.find(p => p.path === hit.agentDir);
+                                                if (!session || !project) return null;
+                                                const isCronProtected = cronProtectedSessionIds.has(session.id);
+                                                return (
+                                                    <SessionSearchItem
+                                                        key={`${hit.sessionId}-${hit.matchType}`}
+                                                        hit={hit}
+                                                        session={session}
+                                                        project={project}
+                                                        isCronProtected={isCronProtected}
+                                                        onClick={() => onOpenTask(session, project)}
+                                                        onShowStats={(e) => handleShowStats(e, session)}
+                                                        onDelete={(e) => handleDeleteClick(e, session)}
+                                                    />
+                                                );
+                                            })
+                                        )
+                                    ) : (
+                                        filteredSessions.map(session => {
+                                            const project = getProjectForSession(session);
+                                            if (!project) return null;
+                                            const tags = sessionTagsMap.get(session.id) ?? [];
+                                            const displayText = getSessionDisplayText(session);
+                                            const msgCount = formatMessageCount(session);
 
-                                        const isCronProtected = cronProtectedSessionIds.has(session.id);
-                                        return (
-                                            <div
-                                                key={session.id}
-                                                role="button"
-                                                onClick={() => onOpenTask(session, project)}
-                                                className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
-                                            >
-                                                <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
-                                                    <Clock className="h-2.5 w-2.5" />
-                                                    <span>{formatTime(session.lastActiveAt)}</span>
-                                                </div>
-                                                {tags.map((tag, i) => (
-                                                    <SessionTagBadge key={i} tag={tag} />
-                                                ))}
-                                                <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
-                                                    {displayText}
-                                                    {msgCount && (
-                                                        <span className="ml-1.5 text-[11px] text-[var(--ink-muted)]/40">
-                                                            {msgCount}
-                                                        </span>
-                                                    )}
-                                                </span>
-                                                <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
-                                                    <WorkspaceIcon icon={project.icon} size={14} />
-                                                    <span className="max-w-[80px] truncate">
-                                                        {getFolderName(project.path)}
-                                                    </span>
-                                                </div>
-
-                                                {/* Hover actions overlay */}
-                                                <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
-                                                    <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
-                                                    <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
-                                                        <button
-                                                            onClick={e => handleShowStats(e, session)}
-                                                            title="查看统计"
-                                                            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
-                                                        >
-                                                            <BarChart2 className="h-3.5 w-3.5" />
-                                                        </button>
-                                                        {isCronProtected ? (
-                                                            <button
-                                                                disabled
-                                                                title="请先停止定时任务后再删除"
-                                                                className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
-                                                            >
-                                                                <Trash2 className="h-3.5 w-3.5" />
-                                                            </button>
-                                                        ) : (
-                                                            <button
-                                                                onClick={e => handleDeleteClick(e, session)}
-                                                                title="删除"
-                                                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
-                                                            >
-                                                                <Trash2 className="h-3.5 w-3.5" />
-                                                            </button>
+                                            const isCronProtected = cronProtectedSessionIds.has(session.id);
+                                            return (
+                                                <div
+                                                    key={session.id}
+                                                    role="button"
+                                                    onClick={() => onOpenTask(session, project)}
+                                                    className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
+                                                >
+                                                    <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
+                                                        <Clock className="h-2.5 w-2.5" />
+                                                        <span>{formatTime(session.lastActiveAt)}</span>
+                                                    </div>
+                                                    {tags.map((tag, i) => (
+                                                        <SessionTagBadge key={i} tag={tag} />
+                                                    ))}
+                                                    <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                                                        {displayText}
+                                                        {msgCount && (
+                                                            <span className="ml-1.5 text-[11px] text-[var(--ink-muted)]/40">
+                                                                {msgCount}
+                                                            </span>
                                                         )}
+                                                    </span>
+                                                    <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
+                                                        <WorkspaceIcon icon={project.icon} size={14} />
+                                                        <span className="max-w-[80px] truncate">
+                                                            {getFolderName(project.path)}
+                                                        </span>
+                                                    </div>
+
+                                                    {/* Hover actions overlay */}
+                                                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+                                                        <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
+                                                        <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
+                                                            <button
+                                                                onClick={e => handleShowStats(e, session)}
+                                                                title="查看统计"
+                                                                className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
+                                                            >
+                                                                <BarChart2 className="h-3.5 w-3.5" />
+                                                            </button>
+                                                            {isCronProtected ? (
+                                                                <button
+                                                                    disabled
+                                                                    title="请先停止定时任务后再删除"
+                                                                    className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
+                                                                >
+                                                                    <Trash2 className="h-3.5 w-3.5" />
+                                                                </button>
+                                                            ) : (
+                                                                <button
+                                                                    onClick={e => handleDeleteClick(e, session)}
+                                                                    title="删除"
+                                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
+                                                                >
+                                                                    <Trash2 className="h-3.5 w-3.5" />
+                                                                </button>
+                                                            )}
+                                                        </div>
                                                     </div>
                                                 </div>
-                                            </div>
-                                        );
-                                    })}
+                                            );
+                                        })
+                                    )}
                                 </div>
                             )}
                         </div>

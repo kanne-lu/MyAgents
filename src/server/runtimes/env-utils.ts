@@ -3,7 +3,7 @@
 import { getShellEnv, getShellPath } from '../utils/shell';
 import { which } from 'bun';
 
-const isWindows = process.platform === 'win32';
+
 
 /**
  * Build an augmented env for spawning external CLI runtimes (claude, codex).
