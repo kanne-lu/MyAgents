@@ -62,7 +62,13 @@ const REHYPE_PLUGINS: ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [
 
 // Custom link component that opens links in embedded browser panel (if available)
 // or falls back to system browser. Supports text selection for copying.
-function MarkdownLink({ href, children, ...props }: React.ComponentProps<'a'>) {
+// Strips react-markdown's hast `node` prop so it doesn't get spread onto the DOM <a>.
+const MarkdownLink = memo(function MarkdownLink({
+  href,
+  children,
+  node: _node,
+  ...props
+}: React.ComponentProps<'a'> & { node?: unknown }) {
   const browserPanel = useContext(BrowserPanelContext);
 
   const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
@@ -94,7 +100,7 @@ function MarkdownLink({ href, children, ...props }: React.ComponentProps<'a'>) {
       {children}
     </a>
   );
-}
+});
 
 // Custom code component - handles both inline and block code
 const CodeComponent: Components['code'] = ({ className, children, node: _node, ...props }) => {

@@ -16,6 +16,7 @@ import { listen } from '@tauri-apps/api/event';
 import { ChevronLeft, ChevronRight, Code2, RotateCw, ExternalLink, Loader2, Globe, X } from 'lucide-react';
 import { openExternal } from '@/utils/openExternal';
 import { useBrowserOverlayGuard } from '@/hooks/useBrowserOverlayGuard';
+import { useToast } from '@/components/Toast';
 import Tip from '@/components/Tip';
 
 interface BrowserPanelProps {
@@ -50,6 +51,12 @@ export default function BrowserPanel({
   const [currentUrl, setCurrentUrl] = useState(url ?? '');
   const [isLoading, setIsLoading] = useState(false);
   const creatingRef = useRef(false);
+
+  // Toast accessed via ref so the create effect doesn't list it as a dep
+  // (project convention — see CLAUDE.md react_stability_rules).
+  const toast = useToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
 
   // ── Editable URL bar state ──
   const [urlEditing, setUrlEditing] = useState(false);
@@ -89,7 +96,11 @@ export default function BrowserPanel({
         })
         .catch((err) => {
           console.error('[browser] Create failed:', err);
-          if (!cancelled) onCreateFailed();
+          if (!cancelled) {
+            const msg = typeof err === 'string' ? err : (err?.message ?? String(err));
+            toastRef.current.error(`无法打开内嵌浏览器：${msg}`);
+            onCreateFailed();
+          }
         })
         .finally(() => { creatingRef.current = false; });
     } else if (browserAlive && url !== lastRequestedUrlRef.current) {
