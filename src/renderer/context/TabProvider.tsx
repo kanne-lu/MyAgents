@@ -241,6 +241,12 @@ export default function TabProvider({
 
     // ── Split message state: history (stable during streaming) + streaming (updates on every SSE event)
     const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
+    // Mirror of historyMessages for async listeners (cron incremental sync) that
+    // need to read "what's on screen right now" without retriggering effects.
+    // Eventual-consistency is fine — Tauri event handlers run in microtasks,
+    // after the latest render commit.
+    const historyMessagesRef = useRef<Message[]>(historyMessages);
+    useEffect(() => { historyMessagesRef.current = historyMessages; }, [historyMessages]);
     const [streamingMessage, rawSetStreamingMessage] = useState<Message | null>(null);
     const streamingMessageRef = useRef<Message | null>(null);
 
@@ -2285,13 +2291,98 @@ export default function TabProvider({
             const { listen } = await import('@tauri-apps/api/event');
             unlisten = await listen<{ taskId: string; success: boolean; executionCount: number; internalSessionId?: string }>(
                 'cron:execution-complete',
-                (event) => {
+                async (event) => {
                     const { internalSessionId } = event.payload;
                     const currentSid = currentSessionIdRef.current;
+                    if (!internalSessionId || !currentSid || internalSessionId !== currentSid) return;
 
-                    // If this Tab is viewing the cron task's internal session, reload to show AI response
-                    if (internalSessionId && currentSid && internalSessionId === currentSid) {
-                        console.log(`[TabProvider ${tabId}] Cron execution complete for viewed session ${internalSessionId}, reloading`);
+                    // Don't disturb an in-flight turn. If the user is still streaming
+                    // or actively loading this session, let the normal SSE path
+                    // deliver new messages — appending mid-turn would compete with
+                    // the streaming message's final move-to-history step.
+                    if (isStreamingRef.current || isLoadingSessionRef.current) {
+                        return;
+                    }
+
+                    const last = historyMessagesRef.current.at(-1);
+                    if (!last) {
+                        // Empty tab view — fall through to a full load (first-time open).
+                        console.log(`[TabProvider ${tabId}] Cron complete on empty view, full load`);
+                        loadSessionRef.current(internalSessionId);
+                        return;
+                    }
+
+                    try {
+                        const resp = await apiGetJson<{
+                            success: boolean;
+                            fromIndex: number;
+                            messages: Array<{
+                                id: string;
+                                role: 'user' | 'assistant';
+                                content: string;
+                                timestamp: string;
+                                sdkUuid?: string;
+                                attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
+                                metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string };
+                            }>;
+                        }>(`/sessions/${encodeURIComponent(internalSessionId)}/since/${encodeURIComponent(last.id)}`);
+
+                        if (!resp.success) return;
+
+                        // Server couldn't locate our baseline (rewind / compaction /
+                        // JSONL rewrite). Fall back to a full reload — still better
+                        // than stale data.
+                        if (resp.fromIndex === -1) {
+                            console.log(`[TabProvider ${tabId}] Cron complete, baseline lost, full reload`);
+                            loadSessionRef.current(internalSessionId);
+                            return;
+                        }
+
+                        if (resp.messages.length === 0) return;
+
+                        const appended: Message[] = resp.messages.map((msg) => {
+                            let parsedContent: string | ContentBlock[] = msg.content ?? '';
+                            if (typeof msg.content === 'string' && msg.content.length > 0 && msg.content.startsWith('[') && msg.content.includes('"type"')) {
+                                try {
+                                    parsedContent = JSON.parse(msg.content) as ContentBlock[];
+                                } catch {
+                                    parsedContent = msg.content;
+                                }
+                            }
+                            return {
+                                id: msg.id,
+                                role: msg.role,
+                                content: parsedContent,
+                                timestamp: new Date(msg.timestamp),
+                                sdkUuid: msg.sdkUuid,
+                                attachments: msg.attachments?.map((att) => ({
+                                    id: att.id,
+                                    name: att.name,
+                                    size: 0,
+                                    mimeType: att.mimeType,
+                                    savedPath: att.path,
+                                    relativePath: att.path,
+                                    previewUrl: resolveAttachmentUrl({ savedPath: att.path }),
+                                    isImage: att.mimeType.startsWith('image/'),
+                                })),
+                                metadata: msg.metadata,
+                            };
+                        });
+
+                        // Dedupe against any IDs already in history — guards against
+                        // the rare race where SSE delivered the same message moments
+                        // before cron:execution-complete fired.
+                        setHistoryMessages(prev => {
+                            const known = new Set(prev.map(m => m.id));
+                            const fresh = appended.filter(m => !known.has(m.id));
+                            if (fresh.length === 0) return prev;
+                            // Mark seen so any subsequent SSE replay skips them.
+                            for (const m of fresh) seenIdsRef.current.add(m.id);
+                            return [...prev, ...fresh];
+                        });
+                        console.log(`[TabProvider ${tabId}] Cron incremental sync appended ${appended.length} message(s)`);
+                    } catch (err) {
+                        console.warn(`[TabProvider ${tabId}] Incremental sync failed, falling back to full reload:`, err);
                         loadSessionRef.current(internalSessionId);
                     }
                 }
@@ -2301,6 +2392,7 @@ export default function TabProvider({
         return () => {
             unlisten?.();
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- apiGetJson is stable via useMemo
     }, [tabId]);
 
     // Track whether initial session has been loaded

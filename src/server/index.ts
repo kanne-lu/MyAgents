@@ -2453,6 +2453,39 @@ async function main() {
         return jsonResponse({ success: true, session });
       }
 
+      // GET /sessions/:id/since/:lastMessageId - Incremental tail fetch
+      // Called by the cron:execution-complete handler to pull only the messages
+      // appended by a background task, instead of reloading the whole session.
+      // This is what keeps a foreground tab responsive after a background cron
+      // task completes: the old full-reload path bundled P0+P1 penalties
+      // (base64 attachments + Virtuoso remount) into a single freeze spike.
+      // Must be BEFORE the generic /sessions/:id route.
+      if (pathname.match(/^\/sessions\/[^/]+\/since\/[^/]+$/) && request.method === 'GET') {
+        const match = pathname.match(/^\/sessions\/([^/]+)\/since\/([^/]+)$/);
+        if (!match) {
+          return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
+        }
+        const sessionId = decodeURIComponent(match[1]);
+        const lastMessageId = decodeURIComponent(match[2]);
+
+        const session = getSessionData(sessionId);
+        if (!session) {
+          return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+        }
+
+        const idx = session.messages.findIndex(m => m.id === lastMessageId);
+        // idx === -1 signals "caller's baseline is gone" (session was rewound,
+        // compacted, or otherwise rewritten). Caller falls back to full reload.
+        if (idx === -1) {
+          return jsonResponse({ success: true, fromIndex: -1, messages: [] });
+        }
+
+        const tail = session.messages.slice(idx + 1);
+        // Same metadata-only shape as GET /sessions/:id (P0) — previews are
+        // resolved via the myagents:// custom protocol on the client.
+        return jsonResponse({ success: true, fromIndex: idx, messages: tail });
+      }
+
       // GET /sessions/:id/stats - Get detailed session statistics
       // NOTE: This route must be BEFORE /sessions/:id to avoid being caught by the generic route
       if (pathname.match(/^\/sessions\/[^/]+\/stats$/) && request.method === 'GET') {
