@@ -1,5 +1,5 @@
 import { Loader2 } from 'lucide-react';
-import React, { memo, useMemo, useState, useEffect, useRef } from 'react';
+import React, { memo, useMemo, useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import type { VirtuosoHandle } from 'react-virtuoso';
 
@@ -198,26 +198,22 @@ const MessageList = memo(function MessageList({
     else if (wasSessionLoadingRef.current) { wasSessionLoadingRef.current = false; setFadeIn(true); }
   }, [isSessionLoading]);
 
-  // Scroll to bottom after session load
+  // Scroll to bottom after session load / switch. Runs synchronously before
+  // the next paint so there's no visible top→bottom jump when the new session's
+  // data prop arrives — critical now that Virtuoso stays mounted across switches
+  // (see the note below about removing `key={sessionId}`).
   const lastScrolledSessionRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (allMessages.length > 0 && sessionId && sessionId !== lastScrolledSessionRef.current) {
-      lastScrolledSessionRef.current = sessionId;
-      followEnabledRef.current = 'force';
-      const timer = setTimeout(() => {
-        const ref = virtuosoRef.current;
-        if (!ref) return;
-        ref.scrollToIndex({ index: 'LAST', align: 'end' });
-        // Virtuoso may not render items at the new scroll position after programmatic
-        // scrollToIndex — it relies on scroll events to trigger visible-range recalculation.
-        // A second call in the next frame forces it to detect the position and render items.
-        requestAnimationFrame(() => {
-          ref.scrollToIndex({ index: 'LAST', align: 'end' });
-        });
-      }, 300);
-      return () => clearTimeout(timer);
-    }
-  }, [allMessages.length, sessionId, virtuosoRef, followEnabledRef]);
+  useLayoutEffect(() => {
+    if (!sessionId || sessionId === lastScrolledSessionRef.current) return;
+    if (allMessages.length === 0) return;
+    lastScrolledSessionRef.current = sessionId;
+    followEnabledRef.current = 'force';
+    virtuosoRef.current?.scrollToIndex({
+      index: allMessages.length - 1,
+      align: 'end',
+      behavior: 'auto',
+    });
+  }, [sessionId, allMessages.length, virtuosoRef, followEnabledRef]);
 
   // ── Auto-scroll during streaming — throttled to ~20fps (48ms) ──
   // followOutput only fires on count change. During streaming the last message keeps
@@ -348,8 +344,23 @@ const MessageList = memo(function MessageList({
         </div>
       )}
 
+      {/*
+        Virtuoso stays mounted across session switches. Previously `key={sessionId}`
+        forced a full remount, which dropped every cached item height, rebuilt
+        every ResizeObserver, and kicked off a measure→reflow→remeasure storm on
+        large sessions — the single biggest contributor to "click a notification,
+        come back, UI frozen for 3-5s". Now session changes are a pure data swap:
+        `computeItemKey={m.id}` ensures Virtuoso reconciles items by identity,
+        and the useLayoutEffect above lands the scroll on the last item in a
+        single pre-paint call. Heights are recomputed lazily as items come into
+        view, not up front.
+
+        defaultItemHeight=480 is an empirical average across tool-use / text /
+        thinking blocks; too low (200) causes Virtuoso to over-render initially,
+        too high leaves holes at the bottom. 480 keeps the initial estimate close
+        to reality without penalising short messages.
+      */}
       <Virtuoso
-        key={sessionId || 'pending'}
         ref={virtuosoRef}
         scrollerRef={onScrollerRef}
         data={allMessages}
@@ -357,7 +368,8 @@ const MessageList = memo(function MessageList({
         followOutput={handleFollowOutput}
         atBottomStateChange={handleAtBottomChange}
         atBottomThreshold={50}
-        defaultItemHeight={200}
+        defaultItemHeight={480}
+        increaseViewportBy={{ top: 800, bottom: 400 }}
         className="h-full"
         style={{ overscrollBehavior: 'none' }}
         components={components}
