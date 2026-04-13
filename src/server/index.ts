@@ -149,7 +149,7 @@ import {
   getSessionMetadata,
   getSessionsByAgentDir,
   updateSessionMetadata,
-  getAttachmentDataUrl,
+  getAttachmentPath,
 } from './SessionStore';
 import { initLogger, getLoggerDiagnostics } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
@@ -1423,6 +1423,35 @@ async function main() {
         return jsonResponse({ status: 'ok', timestamp: Date.now() });
       }
 
+      // Browser dev-mode fallback for attachment files.
+      // Production uses the Tauri `myagents://attachment/<path>` custom protocol
+      // (`src-tauri/src/attachment_protocol.rs`) which serves bytes directly
+      // through WebKit without round-tripping JSON. In dev (vite + browser) the
+      // custom scheme isn't registered, so this route serves the same bytes
+      // via a plain HTTP GET. `Bun.file()` is a lazy handle — no main-loop read.
+      if (pathname.startsWith('/api/attachment/') && request.method === 'GET') {
+        const rel = decodeURIComponent(pathname.replace('/api/attachment/', ''));
+        // Reject path traversal: no `..` segments and no absolute paths.
+        if (rel.includes('..') || rel.startsWith('/')) {
+          return new Response('Forbidden', { status: 403 });
+        }
+        const absolute = getAttachmentPath(rel);
+        try {
+          const file = Bun.file(absolute);
+          if (!(await file.exists())) {
+            return new Response('Not Found', { status: 404 });
+          }
+          return new Response(file, {
+            headers: {
+              'Cache-Control': 'public, max-age=31536000, immutable',
+              'Access-Control-Allow-Origin': '*',
+            },
+          });
+        } catch {
+          return new Response('Not Found', { status: 404 });
+        }
+      }
+
       // Session state endpoint - used by Rust background completion polling
       if (pathname === '/api/session-state' && request.method === 'GET') {
         const sessionState = shouldUseExternalRuntime()
@@ -2593,22 +2622,18 @@ async function main() {
           }
         }
 
-        // Add previewUrl for image attachments
+        // Attachments ship as metadata only. Binary previews are served by the
+        // Tauri `myagents://attachment/<path>` custom protocol (zero-copy, no JSON
+        // round-trip), keeping the JSON body small even for sessions with dozens
+        // of screenshots. Browser dev mode uses the /api/attachment/* fallback
+        // route below.
         const sessionWithPreview = {
           ...session,
           liveStreamingMessage,
           liveSessionState: shouldUseExternalRuntime() && sessionId === getExternalSessionId()
             ? getExternalSessionState()
             : undefined,
-          messages: mergedMessages.map((msg) => ({
-            ...msg,
-            attachments: msg.attachments?.map((att) => ({
-              ...att,
-              previewUrl: att.mimeType.startsWith('image/')
-                ? getAttachmentDataUrl(att.path, att.mimeType)
-                : undefined,
-            })),
-          })),
+          messages: mergedMessages,
         };
 
         return jsonResponse({ success: true, session: sessionWithPreview });

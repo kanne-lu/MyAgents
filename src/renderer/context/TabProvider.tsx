@@ -29,6 +29,7 @@ import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar } from '@/api/tauriClient';
+import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import type { PermissionMode } from '@/config/types';
 import type { QueuedMessageInfo } from '@/types/queue';
@@ -1578,7 +1579,7 @@ export default function TabProvider({
                         role: 'user';
                         content: string;
                         timestamp: string;
-                        attachments?: Array<{ id: string; name: string; size: number; mimeType: string; previewUrl?: string; isImage?: boolean }>;
+                        attachments?: Array<{ id: string; name: string; size: number; mimeType: string; relativePath?: string; savedPath?: string; previewUrl?: string; isImage?: boolean }>;
                     };
                 } | null;
                 if (payload?.queueId) {
@@ -1605,10 +1606,19 @@ export default function TabProvider({
                                 q => q.queueId.startsWith('opt-') && q.images?.length
                             );
                             if (attachments?.length && queuedMsg?.images?.length) {
-                                // Merge: enrich server attachments with frontend previewUrl
+                                // Merge: prefer frontend's local blob/data URL, fall back to
+                                // the Tauri custom-protocol URL resolved from relativePath.
                                 attachments = attachments.map(att => {
                                     const match = queuedMsg.images!.find(img => img.name === att.name);
-                                    return match?.preview ? { ...att, previewUrl: match.preview } : att;
+                                    const previewUrl = match?.preview ?? resolveAttachmentUrl(att);
+                                    return previewUrl ? { ...att, previewUrl } : att;
+                                });
+                            } else if (attachments?.length) {
+                                // Sibling tab / reconnect case: no local upload state,
+                                // resolve previews from the persisted attachment paths.
+                                attachments = attachments.map(att => {
+                                    const previewUrl = resolveAttachmentUrl(att);
+                                    return previewUrl ? { ...att, previewUrl } : att;
                                 });
                             } else if (!attachments?.length && queuedMsg?.images?.length) {
                                 // Fallback: server sent no attachments, use frontend snapshot
@@ -2126,7 +2136,9 @@ export default function TabProvider({
                         mimeType: att.mimeType,
                         savedPath: att.path,
                         relativePath: att.path,
-                        previewUrl: att.previewUrl,
+                        // Server no longer embeds base64 previews — resolve to
+                        // `myagents://` (Tauri) or `/api/attachment/*` (dev).
+                        previewUrl: resolveAttachmentUrl({ savedPath: att.path, previewUrl: att.previewUrl }),
                         isImage: att.mimeType.startsWith('image/'),
                     })),
                     metadata: msg.metadata,

@@ -660,20 +660,3 @@ export function getAttachmentPath(relativePath: string): string {
     return join(ATTACHMENTS_DIR, relativePath);
 }
 
-/**
- * Get attachment as base64 data URL for frontend display
- */
-export function getAttachmentDataUrl(relativePath: string, mimeType: string): string | null {
-    try {
-        const filePath = getAttachmentPath(relativePath);
-        if (!existsSync(filePath)) {
-            return null;
-        }
-        const buffer = readFileSync(filePath);
-        const base64 = buffer.toString('base64');
-        return `data:${mimeType};base64,${base64}`;
-    } catch (error) {
-        console.error('[SessionStore] Failed to read attachment:', error);
-        return null;
-    }
-}

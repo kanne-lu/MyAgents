@@ -2,6 +2,7 @@
 // Main entry point with sidecar lifecycle management
 
 pub mod app_dirs;
+pub mod attachment_protocol;
 pub mod cli;
 mod commands;
 pub mod cron_task;
@@ -112,6 +113,7 @@ pub fn run() {
     // Build the app first, then run with event handler
     // This allows us to handle RunEvent::ExitRequested for Cmd+Q and Dock quit
     let app = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol("myagents", attachment_protocol::handle)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Another instance was launched — bring the existing window to the foreground
             if let Some(window) = app.get_webview_window("main") {
