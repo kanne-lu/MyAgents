@@ -29,7 +29,7 @@ import {
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../shared/types/runtime';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES } from '../../shared/types/runtime';
 import { apiGetJson } from '@/api/apiFetch';
 import { deleteCronTask, stopCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
@@ -153,8 +153,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         ? ((selectedAgent?.runtime as RuntimeType) || 'builtin') : 'builtin';
     const isExternalRuntime = launcherRuntime !== 'builtin';
 
-    // Codex models are dynamic (fetched from app-server); CC models are static
+    // Codex + Gemini models are dynamic (fetched from the CLI); CC models are static
     const [codexModels, setCodexModels] = useState<RuntimeModelInfo[]>([]);
+    const [geminiModels, setGeminiModels] = useState<RuntimeModelInfo[]>([]);
     useEffect(() => {
         if (!multiAgentRuntimeEnabled || launcherRuntime !== 'codex') { setCodexModels([]); return; }
         let cancelled = false;
@@ -163,11 +164,22 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             .catch(() => {});
         return () => { cancelled = true; };
     }, [multiAgentRuntimeEnabled, launcherRuntime]);
+    useEffect(() => {
+        if (!multiAgentRuntimeEnabled || launcherRuntime !== 'gemini') { setGeminiModels([]); return; }
+        let cancelled = false;
+        apiGetJson<{ models?: RuntimeModelInfo[] }>('/api/runtime/models?type=gemini')
+            .then(res => { if (!cancelled && res?.models?.length) setGeminiModels(res.models); })
+            .catch(() => {});
+        return () => { cancelled = true; };
+    }, [multiAgentRuntimeEnabled, launcherRuntime]);
 
     const launcherRuntimeModels: RuntimeModelInfo[] | undefined = launcherRuntime === 'claude-code' ? CC_MODELS
-        : launcherRuntime === 'codex' ? codexModels : undefined;
+        : launcherRuntime === 'codex' ? codexModels
+        : launcherRuntime === 'gemini' ? geminiModels : undefined;
     const launcherRuntimePermissionModes: RuntimePermissionMode[] | undefined = launcherRuntime === 'claude-code'
-        ? CC_PERMISSION_MODES : launcherRuntime === 'codex' ? CODEX_PERMISSION_MODES : undefined;
+        ? CC_PERMISSION_MODES
+        : launcherRuntime === 'codex' ? CODEX_PERMISSION_MODES
+        : launcherRuntime === 'gemini' ? GEMINI_PERMISSION_MODES : undefined;
 
     // Derive provider for launcher — only select providers with valid credentials
     const launcherProvider = useMemo(() => {

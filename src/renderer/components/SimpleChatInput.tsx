@@ -1617,10 +1617,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <ChevronUp className="h-3 w-3 shrink-0" />
                 </button>
                 {showModelMenu && (isExternalRuntime && runtimeModels ? (
-                  /* External Runtime model selector — shows CC/Codex models */
+                  /* External Runtime model selector — shows CC/Codex/Gemini models */
                   <div className="absolute right-0 bottom-full mb-1 w-64 max-h-[300px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-xl">
                     <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
-                      {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime?.toUpperCase()} 模型
+                      {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase()} 模型
                     </div>
                     {runtimeModels.map(model => {
                       const isSelected = selectedModel === model.value || (!selectedModel && model.isDefault);

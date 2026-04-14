@@ -6,8 +6,9 @@
  * - builtin: Built-in Claude Agent SDK (current default)
  * - claude-code: Claude Code CLI (user-installed `claude`)
  * - codex: OpenAI Codex CLI (user-installed `codex`)
+ * - gemini: Google Gemini CLI in ACP mode (user-installed `gemini`, v0.1.66+)
  */
-export type RuntimeType = 'builtin' | 'claude-code' | 'codex';
+export type RuntimeType = 'builtin' | 'claude-code' | 'codex' | 'gemini';
 
 /**
  * Runtime detection result
@@ -91,6 +92,42 @@ export const CC_PERMISSION_MODES: RuntimePermissionMode[] = [
   },
 ];
 
+// ─── Gemini CLI permission modes (ACP session modes, v0.1.66) ───
+//
+// These map 1:1 to Gemini CLI's ACP session/new response `modes.availableModes[]`:
+//   default  → "Prompts for approval"
+//   autoEdit → "Auto-approves edit tools"
+//   yolo     → "Auto-approves all tools"
+//   plan     → "Read-only mode"
+// We keep the internal value equal to Gemini's modeId to avoid a mapping table.
+
+export const GEMINI_PERMISSION_MODES: RuntimePermissionMode[] = [
+  {
+    value: 'default',
+    label: 'Default',
+    icon: '\u{1F6E1}',  // 🛡
+    description: '每次工具调用都需要确认',
+  },
+  {
+    value: 'autoEdit',
+    label: 'Auto Edit',
+    icon: '\u{1F4DD}',  // 📝
+    description: '自动接受文件编辑,其他需确认',
+  },
+  {
+    value: 'yolo',
+    label: 'YOLO',
+    icon: '\u26A1',      // ⚡
+    description: '跳过所有工具确认',
+  },
+  {
+    value: 'plan',
+    label: 'Plan',
+    icon: '\u{1F4CB}',  // 📋
+    description: '规划模式,只读不执行',
+  },
+];
+
 // ─── Codex permission modes (pre-defined for v2) ───
 
 export const CODEX_PERMISSION_MODES: RuntimePermissionMode[] = [
@@ -127,6 +164,7 @@ export function getRuntimePermissionModes(runtime: RuntimeType): RuntimePermissi
   switch (runtime) {
     case 'claude-code': return CC_PERMISSION_MODES;
     case 'codex': return CODEX_PERMISSION_MODES;
+    case 'gemini': return GEMINI_PERMISSION_MODES;
     default: return [];
   }
 }
@@ -140,6 +178,16 @@ export const CC_MODELS: RuntimeModelInfo[] = [
   { value: 'haiku', displayName: 'Haiku' },
 ];
 
+// ─── Gemini CLI model list (placeholder; real list is discovered at runtime) ───
+//
+// Gemini CLI returns the full model catalog in the session/new response (modes.availableModels).
+// This constant only holds a "default" entry so dropdowns have something before detection runs.
+// Once GeminiRuntime.queryModels() has completed, the frontend should render the discovered list.
+
+export const GEMINI_MODELS: RuntimeModelInfo[] = [
+  { value: '', displayName: '默认', isDefault: true },
+];
+
 /**
  * Get default permission mode for a given runtime type
  */
@@ -147,6 +195,7 @@ export function getDefaultRuntimePermissionMode(runtime: RuntimeType): string {
   switch (runtime) {
     case 'claude-code': return 'default';
     case 'codex': return 'full-auto';
+    case 'gemini': return 'autoEdit';  // D5: desktop default = Auto Edit
     default: return '';
   }
 }

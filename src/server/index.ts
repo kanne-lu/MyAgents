@@ -2445,7 +2445,7 @@ async function main() {
           return jsonResponse({ success: false, error: 'agentDir is required.' }, 400);
         }
 
-        const VALID_RUNTIMES = ['builtin', 'claude-code', 'codex'] as const;
+        const VALID_RUNTIMES = ['builtin', 'claude-code', 'codex', 'gemini'] as const;
         const runtimeValue = VALID_RUNTIMES.includes(payload?.runtime as typeof VALID_RUNTIMES[number])
           ? (payload.runtime as import('../shared/types/runtime').RuntimeType)
           : undefined;

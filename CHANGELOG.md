@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.66] - 2026-04-14
+
+### Added
+- **Gemini CLI Runtime**:在内置、Claude Code、Codex 之外新增 Google Gemini CLI 作为第四个 Agent Runtime。基于官方 `gemini --acp`(Agent Client Protocol,JSON-RPC 2.0 over stdio)持久进程模型,与 Codex 协议形态同构
+  - 模型、权限模式、工具调用、思考流、Token 用量全部接入现有的统一事件流,桌面 Chat / Cron / IM Bot 三条路径无缝对齐
+  - 模型列表动态发现:启动时直接从 Gemini CLI 的 `session/new` 响应里读取当前账户可用的 8 个模型(auto-gemini-3 / auto-gemini-2.5 / gemini-3.1-pro-preview / gemini-3-flash-preview / gemini-2.5-pro / 等),无需硬编码
+  - 权限模式:default / autoEdit / yolo / plan 四档,桌面场景默认 autoEdit、Cron/IM 场景默认 yolo,与 CC/Codex 一致
+  - **系统提示合并注入**:使用官方 `GEMINI_SYSTEM_MD` 环境变量 + 外部 tmp 文件,把 MyAgents 的三层系统提示(base-identity + channel + scenario)前置到 Gemini CLI 内置 prompt 之上。基底通过 `GEMINI_WRITE_SYSTEM_MD` 按 CLI 版本缓存,首次提取 zero-cost(在 API 调用前 kill 进程)
+  - **认证完全透传**:MyAgents 不管理 Gemini API Key、OAuth 或 Vertex AI,用户在本机通过 `gemini` CLI 自行完成登录,Sidecar 透明继承 shell 环境
+  - 前提:用户需要先 `npm install -g @google/gemini-cli` 或 `brew install gemini-cli` 并完成登录
+  - 详见 [Multi-Agent Runtime 架构](./specs/tech_docs/multi_agent_runtime.md) 的 Gemini Runtime 节
+
+---
+
 ## [0.1.65] - 2026-04-14
 
 ### Added

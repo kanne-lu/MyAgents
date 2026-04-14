@@ -42,7 +42,7 @@ import {
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, getDefaultRuntimePermissionMode } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
@@ -57,6 +57,18 @@ const LazyBrowserPanel = lazy(() => import('@/components/BrowserPanel'));
 const LazyIntroductionOverlay = lazy(() => import('@/components/IntroductionOverlay'));
 // Terminal chrome now uses CSS tokens that auto-switch with light/dark theme.
 // No need for cached theme constants — the header uses var(--paper), var(--ink), etc.
+
+/** Human-readable label for a runtime type (used in confirm dialogs, toasts, etc.) */
+function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
+  switch (runtime) {
+    case 'claude-code': return 'Claude Code';
+    case 'codex': return 'Codex';
+    case 'gemini': return 'Gemini CLI';
+    case 'builtin':
+    default:
+      return 'MyAgents';
+  }
+}
 const SIGNED_HISTORY_PROVIDER_IDS = new Set(['anthropic-sub', 'anthropic-api']);
 
 function requiresSignedSessionHistory(providerId?: string): boolean {
@@ -571,6 +583,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     'builtin': { installed: true },
     'claude-code': { installed: false },
     'codex': { installed: false },
+    'gemini': { installed: false },
   });
   // Gate: when multiAgentRuntime is off, treat everything as builtin regardless of agent config.
   // This gate is applied at the definition of currentRuntime itself so ALL downstream
@@ -596,15 +609,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   );
   const [runtimePermissionMode, setRuntimePermissionMode] = useState<string>(
     (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode
-    || (currentRuntime === 'claude-code' ? 'default' : 'full-auto')
+    || getDefaultRuntimePermissionMode(currentRuntime) || 'default'
   );
 
   // Runtime-specific models and permission modes
   const runtimePermissionModes = currentRuntime === 'claude-code' ? CC_PERMISSION_MODES
-    : currentRuntime === 'codex' ? CODEX_PERMISSION_MODES : undefined;
+    : currentRuntime === 'codex' ? CODEX_PERMISSION_MODES
+    : currentRuntime === 'gemini' ? GEMINI_PERMISSION_MODES
+    : undefined;
 
-  // Codex models are dynamic (fetched from app-server); CC models are static
+  // Codex + Gemini models are dynamic (fetched from the CLI); CC models are static
   const [codexModels, setCodexModels] = useState<typeof CC_MODELS>([]);
+  const [geminiModels, setGeminiModels] = useState<typeof CC_MODELS>([]);
   useEffect(() => {
     if (!multiAgentRuntimeEnabled || currentRuntime !== 'codex') return;
     let cancelled = false;
@@ -614,9 +630,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
+  useEffect(() => {
+    if (!multiAgentRuntimeEnabled || currentRuntime !== 'gemini') return;
+    let cancelled = false;
+    apiGet('/api/runtime/models?type=gemini').then((res: unknown) => {
+      const data = res as { models?: typeof CC_MODELS } | undefined;
+      if (!cancelled && data?.models?.length) setGeminiModels(data.models);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
 
   const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
-    : currentRuntime === 'codex' ? codexModels : undefined;
+    : currentRuntime === 'codex' ? codexModels
+    : currentRuntime === 'gemini' ? geminiModels
+    : undefined;
 
   // Effective model/permission based on runtime.
   // For external runtimes: if user hasn't explicitly selected a model (runtimeModel=undefined),
@@ -1639,7 +1666,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       if (onForkSession && agentDir) {
         const { createSession } = await import('@/api/sessionClient');
         const session = await createSession(agentDir, runtime);
-        const runtimeLabel = runtime === 'claude-code' ? 'Claude Code' : runtime === 'codex' ? 'Codex' : 'MyAgents';
+        const runtimeLabel = getRuntimeDisplayLabel(runtime);
         onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
       }
     } catch (err) {
@@ -2655,7 +2682,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {pendingCrossRuntimeMessage && (
         <ConfirmDialog
           title="跨 Runtime 会话"
-          message={`此会话由 ${sessionRuntime === 'codex' ? 'Codex' : sessionRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'} 创建，当前 Runtime 为 ${currentRuntime === 'codex' ? 'Codex' : currentRuntime === 'claude-code' ? 'Claude Code' : '内置 SDK'}，新消息将使用当前 Runtime 新开会话。`}
+          message={`此会话由 ${getRuntimeDisplayLabel(sessionRuntime as RuntimeType | undefined)} 创建,当前 Runtime 为 ${getRuntimeDisplayLabel(currentRuntime)},新消息将使用当前 Runtime 新开会话。`}
           confirmText="新开会话并发送"
           cancelText="取消"
           onConfirm={confirmCrossRuntimeSend}
@@ -2667,7 +2694,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       {pendingRuntimeChange && (
         <ConfirmDialog
           title="切换 Runtime"
-          message={`切换到 ${pendingRuntimeChange === 'claude-code' ? 'Claude Code' : pendingRuntimeChange === 'codex' ? 'Codex' : 'MyAgents'} 将新开一个会话。当前会话保留不变。`}
+          message={`切换到 ${getRuntimeDisplayLabel(pendingRuntimeChange)} 将新开一个会话。当前会话保留不变。`}
           confirmText="确认切换"
           cancelText="取消"
           onConfirm={confirmRuntimeChange}

@@ -6,18 +6,20 @@ import { ChevronUp, Settings } from 'lucide-react';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // Runtime types that have backend implementations (not just type definitions)
-const IMPLEMENTED_RUNTIMES = new Set<RuntimeType>(['builtin', 'claude-code', 'codex']);
+const IMPLEMENTED_RUNTIMES = new Set<RuntimeType>(['builtin', 'claude-code', 'codex', 'gemini']);
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 // ─── Runtime icon assets ───
 import myagentsIcon from '@/assets/runtime-icons/myagents.png';
 import claudeCodeIcon from '@/assets/runtime-icons/claude-code.png';
 import codexIcon from '@/assets/runtime-icons/codex.png';
+import geminiIcon from '@/assets/runtime-icons/gemini.png';
 
 const RUNTIME_ICON_MAP: Record<RuntimeType, string> = {
   builtin: myagentsIcon,
   'claude-code': claudeCodeIcon,
   codex: codexIcon,
+  gemini: geminiIcon,
 };
 
 // ─── Runtime display metadata ───
@@ -29,6 +31,7 @@ const RUNTIME_OPTIONS: {
     { type: 'builtin', name: 'MyAgents (Claude Agent SDK)' },
     { type: 'claude-code', name: 'Claude Code CLI' },
     { type: 'codex', name: 'Codex CLI' },
+    { type: 'gemini', name: 'Gemini CLI' },
   ];
 
 function RuntimeIcon({ type, size = 14 }: { type: RuntimeType; size?: number }) {

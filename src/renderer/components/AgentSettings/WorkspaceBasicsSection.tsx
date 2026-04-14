@@ -41,6 +41,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     'builtin': { installed: true },
     'claude-code': { installed: false },
     'codex': { installed: false },
+    'gemini': { installed: false },
   });
   // When multiAgentRuntime is off, treat as builtin regardless of agent config (方案 C)
   const currentRuntime: RuntimeType = config.multiAgentRuntime
@@ -76,7 +77,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     try {
       await patchAgentConfig(agent.id, { runtime });
       refreshConfig();
-      const label = runtime === 'claude-code' ? 'Claude Code' : runtime === 'codex' ? 'Codex' : 'MyAgents';
+      const label = runtime === 'claude-code' ? 'Claude Code'
+        : runtime === 'codex' ? 'Codex'
+        : runtime === 'gemini' ? 'Gemini CLI'
+        : 'MyAgents';
       toast.success(`已切换为 ${label}，新开 Tab 后生效`);
     } catch (err) {
       console.error('[runtime] Failed to save runtime:', err);
@@ -279,13 +283,19 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           </div>
 
           {/* External runtime notice */}
-          {currentRuntime !== 'builtin' && (
-            <p className="rounded-lg bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--ink-muted)]">
-              当前 Agent 工作区的运行环境已设置为 <span className="font-medium text-[var(--ink-secondary)]">{currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'}</span>。
-              无论您在 MyAgents 客户端或通过绑定的聊天机器人与 AI 对话，均将直接调用本机已安装的 {currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'} 来执行，效果等同于在终端中使用。
-              因此供应商配置、支持的模型、MCP 工具、权限规则等均由 {currentRuntime === 'claude-code' ? 'Claude Code' : 'Codex'} 自身管理，如需调整请在其设置中修改。
-            </p>
-          )}
+          {currentRuntime !== 'builtin' && (() => {
+            const runtimeLabel = currentRuntime === 'claude-code' ? 'Claude Code'
+              : currentRuntime === 'codex' ? 'Codex'
+              : currentRuntime === 'gemini' ? 'Gemini CLI'
+              : currentRuntime;
+            return (
+              <p className="rounded-lg bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--ink-muted)]">
+                当前 Agent 工作区的运行环境已设置为 <span className="font-medium text-[var(--ink-secondary)]">{runtimeLabel}</span>。
+                无论您在 MyAgents 客户端或通过绑定的聊天机器人与 AI 对话,均将直接调用本机已安装的 {runtimeLabel} 来执行,效果等同于在终端中使用。
+                因此供应商配置、支持的模型、MCP 工具、权限规则等均由 {runtimeLabel} 自身管理,如需调整请在其设置中修改。
+              </p>
+            );
+          })()}
         </>
       )}
 

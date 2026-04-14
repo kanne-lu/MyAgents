@@ -4,13 +4,14 @@ import type { RuntimeType } from '../../shared/types/runtime';
 import type { AgentRuntime } from './types';
 import { ClaudeCodeRuntime } from './claude-code';
 import { CodexRuntime } from './codex';
+import { GeminiRuntime } from './gemini';
 
 // ─── Runtime registry ───
 
 const runtimes: Partial<Record<RuntimeType, AgentRuntime>> = {};
 
 // Runtime types that have actual implementations
-const SUPPORTED_EXTERNAL_RUNTIMES = new Set<RuntimeType>(['claude-code', 'codex']);
+const SUPPORTED_EXTERNAL_RUNTIMES = new Set<RuntimeType>(['claude-code', 'codex', 'gemini']);
 
 function ensureRuntime(type: RuntimeType): AgentRuntime {
   if (!runtimes[type]) {
@@ -20,6 +21,9 @@ function ensureRuntime(type: RuntimeType): AgentRuntime {
         break;
       case 'codex':
         runtimes[type] = new CodexRuntime();
+        break;
+      case 'gemini':
+        runtimes[type] = new GeminiRuntime();
         break;
       default:
         throw new Error(`Runtime "${type}" is not yet supported. Available: ${[...SUPPORTED_EXTERNAL_RUNTIMES].join(', ')}`);
@@ -58,6 +62,6 @@ export function isExternalRuntime(type: RuntimeType | undefined): boolean {
  */
 export function getCurrentRuntimeType(): RuntimeType {
   const env = process.env.MYAGENTS_RUNTIME;
-  if (env === 'claude-code' || env === 'codex') return env;
+  if (env === 'claude-code' || env === 'codex' || env === 'gemini') return env;
   return 'builtin';
 }
