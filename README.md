@@ -35,12 +35,18 @@ MyAgents 是一款开源桌面端 AI Agent，同时具备「Claude Code」的强
 ### 核心能力
 
 - **图形界面零门槛** - Chrome 风格多标签页，每个 Tab 独立运行一个 Agent，真正的并行工作流
-- **多模型自由切换** - Anthropic、DeepSeek、Moonshot、智谱、MiniMax、火山方舟、OpenRouter 等 10+ 供应商，按需选择，成本可控
-- **Skills 技能系统** - 内置和自定义技能，一键触发常用操作，让 Agent 越用越懂你
+- **多 Agent Runtime（实验室）** - 除内置 Claude Agent SDK 外，可选 **Claude Code CLI** 或 **OpenAI Codex CLI** 作为外部 Runtime，按场景挑顺手的引擎
+- **多模型自由切换** - Anthropic、DeepSeek、Moonshot、智谱、MiniMax、火山方舟、ZenMux、硅基流动、OpenRouter 等 10+ 供应商，按需选择，成本可控
+- **Skills 技能系统** - 把常用流程沉淀成 Agent 可复用的能力模块，内置 + 自定义双轨
 - **MCP 工具集成** - 内置 MCP 协议支持（STDIO/HTTP/SSE），连接外部工具和数据源，Agent 能力可无限扩展
 - **自定义 Agent** - 配置独立的 Prompt、工具、模型，打造专属 Agent
-- **IM 聊天机器人** - 接入 Telegram / 飞书，多 Bot 管理、交互式权限审批、多媒体消息、定时任务
-- **智能权限管理** - 行动/规划/自主三种模式，安全可控
+- **Agent + Channel 架构** - 内置 Telegram / 钉钉适配器，更多 IM 平台（飞书 / 微信 / QQ 等）通过 OpenClaw 插件接入；支持多 Bot 管理、交互式权限审批、多媒体消息
+- **定时任务系统** - 固定间隔 / Cron 表达式 / 一次性三种调度，Chat 内、AI 工具调用、IM Bot 全场景可用
+- **内嵌终端** - 分屏右侧交互式 PTY（xterm.js + portable-pty），自动定位到工作区目录，与 Tab 共享生命周期
+- **内嵌浏览器** - Tauri 多 Webview 子视图，AI 生成的链接和 HTML 文件一键预览，独立 Cookie 持久化
+- **全文搜索** - 基于 Tantivy + jieba 的本地搜索引擎，Session 历史与工作区文件秒级检索，纯本地不上传
+- **自配置 CLI 与 MA 小助理** - 内置 `myagents` 命令让 AI 和用户都能通过 Bash 直接管理应用配置；MA 小助理是产品首席客服，能直接帮你诊断问题、配置工具
+- **智能权限管理** - 行动 / 规划 / 自主三种模式，安全可控
 - **本地数据，持续进化** - 所有对话、文件、记忆都存在本地，隐私有保障，API 直连供应商。随着使用积累，你的 AI 会越来越懂你
 - **完全开源免费** - Apache-2.0 协议，代码完全公开
 
@@ -98,40 +104,45 @@ cd MyAgents
 
 ### 技术栈
 
-| 组件 | 技术 |
+| 层级 | 技术 |
 |------|------|
-| 前端 | React + TypeScript + TailwindCSS |
-| 桌面 | Tauri v2 |
-| 后端 | Bun + Claude Agent SDK (多实例) |
-| 通信 | Rust HTTP/SSE Proxy (reqwest) |
-| 拖拽 | @dnd-kit/sortable |
+| 桌面框架 | Tauri v2 (Rust) + 多 Webview |
+| 前端 | React 19 + TypeScript + TailwindCSS + xterm.js |
+| Agent Runtime | Bun + Claude Agent SDK（默认）/ Claude Code CLI / OpenAI Codex CLI |
+| 社区生态 | Node.js（MCP Server / npm 包，应用内置） |
+| 通信 | Rust HTTP/SSE Proxy（reqwest，统一 localhost no-proxy） |
+| 终端 | portable-pty（PTY 进程）+ xterm.js（前端渲染） |
+| 搜索 | Tantivy + tantivy-jieba（中文分词） |
+| 插件 | OpenClaw Plugin Bridge（独立 Bun 进程加载社区 Channel 插件） |
 
 ### 架构
 
-**Session-Centric 多实例 Sidecar 架构** — 每个会话拥有独立的 Agent 进程，严格 1:1 隔离；多 Owner 共享机制让 Tab、定时任务、IM Bot 安全复用同一 Sidecar；Rust 代理层统一接管所有流量，零 CORS 问题；内置 Bun 运行时，用户无需安装任何依赖。
+**Session-Centric 多实例 Sidecar 架构** — 每个会话拥有独立的 Agent 进程，严格 1:1 隔离；多 Owner 共享机制让 Tab、定时任务、Agent Channel 安全复用同一 Sidecar；Rust 代理层统一接管所有流量，零 CORS 问题；**双运行时**内置 Bun（跑 Agent Runtime）+ Node.js（跑 MCP Server / 社区 npm 生态），Windows 还附带静默安装 Git for Windows，用户无需安装任何依赖。
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                        Tauri Desktop App                       │
-├────────────────────────────────────────────────────────────────┤
-│  React Frontend                                                │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐ │
-│  │  Chat 1  │  │  Chat 2  │  │ Settings │  │  IM Settings  │ │
-│  │  Tab SSE │  │  Tab SSE │  │ 全局 API  │  │ 多 Bot 管理    │ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───────┬───────┘ │
-│       │              │             │                │          │
-├───────┼──────────────┼─────────────┼────────────────┼──────────┤
-│  Rust │              │             │                │          │
-│  ┌────┴──────────────┴───┐  ┌─────┴─────┐  ┌──────┴───────┐ │
-│  │   SidecarManager     │  │  Global   │  │ ManagedImBots│ │
-│  │  Session:Sidecar 1:1 │  │  Sidecar  │  │ Telegram/飞书 │ │
-│  └────┬──────────┬───────┘  └───────────┘  └──────┬───────┘ │
-│       ▼          ▼                                 ▼         │
-│  Sidecar:31415  Sidecar:31416              Bot API Adapters  │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                          Tauri Desktop App                         │
+├────────────────────────────────────────────────────────────────────┤
+│  React Frontend                                                    │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐ │
+│  │  Chat 1  │  │  Chat 2  │  │ Settings │  │   Agent Channels    │ │
+│  │  Tab SSE │  │  Tab SSE │  │ 全局 API │  │  TG / 钉钉 / 插件   │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────────┬──────────┘ │
+│       │             │             │                   │            │
+├───────┼─────────────┼─────────────┼───────────────────┼────────────┤
+│  Rust │             │             │                   │            │
+│  ┌────┴─────────────┴─────┐  ┌────┴─────┐  ┌──────────┴──────────┐ │
+│  │     SidecarManager     │  │  Global  │  │    ManagedAgents    │ │
+│  │  Session:Sidecar 1:1   │  │ Sidecar  │  │    Plugin Bridge    │ │
+│  │  Owner Tab/Cron/Agent  │  │          │  │     (OpenClaw)      │ │
+│  └────┬─────────────┬─────┘  └──────────┘  └──────────┬──────────┘ │
+│       ▼             ▼                                 ▼            │
+│  Bun Sidecar  (Claude Agent SDK / Claude Code CLI / Codex CLI)     │
+│  + Node.js    (MCP Server / 社区 npm 生态)                         │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-> 完整架构说明、Session 切换机制、Owner 生命周期等详见 [技术架构文档](specs/tech_docs/architecture.md)。
+> 完整架构说明、Session 切换机制、Owner 生命周期等详见 [技术架构文档](specs/ARCHITECTURE.md)。
 
 ### 贡献
 
@@ -149,7 +160,7 @@ cd MyAgents
 
 MyAgents is an open-source desktop AI Agent that combines the powerful Agent capabilities of "Claude Code" with flexible IM Bot interaction — two-in-one, one-click install, zero barrier.
 
-For content creators, product managers, students, researchers, indie developers, AI enthusiasts — anyone who wants AI to get things done.
+As of early 2026, AI capability is advancing rapidly — software developers were the first to become 10x or 100x more productive. 2026 is going to be the inaugural year of intelligence abundance. We hope MyAgents brings that power to everyone — students, content creators, educators, domain experts, product managers, anyone who *wants to make something*. We want MyAgents to be the soul of your computer, an amplifier for your taste and ideas, turning intent into impact.
 
 ### Quick Download
 - Visit https://myagents.io to download the installer
@@ -159,11 +170,17 @@ For content creators, product managers, students, researchers, indie developers,
 ### Core Capabilities
 
 - **Zero-Barrier GUI** - Chrome-style multi-tab interface, each Tab runs an independent Agent for true parallel workflows
-- **Multi-Model Freedom** - Anthropic, DeepSeek, Moonshot, Zhipu, MiniMax, Volcengine, OpenRouter and 9+ providers, choose by need, control your cost
-- **Skills System** - Built-in and custom skills, trigger common operations with one click, your Agent learns your habits
+- **Multi-Agent Runtime (Lab)** - Beyond the built-in Claude Agent SDK, optionally pick **Claude Code CLI** or **OpenAI Codex CLI** as the external runtime — choose the engine that fits your task
+- **Multi-Model Freedom** - Anthropic, DeepSeek, Moonshot, Zhipu, MiniMax, Volcengine, ZenMux, SiliconFlow, OpenRouter and 10+ providers, choose by need, control your cost
+- **Skills System** - Codify your common workflows into reusable capability modules the Agent can invoke; built-in + custom
 - **MCP Tool Integration** - Built-in MCP protocol support (STDIO/HTTP/SSE), connect external tools and data sources for unlimited extensibility
 - **Custom Agents** - Configure dedicated prompts, tools, and models to build your own Agents
-- **IM Chatbots** - Connect Telegram / Feishu (Lark), multi-bot management, interactive permission approval, multimedia messages, scheduled tasks
+- **Agent + Channel Architecture** - Built-in Telegram / DingTalk adapters; more IM platforms (Feishu / WeChat / QQ etc.) plug in via the OpenClaw plugin ecosystem; multi-bot management, interactive permission approval, multimedia messages
+- **Cron Task System** - Three scheduling modes — fixed interval / cron expression / one-shot — usable from Chat, AI tool calls, and IM bots
+- **Embedded Terminal** - Interactive PTY in the right split panel (xterm.js + portable-pty), auto-rooted at the workspace, lifecycle bound to the Tab
+- **Embedded Browser** - Tauri multi-Webview child view, AI-generated links and HTML files preview in one click, with persistent cookie store
+- **Full-Text Search** - Local Tantivy + jieba search engine, sub-second retrieval over session history and workspace files — fully local, nothing uploaded
+- **Self-Config CLI & MA Helper** - Built-in `myagents` command lets both AI and you manage app config from Bash; the MA Helper is the in-app support agent that diagnoses issues and configures tools for you
 - **Smart Permissions** - Act / Plan / Auto modes for safety and control
 - **Local Data, Continuous Evolution** - All conversations, files, and memories stay on your machine. API connects directly to providers. Your AI grows smarter the more you use it
 - **Fully Open Source** - Apache-2.0 license, code fully open
@@ -177,7 +194,8 @@ For content creators, product managers, students, researchers, indie developers,
 | Moonshot | Kimi K2.5, K2 Thinking, K2 | API |
 | Zhipu AI | GLM 5, 4.7, 4.5 Air | API |
 | MiniMax | M2.5, M2.5 Lightning, M2.1, M2.1 Lightning | API |
-| Volcengine | Ark Code Latest, Doubao Seed Code | API |
+| Volcengine Coding Plan | Doubao Seed 2.0 Code, GLM 4.7, DeepSeek V3.2, Kimi K2.5 | API |
+| Volcengine API | Doubao Seed 2.0 Pro, Code Preview, Lite | API |
 | ZenMux | ZenMux Auto, Gemini 3.1 Pro, Claude 4.6, Doubao Seed 2.0 and more | API |
 | SiliconFlow | Kimi K2.5, GLM 4.7, DeepSeek V3.2, Step 3.5 Flash and more | API |
 | OpenRouter | GPT-5.2 Codex, GPT-5.2 Pro, Gemini 3 and more | API |
@@ -221,40 +239,45 @@ cd MyAgents
 
 ### Tech Stack
 
-| Component | Technology |
-|-----------|------------|
-| Frontend | React + TypeScript + TailwindCSS |
-| Desktop | Tauri v2 |
-| Backend | Bun + Claude Agent SDK (multi-instance) |
-| Communication | Rust HTTP/SSE Proxy (reqwest) |
-| Drag & Drop | @dnd-kit/sortable |
+| Layer | Technology |
+|-------|------------|
+| Desktop Framework | Tauri v2 (Rust) + multi-Webview |
+| Frontend | React 19 + TypeScript + TailwindCSS + xterm.js |
+| Agent Runtime | Bun + Claude Agent SDK (default) / Claude Code CLI / OpenAI Codex CLI |
+| Community Ecosystem | Node.js (MCP servers / npm packages, bundled in app) |
+| Communication | Rust HTTP/SSE Proxy (reqwest, unified localhost no-proxy) |
+| Terminal | portable-pty (PTY process) + xterm.js (frontend renderer) |
+| Search | Tantivy + tantivy-jieba (Chinese tokenizer) |
+| Plugin | OpenClaw Plugin Bridge (separate Bun process loading community Channel plugins) |
 
 ### Architecture
 
-**Session-Centric multi-instance Sidecar architecture** — each session owns an isolated Agent process with strict 1:1 mapping; a multi-owner mechanism lets Tabs, scheduled tasks, and IM Bots safely share the same Sidecar; the Rust proxy layer handles all traffic with zero CORS issues; Bun runtime is bundled — users install nothing.
+**Session-Centric multi-instance Sidecar architecture** — each session owns an isolated Agent process with strict 1:1 mapping; a multi-owner mechanism lets Tabs, scheduled tasks, and Agent Channels safely share the same Sidecar; the Rust proxy layer handles all traffic with zero CORS issues. **Dual runtime**: Bun (Agent Runtime / Sidecar) + Node.js (MCP servers / community npm) are both bundled, plus Git for Windows is silently installed on Windows — users install nothing.
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                        Tauri Desktop App                       │
-├────────────────────────────────────────────────────────────────┤
-│  React Frontend                                                │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────────────┐ │
-│  │  Chat 1  │  │  Chat 2  │  │ Settings │  │  IM Settings  │ │
-│  │  Tab SSE │  │  Tab SSE │  │Global API│  │ Multi-Bot Mgmt│ │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └───────┬───────┘ │
-│       │              │             │                │          │
-├───────┼──────────────┼─────────────┼────────────────┼──────────┤
-│  Rust │              │             │                │          │
-│  ┌────┴──────────────┴───┐  ┌─────┴─────┐  ┌──────┴───────┐ │
-│  │   SidecarManager     │  │  Global   │  │ ManagedImBots│ │
-│  │  Session:Sidecar 1:1 │  │  Sidecar  │  │ TG / Feishu  │ │
-│  └────┬──────────┬───────┘  └───────────┘  └──────┬───────┘ │
-│       ▼          ▼                                 ▼         │
-│  Sidecar:31415  Sidecar:31416              Bot API Adapters  │
-└────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                          Tauri Desktop App                         │
+├────────────────────────────────────────────────────────────────────┤
+│  React Frontend                                                    │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────────────────┐ │
+│  │  Chat 1  │  │  Chat 2  │  │ Settings │  │   Agent Channels    │ │
+│  │  Tab SSE │  │  Tab SSE │  │Global API│  │  TG / DT / Plugin   │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └──────────┬──────────┘ │
+│       │             │             │                   │            │
+├───────┼─────────────┼─────────────┼───────────────────┼────────────┤
+│  Rust │             │             │                   │            │
+│  ┌────┴─────────────┴─────┐  ┌────┴─────┐  ┌──────────┴──────────┐ │
+│  │     SidecarManager     │  │  Global  │  │    ManagedAgents    │ │
+│  │  Session:Sidecar 1:1   │  │ Sidecar  │  │    Plugin Bridge    │ │
+│  │  Owner Tab/Cron/Agent  │  │          │  │     (OpenClaw)      │ │
+│  └────┬─────────────┬─────┘  └──────────┘  └──────────┬──────────┘ │
+│       ▼             ▼                                 ▼            │
+│  Bun Sidecar  (Claude Agent SDK / Claude Code CLI / Codex CLI)     │
+│  + Node.js    (MCP servers / community npm ecosystem)              │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-> For full details on session switching, owner lifecycle, and communication flow, see the [Architecture Documentation](specs/tech_docs/architecture.md).
+> For full details on session switching, owner lifecycle, and communication flow, see the [Architecture Documentation](specs/ARCHITECTURE.md).
 
 ### Contributing
 
