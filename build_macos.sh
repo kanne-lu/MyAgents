@@ -227,7 +227,12 @@ rm -rf "${SDK_DEST}"
 mkdir -p "${SDK_DEST}"
 cp "${SDK_SRC}/cli.js" "${SDK_DEST}/"
 cp "${SDK_SRC}/sdk.mjs" "${SDK_DEST}/"
-cp "${SDK_SRC}"/*.wasm "${SDK_DEST}/"
+# SDK ≤0.2.84 shipped resvg.wasm at package root; 0.2.107 removed it.
+# Copy any .wasm that's still there without failing on an empty glob, so
+# this line keeps working across SDK upgrades in either direction.
+for wasm in "${SDK_SRC}"/*.wasm; do
+    [ -f "$wasm" ] && cp "$wasm" "${SDK_DEST}/"
+done
 cp -R "${SDK_SRC}/vendor" "${SDK_DEST}/"
 
 # 预装 agent-browser CLI（使用预生成的 lockfile 避免耗时的依赖解析）

@@ -516,7 +516,12 @@ try {
 
     Copy-Item "$sdkSrc\cli.js" $sdkDest -Force
     Copy-Item "$sdkSrc\sdk.mjs" $sdkDest -Force
-    Copy-Item "$sdkSrc\*.wasm" $sdkDest -Force
+    # SDK <=0.2.84 shipped resvg.wasm at package root; 0.2.107 removed it.
+    # Copy any .wasm still present without failing on an empty glob.
+    $wasmFiles = Get-ChildItem -Path "$sdkSrc\*.wasm" -ErrorAction SilentlyContinue
+    if ($wasmFiles) {
+        Copy-Item $wasmFiles.FullName $sdkDest -Force
+    }
     Copy-Item "$sdkSrc\vendor" $sdkDest -Recurse -Force
     Write-Host "    OK - SDK 依赖复制完成" -ForegroundColor Green
 
