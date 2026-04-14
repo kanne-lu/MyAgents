@@ -1017,7 +1017,15 @@ export class GeminiRuntime implements AgentRuntime {
         if (!toolCallId) return null;
         const title = String(update.title || 'Tool');
         const kind = String(update.kind || '');
-        const toolName = mapToolKindToName(kind, title);
+        const internalName = parseGeminiToolName(toolCallId);
+        const toolName = mapGeminiInternalToolName(internalName, kind, title);
+        const input = buildGeminiToolInput(
+          internalName,
+          title,
+          kind,
+          update.locations as Array<{ path: string; line?: number }> | undefined,
+          update.content,
+        );
 
         const existing = geminiProc.toolState.get(toolCallId);
         if (existing?.emittedStart) return null;
@@ -1031,11 +1039,7 @@ export class GeminiRuntime implements AgentRuntime {
           kind: 'tool_use_start',
           toolUseId: toolCallId,
           toolName,
-          input: {
-            title,
-            kind,
-            ...(Array.isArray(update.content) ? { content: update.content } : {}),
-          },
+          input,
         };
       }
 
@@ -1052,16 +1056,25 @@ export class GeminiRuntime implements AgentRuntime {
           const isError = status === 'failed';
           const events: UnifiedEvent[] = [];
 
-          // Late-bind tool_use_start if we never saw one
+          // Late-bind tool_use_start if we never saw one (default mode: request_permission
+          // arrives before any tool_call notification fires)
           if (!state?.emittedStart) {
             const title = String(update.title || 'Tool');
             const kind = String(update.kind || '');
-            const toolName = mapToolKindToName(kind, title);
+            const internalName = parseGeminiToolName(toolCallId);
+            const toolName = mapGeminiInternalToolName(internalName, kind, title);
+            const input = buildGeminiToolInput(
+              internalName,
+              title,
+              kind,
+              update.locations as Array<{ path: string; line?: number }> | undefined,
+              update.content,
+            );
             events.push({
               kind: 'tool_use_start',
               toolUseId: toolCallId,
               toolName,
-              input: { title, kind },
+              input,
             });
           }
 
@@ -1118,6 +1131,7 @@ export class GeminiRuntime implements AgentRuntime {
             title?: string;
             kind?: string;
             content?: unknown;
+            locations?: Array<{ path: string; line?: number }>;
             status?: string;
           };
         };
@@ -1126,13 +1140,16 @@ export class GeminiRuntime implements AgentRuntime {
         const toolCallId = String(toolCall.toolCallId || '');
         const title = String(toolCall.title || 'Tool');
         const kind = String(toolCall.kind || '');
-        const toolName = mapToolKindToName(kind, title);
+        const internalName = parseGeminiToolName(toolCallId);
+        const toolName = mapGeminiInternalToolName(internalName, kind, title);
+        const input = buildGeminiToolInput(internalName, title, kind, toolCall.locations, toolCall.content);
 
         if (p.options && p.options.length > 0) {
           geminiProc.pendingPermissionOptions.set(rpcId, p.options);
         }
 
-        // Emit tool_use_start if we haven't already (default mode goes straight here)
+        // Emit tool_use_start if we haven't already (default mode goes straight here
+        // without a prior tool_call notification)
         if (toolCallId) {
           const state = geminiProc.toolState.get(toolCallId);
           if (!state?.emittedStart) {
@@ -1145,7 +1162,7 @@ export class GeminiRuntime implements AgentRuntime {
               kind: 'tool_use_start',
               toolUseId: toolCallId,
               toolName,
-              input: { title, kind },
+              input,
             });
           }
         }
@@ -1155,7 +1172,7 @@ export class GeminiRuntime implements AgentRuntime {
           requestId: String(rpcId),
           toolName,
           toolUseId: toolCallId,
-          input: { title, kind },
+          input,
         });
         break;
       }
@@ -1187,30 +1204,181 @@ interface PromptResponse {
 }
 
 /**
- * Map Gemini ACP `toolCall.kind` into a MyAgents toolName for frontend badge rendering.
- * ACP kinds observed in Gemini CLI v0.37.2:
- *   "execute"  → shell command  → Bash
- *   "edit"     → file edit      → Edit
- *   "read"     → file read      → Read
- *   "search"   → grep / find    → Grep
- *   "fetch"    → web fetch      → WebFetch
- *   other      → fallback to title string
+ * Parse Gemini's internal tool name from the `toolCallId` prefix.
+ *
+ * Gemini generates toolCallIds in the format `<tool_name>-<epoch_ms>-<seq>`, e.g.
+ *   run_shell_command-1776189411556-1
+ *   list_directory-1776189411617-2
+ *   grep_search-1776189411621-3
+ *   glob-1776189411655-4
+ *
+ * This is the only reliable way to identify the exact internal tool, because
+ * Gemini ACP v0.37.2 does NOT populate the `rawInput` field on tool_call /
+ * tool_call_update notifications (verified with /tmp/myagents-verify-gemini/
+ * tool-input-probe.mjs across 4 tool types — all got `rawInput: undefined`).
+ *
+ * Returns the lowercase snake_case internal name, or empty string if the id
+ * doesn't match the expected shape.
  */
-function mapToolKindToName(kind: string, title: string): string {
-  switch (kind) {
-    case 'execute':
+function parseGeminiToolName(toolCallId: string): string {
+  // Match <snake_case>-<13-digit epoch ms>-<seq>
+  const match = toolCallId.match(/^([a-z_]+)-\d{10,}-\d+$/);
+  return match ? match[1] : '';
+}
+
+/**
+ * Map Gemini internal tool name (from toolCallId prefix) to the MyAgents
+ * frontend badge name. The frontend's `toolBadgeConfig.tsx` switch-statement
+ * is the source of truth for which tool names get custom icons + colors.
+ *
+ * Gemini tool catalog in v0.37.2 (from chunk-FNPZEX27.js ShellTool/EditTool/
+ * WriteFileTool/ReadFileTool/GrepTool/RipGrepTool/GlobTool/LSTool/WebFetchTool/
+ * WebSearchTool/SaveMemoryTool/ActivateSkillTool/AskUserTool, with Kind.X
+ * mapping used here only as a FALLBACK for unknown tools):
+ *
+ *   run_shell_command           → Bash       (Kind.Execute)
+ *   read_file                   → Read       (Kind.Read)
+ *   read_many_files             → Read       (Kind.Read)
+ *   write_file                  → Write      (Kind.Edit)
+ *   replace                     → Edit       (Kind.Edit)
+ *   grep / grep_search          → Grep       (Kind.Search)
+ *   glob                        → Glob       (Kind.Search)
+ *   list_directory              → Glob       (Kind.Search — reuse Glob badge; FE has no LS)
+ *   web_fetch                   → WebFetch   (Kind.Fetch)
+ *   google_web_search           → WebSearch  (Kind.Search)
+ *   save_memory                 → Memory     (FE shows fallback badge)
+ *   activate_skill              → Skill      (Kind.Other)
+ *   ask_user                    → AskUser    (Kind.Other)
+ *   update_topic                → UpdateTopic (Kind.Think)
+ *   complete_task               → Task       (Kind.Other)
+ */
+function mapGeminiInternalToolName(
+  internalName: string,
+  fallbackKind: string,
+  fallbackTitle: string,
+): string {
+  switch (internalName) {
+    case 'run_shell_command':
       return 'Bash';
-    case 'edit':
-      return 'Edit';
-    case 'read':
+    case 'read_file':
+    case 'read_many_files':
       return 'Read';
-    case 'search':
+    case 'write_file':
+      return 'Write';
+    case 'replace':
+      return 'Edit';
+    case 'grep':
+    case 'grep_search':
+    case 'search_file_content':
       return 'Grep';
-    case 'fetch':
+    case 'glob':
+      return 'Glob';
+    case 'list_directory':
+      // Frontend has no LS badge; reuse Glob (purple search family)
+      return 'Glob';
+    case 'web_fetch':
       return 'WebFetch';
-    default:
-      return title || 'Tool';
+    case 'google_web_search':
+      return 'WebSearch';
+    case 'save_memory':
+      return 'Memory';
+    case 'activate_skill':
+      return 'Skill';
+    case 'ask_user':
+      return 'AskUser';
+    case 'complete_task':
+    case 'task_complete':
+      return 'Task';
   }
+  // Fall back to ACP kind for tools we don't recognize (MCP tools, plugins, etc.)
+  switch (fallbackKind) {
+    case 'execute': return 'Bash';
+    case 'edit':    return 'Edit';
+    case 'read':    return 'Read';
+    case 'search':  return 'Grep';
+    case 'fetch':   return 'WebFetch';
+    case 'think':   return 'UpdateTopic';
+  }
+  // Last resort: internal name if we have one, else title, else 'Tool'
+  return internalName || fallbackTitle || 'Tool';
+}
+
+/**
+ * Convert a Gemini tool_call / tool_call_update notification into the structured
+ * `input` object that MyAgents frontend expects (see `toolBadgeConfig.tsx::getToolLabel`
+ * for the canonical field names per tool).
+ *
+ * Gemini's `title` field is pre-formatted by the CLI and is our ONLY source of
+ * structured parameters since `rawInput` is empty in v0.37.2. For each tool we
+ * pattern-match the title back into the frontend's field shape (command / file_path /
+ * pattern / query / url). The mapping is lossy but produces the same display
+ * quality as the native Codex integration — see `toolBadgeConfig.tsx` for how
+ * these fields become the label text.
+ */
+function buildGeminiToolInput(
+  internalName: string,
+  title: string,
+  kind: string,
+  locations: Array<{ path: string; line?: number }> | undefined,
+  content: unknown,
+): Record<string, unknown> {
+  const loc0 = Array.isArray(locations) && locations[0] ? locations[0] : undefined;
+
+  switch (internalName) {
+    case 'run_shell_command': {
+      // title IS the command (verified: toolCallId=run_shell_command-…, title="pwd")
+      return { command: title || '' };
+    }
+    case 'read_file':
+    case 'write_file':
+    case 'replace': {
+      // For file operations Gemini's title is usually the absolute path.
+      // Locations[] is empty in practice but we check first for robustness.
+      const file_path = loc0?.path ?? title ?? '';
+      return { file_path };
+    }
+    case 'read_many_files': {
+      return { file_path: title || '', paths: title || '' };
+    }
+    case 'grep':
+    case 'grep_search':
+    case 'search_file_content': {
+      // title format: `'pattern' in *.ext within ./path` — extract pattern
+      const patternMatch = title.match(/^'([^']*)'/);
+      const pattern = patternMatch ? patternMatch[1] : title;
+      return { pattern };
+    }
+    case 'glob': {
+      // title format: `'*.md'` — strip quotes
+      const pattern = title.replace(/^'|'$/g, '');
+      return { pattern };
+    }
+    case 'list_directory': {
+      const pattern = title || '.';
+      return { pattern };
+    }
+    case 'google_web_search': {
+      return { query: title || '' };
+    }
+    case 'web_fetch': {
+      // title is usually the URL or the fetch prompt
+      return { url: title || '' };
+    }
+    case 'save_memory':
+    case 'activate_skill':
+    case 'ask_user':
+    case 'update_topic':
+    case 'complete_task':
+    case 'task_complete': {
+      return { title, kind };
+    }
+  }
+  // Unknown tool — pass through whatever we have so at least something renders
+  return {
+    title,
+    kind,
+    ...(Array.isArray(content) ? { content } : {}),
+  };
 }
 
 /** Extract text content from a tool_call_update's `content[]` array. */
