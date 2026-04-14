@@ -724,7 +724,7 @@ pub fn cmd_copy_folder_to_templates(
 
 // ============= Admin Agent Sync =============
 
-const ADMIN_AGENT_VERSION: &str = "9";
+const ADMIN_AGENT_VERSION: &str = "10";
 
 /// Merge bundled admin agent files into ~/.myagents/
 /// Version-gated: only runs when ADMIN_AGENT_VERSION changes.
@@ -765,7 +765,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "2";
+const CLI_VERSION: &str = "3";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.

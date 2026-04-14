@@ -186,6 +186,86 @@ myagents plugin remove @anthropic/wechat        # 卸载（须先停止使用该
 
 安装可能需要 10-30 秒（npm install），耐心等待即可。卸载前会检查是否有运行中的 Channel 依赖该插件。
 
+### 管理技能 Skills
+
+**核心能力**：从 GitHub 链接或 `npx skills` 命令直接把社区 skill 装到 `~/.myagents/skills/`，无需用户手动 `cp -r`。
+
+```bash
+myagents skill list                             # 列出已安装的 skill（全局 + 项目级）
+myagents skill info <name>                      # 查看某个 skill 的详情
+myagents skill add <url-or-spec>                # 从链接安装（核心命令）
+myagents skill remove <name>                    # 删除
+myagents skill enable <name>                    # 启用
+myagents skill disable <name>                   # 停用
+myagents skill sync                             # 从 ~/.claude/skills 同步过来
+```
+
+#### `skill add` 的输入形态（全部归一到 GitHub 仓库坐标）
+
+同一个 resolver 吃下所有常见写法，用户粘贴什么都行：
+
+| 输入 | 说明 |
+|------|------|
+| `foo/bar` | GitHub owner/repo 简写 |
+| `https://github.com/foo/bar` | 完整 URL |
+| `https://github.com/foo/bar/tree/main/skills/baz` | tree 子路径（只装该子目录） |
+| `foo/bar@baz` | 仓库内多 skill 时选其一 |
+| `"npx skills add foo/bar --skill baz"` | 用户从 README 复制的整条命令（用引号包住） |
+| `https://example.com/x.zip` | 直连 zip/tar.gz |
+
+**不支持**：GitLab、私有仓库、git SSH（`git@github.com:...`）。
+
+#### 关键 flags
+
+- `--scope user|project` — 装到 `~/.myagents/skills/`（默认）或 `<workspace>/.claude/skills/`
+- `--plugin <name>` — 当仓库含 Claude Plugins 市场（`.claude-plugin/marketplace.json`）时，指定要装的插件合集
+- `--skill <name>` — 仓库内多 skill 时选其一
+- `--force` — 已存在的同名 skill 强制覆盖（默认会报 409 让你确认）
+- `--dry-run` — 只预览不落盘
+
+#### 典型场景
+
+**场景 1：用户粘来一个 GitHub 链接**
+```bash
+myagents skill add https://github.com/vercel-labs/skills/tree/main/skills/react-best-practices
+```
+直接装单个子路径下的 skill。
+
+**场景 2：用户粘来一整条 `npx skills add` 命令**
+```bash
+myagents skill add "npx skills add anthropics/skills --skill pdf"
+```
+resolver 自动剥掉 `npx skills add` 前缀、识别 `--skill` 参数。
+
+**场景 3：仓库是 Claude Plugins 市场（多个插件合集）**
+```bash
+myagents skill add anthropics/skills
+# → 返回错误提示"该仓库是 Claude Plugins 市场，请用 --plugin <name> 指定要安装的 plugin 合集"
+#   并列出可用 plugin 合集：document-skills / example-skills / claude-api
+myagents skill add anthropics/skills --plugin document-skills
+# → 一次装完 docx/pdf/pptx/xlsx 四个 skill
+```
+
+**场景 4：目标已存在**
+```bash
+myagents skill add foo/bar
+# → "技能 bar 已存在。使用 --force 覆盖。"
+myagents skill add foo/bar --force
+```
+
+#### 你应该怎么用
+
+- 用户说"帮我装个 React 最佳实践 skill" → 你用 `myagents skill add vercel-labs/skills --skill react-best-practices`
+- 用户贴了一个 GitHub 链接或 `npx skills add` 命令 → 直接 `myagents skill add "<原文>"`
+- 用户说"看看我有哪些 skill" → `myagents skill list`
+- 用户在 `~/.claude/skills/` 里装了东西 MyAgents 看不见 → `myagents skill sync`
+- 用户说"装不上"，看报错信息：
+  - `401/403` → 私有仓库，不支持
+  - `仓库或分支不存在` → 检查输入拼写，或该仓库使用非默认分支名
+  - `下载超时` → 检查用户代理设置
+  - `该仓库是 Claude Plugins 市场` → 按提示加 `--plugin <name>` 重试
+  - `技能 xxx 已存在` → 按用户意图决定是 `--force` 还是换个名字装
+
 ### 查看 Agent 运行时状态
 
 查看所有 Agent 及其 Channel 的实时连接状态——在线/离线/错误、运行时长、最近消息时间等。

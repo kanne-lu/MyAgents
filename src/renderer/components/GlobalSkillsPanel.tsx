@@ -11,7 +11,7 @@ import SkillDetailPanel from './SkillDetailPanel';
 import type { SkillDetailPanelRef } from './SkillDetailPanel';
 import CommandDetailPanel from './CommandDetailPanel';
 import type { CommandDetailPanelRef } from './CommandDetailPanel';
-import { CreateDialog, NewSkillChooser } from './SkillDialogs';
+import { CreateDialog, NewSkillChooser, InstallFromUrlDialog, type InstallFromUrlResponse } from './SkillDialogs';
 import { SkillCard, CommandCard } from './SkillsCommandsList';
 import type { SkillItem, CommandItem } from '../../shared/skillsTypes';
 
@@ -41,6 +41,7 @@ export default function GlobalSkillsPanel({ onDetailChange }: { onDetailChange?:
 
     // Dialog states
     const [showNewSkillDialog, setShowNewSkillDialog] = useState(false);
+    const [showInstallFromUrlDialog, setShowInstallFromUrlDialog] = useState(false);
     const [showNewCommandDialog, setShowNewCommandDialog] = useState(false);
     const [newItemName, setNewItemName] = useState('');
     const [newItemDescription, setNewItemDescription] = useState('');
@@ -194,6 +195,21 @@ export default function GlobalSkillsPanel({ onDetailChange }: { onDetailChange?:
             toastRef.current.error(err instanceof Error ? err.message : '上传失败');
         }
     }, []);
+
+    // 从 URL 安装 skill — probe + optional confirm，内部无状态，由 Dialog 负责两次请求
+    const handleInstallFromUrl = useCallback(
+        async (
+            url: string,
+            confirmedSelection?: { pluginName?: string; folderNames?: string[]; overwrite?: string[] },
+        ): Promise<InstallFromUrlResponse> => {
+            return apiPostJson<InstallFromUrlResponse>('/api/skill/install-from-url', {
+                url,
+                scope: 'user',
+                confirmedSelection,
+            });
+        },
+        [],
+    );
 
     // 导入文件夹
     const handleImportFolder = useCallback(async (folderPath: string) => {
@@ -418,12 +434,32 @@ export default function GlobalSkillsPanel({ onDetailChange }: { onDetailChange?:
                     }}
                     onUploadSkill={handleUploadSkill}
                     onImportFolder={handleImportFolder}
+                    onInstallFromUrl={() => {
+                        setShowNewSkillDialog(false);
+                        setShowInstallFromUrlDialog(true);
+                    }}
                     onCancel={() => setShowNewSkillDialog(false)}
                     syncConfig={canSyncFromClaude ? {
                         onSync: handleSyncFromClaude,
                         canSync: canSyncFromClaude,
                         syncableCount: syncableCount
                     } : undefined}
+                />
+            )}
+            {showInstallFromUrlDialog && (
+                <InstallFromUrlDialog
+                    onInstall={handleInstallFromUrl}
+                    onCancel={() => setShowInstallFromUrlDialog(false)}
+                    onInstalled={(folderNames) => {
+                        setShowInstallFromUrlDialog(false);
+                        setRefreshKey(k => k + 1);
+                        if (folderNames.length === 1) {
+                            toastRef.current.success(`已安装技能 "${folderNames[0]}"`);
+                            setViewState({ type: 'skill-detail', name: folderNames[0] });
+                        } else {
+                            toastRef.current.success(`已安装 ${folderNames.length} 个技能`);
+                        }
+                    }}
                 />
             )}
             {showNewCommandDialog && (

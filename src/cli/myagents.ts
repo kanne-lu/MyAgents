@@ -96,6 +96,7 @@ Commands:
   mcp       Manage MCP tool servers
   model     Manage model providers
   agent     Manage agents & channels
+  skill     Manage skills (install from URL, list, enable/disable, sync)
   cron      Manage scheduled tasks
   plugin    Manage OpenClaw channel plugins
   config    Read/write application config
@@ -117,6 +118,12 @@ Examples:
   myagents mcp oauth start notion-mcp
   myagents model list
   myagents model set-key deepseek sk-xxx
+  myagents skill list
+  myagents skill add vercel-labs/skills --skill react-best-practices
+  myagents skill add https://github.com/anthropics/skills --plugin document-skills
+  myagents skill add "npx skills add foo/bar --skill baz" --force
+  myagents skill remove my-skill
+  myagents skill sync
   myagents cron list
   myagents plugin list
   myagents version
@@ -196,6 +203,18 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'plugin' && action === 'list') {
     printPluginList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'skill' && action === 'list') {
+    printSkillList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'skill' && action === 'info') {
+    printSkillInfo(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'skill' && action === 'add') {
+    printSkillAdd(result as Record<string, unknown>);
     return;
   }
   if (group === 'mcp' && action === 'oauth') {
@@ -339,6 +358,55 @@ function printPluginList(plugins: Array<Record<string, unknown>>): void {
     );
   }
   console.log(`\n${plugins.length} plugins installed`);
+}
+
+function printSkillList(skills: Array<Record<string, unknown>>): void {
+  if (!skills || skills.length === 0) {
+    console.log('No skills installed.');
+    return;
+  }
+  const pad = (s: string, n: number) => s.padEnd(n);
+  console.log(pad('Folder', 28) + pad('Scope', 10) + pad('Enabled', 10) + 'Description');
+  for (const s of skills) {
+    const enabled = s.enabled === false ? 'off' : 'on';
+    const desc = String(s.description ?? '').slice(0, 60);
+    console.log(
+      pad(String(s.folderName ?? s.name ?? '?').slice(0, 26), 28) +
+      pad(String(s.scope ?? 'user'), 10) +
+      pad(enabled, 10) +
+      desc,
+    );
+  }
+  console.log(`\n${skills.length} skill(s)`);
+}
+
+function printSkillInfo(data: Record<string, unknown>): void {
+  if (!data) {
+    console.log('Skill not found.');
+    return;
+  }
+  const fm = (data.frontmatter as Record<string, unknown>) || {};
+  console.log(`Name:        ${fm.name ?? data.name ?? '?'}`);
+  console.log(`Folder:      ${data.folderName ?? '?'}`);
+  console.log(`Scope:       ${data.scope ?? 'user'}`);
+  console.log(`Description: ${fm.description ?? ''}`);
+  if (fm.author) console.log(`Author:      ${fm.author}`);
+  if (fm['allowed-tools']) console.log(`Allowed:     ${JSON.stringify(fm['allowed-tools'])}`);
+  console.log(`Path:        ${data.path ?? ''}`);
+}
+
+function printSkillAdd(result: Record<string, unknown>): void {
+  const installed = result.installed as Array<Record<string, unknown>> | undefined;
+  if (installed && installed.length > 0) {
+    console.log(`\u2713 Installed ${installed.length} skill(s):`);
+    for (const s of installed) {
+      console.log(`  - ${s.folderName} — ${s.description ?? ''}`);
+    }
+    if (result.sourceUrl) console.log(`\nSource: ${result.sourceUrl}`);
+    return;
+  }
+  // Fall-through: preview / dry-run / error path already handled by generic branch
+  console.log(`\u2713 ${result.hint ?? 'done'}`);
 }
 
 function printMcpOAuth(data: Record<string, unknown>): void {
@@ -633,6 +701,27 @@ function buildRequestBody(
   if (group === 'plugin') {
     if (action === 'install') return { npmSpec: rest[0] || flags.npmSpec };
     if (action === 'remove') return { pluginId: rest[0] || flags.pluginId };
+    return {};
+  }
+
+  // Skill commands
+  if (group === 'skill') {
+    if (action === 'add') {
+      return {
+        url: rest[0] || flags.url,
+        scope: (flags.scope as string) || 'user',
+        plugin: flags.plugin,
+        skill: flags.skill,
+        force: !!flags.force,
+        dryRun: !!flags.dryRun,
+      };
+    }
+    if (action === 'remove' || action === 'info' || action === 'enable' || action === 'disable') {
+      return { name: rest[0] || flags.name, scope: (flags.scope as string) || 'user' };
+    }
+    if (action === 'list' || action === 'sync') {
+      return {};
+    }
     return {};
   }
 

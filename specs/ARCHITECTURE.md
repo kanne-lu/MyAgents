@@ -408,6 +408,42 @@ Cmd+W 层级关闭：Overlay → 分屏面板 → Tab，高 z-index 优先。
 
 详见 [全文搜索架构](./tech_docs/search_architecture.md)。
 
+### 15. Skill URL 安装 (`src/server/skills/`) (v0.1.66)
+
+支持从 GitHub 链接、`npx skills add` 命令或直连 zip 一键把社区 skill 装到 `~/.myagents/skills/`（或当前工作区 `.claude/skills/`）。
+
+**三段流水线**：
+
+```
+用户输入（任意形式）
+    ▼
+url-resolver.ts      — 宽容解析 → { owner, repo, ref?, subPath?, skillName? }
+    ▼
+tarball-fetcher.ts   — codeload.github.com 下载 zip → 内存解包 + 安全限额
+    ▼
+installer.ts         — 扫描 SKILL.md / marketplace.json → 生成 InstallAnalysis
+    ▼
+/api/skill/install-from-url — 复用 /api/skill/upload 的 Zip-Slip 写盘路径
+```
+
+**关键设计**：
+
+| 项 | 说明 |
+|----|------|
+| **统一归一** | URL / owner/repo / `npx skills add ...` 整条命令 / tree 子路径 / `@skill` 后缀 / `--skill` flag 全部归一为同一个 `ResolvedSkillSource` 结构 |
+| **默认分支回退** | 未指定 ref 时先试 `refs/heads/main`，404 回退 `refs/heads/master` |
+| **代理透明** | Bun 原生 `fetch()` 自动继承 `proxy_config` 注入的 `HTTP_PROXY` / `NO_PROXY`；无需本模块感知代理 |
+| **marketplace.json 感知** | 检测到 `.claude-plugin/marketplace.json` 时返回 plugin 合集预览，让前端 / CLI 选一个 plugin（UI 文案：**"Claude Plugins 插件"**） |
+| **两步交互** | 无歧义（单 skill 无冲突）→ 直接落盘；有 marketplace / 多 skill / 冲突 → 返回 preview 让前端二次确认，由前端携带 `confirmedSelection` 再发一次（服务器再次 fetch — 设计权衡是简单 > 状态缓存） |
+| **安全限额** | tarball ≤ 50MB、单文件 ≤ 5MB、文件总数 ≤ 2000、超时 60s、Zip-Slip 防御（复用 `/api/skill/upload` 的 `fullPath.startsWith(skillDir + sep)` 守卫） |
+| **落盘后复用** | 成功写入后调 `bumpSkillsGeneration()` + `syncProjectUserConfig()` + `markSkillsSynced()`，Tab Sidecar 下次请求 skills 时自动同步，与 `/api/skill/upload` 一致 |
+
+**不支持**（MVP 明确拒绝，不是遗漏）：GitLab、私有仓库、git SSH URL、搜索集成（`skill find`）、市场订阅持久化、`skill update`、跨 IDE symlink 同步、npm spec 形态的 skill 包。
+
+**CLI 与 Admin API**：`myagents skill list/info/add/remove/enable/disable/sync` 通过 `/api/admin/skill/*` 薄包装转发到本模块。小助理（MA helper）通过 `self-config` skill 调用 CLI，用户说"帮我装个 foo/bar 的 skill"时助理**直接执行**而非输出步骤。
+
+详见 [Skill URL 安装指南](./guides/skill_marketplace.md)。
+
 ## 通信流程
 
 ### SSE 流式事件

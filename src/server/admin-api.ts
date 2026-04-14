@@ -29,7 +29,7 @@ import {
 } from './utils/admin-config';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { resolve } from 'path';
-import { setMcpServers, getMcpServers, getAgentState } from './agent-session';
+import { setMcpServers, getMcpServers, getAgentState, getSidecarPort } from './agent-session';
 import { broadcast } from './sse';
 
 // ---------------------------------------------------------------------------
@@ -60,6 +60,37 @@ async function managementApi(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, error: `Management API unreachable: ${msg}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar self-loopback (for thin wrappers over existing /api/skill/* routes)
+// ---------------------------------------------------------------------------
+
+async function sidecarSelf(
+  path: string,
+  method: 'GET' | 'POST' | 'DELETE' | 'PUT' = 'GET',
+  body?: Record<string, unknown>,
+): Promise<{ status: number; json: Record<string, unknown> }> {
+  const sidecarPort = getSidecarPort();
+  if (!sidecarPort) {
+    return { status: 500, json: { success: false, error: 'Sidecar port not initialized' } };
+  }
+  const url = `http://127.0.0.1:${sidecarPort}${path}`;
+  const options: RequestInit = {
+    method,
+    headers: { 'Content-Type': 'application/json' },
+  };
+  if (body && (method === 'POST' || method === 'PUT')) {
+    options.body = JSON.stringify(body);
+  }
+  try {
+    const resp = await fetch(url, options);
+    const json = await resp.json() as Record<string, unknown>;
+    return { status: resp.status, json };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 500, json: { success: false, error: `Sidecar self-call failed: ${msg}` } };
   }
 }
 
@@ -1129,6 +1160,224 @@ export async function handlePluginInstall(payload: { npmSpec: string }): Promise
 export async function handlePluginUninstall(payload: { pluginId: string }): Promise<AdminResponse> {
   const resp = await managementApi('/api/plugin/uninstall', 'POST', payload);
   return wrapMgmtResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// Skill handlers (thin wrappers over /api/skill/* self-loopback)
+// ---------------------------------------------------------------------------
+
+export async function handleSkillList(): Promise<AdminResponse> {
+  const { json } = await sidecarSelf('/api/skills?scope=all');
+  if (json.success) {
+    return { success: true, data: json.skills ?? [] };
+  }
+  return { success: false, error: String(json.error ?? 'Failed to list skills') };
+}
+
+export async function handleSkillInfo(payload: { name: string; scope?: 'user' | 'project' }): Promise<AdminResponse> {
+  if (!payload.name) return { success: false, error: 'name is required' };
+  const scope = payload.scope ?? 'user';
+  const { json } = await sidecarSelf(`/api/skill/${encodeURIComponent(payload.name)}?scope=${scope}`);
+  if (json.success) {
+    return { success: true, data: json.skill ?? null };
+  }
+  return { success: false, error: String(json.error ?? 'Skill not found') };
+}
+
+export async function handleSkillAdd(payload: {
+  url: string;
+  scope?: 'user' | 'project';
+  plugin?: string;
+  skill?: string;
+  force?: boolean;
+  dryRun?: boolean;
+}): Promise<AdminResponse> {
+  if (!payload.url) return { success: false, error: 'url is required' };
+
+  // Step 1: probe (no confirmedSelection) to learn the mode
+  const scope = payload.scope ?? 'user';
+  const probe = await sidecarSelf('/api/skill/install-from-url', 'POST', {
+    url: payload.url,
+    scope,
+  });
+  if (!probe.json.success) {
+    return { success: false, error: String(probe.json.error ?? 'Install probe failed') };
+  }
+
+  const mode = probe.json.mode as string | undefined;
+
+  // Already auto-installed (single, no conflict)
+  if (mode === 'installed') {
+    if (payload.dryRun) return { success: true, data: probe.json, hint: '[dry-run] would install the above' };
+    return {
+      success: true,
+      data: probe.json,
+      hint: `Installed ${(probe.json.installed as unknown[] | undefined)?.length ?? 0} skill(s)`,
+    };
+  }
+
+  // Marketplace — require --plugin, install all skills in that plugin
+  if (mode === 'marketplace') {
+    const preview = probe.json.preview as {
+      plugins: Array<{
+        name: string;
+        description: string;
+        skills: Array<{ suggestedFolderName: string; name: string; conflict?: boolean }>;
+      }>;
+    };
+    if (!payload.plugin) {
+      return {
+        success: false,
+        error: '该仓库是 Claude Plugins 市场，请用 --plugin <name> 指定要安装的 plugin 合集',
+        data: { availablePlugins: preview.plugins.map(p => ({ name: p.name, description: p.description, skillCount: p.skills.length })) },
+      };
+    }
+    const plugin = preview.plugins.find(p => p.name === payload.plugin);
+    if (!plugin) {
+      return { success: false, error: `plugin "${payload.plugin}" 不存在` };
+    }
+    const conflicts = plugin.skills.filter(s => s.conflict).map(s => s.suggestedFolderName);
+    if (conflicts.length > 0 && !payload.force) {
+      return {
+        success: false,
+        error: `以下 skill 已存在：${conflicts.join(', ')}。使用 --force 覆盖。`,
+      };
+    }
+    if (payload.dryRun) {
+      return {
+        success: true,
+        hint: `[dry-run] would install ${plugin.skills.length} skill(s) from plugin "${plugin.name}"`,
+        data: { plugin: plugin.name, skills: plugin.skills.map(s => s.suggestedFolderName) },
+      };
+    }
+    const commit = await sidecarSelf('/api/skill/install-from-url', 'POST', {
+      url: payload.url,
+      scope,
+      confirmedSelection: {
+        pluginName: plugin.name,
+        folderNames: plugin.skills.map(s => s.suggestedFolderName),
+        overwrite: payload.force ? conflicts : [],
+      },
+    });
+    if (!commit.json.success) {
+      return { success: false, error: String(commit.json.error ?? 'Install failed') };
+    }
+    return {
+      success: true,
+      data: commit.json,
+      hint: `Installed ${(commit.json.installed as unknown[] | undefined)?.length ?? 0} skill(s) from ${plugin.name}`,
+    };
+  }
+
+  // Multi — require --skill or install all
+  if (mode === 'multi') {
+    const preview = probe.json.preview as {
+      candidates: Array<{ suggestedFolderName: string; name: string; conflict?: boolean }>;
+    };
+    let wanted = preview.candidates;
+    if (payload.skill) {
+      wanted = preview.candidates.filter(
+        c => c.name === payload.skill || c.suggestedFolderName === payload.skill,
+      );
+      if (wanted.length === 0) {
+        return {
+          success: false,
+          error: `未找到 skill "${payload.skill}"。可用：${preview.candidates.map(c => c.suggestedFolderName).join(', ')}`,
+        };
+      }
+    }
+    const conflicts = wanted.filter(c => c.conflict).map(c => c.suggestedFolderName);
+    if (conflicts.length > 0 && !payload.force) {
+      return { success: false, error: `已存在：${conflicts.join(', ')}。使用 --force 覆盖。` };
+    }
+    if (payload.dryRun) {
+      return {
+        success: true,
+        hint: `[dry-run] would install ${wanted.length} skill(s)`,
+        data: { skills: wanted.map(c => c.suggestedFolderName) },
+      };
+    }
+    const commit = await sidecarSelf('/api/skill/install-from-url', 'POST', {
+      url: payload.url,
+      scope,
+      confirmedSelection: {
+        folderNames: wanted.map(c => c.suggestedFolderName),
+        overwrite: payload.force ? conflicts : [],
+      },
+    });
+    if (!commit.json.success) {
+      return { success: false, error: String(commit.json.error ?? 'Install failed') };
+    }
+    return {
+      success: true,
+      data: commit.json,
+      hint: `Installed ${(commit.json.installed as unknown[] | undefined)?.length ?? 0} skill(s)`,
+    };
+  }
+
+  // single-conflict — need --force to overwrite
+  if (mode === 'single-conflict') {
+    const preview = probe.json.preview as { skill: { suggestedFolderName: string; name: string } };
+    if (!payload.force) {
+      return {
+        success: false,
+        error: `技能 "${preview.skill.suggestedFolderName}" 已存在。使用 --force 覆盖。`,
+      };
+    }
+    if (payload.dryRun) {
+      return {
+        success: true,
+        hint: `[dry-run] would overwrite "${preview.skill.suggestedFolderName}"`,
+      };
+    }
+    const commit = await sidecarSelf('/api/skill/install-from-url', 'POST', {
+      url: payload.url,
+      scope,
+      confirmedSelection: {
+        folderNames: [preview.skill.suggestedFolderName],
+        overwrite: [preview.skill.suggestedFolderName],
+      },
+    });
+    if (!commit.json.success) {
+      return { success: false, error: String(commit.json.error ?? 'Install failed') };
+    }
+    return { success: true, data: commit.json, hint: `Overwrote "${preview.skill.suggestedFolderName}"` };
+  }
+
+  return { success: false, error: `未知的 install mode: ${mode}` };
+}
+
+export async function handleSkillRemove(payload: { name: string; scope?: 'user' | 'project' }): Promise<AdminResponse> {
+  if (!payload.name) return { success: false, error: 'name is required' };
+  const scope = payload.scope ?? 'user';
+  const { json } = await sidecarSelf(
+    `/api/skill/${encodeURIComponent(payload.name)}?scope=${scope}`,
+    'DELETE',
+  );
+  if (json.success) return { success: true, data: { name: payload.name } };
+  return { success: false, error: String(json.error ?? 'Failed to remove skill') };
+}
+
+export async function handleSkillToggle(payload: { name: string; enabled: boolean }): Promise<AdminResponse> {
+  if (!payload.name) return { success: false, error: 'name is required' };
+  const { json } = await sidecarSelf('/api/skill/toggle-enable', 'POST', {
+    folderName: payload.name,
+    enabled: payload.enabled,
+  });
+  if (json.success) return { success: true, data: { name: payload.name, enabled: payload.enabled } };
+  return { success: false, error: String(json.error ?? 'Failed to toggle skill') };
+}
+
+export async function handleSkillSync(): Promise<AdminResponse> {
+  const { json } = await sidecarSelf('/api/skill/sync-from-claude', 'POST', {});
+  if (json.success) {
+    return {
+      success: true,
+      data: { synced: json.synced ?? 0, failed: json.failed ?? 0 },
+      hint: `Synced ${json.synced ?? 0} skill(s) from ~/.claude/skills`,
+    };
+  }
+  return { success: false, error: String(json.error ?? 'Sync failed') };
 }
 
 // ---------------------------------------------------------------------------

@@ -2,8 +2,8 @@
  * SkillDialogs - Shared dialog components for Skills & Commands
  * Extracted from SkillsCommandsList and GlobalSkillsPanel to avoid duplication
  */
-import React, { useRef, useState } from 'react';
-import { Loader2, FolderOpen } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Loader2, FolderOpen, Link2 } from 'lucide-react';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -86,6 +86,8 @@ interface NewSkillChooserProps {
     onUploadSkill: (file: File) => void;
     /** Import skill from a folder path (Tauri only) */
     onImportFolder?: (folderPath: string) => void;
+    /** Install skill from a GitHub URL / npx skills command */
+    onInstallFromUrl?: () => void;
     onCancel: () => void;
     /** Optional: sync from Claude Code functionality */
     syncConfig?: {
@@ -99,6 +101,7 @@ export function NewSkillChooser({
     onWriteSkill,
     onUploadSkill,
     onImportFolder,
+    onInstallFromUrl,
     onCancel,
     syncConfig
 }: NewSkillChooserProps) {
@@ -206,6 +209,23 @@ export function NewSkillChooser({
                         </div>
                     </button>
 
+                    {/* Install from URL Option */}
+                    {onInstallFromUrl && (
+                        <button
+                            type="button"
+                            onClick={onInstallFromUrl}
+                            className="group flex w-full items-center gap-4 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
+                        >
+                            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--paper-inset)] transition-colors group-hover:bg-[var(--accent-warm-subtle)]">
+                                <Link2 className="h-6 w-6 text-[var(--ink-muted)]" />
+                            </div>
+                            <div>
+                                <div className="font-medium text-[var(--ink)]">从链接导入</div>
+                                <p className="mt-0.5 text-sm text-[var(--ink-muted)]">粘贴 GitHub 链接或 npx skills 命令</p>
+                            </div>
+                        </button>
+                    )}
+
                     {/* Import Folder Option - Only show in Tauri environment */}
                     {canImportFolder && (
                         <button
@@ -258,6 +278,435 @@ export function NewSkillChooser({
                         onChange={handleFileChange}
                         className="hidden"
                     />
+                </div>
+            </div>
+        </OverlayBackdrop>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// InstallFromUrlDialog — paste a GitHub URL / npx skills command and install
+// ---------------------------------------------------------------------------
+
+type InstallPreview =
+    | {
+          mode: 'marketplace';
+          marketplaceName: string;
+          marketplaceDescription?: string;
+          plugins: Array<{
+              name: string;
+              description: string;
+              skills: Array<{
+                  suggestedFolderName: string;
+                  name: string;
+                  description: string;
+                  hasDangerousTools: boolean;
+                  conflict: boolean;
+              }>;
+          }>;
+      }
+    | {
+          mode: 'multi';
+          candidates: Array<{
+              suggestedFolderName: string;
+              name: string;
+              description: string;
+              hasDangerousTools: boolean;
+              rootPath: string;
+              conflict: boolean;
+          }>;
+      }
+    | {
+          mode: 'single-conflict';
+          skill: {
+              suggestedFolderName: string;
+              name: string;
+              description: string;
+              hasDangerousTools: boolean;
+              conflict: boolean;
+          };
+      };
+
+export interface InstallFromUrlResponse {
+    success: boolean;
+    mode?: string;
+    installed?: Array<{ folderName: string; name?: string; description?: string }>;
+    preview?: InstallPreview;
+    error?: string;
+    sourceUrl?: string;
+    effectiveRef?: string;
+}
+
+interface InstallFromUrlDialogProps {
+    /** Called with the raw URL plus optional confirmed selection. Returns the server JSON. */
+    onInstall: (
+        url: string,
+        confirmedSelection?: {
+            pluginName?: string;
+            folderNames?: string[];
+            overwrite?: string[];
+        },
+    ) => Promise<InstallFromUrlResponse>;
+    onCancel: () => void;
+    onInstalled?: (folderNames: string[]) => void;
+}
+
+export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: InstallFromUrlDialogProps) {
+    useCloseLayer(() => { onCancel(); return true; }, 300);
+
+    const [url, setUrl] = useState('');
+    const [phase, setPhase] = useState<string>('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [preview, setPreview] = useState<InstallPreview | null>(null);
+    const [selectedPlugin, setSelectedPlugin] = useState<string | null>(null);
+    const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
+    const [overwriteFolders, setOverwriteFolders] = useState<Set<string>>(new Set());
+
+    // Phase rotation during a pending fetch (purely cosmetic — not driven by backend)
+    useEffect(() => {
+        if (!loading) return;
+        const phases = [
+            { at: 0, text: '正在解析链接...' },
+            { at: 600, text: '正在下载仓库...' },
+            { at: 3000, text: '正在解包...' },
+            { at: 8000, text: '正在验证 SKILL.md...' },
+        ];
+        const timers = phases.map(p => setTimeout(() => setPhase(p.text), p.at));
+        return () => timers.forEach(clearTimeout);
+    }, [loading]);
+
+    const handleProbe = async () => {
+        if (!url.trim() || loading) return;
+        setError(null);
+        setPreview(null);
+        setSelectedPlugin(null);
+        setSelectedFolders(new Set());
+        setOverwriteFolders(new Set());
+        setLoading(true);
+        setPhase('正在解析链接...');
+        try {
+            const result = await onInstall(url.trim());
+            if (!result.success) {
+                setError(result.error || '安装失败');
+                return;
+            }
+            if (result.mode === 'installed') {
+                const folders = (result.installed ?? []).map(i => i.folderName);
+                onInstalled?.(folders);
+                return;
+            }
+            if (result.preview) {
+                setPreview(result.preview);
+                // For multi / marketplace first-plugin, auto-select non-conflicting items
+                if (result.preview.mode === 'multi') {
+                    setSelectedFolders(
+                        new Set(
+                            result.preview.candidates
+                                .filter(c => !c.conflict)
+                                .map(c => c.suggestedFolderName),
+                        ),
+                    );
+                } else if (result.preview.mode === 'marketplace') {
+                    const first = result.preview.plugins[0];
+                    if (first) {
+                        setSelectedPlugin(first.name);
+                        setSelectedFolders(new Set(first.skills.map(s => s.suggestedFolderName)));
+                    }
+                }
+            }
+        } catch (err) {
+            setError(err instanceof Error ? err.message : '安装失败');
+        } finally {
+            setLoading(false);
+            setPhase('');
+        }
+    };
+
+    const handleConfirm = async () => {
+        if (!preview || loading) return;
+        setError(null);
+        setLoading(true);
+        setPhase('正在下载并安装...');
+        try {
+            let body: { pluginName?: string; folderNames?: string[]; overwrite?: string[] };
+            if (preview.mode === 'marketplace') {
+                if (!selectedPlugin) {
+                    setError('请选择一个 Claude Plugins 插件');
+                    return;
+                }
+                const plugin = preview.plugins.find(p => p.name === selectedPlugin);
+                if (!plugin) return;
+                const chosen = plugin.skills.filter(s => selectedFolders.has(s.suggestedFolderName));
+                if (chosen.length === 0) {
+                    setError('请至少选择一个 skill');
+                    return;
+                }
+                body = {
+                    pluginName: selectedPlugin,
+                    folderNames: chosen.map(s => s.suggestedFolderName),
+                    overwrite: chosen.filter(s => s.conflict && overwriteFolders.has(s.suggestedFolderName)).map(s => s.suggestedFolderName),
+                };
+            } else if (preview.mode === 'multi') {
+                const chosen = preview.candidates.filter(c => selectedFolders.has(c.suggestedFolderName));
+                if (chosen.length === 0) {
+                    setError('请至少选择一个 skill');
+                    return;
+                }
+                body = {
+                    folderNames: chosen.map(c => c.suggestedFolderName),
+                    overwrite: chosen.filter(c => c.conflict && overwriteFolders.has(c.suggestedFolderName)).map(c => c.suggestedFolderName),
+                };
+            } else {
+                // single-conflict
+                if (!overwriteFolders.has(preview.skill.suggestedFolderName)) {
+                    setError('请勾选"覆盖已存在"');
+                    return;
+                }
+                body = {
+                    folderNames: [preview.skill.suggestedFolderName],
+                    overwrite: [preview.skill.suggestedFolderName],
+                };
+            }
+
+            const result = await onInstall(url.trim(), body);
+            if (!result.success) {
+                setError(result.error || '安装失败');
+                return;
+            }
+            if (result.mode === 'installed') {
+                const folders = (result.installed ?? []).map(i => i.folderName);
+                onInstalled?.(folders);
+            }
+        } catch (err) {
+            setError(err instanceof Error ? err.message : '安装失败');
+        } finally {
+            setLoading(false);
+            setPhase('');
+        }
+    };
+
+    const toggleFolder = (name: string) => {
+        setSelectedFolders(prev => {
+            const next = new Set(prev);
+            if (next.has(name)) next.delete(name);
+            else next.add(name);
+            return next;
+        });
+    };
+    const toggleOverwrite = (name: string) => {
+        setOverwriteFolders(prev => {
+            const next = new Set(prev);
+            if (next.has(name)) next.delete(name);
+            else next.add(name);
+            return next;
+        });
+    };
+
+    return (
+        <OverlayBackdrop className="z-[300]">
+            <div className="w-full max-w-2xl rounded-2xl bg-[var(--paper-elevated)] p-6 shadow-2xl">
+                <h3 className="text-lg font-semibold text-[var(--ink)]">从链接导入 Skill</h3>
+
+                {!preview && (
+                    <div className="mt-4">
+                        <label className="mb-1.5 block text-sm font-medium text-[var(--ink)]">GitHub 链接或 npx skills 命令</label>
+                        <textarea
+                            value={url}
+                            onChange={e => setUrl(e.target.value)}
+                            rows={2}
+                            placeholder={
+                                '示例：\n  anthropics/skills\n  https://github.com/vercel-labs/skills/tree/main/skills/react-best-practices\n  npx skills add foo/bar --skill baz'
+                            }
+                            className="w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 font-mono text-sm text-[var(--ink)] placeholder-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
+                            disabled={loading}
+                            autoFocus
+                        />
+                        <p className="mt-2 text-xs text-[var(--ink-muted)]">
+                            支持 GitHub 仓库、tree 子路径、npx skills 完整命令、直连 .zip 链接。暂不支持 GitLab、私有仓库。
+                        </p>
+                    </div>
+                )}
+
+                {loading && (
+                    <div className="mt-4 flex items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-3 text-sm text-[var(--ink-muted)]">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        {phase || '处理中...'}
+                    </div>
+                )}
+
+                {error && (
+                    <div className="mt-4 rounded-lg border border-[var(--error)]/30 bg-[var(--error-bg)] px-4 py-3 text-sm text-[var(--error)]">
+                        {error}
+                    </div>
+                )}
+
+                {preview && preview.mode === 'marketplace' && (
+                    <div className="mt-4 max-h-[50vh] space-y-3 overflow-y-auto">
+                        <p className="text-sm text-[var(--ink-muted)]">
+                            发现 Claude Plugins 市场：<span className="font-medium text-[var(--ink)]">{preview.marketplaceName}</span>
+                            {preview.marketplaceDescription && ` — ${preview.marketplaceDescription}`}
+                        </p>
+                        <p className="text-sm font-medium text-[var(--ink)]">请选择要安装的 Claude Plugins 插件：</p>
+                        {preview.plugins.map(plugin => (
+                            <label
+                                key={plugin.name}
+                                className={`block cursor-pointer rounded-xl border p-3 transition-all ${
+                                    selectedPlugin === plugin.name
+                                        ? 'border-[var(--accent)] bg-[var(--accent-warm-subtle)]'
+                                        : 'border-[var(--line)] bg-[var(--paper-elevated)] hover:border-[var(--line-strong)]'
+                                }`}
+                            >
+                                <div className="flex items-start gap-3">
+                                    <input
+                                        type="radio"
+                                        name="plugin"
+                                        value={plugin.name}
+                                        checked={selectedPlugin === plugin.name}
+                                        onChange={() => {
+                                            setSelectedPlugin(plugin.name);
+                                            setSelectedFolders(new Set(plugin.skills.map(s => s.suggestedFolderName)));
+                                        }}
+                                        className="mt-0.5"
+                                    />
+                                    <div className="flex-1">
+                                        <div className="font-medium text-[var(--ink)]">
+                                            {plugin.name}
+                                            <span className="ml-2 text-xs text-[var(--ink-muted)]">({plugin.skills.length} skills)</span>
+                                        </div>
+                                        {plugin.description && (
+                                            <p className="mt-1 text-xs text-[var(--ink-muted)]">{plugin.description}</p>
+                                        )}
+                                        {selectedPlugin === plugin.name && (
+                                            <div className="mt-2 space-y-1.5 border-t border-[var(--line)] pt-2">
+                                                {plugin.skills.map(skill => (
+                                                    <div key={skill.suggestedFolderName} className="flex items-center gap-2 text-xs">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selectedFolders.has(skill.suggestedFolderName)}
+                                                            onChange={() => toggleFolder(skill.suggestedFolderName)}
+                                                            onClick={e => e.stopPropagation()}
+                                                        />
+                                                        <span className="font-mono text-[var(--ink)]">{skill.suggestedFolderName}</span>
+                                                        {skill.conflict && (
+                                                            <span className="rounded bg-[var(--warning-bg)] px-1.5 py-0.5 text-[var(--warning)]">已存在</span>
+                                                        )}
+                                                        {skill.hasDangerousTools && (
+                                                            <span className="rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-[var(--error)]">含 Bash 权限</span>
+                                                        )}
+                                                        {skill.conflict && (
+                                                            <label className="ml-auto flex items-center gap-1 text-[var(--ink-muted)]">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    checked={overwriteFolders.has(skill.suggestedFolderName)}
+                                                                    onChange={() => toggleOverwrite(skill.suggestedFolderName)}
+                                                                    onClick={e => e.stopPropagation()}
+                                                                />
+                                                                覆盖
+                                                            </label>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </label>
+                        ))}
+                    </div>
+                )}
+
+                {preview && preview.mode === 'multi' && (
+                    <div className="mt-4 max-h-[50vh] space-y-2 overflow-y-auto">
+                        <p className="text-sm text-[var(--ink-muted)]">仓库包含多个 skill，请选择要安装的：</p>
+                        {preview.candidates.map(c => (
+                            <div
+                                key={c.suggestedFolderName}
+                                className="flex items-start gap-3 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-3"
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={selectedFolders.has(c.suggestedFolderName)}
+                                    onChange={() => toggleFolder(c.suggestedFolderName)}
+                                    className="mt-0.5"
+                                />
+                                <div className="flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <span className="font-mono text-sm text-[var(--ink)]">{c.suggestedFolderName}</span>
+                                        {c.conflict && (
+                                            <span className="rounded bg-[var(--warning-bg)] px-1.5 py-0.5 text-xs text-[var(--warning)]">已存在</span>
+                                        )}
+                                        {c.hasDangerousTools && (
+                                            <span className="rounded bg-[var(--error-bg)] px-1.5 py-0.5 text-xs text-[var(--error)]">含 Bash 权限</span>
+                                        )}
+                                    </div>
+                                    {c.description && <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{c.description}</p>}
+                                    <p className="mt-0.5 font-mono text-[10px] text-[var(--ink-muted)]/70">{c.rootPath}</p>
+                                    {c.conflict && (
+                                        <label className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--ink-muted)]">
+                                            <input
+                                                type="checkbox"
+                                                checked={overwriteFolders.has(c.suggestedFolderName)}
+                                                onChange={() => toggleOverwrite(c.suggestedFolderName)}
+                                            />
+                                            覆盖已存在的同名技能
+                                        </label>
+                                    )}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
+
+                {preview && preview.mode === 'single-conflict' && (
+                    <div className="mt-4 rounded-xl border border-[var(--warning)]/30 bg-[var(--warning-bg)] p-4">
+                        <p className="text-sm font-medium text-[var(--ink)]">
+                            技能 <span className="font-mono">{preview.skill.suggestedFolderName}</span> 已存在
+                        </p>
+                        {preview.skill.description && (
+                            <p className="mt-1 text-xs text-[var(--ink-muted)]">{preview.skill.description}</p>
+                        )}
+                        <label className="mt-3 flex cursor-pointer items-center gap-2 text-sm text-[var(--ink)]">
+                            <input
+                                type="checkbox"
+                                checked={overwriteFolders.has(preview.skill.suggestedFolderName)}
+                                onChange={() => toggleOverwrite(preview.skill.suggestedFolderName)}
+                            />
+                            覆盖现有版本
+                        </label>
+                    </div>
+                )}
+
+                <div className="mt-6 flex justify-end gap-3">
+                    <button
+                        type="button"
+                        onClick={onCancel}
+                        disabled={loading}
+                        className="rounded-lg px-4 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] disabled:opacity-50"
+                    >
+                        取消
+                    </button>
+                    {!preview ? (
+                        <button
+                            type="button"
+                            onClick={handleProbe}
+                            disabled={!url.trim() || loading}
+                            className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+                        >
+                            {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+                            解析并预览
+                        </button>
+                    ) : (
+                        <button
+                            type="button"
+                            onClick={handleConfirm}
+                            disabled={loading}
+                            className="flex items-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+                        >
+                            {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+                            安装
+                        </button>
+                    )}
                 </div>
             </div>
         </OverlayBackdrop>

@@ -559,6 +559,11 @@ export function setSidecarPort(port: number): void {
   sidecarPort = port;
 }
 
+/** Get the current sidecar port (used by admin-api for self-loopback) */
+export function getSidecarPort(): number {
+  return sidecarPort;
+}
+
 /** Get the current OpenAI bridge config (used by bridge handler in index.ts).
  *  Model is always derived from currentModel to avoid staleness after setSessionModel().
  *  When modelAliases exist, model override is suppressed — sub-agents need distinct models. */
