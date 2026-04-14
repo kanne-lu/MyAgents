@@ -807,6 +807,47 @@ impl SidecarManager {
         self.sidecars.remove(session_id)
     }
 
+    /// Runtime drift helper for the IM router (v0.1.66).
+    ///
+    /// Looks up the Sidecar for `session_id` and checks whether its spawn-time
+    /// MYAGENTS_RUNTIME differs from `desired_runtime`. If it does, kills the
+    /// process (best-effort) and removes it from the manager so the next
+    /// `ensure_session_sidecar` call for the same or a different session_id
+    /// falls through to the fresh spawn path.
+    ///
+    /// `desired_runtime` follows the same normalization as everywhere else:
+    /// `"builtin"` | `"claude-code"` | `"codex"` | `"gemini"`. Internally
+    /// Sidecars spawned as builtin have `runtime = None` (no env var injected);
+    /// this method treats that as equivalent to `"builtin"` for comparison.
+    ///
+    /// Returns true if a drift reset was performed.
+    pub fn kill_sidecar_if_runtime_differs(
+        &mut self,
+        session_id: &str,
+        desired_runtime: &str,
+    ) -> bool {
+        let effective_desired = if desired_runtime.is_empty() {
+            "builtin"
+        } else {
+            desired_runtime
+        };
+        let drift = match self.sidecars.get(session_id) {
+            Some(sidecar) => {
+                let sidecar_runtime = sidecar.runtime.as_deref().unwrap_or("builtin");
+                sidecar_runtime != effective_desired
+            }
+            None => false,
+        };
+        if !drift {
+            return false;
+        }
+        if let Some(sidecar) = self.sidecars.get_mut(session_id) {
+            let _ = sidecar.process.kill();
+        }
+        self.sidecars.remove(session_id);
+        true
+    }
+
     /// Clear the generation counter for a session.
     /// Call only when the session is permanently done (last owner released).
     fn clear_generation(&mut self, session_id: &str) {

@@ -2301,6 +2301,44 @@ async fn create_bot_instance<R: Runtime>(
                         task_adapter.ack_processing(&chat_id, &message_id).await;
                         task_adapter.send_typing(&chat_id).await;
 
+                        // 3b. Runtime drift check (v0.1.66): if the agent's runtime has
+                        // been changed in Settings since the current Sidecar was spawned,
+                        // kill it, regenerate the peer session_id, and notify the user with
+                        // the same format as a manual `/new`. The old session's messages
+                        // remain on disk at the old session_id and stay discoverable via
+                        // global search — the WeChat Bot chat just starts a clean thread
+                        // under the new session_id with the new runtime.
+                        {
+                            // task_runtime is already a String cloned above at the top of
+                            // this spawn (runtime_for_loop.read().await.clone()).
+                            let drift_result = task_router
+                                .lock()
+                                .await
+                                .check_and_reset_on_runtime_drift(
+                                    &session_key,
+                                    &task_runtime,
+                                    &task_manager,
+                                );
+                            if let Some((_old_id, new_id)) = drift_result {
+                                // Clear pending group history so the fresh session doesn't
+                                // get stale context carried over from the drift point.
+                                task_group_history.lock().await.clear(&session_key);
+                                let reply = format!(
+                                    "🔁 运行环境已切换为 {},已自动创建新对话 ({})",
+                                    runtime_display_name(&task_runtime),
+                                    &new_id[..8.min(new_id.len())]
+                                );
+                                if let Err(e) =
+                                    task_adapter.send_message(&chat_id, &reply).await
+                                {
+                                    ulog_warn!(
+                                        "[im-drift] send_message (runtime-drift notify) failed: {}",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+
                         // 4. Ensure Sidecar is running (brief router lock)
                         let (port, is_new_sidecar) = match task_router
                             .lock()
