@@ -7,17 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.66] - 2026-04-14
+## [0.1.66] - 2026-04-15
 
 ### Added
-- **Gemini CLI Runtime**:在内置、Claude Code、Codex 之外新增 Google Gemini CLI 作为第四个 Agent Runtime。基于官方 `gemini --acp`(Agent Client Protocol,JSON-RPC 2.0 over stdio)持久进程模型,与 Codex 协议形态同构
-  - 模型、权限模式、工具调用、思考流、Token 用量全部接入现有的统一事件流,桌面 Chat / Cron / IM Bot 三条路径无缝对齐
-  - 模型列表动态发现:启动时直接从 Gemini CLI 的 `session/new` 响应里读取当前账户可用的 8 个模型(auto-gemini-3 / auto-gemini-2.5 / gemini-3.1-pro-preview / gemini-3-flash-preview / gemini-2.5-pro / 等),无需硬编码
-  - 权限模式:default / autoEdit / yolo / plan 四档,桌面场景默认 autoEdit、Cron/IM 场景默认 yolo,与 CC/Codex 一致
-  - **系统提示合并注入**:使用官方 `GEMINI_SYSTEM_MD` 环境变量 + 外部 tmp 文件,把 MyAgents 的三层系统提示(base-identity + channel + scenario)前置到 Gemini CLI 内置 prompt 之上。基底通过 `GEMINI_WRITE_SYSTEM_MD` 按 CLI 版本缓存,首次提取 zero-cost(在 API 调用前 kill 进程)
-  - **认证完全透传**:MyAgents 不管理 Gemini API Key、OAuth 或 Vertex AI,用户在本机通过 `gemini` CLI 自行完成登录,Sidecar 透明继承 shell 环境
-  - 前提:用户需要先 `npm install -g @google/gemini-cli` 或 `brew install gemini-cli` 并完成登录
-  - 详见 [Multi-Agent Runtime 架构](./specs/tech_docs/multi_agent_runtime.md) 的 Gemini Runtime 节
+- **Gemini CLI 加入 Agent Runtime 阵容**:在原有的内置、Claude Code、Codex 之外,新增 Google Gemini CLI 作为第四个可选运行环境。只要你本机装好 `gemini` 并登录过,设置里一键切过去就能用 —— MyAgents 完全不管 API Key / OAuth,你原来怎么登录的还是怎么用。
+  - 支持 Gemini 3.1 Pro、Gemini 3 Flash、Gemini 2.5 Pro 等**当前账户可用的全部模型**,Settings 下拉列表是实时从 Gemini CLI 读出来的,不用手动维护
+  - 工具调用(Shell / Read / Edit / Grep / Glob / WebFetch / WebSearch)、思考过程、Token 用量都正常显示,和 Claude Code / Codex 一致
+  - 工具 badge 展示 Gemini 的**原始工具名**(比如 `run_shell_command`、`grep_search`),点开看到命令/参数/输出的完整细节,不再是干巴巴的 "Run command"
+  - 桌面 Chat、定时任务、IM Bot(微信 / 飞书 / 钉钉 / Telegram) 三条路径全部打通,切换到 Gemini 后所有入口都用它
+- **从 GitHub URL 安装技能**:Skills 设置页新增"从 URL 导入"入口,粘贴任意 GitHub 仓库或 npm 包地址就能把对方写好的 Skill 拉到你本地。内置 AI 助手 MA 也能通过 `npx` 等命令直接帮你装技能。
+- **聊天内文本查找 (⌘F / Ctrl+F)**:在对话里按快捷键唤起顶部查找栏,高亮所有匹配、方向键切换、回车跳转。作用域仅限当前已加载的消息,全历史搜索仍然用 ⌘K。
+
+### Changed
+- **Agent 身份提示现在真实反映当前 Runtime**:AI 回答"你在哪运行?"时会正确说"MyAgents + Gemini CLI / Claude Code / Codex / 内置 SDK",而不是一律说"基于 Claude Agent SDK"。换 Runtime 后立刻生效。
+- **Claude Agent SDK 升级至 0.2.107**:跟进上游修复与稳定性改进。
+
+### Fixed
+- **切换 Agent Runtime 后微信 Bot 自动开新对话 + 提示**:当你在 Settings 里把 Agent 的 Runtime 换了(比如 Codex → Gemini),下一条 IM 消息会自动检测并创建一条新对话,微信里会收到 "🔁 运行环境已切换为 XXX,已自动创建新对话 (xxxxxxxx)" 提示,旧历史仍然保留在会话记录里可以翻回来。之前会出现"换了 Runtime 但 Bot 还在用老的"的情况,现在不会了。
+- **切回 Claude Code 时微信 Bot 不再报 "Please run /login"**:修复了 CC CLI 在 IM 场景下的一个启动参数导致 OAuth 登录状态被忽略的问题。现在只要你在本机 `claude /login` 登录过,所有入口(Tab / 微信 / 飞书 / Cron)都能正常用。
+- **恢复历史 Gemini 会话不再出现"回答复读一次"**:之前加载旧 Gemini 对话会把上一轮的回复当作新消息再显示一次,现已正确识别并过滤回放事件。
+- **Gemini 会话空闲超时的吓人报错不再弹**:当 Gemini 进程在两轮对话间被系统回收内存时,不再向用户显示"Gemini process exited with code 137"红色错误,下一条消息会自动无感恢复。
+- **权限模式和默认模型显示与实际一致**:之前用 Gemini 时权限下拉栏经常显示 "Default" 但实际跑的是别的模式,现在 UI 和后台统一。切换 Runtime 时持久化的旧值会自动校正到新 Runtime 合法的选项。
+- **安装 Skill 的一些边角问题**:修复了从 URL 安装时的 SSRF 风险、部分失败后残留文件、超大 YAML 导致卡住等问题。
+- **终端侧栏错误横幅不会被消息完成覆盖**:Agent 报错后的警示条在后续消息写入时仍然保留。
 
 ---
 
