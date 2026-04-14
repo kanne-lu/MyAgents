@@ -1239,10 +1239,25 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         }
       } else {
         const errorMessage = event.result || 'Session ended with error';
-        broadcast('chat:agent-error', { message: errorMessage });
-        broadcast('chat:message-error', errorMessage);
-        fireImCallback('error', errorMessage);
-        resetTurnAccumulators(); // Prevent stale content leaking into next turn
+        // Suppress user-visible error when the external runtime's persistent process
+        // dies while idle (after a turn already completed, with no new turn in flight).
+        // Common cause: OS memory pressure / SIGKILL (exit 137) after tens of minutes
+        // of inactivity on Codex/Gemini. The next sendExternalMessage will hit the
+        // "Previous process exited, resuming" branch and transparently spawn a fresh
+        // process — the user never needed to see an error in the first place.
+        //
+        // Repro: user reported "Gemini process exited with code 137" toast after
+        // leaving a session idle for 26 minutes with no interaction. See
+        // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
+        const isIdleExit = turnCompleted && !currentAssistantText.trim();
+        if (isIdleExit) {
+          console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
+        } else {
+          broadcast('chat:agent-error', { message: errorMessage });
+          broadcast('chat:message-error', errorMessage);
+          fireImCallback('error', errorMessage);
+          resetTurnAccumulators(); // Prevent stale content leaking into next turn
+        }
       }
       pendingPermissionSuggestions.clear();
       pendingExternalInteractiveRequests.clear();
