@@ -1558,9 +1558,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [currentProject?.id, patchProject]);
 
   // Cross-runtime session detection: session was created by a DIFFERENT runtime than the current one.
-  // Covers all mismatch scenarios: builtin↔CC, builtin↔Codex, CC↔Codex.
+  // Covers all mismatch scenarios across builtin, Claude Code, Codex, and Gemini.
   // sessionRuntime is null ONLY when session hasn't loaded yet (initial state).
-  // After loadSession, it's always a valid RuntimeType ('builtin' | 'codex' | 'claude-code')
+  // After loadSession, it's always a valid RuntimeType ('builtin' | 'codex' | 'claude-code' | 'gemini')
   // because: new sessions write runtime via createSessionMetadata (defaults to 'builtin'),
   // old sessions get 'builtin' at load time (TabProvider: runtime || 'builtin').
   const isCrossRuntimeSession = sessionRuntime !== null && sessionRuntime !== currentRuntime;

@@ -365,6 +365,31 @@ pub enum SidecarState {
 
 /// Session-centric Sidecar instance
 /// Each Session has at most one Sidecar, shared by multiple owners.
+/// Result of `SidecarManager::kill_sidecar_if_runtime_differs`.
+///
+/// Distinguishes between three cases:
+/// - `NoDrift`: the existing Sidecar's runtime matches the desired runtime
+///   (or there's no existing Sidecar).
+/// - `DetectedKeptAlive`: drift was detected but the Sidecar has non-Agent
+///   owners (Tab/Cron/BackgroundCompletion) attached, so killing would
+///   orphan a desktop session. The caller (IM router) should still treat
+///   this as drift and fork the peer to a new session_id.
+/// - `KilledAndRemoved`: drift was detected AND the Sidecar had only Agent
+///   owners, so it's been killed and evicted from the manager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeDriftResult {
+    NoDrift,
+    DetectedKeptAlive,
+    KilledAndRemoved,
+}
+
+impl RuntimeDriftResult {
+    /// Did we observe a runtime drift? (True for both kill outcomes.)
+    pub fn is_drift(&self) -> bool {
+        matches!(self, Self::KilledAndRemoved | Self::DetectedKeptAlive)
+    }
+}
+
 pub struct SessionSidecar {
     /// The child process handle
     pub process: Child,
@@ -810,42 +835,67 @@ impl SidecarManager {
     /// Runtime drift helper for the IM router (v0.1.66).
     ///
     /// Looks up the Sidecar for `session_id` and checks whether its spawn-time
-    /// MYAGENTS_RUNTIME differs from `desired_runtime`. If it does, kills the
-    /// process (best-effort) and removes it from the manager so the next
-    /// `ensure_session_sidecar` call for the same or a different session_id
-    /// falls through to the fresh spawn path.
+    /// MYAGENTS_RUNTIME differs from `desired_runtime`. On drift, the kill
+    /// decision depends on which owners are currently attached:
+    ///
+    ///   - Only `Agent(_)` owners → safe to kill: the IM router is the sole
+    ///     stakeholder and it will regenerate the peer session_id anyway.
+    ///     Kill + remove + clear generation counter.
+    ///
+    ///   - Any non-Agent owner (`Tab`, `CronTask`, `BackgroundCompletion`) →
+    ///     the Sidecar is shared with a desktop-style caller whose session
+    ///     would be orphaned by a kill (SSE stream dies, frontend can't
+    ///     recover without reload). Skip the kill, leave the Sidecar alone,
+    ///     but still return DriftDetected so the caller (IM router) can
+    ///     regenerate the peer session_id and fork cleanly. The old Sidecar
+    ///     keeps running under the old session_id for the desktop owner;
+    ///     the IM peer gets a fresh Sidecar under the new session_id.
     ///
     /// `desired_runtime` follows the same normalization as everywhere else:
     /// `"builtin"` | `"claude-code"` | `"codex"` | `"gemini"`. Internally
-    /// Sidecars spawned as builtin have `runtime = None` (no env var injected);
-    /// this method treats that as equivalent to `"builtin"` for comparison.
-    ///
-    /// Returns true if a drift reset was performed.
+    /// Sidecars spawned as builtin have `runtime = None` (no env var
+    /// injected); this method treats that as equivalent to `"builtin"` for
+    /// comparison.
     pub fn kill_sidecar_if_runtime_differs(
         &mut self,
         session_id: &str,
         desired_runtime: &str,
-    ) -> bool {
+    ) -> RuntimeDriftResult {
         let effective_desired = if desired_runtime.is_empty() {
             "builtin"
         } else {
             desired_runtime
         };
-        let drift = match self.sidecars.get(session_id) {
+        let (drift, has_non_agent_owner) = match self.sidecars.get(session_id) {
             Some(sidecar) => {
                 let sidecar_runtime = sidecar.runtime.as_deref().unwrap_or("builtin");
-                sidecar_runtime != effective_desired
+                let drift = sidecar_runtime != effective_desired;
+                let non_agent = sidecar.owners.iter().any(|o| !matches!(o, SidecarOwner::Agent(_)));
+                (drift, non_agent)
             }
-            None => false,
+            None => (false, false),
         };
         if !drift {
-            return false;
+            return RuntimeDriftResult::NoDrift;
+        }
+        if has_non_agent_owner {
+            ulog_info!(
+                "[sidecar] Runtime drift on session {} detected but kept alive \
+                 — non-Agent owner (Tab/Cron/BackgroundCompletion) still attached. \
+                 Caller should fork via a fresh session_id.",
+                session_id
+            );
+            return RuntimeDriftResult::DetectedKeptAlive;
         }
         if let Some(sidecar) = self.sidecars.get_mut(session_id) {
             let _ = sidecar.process.kill();
         }
         self.sidecars.remove(session_id);
-        true
+        // Clear the generation counter too — the old session_id is now orphaned
+        // and the peer map will never reference it again, so there's no TOCTOU
+        // concern that kept it alive in the normal remove_sidecar path.
+        self.sidecar_generations.remove(session_id);
+        RuntimeDriftResult::KilledAndRemoved
     }
 
     /// Clear the generation counter for a session.
@@ -2356,30 +2406,28 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     // Phase 2: Do HTTP health check (without lock)
     // Phase 3: Re-acquire lock and finalize decision
 
-    // Drift detection for Agent-owner Sidecars: if the agent's runtime has been
-    // changed in Settings while this Sidecar is still alive on the old runtime,
-    // the existing process cannot serve new IM messages correctly (its
-    // MYAGENTS_RUNTIME env var is baked in at spawn time). Kill it so the spawn
-    // path below picks up the fresh runtime from agent config.
+    // Note: there used to be an inline drift check for Agent-owner Sidecars
+    // here, but it's been removed as of v0.1.66. Drift is now handled at the
+    // IM router layer (`SessionRouter::check_and_reset_on_runtime_drift`)
+    // which runs BEFORE `ensure_session_sidecar` and regenerates the peer
+    // session_id on drift. By the time we reach here:
     //
-    // We do NOT apply this check to Tab/Cron/BackgroundCompletion owners because
-    // desktop sessions preserve runtime stability by design (v0.1.62).
-    if matches!(owner, SidecarOwner::Agent(_)) {
-        let desired_runtime = runtime_override.as_ref().cloned()
-            .or_else(|| resolve_agent_runtime_from_config(workspace_path));
-        if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-            if !sidecar.is_dead() && sidecar.runtime != desired_runtime {
-                ulog_info!(
-                    "[sidecar] Session {} Agent-owner Sidecar runtime drift detected \
-                     (sidecar={:?}, desired={:?}), killing for respawn",
-                    session_id, sidecar.runtime, desired_runtime
-                );
-                // Best-effort graceful kill; the spawn path below will create a fresh process.
-                let _ = sidecar.process.kill();
-                manager_guard.remove_sidecar(session_id);
-            }
-        }
-    }
+    //   - IM message path (router-driven): the router already forked to a
+    //     fresh session_id, so `session_id` has no existing Sidecar and the
+    //     spawn path below uses the owner-aware priority chain to pick the
+    //     correct runtime from agent config.
+    //
+    //   - memory_update.rs direct callers: they target an existing session_id
+    //     that may be shared with a desktop Tab. Killing the Sidecar here
+    //     would orphan the Tab's SSE stream. Better to let memory_update
+    //     reuse the existing (possibly stale-runtime) Sidecar — memory file
+    //     updates are runtime-agnostic so a mismatched runtime doesn't
+    //     actually break anything.
+    //
+    // The priority chain at the spawn path below still enforces "Agent owner
+    // uses agent config, not session metadata" so fresh spawns for Agent
+    // owners always honor the user's latest runtime choice, including the
+    // external → builtin switch direction.
 
     let existing_sidecar_info: Option<u16> = {
         if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
@@ -2583,21 +2631,25 @@ fn create_new_session_sidecar<R: Runtime>(
     //     default in Settings. This is the v0.1.62 session-stability guarantee.
     //
     //   Agent (IM / agent-channel):
-    //     runtime_override → agent config → session metadata
+    //     runtime_override → agent config (NO session fallback)
     //
     //     The IM peer session map is keyed on (agent, channel, user), so the
     //     user never sees individual session IDs — their mental model is "I'm
     //     talking to my agent". When they change the agent's runtime in
     //     Settings, they expect the next IM message to use the new runtime
     //     regardless of which session_id the peer map happens to point at.
-    //     Without this, a codex→gemini switch leaves the WeChat bot stuck
-    //     spawning codex Sidecars forever (observed in unified-2026-04-15.log
-    //     line 3763: "Runtime mismatch: sidecar=codex payload=gemini").
+    //
+    //     Critically, we must NOT fall back to session metadata for the Agent
+    //     branch: `resolve_agent_runtime_from_config` returns None when the
+    //     agent is builtin, and falling through to session_runtime would then
+    //     silently re-resurrect a previously-used external runtime (e.g.
+    //     gemini→builtin switch), defeating the whole point of the IM drift
+    //     semantics. A None result here means "spawn as builtin (no env var)"
+    //     which is exactly correct — the user explicitly asked for builtin.
     let resolved_runtime = runtime_override.map(|runtime| runtime.to_string())
         .or_else(|| {
             if matches!(owner, SidecarOwner::Agent(_)) {
                 resolve_agent_runtime_from_config(workspace_path)
-                    .or_else(|| resolve_session_runtime(session_id))
             } else {
                 resolve_session_runtime(session_id)
                     .or_else(|| resolve_agent_runtime_from_config(workspace_path))

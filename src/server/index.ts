@@ -7622,21 +7622,27 @@ async function main() {
             const imSourceType = payload.source.includes('group') ? 'group' as const : 'private' as const;
             const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
             const runtimeConfig = payload.runtimeConfig ?? null;
-            // Hard fail on runtime drift. Rust side handles Agent-owner drift
-            // proactively (sidecar.rs v0.1.66 tears down stale Sidecars before
-            // routing), but if the drift somehow still reaches us (race during
-            // agent config hot-reload, or a bug in the priority chain), bail
-            // out with a 409 so Rust can kill this Sidecar and spawn a fresh
-            // one instead of silently serving the request with the wrong CLI.
+            // Runtime drift is handled authoritatively on the Rust side:
+            //   - Desktop/Tab: v0.1.62 session-stability pins runtime
+            //   - IM/Agent:    v0.1.66 SessionRouter::check_and_reset_on_runtime_drift
+            //                  runs before ensure_sidecar, regenerating the peer
+            //                  session_id and forking a fresh Sidecar with the
+            //                  agent's current runtime
             //
-            // Repro: unified-2026-04-15.log line 3763 logged this mismatch as a
-            // warning and proceeded with codex, producing the "站站嘿嘿 → codex
-            // usage limit hit" bug on a workspace whose agent had already been
-            // switched to gemini.
+            // By the time a message reaches this handler, the MYAGENTS_RUNTIME
+            // env var was set at spawn time and Rust guarantees it matches the
+            // agent's current runtime (modulo race windows during config
+            // hot-reload). If we DO observe a mismatch at this layer, it means
+            // Rust's drift detection missed an edge case — log loudly so it
+            // surfaces in reports, but DO NOT return an error: there's no
+            // downstream Rust handler for a 409, which would turn the race
+            // into a permanently-broken session. The stale runtime is still
+            // better than a hard failure, and the user's next message will
+            // re-trigger drift detection on Rust's side.
             if (payloadRuntime !== getActiveRuntimeType()) {
-              const msg = `Runtime mismatch: sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}. This Sidecar was spawned with a stale runtime; it will be torn down and respawned on the next message.`;
-              console.error(`[im/chat] ${msg}`);
-              return jsonResponse({ success: false, error: msg, code: 'runtime_mismatch' }, 409);
+              console.error(
+                `[im/chat] Runtime mismatch (Rust drift detection failed to catch): sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}. Proceeding with sidecar runtime; user should re-send after Rust drift detection reconciles.`,
+              );
             }
             const ccResult = await sendExternalMessage(
               finalMessage, payload.images ?? undefined, undefined, undefined,

@@ -385,14 +385,22 @@ impl SessionRouter {
     ) -> Option<(String, String)> {
         let old_id = self.peer_sessions.get(session_key)?.session_id.clone();
 
-        // Delegate the Sidecar-side half (compare spawn-time runtime, kill if
-        // drifted, remove from manager) to SidecarManager so router.rs
-        // doesn't need to reach into private fields.
-        let drift = {
+        // Delegate the Sidecar-side half (compare spawn-time runtime, decide
+        // whether killing is safe based on owner accounting) to SidecarManager
+        // so router.rs doesn't reach into private fields.
+        //
+        // The tri-state result lets us distinguish:
+        //   - NoDrift → no action
+        //   - KilledAndRemoved → full kill happened, spawn path will recreate
+        //   - DetectedKeptAlive → Sidecar stays alive (shared with desktop
+        //     Tab/Cron/BackgroundCompletion), but we STILL regenerate the
+        //     peer session_id to fork the IM conversation cleanly. The
+        //     desktop session continues unperturbed on the old session_id.
+        let drift_result = {
             let mut mgr = manager.lock().ok()?;
             mgr.kill_sidecar_if_runtime_differs(&old_id, desired_runtime)
         };
-        if !drift {
+        if !drift_result.is_drift() {
             return None;
         }
 

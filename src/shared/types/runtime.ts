@@ -178,15 +178,12 @@ export const CC_MODELS: RuntimeModelInfo[] = [
   { value: 'haiku', displayName: 'Haiku' },
 ];
 
-// ─── Gemini CLI model list (placeholder; real list is discovered at runtime) ───
-//
-// Gemini CLI returns the full model catalog in the session/new response (modes.availableModels).
-// This constant only holds a "default" entry so dropdowns have something before detection runs.
-// Once GeminiRuntime.queryModels() has completed, the frontend should render the discovered list.
-
-export const GEMINI_MODELS: RuntimeModelInfo[] = [
-  { value: '', displayName: '默认', isDefault: true },
-];
+// Note: no static GEMINI_MODELS export (unlike CC_MODELS). Gemini's model
+// list is fetched dynamically via /api/runtime/models?type=gemini →
+// GeminiRuntime.queryModels() → short-lived `gemini --acp` handshake that
+// reads `result.models.availableModels` from the session/new response.
+// Launcher.tsx and Chat.tsx hold their own `geminiModels` useState seeded
+// to [] and populated on the first mount.
 
 /**
  * Get default permission mode for a given runtime type
