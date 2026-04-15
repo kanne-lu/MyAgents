@@ -6341,6 +6341,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         const lastAssistant = messages.length > 0 && messages[messages.length - 1].role === 'assistant'
           ? messages[messages.length - 1] : null;
 
+        // Log non-completed terminal_reasons to unified logs for debugging.
+        // Some reasons (e.g. aborted_streaming) suppress the UI banner entirely
+        // (see src/shared/terminalReason.ts), so this is the ONLY surface left
+        // for figuring out why a turn ended early. One line per non-trivial turn
+        // — low frequency, keeps signal tight.
+        if (resultMessage.terminal_reason && resultMessage.terminal_reason !== 'completed') {
+          console.log(`[agent][terminal_reason] ${resultMessage.terminal_reason} scenario=${currentScenario.type} model=${currentTurnUsage.model ?? 'unknown'} duration_ms=${durationMs} tool_count=${currentTurnToolCount}`);
+        }
+
         console.log('[agent][sdk] Broadcasting chat:message-complete');
         // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
         broadcast('chat:message-complete', {
