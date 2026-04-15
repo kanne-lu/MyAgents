@@ -31,6 +31,10 @@ import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
 import { resolve } from 'path';
 import { setMcpServers, getMcpServers, getAgentState, getSidecarPort } from './agent-session';
 import { broadcast } from './sse';
+import { getCronTaskContext, CRON_TASK_EXIT_TEXT } from './tools/cron-tools';
+import { getImMediaContext } from './tools/im-media-tool';
+import { buildReadMeContent } from './tools/generative-ui-tool';
+import { assertSafeFilePath } from './utils/safe-file-path';
 
 // ---------------------------------------------------------------------------
 // Management API forwarding (Bun Sidecar → Rust)
@@ -1135,6 +1139,230 @@ export async function handleCronStatus(payload: { workspacePath?: string }): Pro
   const qs = payload.workspacePath ? `?workspacePath=${encodeURIComponent(payload.workspacePath)}` : '';
   const resp = await managementApi(`/api/cron/status${qs}`);
   return wrapMgmtResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// Session-scoped capabilities for external runtimes (v0.1.67)
+//
+// These handlers expose Pattern 1 (context-injected) MCP tools to the `myagents`
+// CLI so the AI running on external runtimes (Claude Code / Codex / Gemini CLI)
+// can reach MyAgents-specific capabilities through plain shell tool calls
+// instead of a Claude-Agent-SDK-only MCP protocol. See prd_0.1.67.
+//
+// Authorization model: Sidecar is session-scoped (1 Sidecar = 1 session), so
+// the ambient session context (cron context / im-media context) is already
+// correctly bound to the calling Sidecar — no MYAGENTS_SESSION_ID plumbing.
+// ---------------------------------------------------------------------------
+
+export function handleCronExit(payload: { reason?: string }): AdminResponse {
+  const ctx = getCronTaskContext();
+  if (!ctx.taskId) {
+    return { success: false, error: 'No active cron task in this session. This command only works inside a cron task run.' };
+  }
+  if (!ctx.canExit) {
+    return { success: false, error: 'This cron task has "Allow AI to exit" disabled — only the user can stop it from the UI.' };
+  }
+  const reason = payload.reason?.trim() || 'AI requested task exit';
+  broadcast('cron:task-exit-requested', {
+    taskId: ctx.taskId,
+    reason,
+    timestamp: new Date().toISOString(),
+  });
+  return {
+    success: true,
+    data: { taskId: ctx.taskId, reason },
+    hint: `${CRON_TASK_EXIT_TEXT}. Reason: ${reason}`,
+  };
+}
+
+export async function handleImSendMedia(payload: { filePath?: string; caption?: string }): Promise<AdminResponse> {
+  if (!payload.filePath) {
+    return { success: false, error: 'Missing required field: --file <absolute-path>' };
+  }
+  const ctx = getImMediaContext();
+  if (!ctx) {
+    return { success: false, error: 'No IM context in this session. This command only works inside an IM Bot / Agent Channel session.' };
+  }
+  // Path traversal guard: prompt-injected AI on an external runtime could be
+  // steered into `myagents im send-media --file ~/.ssh/id_rsa` and exfiltrate
+  // secrets to the chat peer. assertSafeFilePath canonicalises (dereferencing
+  // symlinks) and requires the real path to live under workspace / tmp / the
+  // myagents scratch dir. Any other location is rejected with a clear error.
+  const { agentDir } = getAgentState();
+  let safePath: string;
+  try {
+    safePath = assertSafeFilePath(payload.filePath, { workspacePath: agentDir });
+  } catch (err) {
+    return { success: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  const resp = await managementApi('/api/im/send-media', 'POST', {
+    botId: ctx.botId,
+    chatId: ctx.chatId,
+    platform: ctx.platform,
+    filePath: safePath,
+    caption: payload.caption,
+  });
+  if (resp.ok) {
+    return {
+      success: true,
+      data: {
+        fileName: (resp as Record<string, unknown>).fileName,
+        fileSize: (resp as Record<string, unknown>).fileSize,
+      },
+      hint: 'File sent to IM chat.',
+    };
+  }
+  return { success: false, error: String(resp.error ?? 'Failed to send media') };
+}
+
+// ---------------------------------------------------------------------------
+// Tool readme lookups — progressive disclosure (v0.1.67)
+//
+// Skill layer pre-injects BRIEF descriptions of these tools into the system
+// prompt (system-prompt-cli-tools.ts). When the AI actually needs to use one,
+// it calls `myagents X readme` to pull the full usage doc on demand.
+// ---------------------------------------------------------------------------
+
+const README_CRON = `myagents cron — Scheduled task management
+
+WHAT
+  Create, list, inspect, stop, and delete scheduled AI tasks (cron / interval /
+  one-shot). Tasks run inside MyAgents regardless of which runtime the current
+  chat uses. A task can deliver results to an IM channel.
+
+COMMANDS
+  list                            List tasks in the current workspace
+  status                          Totals + next execution time
+  add OPTIONS                     Create a new task
+  start <taskId>                  Trigger a task for immediate execution
+  stop <taskId>                   Pause a running task
+  remove <taskId>                 Delete a task
+  update <taskId> OPTIONS         Change name / prompt / schedule
+  runs <taskId> [--limit N]       Show recent execution records
+
+CREATE OPTIONS (myagents cron add ...)
+  --name <text>                   Human-readable label (optional)
+  --prompt <text>                 The prompt the AI runs each tick. For short
+                                  prompts use this. For multi-line / complex
+                                  prompts, prefer --prompt-file.
+  --prompt-file <path>            Read prompt body from a file (recommended for
+                                  anything longer than ~80 chars — avoids shell
+                                  escape issues with quotes, newlines, \`\`\`).
+  --every <minutes>               Run every N minutes (min 5)
+  --schedule <cron-expr>          Cron expression, e.g. "0 9 * * *"
+  --workspace <path>              Workspace the task runs in. Defaults to the
+                                  current session workspace.
+
+EXAMPLES
+  # Short prompt, 30 min interval
+  myagents cron add --name ping --prompt "ping example.com, report latency" --every 30
+
+  # Long prompt from file (the recommended path)
+  printf '%s\\n' 'Check the build log for new errors.' \\
+    'If errors found, summarize and tag me.' > /tmp/cron-check.txt
+  myagents cron add --name build-watch --prompt-file /tmp/cron-check.txt --every 15
+
+  # Look at recent runs
+  myagents cron list
+  myagents cron runs <taskId> --limit 5
+
+EXIT FROM INSIDE A TASK (cron scenario only)
+  If you are currently running as a cron task AND the task creator enabled
+  "Allow AI to exit", call:
+    myagents cron exit --reason "goal achieved"
+  to mark the task complete and stop future executions.
+
+DO NOT
+  Use system cron / crontab / at / launchctl — they can't see MyAgents state.
+  Only \`myagents cron\` can create tasks inside MyAgents.`;
+
+const README_IM = `myagents im — IM Bot capabilities
+
+WHAT
+  Commands that act on the current IM chat (Telegram / Feishu / DingTalk /
+  OpenClaw plugin channels). Only work inside an IM Bot session or
+  Agent Channel session; in desktop sessions they return an error.
+
+COMMANDS
+  send-media --file <path> [--caption <text>]
+      Send a file to the current chat. Images (jpg/png/gif/webp/svg — max
+      10 MB) are sent as native photos; everything else (pdf/doc/xls/csv/json/
+      audio/video/archives) as a file upload (max 50 MB).
+      Write the file first using normal file-writing tools, then call this
+      with the absolute path. Use for things the user explicitly wants to
+      receive — not for intermediate work files.
+
+EXAMPLES
+  # Generate a CSV and send it
+  myagents im send-media --file /tmp/report.csv --caption "Today's numbers"
+
+  # Send a generated chart image
+  myagents im send-media --file /tmp/chart.png`;
+
+const README_WIDGET = `myagents widget — Generative UI widget design guidelines
+
+WHAT
+  Returns the MyAgents widget design system (color palette, component specs,
+  layout rules) and the output format you MUST use to embed an interactive
+  widget in a chat reply. Widgets render inline in the conversation — charts,
+  SVG diagrams, interactive explainers, dashboards.
+
+WHEN TO CALL
+  Before outputting your first <generative-ui-widget> tag in a desktop chat
+  response, when the user asks to visualize / chart / draw / build an
+  interactive explainer. Skip it for simple text answers, code snippets, and
+  static markdown tables.
+
+WHEN NOT TO CALL
+  - User explicitly asks for plain text / code / markdown
+  - IM bot sessions (widgets only render in the desktop client)
+  - Simple answers that don't benefit from visual layout
+
+COMMAND
+  myagents widget readme <module1> [<module2> ...]
+
+MODULES
+  chart         Chart.js line/bar/pie patterns, palette hex values, dashboards
+  diagram       SVG flowcharts, architecture diagrams, connectors, markers
+  interactive   Sliders, calculators, comparison cards, data records
+  dashboard     Combines chart + interactive (multi-chart layouts + controls)
+  art           SVG illustration / visual metaphor
+
+EXAMPLES
+  myagents widget readme chart
+  myagents widget readme chart interactive
+  myagents widget readme dashboard
+
+The output begins with the required <generative-ui-widget> output format
+contract; do not skip reading it.`;
+
+export function handleReadme(payload: { topic?: string; modules?: string[] }): AdminResponse {
+  const topic = (payload.topic ?? '').toLowerCase();
+  if (topic === 'cron') {
+    return { success: true, data: { text: README_CRON } };
+  }
+  if (topic === 'im' || topic === 'im-media' || topic === 'media') {
+    return { success: true, data: { text: README_IM } };
+  }
+  if (topic === 'widget' || topic === 'generative-ui' || topic === 'ui') {
+    const modules = (payload.modules ?? []).filter(m => typeof m === 'string' && m.length > 0);
+    if (modules.length === 0) {
+      // No modules passed → return the meta-readme describing modules
+      return { success: true, data: { text: README_WIDGET } };
+    }
+    const text = buildReadMeContent(modules);
+    // buildReadMeContent returns a generic "Unknown module(s). Available: ..."
+    // sentinel when it can't resolve any of the given modules. Surface that as
+    // a failure so the CLI exits non-zero and the AI gets a clear error.
+    if (text.startsWith('Unknown module(s)')) {
+      return { success: false, error: text };
+    }
+    return { success: true, data: { text } };
+  }
+  return {
+    success: false,
+    error: `Unknown readme topic "${payload.topic}". Available: cron, im, widget.`,
+  };
 }
 
 // ---------------------------------------------------------------------------

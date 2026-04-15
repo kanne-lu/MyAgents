@@ -283,7 +283,7 @@ const ALL_SECTIONS: Record<string, string> = {
   ART: SECTION_ART,
 };
 
-function buildReadMeContent(modules: string[]): string {
+export function buildReadMeContent(modules: string[]): string {
   const seen = new Set<string>();
   const parts: string[] = [];
   for (const mod of modules) {

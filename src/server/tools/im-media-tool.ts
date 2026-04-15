@@ -3,6 +3,7 @@
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod/v4';
+import { assertSafeFilePath } from '../utils/safe-file-path';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -16,6 +17,14 @@ interface ImMediaContext {
   botId: string;
   chatId: string;
   platform: string; // "telegram" | "feishu"
+  /**
+   * Workspace root the current session is scoped to — set by the caller so
+   * `sendMediaHandler` can validate that AI-supplied file paths stay inside
+   * a safe root (workspace / tmp). Optional for backwards-compat; callers
+   * that don't set it get the previous "trust the AI" behaviour, which is
+   * fine for desktop-only contexts where the user can vet the argument.
+   */
+  workspacePath?: string;
 }
 
 let imMediaContext: ImMediaContext | null = null;
@@ -76,12 +85,30 @@ async function sendMediaHandler(args: {
     };
   }
 
+  // Path traversal guard (mirrors admin-api.ts::handleImSendMedia). Only
+  // enforced when the context has workspacePath set — maintains backward-compat
+  // for older call sites that haven't been updated yet. Prompt-injected AI
+  // must not exfiltrate ~/.ssh/id_rsa etc. through an IM chat peer.
+  let safeFilePath = args.file_path;
+  if (imMediaContext.workspacePath) {
+    try {
+      safeFilePath = assertSafeFilePath(args.file_path, {
+        workspacePath: imMediaContext.workspacePath,
+      });
+    } catch (err) {
+      return {
+        content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
+        isError: true,
+      };
+    }
+  }
+
   try {
     const result = await managementApi('/api/im/send-media', 'POST', {
       botId: imMediaContext.botId,
       chatId: imMediaContext.chatId,
       platform: imMediaContext.platform,
-      filePath: args.file_path,
+      filePath: safeFilePath,
       caption: args.caption,
     }) as { ok: boolean; fileName?: string; fileSize?: number; error?: string };
 

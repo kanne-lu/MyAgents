@@ -97,7 +97,9 @@ Commands:
   model     Manage model providers
   agent     Manage agents & channels
   skill     Manage skills (install from URL, list, enable/disable, sync)
-  cron      Manage scheduled tasks
+  cron      Manage scheduled tasks (list/add/runs/exit ...)
+  im        IM runtime actions for current chat (send-media)
+  widget    Generative UI widget design guidelines (readme)
   plugin    Manage OpenClaw channel plugins
   config    Read/write application config
   status    Show app running state
@@ -234,6 +236,14 @@ function printResult(group: string, action: string, result: Record<string, unkno
     return;
   }
   if (group === 'help') {
+    console.log((result.data as { text: string })?.text ?? '');
+    return;
+  }
+
+  // Tool readmes: `cron readme` / `im readme` / any `widget ...` form all
+  // return a raw text body in result.data.text. Print it as-is — no padding,
+  // no status line, no ticks — so AI can consume it directly as context.
+  if (action === 'readme' || group === 'widget') {
     console.log((result.data as { text: string })?.text ?? '');
     return;
   }
@@ -548,6 +558,16 @@ function buildRoute(group: string, action: string, rest: string[]): string {
     const oauthAction = rest[0] || 'status';
     return `mcp/oauth/${oauthAction}`;
   }
+  // Tool readmes: `myagents cron readme`, `myagents im readme`, `myagents widget ...`
+  if (action === 'readme' && (group === 'cron' || group === 'im' || group === 'widget')) {
+    return `readme/${group}`;
+  }
+  // `widget` only exists for readme lookup — any form of invocation
+  // (`myagents widget`, `myagents widget chart`, `myagents widget readme chart`)
+  // routes to the same handler. The handler parses modules from the payload.
+  if (group === 'widget') {
+    return 'readme/widget';
+  }
   return `${group}/${action}`;
 }
 
@@ -666,13 +686,54 @@ function buildRequestBody(
   // Cron commands
   if (group === 'cron') {
     if (action === 'add') {
+      // Resolve prompt: --prompt-file (industry standard for long text, avoids
+      // shell escape hell for multiline / quoted / backtick content) takes
+      // precedence over --prompt when both are set.
+      let promptText = flags.prompt as string | undefined;
+      if (flags.promptFile && typeof flags.promptFile === 'string') {
+        try {
+          // Lazy load — keep CLI startup fast for non-cron commands.
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          const fs = require('fs') as typeof import('fs');
+          // Size guard: 1 MB is already pathologically large for a cron prompt
+          // (~250k English words). Refuse /dev/zero, runaway files, binaries
+          // disguised as text, etc., with a clear error instead of blocking
+          // the CLI or flooding Admin API.
+          const MAX_PROMPT_BYTES = 1024 * 1024;
+          const stat = fs.statSync(flags.promptFile);
+          if (stat.size > MAX_PROMPT_BYTES) {
+            console.error(`Error: --prompt-file "${flags.promptFile}" is ${stat.size} bytes, exceeds ${MAX_PROMPT_BYTES} (1 MB) limit`);
+            process.exit(1);
+          }
+          const raw = fs.readFileSync(flags.promptFile, 'utf-8');
+          // NUL-byte guard: a prompt with embedded NULs is almost certainly a
+          // binary file being passed in by mistake, and most downstream JSON
+          // serialisation / log processing chokes on them. Refuse explicitly.
+          if (raw.includes('\0')) {
+            console.error(`Error: --prompt-file "${flags.promptFile}" contains NUL bytes (is this a binary file?)`);
+            process.exit(1);
+          }
+          promptText = raw;
+        } catch (err) {
+          console.error(`Error: failed to read --prompt-file "${flags.promptFile}": ${err instanceof Error ? err.message : String(err)}`);
+          // exit(1) matches the existing CLI convention: 1 = business error,
+          // 3 = can't connect to Sidecar. Anything CLI-local falls under 1.
+          process.exit(1);
+        }
+      }
       return {
         name: flags.name,
-        message: flags.prompt,
+        message: promptText,
         workspacePath: flags.workspace,
         schedule: flags.schedule ? { kind: 'cron', expr: flags.schedule } : undefined,
         intervalMinutes: flags.every ? Number(flags.every) : undefined,
       };
+    }
+    if (action === 'exit') {
+      return { reason: flags.reason || rest[0] };
+    }
+    if (action === 'readme') {
+      return {}; // no body
     }
     if (action === 'start' || action === 'stop' || action === 'remove') {
       return { taskId: rest[0] || flags.id };
@@ -695,6 +756,36 @@ function buildRequestBody(
       return { workspacePath: flags.workspace };
     }
     return {};
+  }
+
+  // IM runtime commands — session-scoped, only work inside an IM Bot session
+  if (group === 'im') {
+    if (action === 'send-media') {
+      return {
+        filePath: (flags.file as string) || rest[0],
+        caption: flags.caption,
+      };
+    }
+    if (action === 'readme') {
+      return {};
+    }
+    return {};
+  }
+
+  // Generative UI widget readme. Accept any of:
+  //   myagents widget                         → action='list',    rest=[]           → modules=[]
+  //   myagents widget readme                  → action='readme',  rest=[]           → modules=[]
+  //   myagents widget readme chart            → action='readme',  rest=['chart']    → modules=['chart']
+  //   myagents widget readme chart interactive → rest=['chart','interactive']       → modules=['chart','interactive']
+  //   myagents widget chart                   → action='chart',   rest=[]           → modules=['chart']
+  //   myagents widget chart interactive       → action='chart',   rest=['interactive'] → modules=['chart','interactive']
+  // Modules = positional args AFTER `widget`, minus any leading `readme`/`list` keyword.
+  if (group === 'widget') {
+    const candidates = [action, ...rest].filter(Boolean);
+    const modules = candidates[0] === 'readme' || candidates[0] === 'list'
+      ? candidates.slice(1)
+      : candidates;
+    return { modules };
   }
 
   // Plugin commands

@@ -16,6 +16,10 @@ function getFallbackPaths(): string[] {
         const programFiles = process.env.PROGRAMFILES || '';
 
         return [
+            // ~/.myagents/bin — MUST be first so external runtime shell tools can find
+            // the `myagents` CLI (runtime shell subprocess inherits this PATH via
+            // augmentedProcessEnv → getShellEnv). Same reason as the Unix branch below.
+            userProfile ? join(userProfile, '.myagents', 'bin') : '',
             userProfile ? join(userProfile, '.bun', 'bin') : '',
             localAppData ? join(localAppData, 'bun', 'bin') : '',
             programFiles ? join(programFiles, 'nodejs') : '',
@@ -31,6 +35,11 @@ function getFallbackPaths(): string[] {
     // GUI apps don't inherit shell PATH, so we enumerate known binary directories.
     const home = process.env.HOME;
     const paths = [
+        // ~/.myagents/bin — MUST be first so external runtime (Gemini/CC/Codex) shell
+        // tools can find the `myagents` CLI. The builtin SDK path has its own
+        // explicit injection in buildClaudeSessionEnv, but external runtimes rely
+        // on getFallbackPaths via augmentedProcessEnv → getShellEnv.
+        home ? `${home}/.myagents/bin` : '',
         '/opt/homebrew/bin',        // macOS Apple Silicon homebrew
         '/usr/local/bin',           // macOS Intel homebrew / Linux system
         home ? `${home}/.local/bin` : '',          // Claude Code / pipx / XDG user-local

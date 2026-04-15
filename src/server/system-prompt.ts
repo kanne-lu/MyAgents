@@ -11,6 +11,7 @@
  */
 
 import type { RuntimeType } from '../shared/types/runtime';
+import { buildCliToolsAppend } from './system-prompt-cli-tools';
 
 // ===== Scenario types =====
 
@@ -107,6 +108,15 @@ export interface SystemPromptOptions {
    * identity line in L1. Defaults to 'builtin' (Claude Agent SDK) if omitted.
    */
   runtime?: RuntimeType;
+  /**
+   * Append the `myagents` CLI capability hints (cron / IM media / widget) to
+   * the prompt. Only set by external-runtime session paths — builtin SDK
+   * sessions reach those capabilities through their dedicated MCP servers
+   * (cron-tools / im-media / generative-ui) and MUST NOT have this appendix,
+   * to avoid (a) token waste and (b) confusing the AI with two paths to the
+   * same capability. See prd_0.1.67.
+   */
+  cliToolsEnabled?: boolean;
 }
 
 export function buildSystemPromptAppend(scenario: InteractionScenario, options?: SystemPromptOptions): string {
@@ -156,6 +166,14 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
   // L3: Browser storage state save instruction (when Playwright with --caps=storage is active)
   if (options?.playwrightStorageEnabled) {
     parts.push(TMPL_BROWSER_STORAGE_STATE);
+  }
+
+  // L4: CLI-backed capability hints (external runtimes only)
+  // — bridges MyAgents-specific capabilities (cron / IM media / generative UI)
+  //   to runtimes that can't see the in-process SDK MCP servers.
+  if (options?.cliToolsEnabled) {
+    const cliTools = buildCliToolsAppend(scenario);
+    if (cliTools) parts.push(cliTools);
   }
 
   return parts.join('\n\n');

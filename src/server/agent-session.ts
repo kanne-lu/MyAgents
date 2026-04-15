@@ -554,9 +554,23 @@ export type OpenAiBridgeConfig = {
 
 let currentOpenAiBridgeConfig: OpenAiBridgeConfig = null;
 
-/** Set the sidecar port (called once from index.ts on startup) */
+/** Set the sidecar port (called once from index.ts on startup).
+ *
+ *  Side effect: exports `MYAGENTS_PORT` to `process.env` so every subprocess
+ *  spawned later via `augmentedProcessEnv()` (external runtimes: gemini / claude-code /
+ *  codex) inherits it automatically — the AI's shell tool can then invoke
+ *  `myagents` CLI without the CLI bailing with `MYAGENTS_PORT not set`. This is
+ *  the pit-of-success alternative to editing three runtime `spawn()` call sites
+ *  individually: a new runtime added tomorrow gets the same guarantee for free.
+ *
+ *  The builtin SDK path still sets `env.MYAGENTS_PORT` explicitly in
+ *  `buildClaudeSessionEnv()` (idempotent) because pre-warm can spawn before
+ *  this function is called and the process.env write would arrive too late. */
 export function setSidecarPort(port: number): void {
   sidecarPort = port;
+  if (port > 0) {
+    process.env.MYAGENTS_PORT = String(port);
+  }
 }
 
 /** Get the current sidecar port (used by admin-api for self-loopback) */

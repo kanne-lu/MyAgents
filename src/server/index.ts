@@ -43,6 +43,7 @@ import {
   handleConfigGet, handleConfigSet, handleStatus, handleReload, handleHelp,
   handleVersion,
   handleCronList, handleCronCreate, handleCronStop, handleCronStart, handleCronDelete, handleCronUpdate, handleCronRuns, handleCronStatus,
+  handleCronExit, handleImSendMedia, handleReadme,
   handlePluginList, handlePluginInstall, handlePluginUninstall,
   handleAgentRuntimeStatus,
 } from './admin-api';
@@ -1089,6 +1090,19 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'cron/update') return await handleCronUpdate(payload as Parameters<typeof handleCronUpdate>[0]);
   if (route === 'cron/runs') return await handleCronRuns(payload as Parameters<typeof handleCronRuns>[0]);
   if (route === 'cron/status') return await handleCronStatus(payload as Parameters<typeof handleCronStatus>[0]);
+  if (route === 'cron/exit') return handleCronExit(payload as Parameters<typeof handleCronExit>[0]);
+
+  // IM runtime commands (session-scoped — only work inside an IM Bot / Agent Channel Sidecar)
+  if (route === 'im/send-media') return await handleImSendMedia(payload as Parameters<typeof handleImSendMedia>[0]);
+
+  // Tool readme — progressive-disclosure helpers for external runtimes
+  if (route === 'readme/cron' || route === 'readme/im' || route === 'readme/widget') {
+    const topic = route.split('/')[1];
+    return handleReadme({
+      topic,
+      modules: Array.isArray(payload.modules) ? (payload.modules as string[]) : undefined,
+    });
+  }
 
   // Plugin commands
   if (route === 'plugin/list') return await handlePluginList();
@@ -1350,6 +1364,16 @@ async function main() {
   // Must run BEFORE initializeAgent() which triggers pre-warm → SDK subprocess spawn.
   await initSocksBridgeFromEnv();
 
+  // Store sidecar port BEFORE initializeAgent() so that:
+  //   1. pre-warm's buildClaudeSessionEnv() reads the correct sidecarPort
+  //      (OpenAI bridge loopback URL + MYAGENTS_PORT injection both need it).
+  //   2. setSidecarPort's process.env.MYAGENTS_PORT side effect is in place
+  //      before any external runtime subprocess (or `myagents` CLI invocation
+  //      from pre-warm bash tools) can spawn. This eliminates a subtle timing
+  //      coincidence where the old ordering depended on pre-warm's 500ms
+  //      debounce outlasting the few µs between these two calls.
+  setSidecarPort(port);
+
   await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
   console.log('[startup] initializeAgent done');
 
@@ -1358,9 +1382,6 @@ async function main() {
   if (shouldUseExternalRuntime() && initialSessionId) {
     restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
   }
-
-  // Store sidecar port for OpenAI bridge loopback
-  setSidecarPort(port);
 
   // Create OpenAI bridge handler (lazy: only processes requests when bridge config is active)
   const bridgeHandler = createBridgeHandler({
@@ -7521,11 +7542,15 @@ async function main() {
               runtimeConfig: payloadRuntime === 'builtin' ? undefined : payloadRuntimeConfig ?? undefined,
             });
 
-            // Set IM media context for the im-media tool (send_media)
+            // Set IM media context for the im-media tool (send_media).
+            // workspacePath enables the path-traversal guard in
+            // im-media-tool.ts::sendMediaHandler — without it AI-supplied file
+            // paths are NOT validated (see utils/safe-file-path.ts).
             setImMediaContext({
               botId: payload.botId,
               chatId: payload.sourceId,
               platform: payload.source.split('_')[0],
+              workspacePath: agentDir,
             });
 
             // Set Bridge tools context if this is an OpenClaw plugin session with tools

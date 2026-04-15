@@ -636,7 +636,17 @@ async function _doStartExternalSession(options: {
   // Build system prompt using MyAgents' three-layer architecture.
   // Pass the current runtime so L1 identity text reports the correct CLI
   // (e.g. "Google Gemini CLI" instead of the builtin default).
-  const systemPromptAppend = buildSystemPromptAppend(options.scenario, { runtime: runtimeType });
+  //
+  // cliToolsEnabled: true — external runtimes can't see the builtin `im-cron` /
+  // `im-media` / `generative-ui` SDK MCP servers, so we teach the AI about
+  // their `myagents` CLI equivalents via a progressive-disclosure appendix.
+  // The builtin path at agent-session.ts keeps cliToolsEnabled off and
+  // continues to use the in-process MCP servers — no behaviour change. See
+  // prd_0.1.67_external_runtime_cli_skill.md.
+  const systemPromptAppend = buildSystemPromptAppend(options.scenario, {
+    runtime: runtimeType,
+    cliToolsEnabled: true,
+  });
 
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${options.model || '(default)'}, permissionMode=${options.permissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
   turnCompleted = false;
