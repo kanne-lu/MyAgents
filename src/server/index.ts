@@ -7261,6 +7261,29 @@ async function main() {
         }
       }
 
+      // GET /api/session/context-usage - SDK 0.2.86+ context window breakdown
+      // Returns the live breakdown of the current session's context window usage
+      // (system prompt / tools / messages / MCP / agents / memory / skills).
+      // Returns {success:false} with 200 when unavailable (no active session /
+      // external runtime), so the frontend can distinguish "no data yet" from
+      // network errors. Non-200 is reserved for actual HTTP/server failures.
+      if (pathname === '/api/session/context-usage' && request.method === 'GET') {
+        try {
+          if (shouldUseExternalRuntime()) {
+            return jsonResponse({ success: false, error: 'context usage not available for external runtime', reason: 'external_runtime' });
+          }
+          const { getSessionContextUsage } = await import('./agent-session');
+          const usage = await getSessionContextUsage();
+          if (!usage) {
+            return jsonResponse({ success: false, error: 'no active session', reason: 'no_session' });
+          }
+          return jsonResponse({ success: true, usage });
+        } catch (error) {
+          console.error('[api/session/context-usage] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to get context usage' }, 500);
+        }
+      }
+
       // GET /api/session/config - Read sidecar's current config state
       // Used by Tabs joining an existing sidecar (e.g. IM Bot session) to adopt
       // the session's config instead of pushing their own.

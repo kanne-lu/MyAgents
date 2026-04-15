@@ -1042,6 +1042,43 @@ export function getSessionPermissionMode(): PermissionMode {
   return currentPermissionMode;
 }
 
+/**
+ * Fetch the SDK's context usage breakdown (system prompt / tools / messages / MCP / agents / ...).
+ * Requires SDK 0.2.86+. Returns null when no active session, in a transient state
+ * (pre-warm not completed yet), or when the call times out. The HTTP endpoint returns
+ * 200 + `{success:false, reason:'no_session'}` in all null cases so the frontend
+ * can distinguish "no data" from actual network errors.
+ *
+ * The SDK call is async and cheap (not free) — it issues a `get_context_usage` control
+ * request to the subprocess. Callers should sample sparingly: once per turn_end + on user
+ * demand (expand panel). See PRD §5.2.3.
+ *
+ * Safety (from /cross-review-code findings):
+ * - Local const `session` reference captured *before* the await, so a concurrent
+ *   `abortPersistentSession()` that sets `querySession = null` can't race with us.
+ * - 3s Promise.race timeout so a stuck subprocess (dying mid-abort, pre-warm hang,
+ *   control-channel backup) can't block the HTTP handler indefinitely. The user-facing
+ *   case is `prompt_too_long` — exactly the moment SDK is under maximum pressure.
+ */
+const CONTEXT_USAGE_TIMEOUT_MS = 3_000;
+
+export async function getSessionContextUsage(): Promise<
+  import('@anthropic-ai/claude-agent-sdk').SDKControlGetContextUsageResponse | null
+> {
+  const session = querySession;
+  if (!session) return null;
+  try {
+    const resp = await Promise.race([
+      session.getContextUsage(),
+      new Promise<null>(resolve => setTimeout(() => resolve(null), CONTEXT_USAGE_TIMEOUT_MS)),
+    ]);
+    return resp ?? null;
+  } catch (err) {
+    console.warn('[agent] getContextUsage failed:', err);
+    return null;
+  }
+}
+
 /** Set permission mode (called from frontend via /api/session/permission-mode) */
 export function setSessionPermissionMode(mode: PermissionMode): void {
   if (mode === currentPermissionMode) return;
@@ -6095,6 +6132,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           is_error?: boolean;
           result?: string;
           errors?: string[];
+          // SDK 0.2.91+ 新增：标识 result 终止原因。字段缺失表示 loop 被 bypass
+          // (本地 slash 命令) 或在 yield 之间被外部中断。使用 SDK 导出的 TerminalReason
+          // 联合类型而非裸 string，确保 SDK 升级新增枚举值时 tsc 能捕获缺失处理。
+          terminal_reason?: import('@anthropic-ai/claude-agent-sdk').TerminalReason;
           usage?: {
             input_tokens?: number;
             output_tokens?: number;
@@ -6249,6 +6290,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           cache_creation_tokens: currentTurnUsage.cacheCreationTokens,
           tool_count: currentTurnToolCount,
           duration_ms: durationMs,
+          // SDK 0.2.91+ terminal_reason — 前端映射为中文 banner/toast。
+          // 未设置时前端按 `completed` 处理（不显示额外提示）。
+          terminal_reason: resultMessage.terminal_reason,
           // Piggyback sdkUuid + real message ID so fork button works immediately after streaming.
           // Frontend streaming messages use Date.now() IDs that don't match backend messageSequence IDs.
           assistant_sdk_uuid: lastAssistant?.sdkUuid,

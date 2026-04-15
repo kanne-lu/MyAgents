@@ -25,6 +25,7 @@ import { TabContext, TabApiContext, TabActiveContext, type SessionState, type Ta
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
+import type { TerminalReason } from '../../shared/terminalReason';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
@@ -313,6 +314,8 @@ export default function TabProvider({
     const [systemInitInfo, setSystemInitInfo] = useState<SystemInitInfo | null>(null);
     const [agentError, setAgentError] = useState<string | null>(null);
     const [systemStatus, setSystemStatus] = useState<string | null>(null);  // e.g., 'compacting'
+    const [lastTerminalReason, setLastTerminalReason] = useState<TerminalReason | null>(null);
+    const [contextUsagePercent, setContextUsagePercent] = useState<number | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
     const [pendingAskUserQuestion, setPendingAskUserQuestion] = useState<AskUserQuestionRequest | null>(null);
@@ -462,6 +465,8 @@ export default function TabProvider({
         setSessionState('idle');  // Reset session state for new conversation
         setSystemStatus(null);
         setAgentError(null);
+        setLastTerminalReason(null);
+        setContextUsagePercent(null);
         setUnifiedLogs([]);
         setLogs([]);
         clearInteractiveState();
@@ -729,6 +734,7 @@ export default function TabProvider({
                     resetPaginationState();
                     setStreamingMessage(null);
                     setAgentError(null);
+                    setLastTerminalReason(null);
                     clearInteractiveState();
                 }
 
@@ -1216,9 +1222,41 @@ export default function TabProvider({
                     cache_creation_tokens?: number;
                     tool_count?: number;
                     duration_ms?: number;
+                    terminal_reason?: TerminalReason;
                     assistant_sdk_uuid?: string;
                     assistant_message_id?: string;
                 } | null;
+
+                // SDK 0.2.91+: map terminal_reason to UI banner. Only SET when reason is
+                // explicitly provided and non-completed — do NOT wipe to null on every
+                // complete event. External-runtime `chat:message-complete` (external-session.ts)
+                // never carries terminal_reason, so wiping would silently dismiss a
+                // still-actionable banner from the previous builtin turn. Banner clearing
+                // happens at send / reset / loadSession / chat:init instead (those are the
+                // only events that semantically invalidate the prior turn's outcome).
+                {
+                    const reason = completePayload?.terminal_reason;
+                    if (reason && reason !== 'completed') {
+                        setLastTerminalReason(reason);
+                    }
+                }
+
+                // SDK 0.2.86+: auto-sample context usage after turn ends (PRD §5.2.2).
+                // Fire-and-forget so it never blocks the UI. Server has a 3s timeout
+                // and returns null for external runtime / pre-warm / abort races.
+                // Gated by currentSessionIdRef so a stale response from a prior session
+                // won't overwrite the current session's percentage.
+                {
+                    const sidAtFire = currentSessionIdRef.current;
+                    apiGetJson<{ success: boolean; usage?: { percentage?: number } }>('/api/session/context-usage')
+                        .then(resp => {
+                            if (currentSessionIdRef.current !== sidAtFire) return;
+                            if (resp?.success && typeof resp.usage?.percentage === 'number') {
+                                setContextUsagePercent(resp.usage.percentage);
+                            }
+                        })
+                        .catch(() => { /* silent — overlay still works on manual open */ });
+                }
 
                 // Apply backend's real message ID + sdkUuid to the just-moved history message.
                 // Streaming messages use Date.now() IDs that don't match backend's messageSequence IDs.
@@ -1769,7 +1807,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, clearSessionActive, resetPaginationState]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, apiGetJson, clearInteractiveState, flushPendingChunks, clearSessionActive, resetPaginationState]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -1934,6 +1972,12 @@ export default function TabProvider({
 
         // Reset new session flag BEFORE sending - allow message replay to show user's message
         isNewSessionRef.current = false;
+
+        // Clear prior turn's terminal_reason banner — a new user send semantically
+        // invalidates the previous turn's outcome. Without this, banner stays visible
+        // while the new stream renders (and chat:message-complete no longer wipes it
+        // since that caused the external-runtime bug).
+        setLastTerminalReason(null);
 
         // Capture user message for auto-title generation (FIFO queue for queued sends)
         if (!autoTitleAttemptedRef.current) {
@@ -2310,6 +2354,8 @@ export default function TabProvider({
             }
             setSystemStatus(null);
             setAgentError(null);
+            setLastTerminalReason(null);
+            setContextUsagePercent(null);
             clearInteractiveState();
             // Update current session ID to reflect the loaded session.
             // Ref is updated synchronously so that any in-flight async handler
@@ -2750,6 +2796,8 @@ export default function TabProvider({
         systemInitInfo,
         agentError,
         systemStatus,
+        lastTerminalReason,
+        contextUsagePercent,
         pendingPermission,
         pendingAskUserQuestion,
         pendingExitPlanMode,
@@ -2765,6 +2813,7 @@ export default function TabProvider({
         clearUnifiedLogs,
         setSystemInitInfo,
         setAgentError,
+        setLastTerminalReason,
         connectSse,
         disconnectSse,
         sendMessage,
@@ -2786,7 +2835,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime,
-        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, contextUsagePercent, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

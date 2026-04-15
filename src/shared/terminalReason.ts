@@ -1,0 +1,114 @@
+/**
+ * SDK 0.2.91+ `terminal_reason` 枚举 — 标识 result 消息的终止原因。
+ *
+ * Re-exported directly from `@anthropic-ai/claude-agent-sdk` so SDK upgrades
+ * adding new enum values cause tsc errors on the MAP below instead of silent
+ * fallback-only behaviour. Double-sourcing was the original mistake here:
+ * MyAgents hand-maintained the 12 values against SDK 0.2.107's type, which
+ * works today but silently drifts when the SDK bumps.
+ */
+import type { TerminalReason as SdkTerminalReason } from '@anthropic-ai/claude-agent-sdk';
+export type TerminalReason = SdkTerminalReason;
+
+/**
+ * 严重等级决定前端如何呈现：
+ * - `info`：正常或无需打扰的状态（`completed`、`tool_deferred`）
+ * - `notice`：需要用户知晓但非错误（`max_turns`、`aborted_*`）
+ * - `error`：需要用户采取行动的错误（配额、Hook 阻断、图像/模型错误）
+ */
+export type TerminalReasonSeverity = 'info' | 'notice' | 'error';
+
+export interface TerminalReasonInfo {
+  /** 简短中文描述，用于 banner / toast */
+  label: string;
+  /** 更详细的说明，建议展示在 hover tip 或展开块中 */
+  detail: string;
+  severity: TerminalReasonSeverity;
+}
+
+// Record<TerminalReason, ...> forces exhaustive coverage — SDK adding a new
+// enum value without an entry here breaks the build. That's the intent.
+const MAP: Record<TerminalReason, TerminalReasonInfo> = {
+  completed: {
+    label: '已完成',
+    detail: '本轮对话正常结束',
+    severity: 'info',
+  },
+  max_turns: {
+    label: '已达到最大对话轮次',
+    detail: '本轮执行触达最大轮次上限。建议新开会话继续，或调整 Agent 的 maxTurns 配置。',
+    severity: 'notice',
+  },
+  prompt_too_long: {
+    label: '上下文已满',
+    detail: '当前对话的 token 总量已达到模型上下文窗口上限，必须精简历史、清理附件或新开会话才能继续。',
+    severity: 'error',
+  },
+  blocking_limit: {
+    label: 'API 额度已用完',
+    detail: '供应商返回 rate limit / quota 命中。请检查供应商后台配额或等待重置。',
+    severity: 'error',
+  },
+  rapid_refill_breaker: {
+    label: '请求过于频繁，已自动退避',
+    detail: 'SDK 触发快速补发熔断器，正在自动退避重试。稍后会自行恢复。',
+    severity: 'notice',
+  },
+  aborted_tools: {
+    label: '工具执行被中断',
+    detail: '工具调用被用户或系统中断。可重新发送消息让 AI 重试。',
+    severity: 'notice',
+  },
+  aborted_streaming: {
+    label: '回复被中断',
+    detail: '流式回复在完成前被中断。可重新发送消息让 AI 重新生成。',
+    severity: 'notice',
+  },
+  tool_deferred: {
+    label: '工具被延迟执行',
+    detail: '部分工具调用被延迟处理，本轮已返回。',
+    severity: 'info',
+  },
+  stop_hook_prevented: {
+    label: '被 Stop Hook 阻止结束',
+    detail: '项目配置的 Stop Hook 主动阻止了会话结束。请检查 Hook 逻辑或 settings.json。',
+    severity: 'error',
+  },
+  hook_stopped: {
+    label: '被 Hook 主动终止',
+    detail: '某个 Hook 主动请求终止当前轮次。请检查 Hook 配置或日志定位触发的 Hook。',
+    severity: 'error',
+  },
+  image_error: {
+    label: '图像处理失败',
+    detail: '图像内容块无法被模型处理，可能是格式不支持或尺寸超限（>8000px）。',
+    severity: 'error',
+  },
+  model_error: {
+    label: '模型返回错误',
+    detail: '模型侧返回错误，请查看日志定位具体原因。',
+    severity: 'error',
+  },
+};
+
+/**
+ * 解析 SDK `terminal_reason`。对未知值做兜底，避免 SDK 扩展枚举时前端 crash。
+ * 返回 `null` 表示该原因无需展示（`completed` 或字段缺失）。
+ */
+export function describeTerminalReason(reason: unknown): TerminalReasonInfo | null {
+  if (typeof reason !== 'string' || reason.length === 0) return null;
+  if (reason === 'completed') return null;
+  const info = MAP[reason as TerminalReason];
+  if (info) return info;
+  // 未知 reason — 返回通用占位，避免前端 switch 穷举
+  return {
+    label: `未知原因 (${reason})`,
+    detail: `SDK 返回了未知的 terminal_reason=${reason}。可能是 SDK 版本升级带来的新枚举值。`,
+    severity: 'notice',
+  };
+}
+
+/** 便捷判断：该 reason 是否应该打扰用户（banner/toast）。 */
+export function shouldSurfaceTerminalReason(reason: unknown): boolean {
+  return describeTerminalReason(reason) !== null;
+}

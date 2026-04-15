@@ -419,6 +419,24 @@ SDK subprocess → Provider API（流式响应）
 | `[agent] rewind: skipping resumeSessionAt — UUID not in current session` | 旧消息的 UUID 不属于当前 SDK session | 正常——系统会新建 session 而非尝试截断旧 session |
 | `SDK UUID 已过期` | Fork 目标消息来自已过期的 session | 建议用户重新发送消息后再 fork |
 
+### AI 终止原因（terminal_reason，SDK 0.2.91+）
+
+SDK `result` 消息带有 `terminal_reason` 字段，标识本轮对话的终止原因。诊断用户问题时 grep 日志中的 `terminal_reason=` 或 `"terminal_reason":"..."` 能快速定位本轮终止类型：
+
+| terminal_reason | 含义 | 用户侧表现 | 解决方案 |
+|-----------------|------|-----------|----------|
+| `completed` | 正常完成 | 无提示 | — |
+| `max_turns` | 达到最大对话轮次 | banner 提示 | 建议新开会话或调整 Agent maxTurns |
+| `prompt_too_long` | 上下文已满 | banner 提示 | 精简历史、清理附件或新开会话 |
+| `blocking_limit` | API 额度/配额用完 | banner 提示 | 检查供应商后台配额或更换 Provider |
+| `rapid_refill_breaker` | 快速补发熔断，自动退避 | banner 提示 | 等待自动恢复，频繁出现可能供应商 QPS 限制 |
+| `aborted_tools` / `aborted_streaming` | 用户或系统中断 | banner 提示 | 重新发送让 AI 重试 |
+| `stop_hook_prevented` / `hook_stopped` | Hook 阻断/终止 | banner 提示 | 检查 settings.json 的 Hook 配置 |
+| `image_error` | 图像处理失败 | banner + 错误 | 通常尺寸超限（>8000px）或格式不支持 |
+| `model_error` | 模型侧错误 | banner + 错误 | 查看日志中完整错误消息 |
+
+**诊断要点**：用户反馈"AI 突然停了"、"只回答了一半"、"什么都没说就完成了" 时，优先 grep 日志中的 `terminal_reason`，对照上表确定根因。该字段在 `[agent][sdk] result:` 日志行中可见。
+
 ---
 
 ## config.json 结构

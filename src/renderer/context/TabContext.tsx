@@ -22,6 +22,7 @@ import type { PermissionMode } from '@/config/types';
 import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
 import type { ExitPlanModeRequest, EnterPlanModeRequest } from '../../shared/types/planMode';
+import type { TerminalReason } from '../../shared/terminalReason';
 
 export type SessionState = 'idle' | 'running' | 'stopping' | 'error';
 
@@ -52,6 +53,23 @@ export interface TabState {
     systemInitInfo: SystemInitInfo | null;
     agentError: string | null;
     systemStatus: string | null;  // SDK system status (e.g., 'compacting')
+    /**
+     * SDK 0.2.91+ terminal_reason of the last turn. Set on chat:message-complete,
+     * cleared on next send / session load / reset. `completed` and missing reasons
+     * are normalized to null (no banner needed). Typed as `TerminalReason | null`
+     * (not `string | null`) so SDK upgrades that add enum values are caught by tsc
+     * in consumers. `describeTerminalReason` still tolerates unknown strings at
+     * runtime as forward-compat defense. See shared/terminalReason.ts.
+     */
+    lastTerminalReason: TerminalReason | null;
+    /**
+     * SDK 0.2.86+ context usage percentage (0..100). Auto-sampled after each
+     * chat:message-complete via /api/session/context-usage. null = not yet
+     * sampled / unavailable (external runtime, pre-warm, no session). Displayed
+     * as a small badge on the Chat header Gauge button so users see context
+     * pressure building *before* prompt_too_long hits. PRD §5.2.2.
+     */
+    contextUsagePercent: number | null;
 
     // Permission prompt state
     pendingPermission: PermissionRequest | null;
@@ -95,6 +113,9 @@ export interface TabContextValue extends TabState {
 
     // Agent error
     setAgentError: Dispatch<SetStateAction<string | null>>;
+
+    // SDK terminal_reason banner dismissal
+    setLastTerminalReason: Dispatch<SetStateAction<TerminalReason | null>>;
 
     // SSE connection management
     isConnected: boolean;
@@ -153,6 +174,8 @@ const defaultContextValue: TabContextValue = {
     systemInitInfo: null,
     agentError: null,
     systemStatus: null,
+    lastTerminalReason: null,
+    contextUsagePercent: null,
     pendingPermission: null,
     pendingAskUserQuestion: null,
     pendingExitPlanMode: null,
@@ -168,6 +191,7 @@ const defaultContextValue: TabContextValue = {
     clearUnifiedLogs: () => { },
     setSystemInitInfo: () => { },
     setAgentError: () => { },
+    setLastTerminalReason: () => { },
     connectSse: async () => { },
     disconnectSse: () => { },
     sendMessage: async () => false,

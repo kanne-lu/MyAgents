@@ -1,4 +1,4 @@
-import { AlertTriangle, ArrowLeft, Bot, Globe, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Bot, Gauge, Globe, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
@@ -17,6 +17,8 @@ import QueryNavigator from '@/components/chat/QueryNavigator';
 import ChatSearchPanel from '@/components/ChatSearchPanel';
 import { useChatSearch, isHighlightApiSupported } from '@/hooks/useChatSearch';
 import SelectionCommentMenu from '@/components/SelectionCommentMenu';
+import TerminalReasonBanner from '@/components/TerminalReasonBanner';
+import ContextUsageOverlay from '@/components/ContextUsageOverlay';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
@@ -168,6 +170,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     systemInitInfo: _systemInitInfo,
     agentError,
     systemStatus,
+    lastTerminalReason,
+    contextUsagePercent,
     pendingPermission,
     pendingAskUserQuestion,
     pendingExitPlanMode,
@@ -177,6 +181,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setMessages,
     setIsLoading,
     setAgentError,
+    setLastTerminalReason,
     connectSse,
     disconnectSse,
     sendMessage,
@@ -242,6 +247,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // to avoid re-rendering Chat (and MessageList) on every keystroke
   const [showLogs, setShowLogs] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showContextUsage, setShowContextUsage] = useState(false);
   // Narrow mode: workspace renders as overlay drawer instead of side panel
   // Initialize from window.innerWidth to avoid layout flash (FOUC) on first render
   const [isNarrowLayout, setIsNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
@@ -2194,6 +2200,38 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 onClose={() => setShowHistory(false)}
               />
             </div>
+            {/* Context usage button — SDK 0.2.86+ getContextUsage
+                Only meaningful for builtin runtime with a live SDK session.
+                External runtimes (CC/Codex/Gemini) don't expose this API;
+                overlay itself handles the "unavailable" state so hiding the
+                button would just move the disappointment.
+                The small percent badge (PRD §5.2.2) auto-samples on turn-end
+                and escalates color at 75%/90% thresholds so users see context
+                pressure building *before* prompt_too_long hits. */}
+            {!isExternalRuntime && (
+              <Tip label="上下文用量" position="bottom">
+                <button
+                  type="button"
+                  onClick={() => setShowContextUsage(true)}
+                  className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                >
+                  <Gauge
+                    className={`h-3.5 w-3.5 flex-shrink-0 ${
+                      contextUsagePercent != null && contextUsagePercent >= 90
+                        ? 'text-[var(--error)]'
+                        : contextUsagePercent != null && contextUsagePercent >= 75
+                        ? 'text-[var(--warning)]'
+                        : ''
+                    }`}
+                  />
+                  {contextUsagePercent != null && (
+                    <span className="text-[11px] tabular-nums">
+                      {Math.round(contextUsagePercent)}%
+                    </span>
+                  )}
+                </button>
+              </Tip>
+            )}
             {/* Dev-only buttons - controlled by config.showDevTools */}
             {config.showDevTools && (
               <>
@@ -2249,6 +2287,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               </div>
             </div>
           )}
+
+          {/* SDK 0.2.91+ terminal_reason banner. For error-severity reasons that
+              already surface via agentError (image_error / model_error), suppress
+              this banner to avoid double-stacking ~80px of banner region. agentError
+              carries the richer provider-level message; the reason banner's info
+              would just duplicate it. notice/info-severity reasons (max_turns,
+              prompt_too_long, etc.) still render alongside agentError since they
+              carry actionable signals agentError doesn't. */}
+          <TerminalReasonBanner
+            reason={agentError ? null : lastTerminalReason}
+            onDismiss={() => setLastTerminalReason(null)}
+            onNewSession={handleNewSession}
+            onOpenContextUsage={!isExternalRuntime ? () => setShowContextUsage(true) : undefined}
+          />
 
           {agentError && (
             <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-[11px] text-[var(--ink)]">
@@ -2310,6 +2362,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 </div>
               </div>
             </div>
+          )}
+          {/* Context usage overlay — live SDK context window breakdown */}
+          {showContextUsage && (
+            <ContextUsageOverlay onClose={() => setShowContextUsage(false)} />
           )}
           {/* Unified Logs Panel - fullscreen modal displaying logs */}
           <UnifiedLogsPanel
