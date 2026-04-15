@@ -67,7 +67,8 @@
       "infoplist/zh-Hans.lproj/InfoPlist.strings": "zh-Hans.lproj/InfoPlist.strings"
     },
     "externalBin": [
-      "binaries/bun"
+      "binaries/bun",
+      "binaries/cuse"
     ],
     "macOS": {
       "minimumSystemVersion": "13.0",

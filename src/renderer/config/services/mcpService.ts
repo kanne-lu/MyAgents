@@ -6,6 +6,32 @@ import { loadAppConfig, atomicModifyConfig } from './appConfigService';
 import { loadProjects, saveProjects } from './projectService';
 
 /**
+ * Detect host platform in the renderer using the same vocabulary as
+ * `process.platform` (`'darwin' | 'win32' | 'linux'`). `navigator.platform`
+ * is reliable enough for a coarse 3-way split and matches the existing
+ * pattern used elsewhere in the renderer (see App.tsx, TitleBar.tsx).
+ */
+function getRendererPlatform(): NodeJS.Platform {
+    if (typeof navigator === 'undefined') return 'linux';
+    const p = navigator.platform.toLowerCase();
+    if (p.includes('mac')) return 'darwin';
+    if (p.includes('win')) return 'win32';
+    return 'linux';
+}
+
+/**
+ * Filter out presets whose `platforms` field doesn't include the host.
+ * Keeps platform-specific presets (e.g. cuse on darwin/win32) invisible
+ * everywhere on unsupported hosts. Mirror of admin-config.ts filter —
+ * the two sites share the same semantic so catalogue and effective server
+ * list stay in sync.
+ */
+function getPlatformFilteredPresets(): McpServerDefinition[] {
+    const host = getRendererPlatform();
+    return PRESET_MCP_SERVERS.filter(p => !p.platforms || p.platforms.includes(host));
+}
+
+/**
  * Get all available MCP servers (preset + custom), with user-configured args/env merged in.
  * Defensive: all disk-loaded array fields are validated with Array.isArray() before spread,
  * because config.json is a trust boundary — TypeScript types don't constrain raw JSON.
@@ -17,7 +43,7 @@ export async function getAllMcpServers(): Promise<McpServerDefinition[]> {
     // (aligned with server-side getAllMcpServers in admin-config.ts)
     const customIds = new Set(customServers.map(s => s.id));
     const allServers = [
-        ...PRESET_MCP_SERVERS.filter(p => !customIds.has(p.id)),
+        ...getPlatformFilteredPresets().filter(p => !customIds.has(p.id)),
         ...customServers,
     ];
     const serverArgsConfig = config.mcpServerArgs && typeof config.mcpServerArgs === 'object' && !Array.isArray(config.mcpServerArgs)

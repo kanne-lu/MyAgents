@@ -550,6 +550,19 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 
 **分层原则**：Bun 跑我们自己的代码（启动快、行为可控），Node.js 跑社区生态代码（MCP Server / npm 包）。
 
+### 预置原生二进制 MCP (v0.1.67+)
+
+除 Bun / Node.js 两大运行时外，少量性能或 OS API 敏感的预置 MCP 以原生二进制形式随 App 分发，通过 Tauri `externalBin` 打包、SDK stdio transport 启动，不依赖 Bun / Node.js：
+
+| 二进制 | 用途 | 来源 | 打包位置 |
+|--------|------|------|---------|
+| **cuse** | 预置 Computer-Use MCP（截图/点击/输入/滚动，仅 macOS/Windows） | `hAcKlyc/MyAgents-Cuse` GitHub Release，构建时 `scripts/download_cuse.sh`（macOS）/`.ps1`（Windows）按 `gh release` 拉取 latest | `src-tauri/binaries/cuse-*-<triple>[.exe]` |
+
+**新增同类二进制时的约定**：
+- 注册到 `PRESET_MCP_SERVERS` 时用 `command: '__bundled_xxx__'` 哨兵字符串，解析器放在 `src/server/utils/runtime.ts`，在 `agent-session.ts` / `admin-api.ts` / `index.ts` 三处 MCP 启动/验证分支各加短路分支
+- 平台差异（如 cuse 只支持 macOS/Windows）通过 `McpServerDefinition.platforms` + `mcpService.ts` / `admin-config.ts` 的平台过滤器承担，不散布在上游
+- `build_macos.sh` 的 `codesign` 循环通配 `src-tauri/binaries/*-apple-darwin`——新二进制只要落在这个目录就自动继承应用签名，TCC 权限（Screen Recording / Accessibility / AppleEvents）通过同 Team ID 的 code signature 自动传递
+
 ## 开发脚本
 
 ### macOS

@@ -195,6 +195,16 @@ fi
 echo -e "${GREEN}✓ TypeScript 检查通过${NC}"
 echo ""
 
+# 下载最新 cuse 二进制 (computer-use MCP)
+# 每次构建都拉取最新 release — cuse 更新 → 你打 tag → 我们构建就带上
+echo -e "${BLUE}[4.5/7] 拉取最新 cuse 二进制...${NC}"
+if ! "${PROJECT_DIR}/scripts/download_cuse.sh"; then
+    echo -e "${RED}✗ cuse 下载失败，无法继续构建${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ cuse 已就绪${NC}"
+echo ""
+
 # 构建前端和服务端
 echo -e "${BLUE}[5/7] 构建前端和服务端...${NC}"
 
@@ -293,39 +303,46 @@ echo -e "${BLUE}[6/7] 签名外部二进制文件...${NC}"
 # 否则 macOS TCC 会将 Bun 视为独立应用，每次访问受保护目录都需要单独授权
 # 参考：https://developer.apple.com/forums/thread/129494
 #       https://book.hacktricks.wiki/en/macos-hardening/macos-security-and-privilege-escalation/macos-security-protections/macos-tcc/
-echo -e "  ${CYAN}签名 Bun 可执行文件 (使用应用签名替换官方签名)...${NC}"
-BUN_BINARIES_DIR="${PROJECT_DIR}/src-tauri/binaries"
-BUN_SIGNED_COUNT=0
-BUN_FAILED_COUNT=0
+echo -e "  ${CYAN}签名 externalBin 可执行文件 (使用应用签名替换官方签名)...${NC}"
+# Pit-of-success: signs ANY file matching src-tauri/binaries/*-apple-darwin.
+# Dropping a new externalBin under src-tauri/binaries/ with the apple-darwin
+# triple is enough — the loop auto-picks it up, re-signs it with our
+# Developer ID + hardened runtime + entitlements, and TCC permissions
+# inherit through the shared code signature. No per-binary enumeration to
+# keep in sync with tauri.conf.json.
+EXTBIN_DIR="${PROJECT_DIR}/src-tauri/binaries"
+EXTBIN_SIGNED_COUNT=0
+EXTBIN_FAILED_COUNT=0
 
-for bun_binary in "${BUN_BINARIES_DIR}"/bun-*-apple-darwin; do
-    if [ -f "$bun_binary" ]; then
-        echo -e "    ${CYAN}处理: $(basename "$bun_binary")${NC}"
+for bin in "${EXTBIN_DIR}"/*-apple-darwin; do
+    if [ -f "$bin" ]; then
+        echo -e "    ${CYAN}处理: $(basename "$bin")${NC}"
 
         # 1. 移除 quarantine 属性 (macOS 会标记下载的二进制文件)
         # 参考：https://v2.tauri.app/develop/sidecar/
-        xattr -d com.apple.quarantine "$bun_binary" 2>/dev/null || true
+        xattr -d com.apple.quarantine "$bin" 2>/dev/null || true
 
         # 2. 重签名：使用 --force 强制重签名，--options runtime 启用 hardened runtime
         # --entitlements 使用应用的 entitlements 确保 JIT 等权限
-        # 这样 Bun 将与主应用共享相同的 Team ID，TCC 权限可以正确继承
+        # 子进程与主应用共享相同的 Team ID，TCC 权限（含 Screen Recording /
+        # Accessibility / AppleEvents）可以正确继承。
         if codesign --force --options runtime --timestamp \
             --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
-            --sign "$APPLE_SIGNING_IDENTITY" "$bun_binary"; then
-            echo -e "    ${GREEN}✓ $(basename "$bun_binary") 签名成功${NC}"
-            ((BUN_SIGNED_COUNT++))
+            --sign "$APPLE_SIGNING_IDENTITY" "$bin"; then
+            echo -e "    ${GREEN}✓ $(basename "$bin") 签名成功${NC}"
+            ((EXTBIN_SIGNED_COUNT++))
         else
-            echo -e "    ${RED}✗ $(basename "$bun_binary") 签名失败${NC}"
-            ((BUN_FAILED_COUNT++))
+            echo -e "    ${RED}✗ $(basename "$bin") 签名失败${NC}"
+            ((EXTBIN_FAILED_COUNT++))
         fi
     fi
 done
 
-if [ $BUN_FAILED_COUNT -gt 0 ]; then
-    echo -e "${RED}错误: Bun 签名失败，构建终止${NC}"
+if [ $EXTBIN_FAILED_COUNT -gt 0 ]; then
+    echo -e "${RED}错误: externalBin 签名失败，构建终止${NC}"
     exit 1
 fi
-echo -e "${GREEN}✓ Bun 签名完成 (${BUN_SIGNED_COUNT} 个文件)${NC}"
+echo -e "${GREEN}✓ externalBin 签名完成 (${EXTBIN_SIGNED_COUNT} 个文件)${NC}"
 
 echo ""
 

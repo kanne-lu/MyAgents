@@ -368,6 +368,23 @@ export async function handleMcpTest(payload: { id: string }): Promise<AdminRespo
     return { success: true, data: { id, type: 'builtin' }, hint: 'Built-in MCP validated.' };
   }
 
+  // Bundled cuse (computer-use) binary: resolve via runtime helper and
+  // check the resolved path exists. Skip the generic `which` preflight —
+  // __bundled_cuse__ is a sentinel, not a real PATH lookup. Response
+  // surface deliberately omits the resolved absolute path so the sentinel
+  // mapping never leaks to user-facing UI.
+  if (server.command === '__bundled_cuse__') {
+    const { getBundledCusePath } = await import('./utils/runtime');
+    const cusePath = getBundledCusePath();
+    if (!cusePath) {
+      return {
+        success: false,
+        error: `cuse 二进制未安装 (platform=${process.platform})。macOS/Windows 构建会自动包含；开发环境请运行 scripts/download_cuse.sh。`,
+      };
+    }
+    return { success: true, data: { id, type: 'stdio' }, hint: 'Bundled cuse validated.' };
+  }
+
   // SSE/HTTP: test URL reachability
   if (server.type === 'sse' || server.type === 'http') {
     try {

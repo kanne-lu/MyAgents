@@ -175,7 +175,13 @@ function getPresetMcpServers(): McpServerDefinition[] {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { PRESET_MCP_SERVERS } = require('../../renderer/config/types');
-    return PRESET_MCP_SERVERS as McpServerDefinition[];
+    // Filter out presets whose `platforms` field doesn't include the host —
+    // keeps platform-specific presets (e.g. cuse on darwin/win32) invisible
+    // everywhere on unsupported hosts (catalogue, validation, effective
+    // MCP lists, `myagents mcp list`).
+    return (PRESET_MCP_SERVERS as McpServerDefinition[]).filter(p =>
+      !p.platforms || p.platforms.includes(process.platform)
+    );
   } catch {
     return [];
   }

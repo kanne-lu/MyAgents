@@ -2517,7 +2517,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                                         ⚠️ 需要配置 API Key
                                                     </p>
                                                 )}
-                                                {server.command !== '__builtin__' && (
+                                                {server.command !== '__builtin__' && server.command !== '__bundled_cuse__' && (
                                                     <p className="mt-2 truncate font-mono text-[10px] text-[var(--ink-muted)]" title={`${server.command} ${server.args?.join(' ') ?? ''}`}>
                                                         {server.command} {server.args?.join(' ')}
                                                     </p>
@@ -3271,7 +3271,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                                 </label>
                                 <div className="rounded-lg bg-[var(--paper-inset)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
                                     {builtinMcpSettings.server.type === 'stdio'
-                                        ? `${builtinMcpSettings.server.command} ${(getPresetMcpServer(builtinMcpSettings.server.id)?.args ?? []).join(' ')}`
+                                        // Replace the __bundled_* sentinel with its display name so users
+                                        // see "cuse mcp ..." rather than "__bundled_cuse__ mcp ...".
+                                        ? `${builtinMcpSettings.server.command === '__bundled_cuse__' ? 'cuse' : builtinMcpSettings.server.command} ${(getPresetMcpServer(builtinMcpSettings.server.id)?.args ?? []).join(' ')}`
                                         : (builtinMcpSettings.server.url?.replace(/\{\{\w+\}\}/g, '***') ?? '')}
                                 </div>
                             </div>

@@ -1450,6 +1450,22 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
       // Defensive: args may be non-array (e.g. boolean `true`) due to CLI parsing bugs or manual config edits
       let args = [...(Array.isArray(server.args) ? server.args : [])];
 
+      // Sentinel: bundled cuse (computer-use) binary — resolve to the
+      // platform-specific path shipped in the app bundle. If the binary is
+      // missing (unsupported platform, or a dev build without the binary
+      // downloaded yet), skip the MCP with a warning rather than crashing
+      // the session.
+      if (command === '__bundled_cuse__') {
+        const { getBundledCusePath } = await import('./utils/runtime');
+        const cusePath = getBundledCusePath();
+        if (!cusePath) {
+          console.warn(`[agent] MCP ${server.id}: bundled cuse binary not found (platform=${process.platform}); skipping. Run scripts/download_cuse.sh to install.`);
+          continue;
+        }
+        command = cusePath;
+        console.log(`[agent] MCP ${server.id}: resolved to bundled cuse at ${cusePath}`);
+      }
+
       // For npx commands: prefer system npx → bundled Node.js npx → bun x
       // System Node.js is maintained by the user's package manager, more reliable than our bundled npm.
       // Bundled Node.js serves as fallback for users who don't have Node.js installed.

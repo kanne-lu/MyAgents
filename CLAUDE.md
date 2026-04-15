@@ -105,8 +105,9 @@ npm run typecheck && npm run lint  # 代码质量检查
 | **Bun** | Agent Runtime — 运行 Claude Agent SDK（`executable: 'bun'`），Sidecar 主进程、Plugin Bridge | `src-tauri/binaries/bun-*` |
 | **Node.js** | 功能层 — MCP Server 执行（`npx`）、社区 npm 包、AI Bash 环境中的 `node`/`npx`/`npm` | `src-tauri/resources/nodejs/`（v0.1.44+，含 node + npm/npx） |
 | **Git** | SDK 依赖 — Claude Code 需要 `git`（代码操作）+ `bash`（工具执行），Windows 无自带 → NSIS 静默安装 Git for Windows | `src-tauri/nsis/Git-Installer.exe`（仅 Windows） |
+| **cuse** (v0.1.67+) | 预置 Computer-Use MCP 原生二进制（截图/点击/输入/滚动，仅 macOS/Windows） | `src-tauri/binaries/cuse-*-<triple>[.exe]`，构建时 `scripts/download_cuse.sh`/`.ps1` 从 `hAcKlyc/MyAgents-Cuse` GitHub Release 拉取 latest |
 
-**分层原则**：Bun 跑我们自己的代码（启动快、行为可控），Node.js 跑社区生态代码（MCP Server / npm 包，设计目标是 Node.js，Bun 兼容性存在系统性缺陷）。
+**分层原则**：Bun 跑我们自己的代码（启动快、行为可控），Node.js 跑社区生态代码（MCP Server / npm 包，设计目标是 Node.js，Bun 兼容性存在系统性缺陷）。原生二进制 MCP（cuse 等）作为第三类，用于性能或 OS API 敏感场景，通过 `PRESET_MCP_SERVERS` 的 `command: '__bundled_xxx__'` 哨兵注册、`platforms?:` 字段做平台门控、`build_macos.sh` 的 `src-tauri/binaries/*-apple-darwin` 通配符自动继承应用签名与 TCC 权限。
 
 **PATH 注入**：`buildClaudeSessionEnv()` 构造 SDK 子进程的 PATH，决定 AI Bash 工具能找到哪些命令。优先级：`bundledBunDir` → `systemNodeDirs`（用户安装的 Node.js） → `bundledNodeDir` → `~/.myagents/bin` → 系统路径。Node.js 系统优先（用户维护、npm 更可靠），Bun 内置优先（跑我们自己的代码）。
 

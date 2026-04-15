@@ -224,6 +224,11 @@ export function useChatSearch({ scrollerRef, active }: UseChatSearchOptions): Ch
   // a setState updater (which would double-fire in StrictMode).
   const currentIndexRef = useRef(-1);
   const queryRef = useRef('');
+  // Mirrors `query` for use inside imperative callbacks that don't re-run
+  // on every render. Writing to a ref during render is flagged by
+  // `react-hooks/refs`, but the value written is pure — it's the same value
+  // React will commit — so StrictMode double-invocation is a no-op here.
+  // eslint-disable-next-line react-hooks/refs
   queryRef.current = query;
 
   const supported = useMemo(() => {

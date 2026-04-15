@@ -732,6 +732,15 @@ export interface McpServerDefinition {
   requiresConfig?: string[];  // Required config fields (e.g., API keys)
   websiteUrl?: string;     // Website for API key registration
   configHint?: string;     // Help text shown in settings dialog (e.g., "去官网注册获取 API Key")
+  /**
+   * Platforms this preset supports. Undefined = all platforms.
+   * Values match `process.platform` / `NodeJS.Platform`
+   * (`'darwin' | 'win32' | 'linux'`). Presets with a set platforms list are
+   * filtered out of the catalogue on non-matching hosts — both in the
+   * renderer `mcpService.ts` and the sidecar `admin-config.ts` so the UI
+   * and the effective server list stay in sync.
+   */
+  platforms?: NodeJS.Platform[];
 }
 
 /**
@@ -811,6 +820,19 @@ export const PRESET_MCP_SERVERS: McpServerDefinition[] = [
     args: [],
     isBuiltin: true,
     isFree: true,
+  },
+  {
+    id: 'cuse',
+    name: 'Cuse 电脑控制',
+    description: '让 AI 直接操作你的电脑：截图、点击、输入、滚动。',
+    type: 'stdio',
+    // Sentinel resolved at MCP launch to the bundled cuse binary path —
+    // see getBundledCusePath() in src/server/utils/runtime.ts.
+    command: '__bundled_cuse__',
+    args: ['mcp', '--caller-app', 'MyAgents'],
+    isBuiltin: true,
+    isFree: true,
+    platforms: ['darwin', 'win32'],
   },
 ];
 

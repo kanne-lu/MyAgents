@@ -4438,7 +4438,13 @@ async function main() {
             return jsonResponse({ success: false, error: 'Missing server' }, 400);
           }
 
-          console.log(`[api/mcp/enable] Enabling MCP: ${server.id}, type: ${server.type}, command: ${server.command}`);
+          // Resolve sentinel commands to display names for logs, so
+          // __bundled_cuse__ / __builtin__ never leak into unified logs or
+          // user-facing error surfaces.
+          const displayCommand = server.command === '__builtin__'
+            ? '(builtin)'
+            : server.command === '__bundled_cuse__' ? 'cuse' : server.command;
+          console.log(`[api/mcp/enable] Enabling MCP: ${server.id}, type: ${server.type}, command: ${displayCommand}`);
 
           // Built-in MCP (in-process) — delegate validation to registry
           if (server.command === '__builtin__') {
@@ -4450,6 +4456,28 @@ async function main() {
               }
             }
             console.log(`[api/mcp/enable] Built-in MCP: ${server.id} — enabled`);
+            return jsonResponse({ success: true });
+          }
+
+          // Bundled cuse (computer-use) binary — resolve the sentinel to
+          // the real path via runtime helper. This is the primary enable
+          // path hit by the Settings UI toggle, so it MUST short-circuit
+          // the generic `which` preflight below (which would fail with a
+          // sentinel-leaking "命令 __bundled_cuse__ 未找到" error).
+          if (server.command === '__bundled_cuse__') {
+            const { getBundledCusePath } = await import('./utils/runtime');
+            const cusePath = getBundledCusePath();
+            if (!cusePath) {
+              return jsonResponse({
+                success: false,
+                error: {
+                  type: 'command_not_found',
+                  command: 'cuse',
+                  message: `Cuse 二进制未安装 (platform=${process.platform})。仅支持 macOS 与 Windows。`,
+                },
+              });
+            }
+            console.log(`[api/mcp/enable] Bundled cuse: ${server.id} — resolved to ${cusePath}`);
             return jsonResponse({ success: true });
           }
 
