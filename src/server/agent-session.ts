@@ -2711,11 +2711,17 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     // the loopback request to http://127.0.0.1:{port} to be routed through the system proxy,
     // resulting in timeout/502 errors. The subprocess only needs to talk to our local bridge;
     // the bridge handler itself handles upstream proxy if needed (via process.env).
+    //
+    // NOTE: SDK 0.2.111+ changed env semantics from replace ({...$.env ?? process.env})
+    // to overlay ({...process.env, ...$.env}) — so `delete env[proxyVar]` no longer removes
+    // the parent's proxy vars from the subprocess env. Convert deletes into explicit empty
+    // strings; the CLI's proxy-from-env lookup (Yf6) uses `process.env[k] || ""` which
+    // treats empty string as "not set". Same sealing pattern as sealCcAuthEnv() above.
     for (const proxyVar of [
       'http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY',
       'ALL_PROXY', 'all_proxy', 'no_proxy', 'NO_PROXY',
     ]) {
-      delete env[proxyVar];
+      env[proxyVar] = '';
     }
     // Store upstream config for bridge handler (includes proxy from process.env for upstream fetch)
     // Note: model is NOT stored here — getOpenAiBridgeConfig() derives it from currentModel
