@@ -904,7 +904,9 @@ function applyProxyEnvVars(proxyUrl: string, noProxyVal: string): void {
   delete process.env.all_proxy;
 }
 
-/** Restart session after proxy change (same pattern as MCP config changes) */
+/** Restart session after proxy change.
+ * Immediate abort (not deferred like setMcpServers/setAgents) — proxy changes are
+ * discrete user actions from Settings, not rapid-fire React state sync. */
 function triggerProxyRestart(): void {
   if (querySession) {
     if (isProcessing && !isPreWarming) {
@@ -1101,7 +1103,8 @@ export function getSessionProviderEnv(): ProviderEnv | undefined {
  * Provider env is baked into SDK subprocess environment variables at spawn time
  * and CANNOT be updated on a running process. If a session is already running
  * with stale env (e.g., pre-warm started before sync_ai_config arrived),
- * we must restart it — same pattern as setMcpServers().
+ * we must restart it. Immediate abort (not deferred like setMcpServers/setAgents) —
+ * provider changes are discrete Rust-layer calls, not rapid-fire React state sync.
  */
 export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): void {
   const oldLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
@@ -1191,9 +1194,9 @@ function schedulePreWarm(): void {
     if (!agentDir) return;
 
     // Drain deferred config restart: abort the stale session so the next
-    // startStreamingSession() picks up the latest MCP/agents/provider config.
-    // This is the single exit point for all config-change restarts — setMcpServers,
-    // setAgents etc. only set pendingConfigRestart=true and let this timer batch them.
+    // startStreamingSession() picks up the latest MCP/agents config.
+    // Batched exit point for rapid-fire config changes (setMcpServers, setAgents,
+    // OAuth). Provider/proxy use immediate abort (discrete events, no batching needed).
     if (pendingConfigRestart && querySession) {
       pendingConfigRestart = false;
       console.log('[agent] pre-warm: applying batched config restart');
