@@ -12,8 +12,17 @@
 //   - Gemini: chain fallback (GEMINI.md present → skip; else CLAUDE.md + rules; else AGENTS.md)
 //            injected through GEMINI_SYSTEM_MD merge
 //   - Zero external config file modification
+//
+// Security hardening (v0.1.68+):
+//   - Symlinks rejected: both root-level files (CLAUDE.md, AGENTS.md, GEMINI.md) and
+//     directory entries use lstat semantics (readdirSync withFileTypes / lstatSync).
+//     Prevents a repo-local symlink from exfiltrating files outside the workspace
+//     (e.g. `.claude/rules/x.md -> ~/.ssh/id_rsa`) into the model prompt.
+//   - Recursion depth bounded (MAX_DEPTH) to defuse symlink loops on directories.
+//   - File count / per-file size / total size caps to prevent prompt inflation attacks
+//     and excessive context usage.
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync, type Dirent } from 'fs';
 import { join, extname } from 'path';
 
 // ─── Constants (replicated from Claude Code utils/claudemd.ts) ───
@@ -24,6 +33,17 @@ const MEMORY_INSTRUCTION_PROMPT =
 
 const PROJECT_DESCRIPTION = '(project instructions, checked into the codebase)';
 
+// ─── Resource limits (security hardening) ───
+//
+// These bounds are intentionally generous — a well-maintained project's
+// CLAUDE.md + rules is typically under 50KB. Bounds are here to defuse
+// pathological / malicious inputs, not to constrain normal use.
+
+const MAX_DEPTH = 8;                       // rules/ recursion depth
+const MAX_FILES = 64;                      // max rule files injected
+const MAX_BYTES_PER_FILE = 256 * 1024;     // 256KB per file
+const MAX_TOTAL_BYTES = 1 * 1024 * 1024;   // 1MB aggregate
+
 // ─── Types ───
 
 interface WorkspaceInstruction {
@@ -31,14 +51,25 @@ interface WorkspaceInstruction {
   content: string;  // trimmed content
 }
 
+interface CollectBudget {
+  totalBytes: number;
+  truncated: boolean;
+}
+
 // ─── File reading helpers ───
 
-/** Read a single file if it exists and is non-empty. */
+/** Read a single regular file if it exists, non-symlink, and within size cap. */
 function readIfExists(filePath: string): WorkspaceInstruction | null {
   try {
     if (!existsSync(filePath)) return null;
-    const stat = statSync(filePath);
-    if (!stat.isFile()) return null;
+    // lstat — we reject symlinks at the file level, just like for directory entries.
+    // A repo-level `CLAUDE.md -> /etc/passwd` should not get injected.
+    const st = lstatSync(filePath);
+    if (!st.isFile()) return null;
+    if (st.size > MAX_BYTES_PER_FILE) {
+      console.warn(`[workspace-instructions] Skipping oversized file (${st.size} bytes > ${MAX_BYTES_PER_FILE}): ${filePath}`);
+      return null;
+    }
     const content = readFileSync(filePath, 'utf-8').trim();
     if (!content) return null;
     return { path: filePath, content };
@@ -48,27 +79,104 @@ function readIfExists(filePath: string): WorkspaceInstruction | null {
 }
 
 /**
- * Recursively collect .md files from a rules directory.
- * Mirrors Claude Code's processMdRules() — recurse subdirs, sort by name for determinism.
+ * Check if a candidate root-level sentinel file exists, is a regular file, and is
+ * not a symlink. Used for GEMINI.md presence check — we only treat a repo as
+ * having GEMINI.md when it's a real file committed to the repo, not a dangling
+ * or adversarial symlink.
  */
-function collectRuleFiles(dir: string, out: WorkspaceInstruction[]): void {
-  let entries: string[];
+function isRegularFile(filePath: string): boolean {
   try {
-    entries = readdirSync(dir);
+    if (!existsSync(filePath)) return false;
+    const st = lstatSync(filePath);
+    return st.isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Recursively collect .md files from a rules directory.
+ *
+ * Safety:
+ *   - Symlinks (file and directory) are skipped — Dirent.isSymbolicLink() on
+ *     readdirSync({ withFileTypes: true }) uses lstat semantics.
+ *   - Depth bounded by MAX_DEPTH to defuse symlink loops that escape the isSymbolicLink
+ *     check on bizarre filesystems.
+ *   - File count bounded by MAX_FILES.
+ *   - Per-file and total byte budgets enforced.
+ *
+ * Sort-by-name kept for determinism (mirrors Claude Code's processMdRules()).
+ */
+function collectRuleFiles(
+  dir: string,
+  out: WorkspaceInstruction[],
+  budget: CollectBudget,
+  depth = 0,
+): void {
+  if (depth > MAX_DEPTH) {
+    if (!budget.truncated) {
+      console.warn(`[workspace-instructions] rules/ recursion depth exceeded (${MAX_DEPTH}) at ${dir}`);
+      budget.truncated = true;
+    }
+    return;
+  }
+  if (out.length >= MAX_FILES) return;
+
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
   } catch {
     return; // ENOENT / EACCES — silently skip
   }
-  entries.sort();
-  for (const name of entries) {
-    const full = join(dir, name);
-    try {
-      const stat = statSync(full);
-      if (stat.isDirectory()) {
-        collectRuleFiles(full, out);
-      } else if (stat.isFile() && extname(name).toLowerCase() === '.md') {
-        const content = readFileSync(full, 'utf-8').trim();
-        if (content) out.push({ path: full, content });
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  for (const ent of entries) {
+    if (out.length >= MAX_FILES) {
+      if (!budget.truncated) {
+        console.warn(`[workspace-instructions] rule file count cap reached (${MAX_FILES})`);
+        budget.truncated = true;
       }
+      return;
+    }
+
+    // Reject symlinks at both the file and directory level.
+    // Dirent from readdirSync({ withFileTypes: true }) uses lstat — symlinks
+    // surface as isSymbolicLink() rather than their target type.
+    if (ent.isSymbolicLink()) continue;
+
+    const full = join(dir, ent.name);
+
+    if (ent.isDirectory()) {
+      collectRuleFiles(full, out, budget, depth + 1);
+      continue;
+    }
+
+    if (!ent.isFile() || extname(ent.name).toLowerCase() !== '.md') continue;
+
+    // Size caps (per-file + aggregate) checked via lstat — Dirent doesn't carry size.
+    let size: number;
+    try {
+      size = statSync(full).size;
+    } catch {
+      continue;
+    }
+    if (size > MAX_BYTES_PER_FILE) {
+      console.warn(`[workspace-instructions] Skipping oversized rule file (${size} bytes): ${full}`);
+      continue;
+    }
+    if (budget.totalBytes + size > MAX_TOTAL_BYTES) {
+      if (!budget.truncated) {
+        console.warn(`[workspace-instructions] Total rules size cap reached (${MAX_TOTAL_BYTES} bytes) at ${full}`);
+        budget.truncated = true;
+      }
+      return;
+    }
+
+    try {
+      const content = readFileSync(full, 'utf-8').trim();
+      if (!content) continue;
+      out.push({ path: full, content });
+      budget.totalBytes += size;
     } catch {
       // skip unreadable entries
     }
@@ -79,20 +187,33 @@ function collectRuleFiles(dir: string, out: WorkspaceInstruction[]): void {
 
 /**
  * Read CLAUDE.md + .claude/CLAUDE.md + .claude/rules/*.md from a workspace.
+ * Shares a single CollectBudget so the aggregate cap spans all three sources.
  */
 function readClaudeWorkspaceInstructions(workspacePath: string): WorkspaceInstruction[] {
   const instructions: WorkspaceInstruction[] = [];
+  const budget: CollectBudget = { totalBytes: 0, truncated: false };
+
+  const consume = (inst: WorkspaceInstruction | null): void => {
+    if (!inst) return;
+    const size = Buffer.byteLength(inst.content, 'utf-8');
+    if (budget.totalBytes + size > MAX_TOTAL_BYTES) {
+      budget.truncated = true;
+      return;
+    }
+    instructions.push(inst);
+    budget.totalBytes += size;
+  };
 
   // CLAUDE.md at project root
-  const claudeMd = readIfExists(join(workspacePath, 'CLAUDE.md'));
-  if (claudeMd) instructions.push(claudeMd);
+  consume(readIfExists(join(workspacePath, 'CLAUDE.md')));
 
   // .claude/CLAUDE.md (Claude Code also checks this location)
-  const dotClaudeMd = readIfExists(join(workspacePath, '.claude', 'CLAUDE.md'));
-  if (dotClaudeMd) instructions.push(dotClaudeMd);
+  consume(readIfExists(join(workspacePath, '.claude', 'CLAUDE.md')));
 
   // .claude/rules/*.md (recursive)
-  collectRuleFiles(join(workspacePath, '.claude', 'rules'), instructions);
+  if (!budget.truncated && instructions.length < MAX_FILES) {
+    collectRuleFiles(join(workspacePath, '.claude', 'rules'), instructions, budget);
+  }
 
   return instructions;
 }
@@ -102,7 +223,8 @@ function readClaudeWorkspaceInstructions(workspacePath: string): WorkspaceInstru
  */
 function readClaudeRulesOnly(workspacePath: string): WorkspaceInstruction[] {
   const rules: WorkspaceInstruction[] = [];
-  collectRuleFiles(join(workspacePath, '.claude', 'rules'), rules);
+  const budget: CollectBudget = { totalBytes: 0, truncated: false };
+  collectRuleFiles(join(workspacePath, '.claude', 'rules'), rules, budget);
   return rules;
 }
 
@@ -156,14 +278,14 @@ export function resolveCodexWorkspaceInstructions(workspacePath: string): string
  * Gemini: chain fallback for GEMINI_SYSTEM_MD injection.
  *
  * Priority:
- *   1. GEMINI.md exists → return '' (Gemini loads it natively, avoid duplication)
+ *   1. GEMINI.md exists (regular file, not symlink) → return '' (Gemini loads it natively)
  *   2. CLAUDE.md exists → inject CLAUDE.md + .claude/CLAUDE.md + .claude/rules/*.md
  *   3. AGENTS.md exists → inject AGENTS.md
  *   4. None found → return ''
  */
 export function resolveGeminiWorkspaceInstructions(workspacePath: string): string {
-  // 1. GEMINI.md present → Gemini native, skip
-  if (existsSync(join(workspacePath, 'GEMINI.md'))) {
+  // 1. GEMINI.md present as a regular (non-symlink) file → Gemini native, skip
+  if (isRegularFile(join(workspacePath, 'GEMINI.md'))) {
     return '';
   }
 

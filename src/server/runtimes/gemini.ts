@@ -36,6 +36,7 @@ import type {
 } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { resolveGeminiWorkspaceInstructions } from './workspace-instructions';
+import { broadcast } from '../sse';
 
 // ─── Tmp directory layout for system prompt files ───
 
@@ -202,6 +203,27 @@ async function writeSessionSystemPrompt(
       'tool usage, safety, and tone unless they conflict with the MyAgents instructions above, ' +
       'in which case the MyAgents instructions take precedence.\n\n';
     content += basePrompt.trim() + '\n';
+  } else {
+    // Base prompt extraction failed (first-run spawn error, gemini CLI not on PATH,
+    // or version mismatch). Gemini will run without its built-in tool conventions,
+    // safety guidelines, and tone instructions — degrade loudly so operators notice
+    // and the model itself has an in-context signal that its usual rails are missing.
+    console.warn(
+      '[gemini] Base prompt unavailable — Gemini will run without official tool ' +
+      'conventions and safety guidelines. Check `gemini` CLI install and PATH.',
+    );
+    broadcast('chat:log', {
+      level: 'warn',
+      message:
+        'Gemini built-in guidelines unavailable this session (base prompt extraction ' +
+        'failed). Tool-use conventions may drift. Verify `gemini` CLI install.',
+    });
+    content += '---\n\n';
+    content += '# Degraded Mode — Built-in Guidelines Unavailable\n\n';
+    content +=
+      'The default Gemini CLI guidelines could not be loaded for this session. ' +
+      'Follow the MyAgents instructions above strictly, and fall back to conservative ' +
+      'behavior for tool use and safety when they do not explicitly cover a case.\n';
   }
 
   writeFileSync(path, content, 'utf8');
