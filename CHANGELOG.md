@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.1.68] - 2026-04-17
+
+### Added
+- **Gemini / Codex 自动继承项目 CLAUDE.md 和 .claude/rules**：切到外部 Runtime 后，AI 也能读到你项目里写好的开发约束和规则文件，不再"失忆"。Codex 走原生配置发现，Gemini 写入合并后的系统提示，零额外配置。
+- **外部 Runtime 会话标题自动生成**：之前切到 Gemini / Claude Code / Codex 后，会话标题一直显示默认名。现在会用对应 Runtime 自动生成摘要标题，和内置 Runtime 体验一致。
+- **外部 Runtime 冷启动加速（Pre-warm）**：首次发消息前在后台预启动 Runtime 进程，隐藏 10-15 秒的冷启动延迟。
+- **Anthropic 模型别名锁定**：新版 SDK 移除了 `claude-sonnet-4-20250514` 等旧 ID 的内置映射，现在 MyAgents 在启动时主动注入 `sonnet → claude-sonnet-4-20250514` 等别名，子 Agent 指定 `model: "sonnet"` 不再报"模型不存在"。
+
+### Fixed
+- **Gemini 长时间工具调用不再误报超时**：之前 Gemini 执行耗时工具（如网络搜索）超过 10 分钟会弹红色错误。现在取消了硬超时，改由无活动看门狗兜底，正常执行不受影响。
+- **Gemini Edit 工具结果显示真实 diff**：之前 Gemini 编辑文件后结果栏只显示"Tool executed"，现在正确提取并展示 unified-diff 格式的修改内容。
+- **Gemini Read / Grep / Glob 工具结果文案优化**：这些工具的输出由 Gemini 内部消化不对外暴露，之前统一显示"Tool executed"容易误解，现在显示更准确的提示。
+- **外部 Runtime 工具调用行在执行中也可展开**：之前工具输入为空时（如 Read），执行期间工具行无法展开、没有箭头，现在执行中即可交互查看。
+- **后台任务完成状态显示在正确位置**：之前后台任务完成后状态可能渲染到错误的聊天位置，根因是内部 ID 不匹配，已修复。
+- **安全加固**：工作区指令注入增加 symlink 拒绝、文件大小限额、递归深度限制；后台任务状态池增加 LRU 淘汰防内存泄漏；配置变更重启原因可追溯。
+
+---
+
 ## [0.1.67] - 2026-04-16
 
 ### Added
