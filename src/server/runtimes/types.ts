@@ -166,4 +166,13 @@ export interface AgentRuntime {
 
   /** Stop the session gracefully */
   stopSession(process: RuntimeProcess): Promise<void>;
+
+  /**
+   * Switch the session's active model in-place without restarting the process.
+   * Optional — only runtimes whose protocol exposes mid-session model switching
+   * implement this (currently Gemini via ACP `session/set_model`). When absent
+   * or the call fails, the session layer falls back to stopExternalSession()
+   * so the next message resumes with the new model.
+   */
+  setModel?(process: RuntimeProcess, model: string): Promise<void>;
 }

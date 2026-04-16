@@ -40,7 +40,7 @@ import {
     notifyAskUserQuestion,
     notifyPlanModeRequest,
 } from '@/services/notificationService';
-import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTaskDescription, clearAllBackgroundTaskStatuses } from '@/utils/backgroundTaskStatus';
+import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTaskDescription, clearAllBackgroundTaskStatuses, registerBackgroundTask } from '@/utils/backgroundTaskStatus';
 
 /** Minimum QA rounds before triggering AI title generation */
 const AUTO_TITLE_MIN_ROUNDS = 3;
@@ -1103,7 +1103,7 @@ export default function TabProvider({
                         : contentArray.findIndex(b => isToolBlock(b) && b.tool?.streamIndex === index);
                     if (toolIdx !== -1) {
                         const block = contentArray[toolIdx];
-                        if (isToolBlock(block) && block.tool?.inputJson) {
+                        if (isToolBlock(block) && block.tool?.inputJson != null) {
                             let parsedInput: ToolInput | undefined;
                             try {
                                 parsedInput = JSON.parse(block.tool.inputJson);
@@ -1356,7 +1356,7 @@ export default function TabProvider({
             }
 
             case 'chat:system-init': {
-                const payload = data as { info: SystemInitInfo; sessionId?: string } | null;
+                const payload = data as { info: SystemInitInfo; sessionId?: string; prewarm?: boolean } | null;
                 if (payload?.info) {
                     setSystemInitInfo(payload.info);
 
@@ -1364,8 +1364,18 @@ export default function TabProvider({
                     // Do NOT set isStreamingRef — that must only be set when a streaming message
                     // is actually created (first message-chunk via flushSync). Setting it here
                     // without a streaming message causes chunks to skip the creation path.
-                    isSessionActiveRef.current = true;
-                    setIsLoading(true);
+                    //
+                    // Pre-warm exception: a pre-warmed external runtime emits session_init when
+                    // the CLI subprocess finishes handshake — no user turn has started. Flipping
+                    // isLoading:true here would strand the UI at "加载智慧模块中..." until the
+                    // user actually sends a message. Skip the loading flip for prewarm payloads;
+                    // when the user actually sends a message the chat:status 'running' event
+                    // (see line 827 branch above) will set isLoading:true, and Case 1/2 paths
+                    // re-emit chat:system-init with prewarm cleared.
+                    if (!payload.prewarm) {
+                        isSessionActiveRef.current = true;
+                        setIsLoading(true);
+                    }
 
                     // Auto-sync sessionId when a new session is created (e.g., first message in empty session)
                     // This ensures currentSessionId stays in sync with the actual session
@@ -1586,17 +1596,25 @@ export default function TabProvider({
             // Background task lifecycle (SDK Task tool)
             case 'chat:task-started': {
                 console.log(`[TabProvider ${tabId}] ${eventName}:`, data);
-                const startPayload = data as { taskId?: string; description?: string };
+                const startPayload = data as { taskId?: string; toolUseId?: string; description?: string };
                 if (startPayload.taskId && startPayload.description) {
                     setBackgroundTaskDescription(startPayload.taskId, startPayload.description);
+                }
+                // Register the toolUseId↔taskId mapping so TaskTool components
+                // (which only know their tool.id = toolUseId) can look up status
+                // from task-notification events (which only carry taskId).
+                if (startPayload.taskId && startPayload.toolUseId) {
+                    registerBackgroundTask(startPayload.taskId, startPayload.toolUseId);
+                } else if (startPayload.taskId && !startPayload.toolUseId) {
+                    console.warn(`[TabProvider ${tabId}] chat:task-started missing toolUseId for task ${startPayload.taskId} — background task status matching will degrade`);
                 }
                 break;
             }
             case 'chat:task-notification': {
                 console.log(`[TabProvider ${tabId}] ${eventName}:`, data);
-                const payload = data as { taskId?: string; status?: string; summary?: string };
+                const payload = data as { taskId?: string; toolUseId?: string; status?: string; summary?: string };
                 if (payload.taskId && payload.status) {
-                    setBackgroundTaskStatus(payload.taskId, payload.status);
+                    setBackgroundTaskStatus(payload.taskId, payload.status, payload.toolUseId);
                     // Inject a visible notification message into the chat so the user
                     // understands why AI continues responding (prevents "AI talking to itself" UX).
                     const description = getBackgroundTaskDescription(payload.taskId);

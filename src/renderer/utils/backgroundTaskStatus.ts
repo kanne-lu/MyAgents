@@ -5,6 +5,18 @@
  * before the corresponding TaskTool component mounts its event listener.
  * By writing to this Map first, TaskTool can read the status on mount
  * and also subscribe to future changes via the DOM event.
+ *
+ * Resource management:
+ *   - Active (non-terminal) entries live until either the task reaches a
+ *     terminal status or `clearAllBackgroundTaskStatuses()` is called on
+ *     session boundary transitions.
+ *   - Terminal entries are retained for an LRU window (MAX_TERMINAL_RETAINED)
+ *     so late-mounting TaskTool components can still read the final state,
+ *     then evicted oldest-first. Active entries are never evicted by the LRU.
+ *   - Orphan terminal statuses (notification arrived without a prior
+ *     task-started registration) are held in a small pool keyed by taskId.
+ *     If task-started arrives later with the same taskId, the orphan is
+ *     automatically reconciled and dispatched to listeners.
  */
 
 /** Terminal statuses emitted by the SDK's task_notification system messages. */
@@ -17,31 +29,147 @@ export function isTerminalStatus(status: string | undefined): status is Backgrou
     return !!status && TERMINAL.has(status);
 }
 
-const statuses = new Map<string, string>();
-const descriptions = new Map<string, string>();
+// ─── Capacity limits ───
+//
+// A single long session with many sub-agent invocations could otherwise let
+// these maps grow unbounded. Active entries are never auto-evicted (they're
+// meaningful); terminal entries sit in an LRU window long enough that a
+// freshly-mounted TaskTool can still read them.
+
+const MAX_TERMINAL_RETAINED = 128;   // terminal-state entries kept for late mount
+const MAX_ORPHAN_RETAINED = 32;      // notification-without-registration pool
+const MAX_ACTIVE_SOFT_WARN = 512;    // soft warning threshold for active entries
+
+// ─── Primary state ───
+
+const statuses = new Map<string, string>();                     // taskId → status
+const descriptions = new Map<string, string>();                 // taskId → description
+const toolUseIdToTaskId = new Map<string, string>();            // toolUseId → taskId
+const taskIdToToolUseId = new Map<string, string>();            // taskId → toolUseId
+
+// Insertion-ordered set of taskIds that have reached a terminal state.
+// Map preserves insertion order — treating it as an LRU by deleting+re-adding on touch.
+const terminalOrder = new Map<string, true>();
+
+// Orphan pool: terminal status arrived before task-started → we have no toolUseId.
+// Store by taskId so a later reconcile (when TaskTool provides its own toolUseId)
+// can locate it. Map keeps insertion order for eviction.
+interface OrphanEntry {
+    taskId: string;
+    status: string;
+}
+const orphanByTaskId = new Map<string, OrphanEntry>();
 
 const EVENT_NAME = 'background-task-status';
+
+// ─── Registration (task started) ───
+
+/** Register the toolUseId↔taskId mapping (called when chat:task-started arrives).
+ *  Also reconciles any orphan terminal status stored for this taskId. */
+export function registerBackgroundTask(taskId: string, toolUseId: string): void {
+    toolUseIdToTaskId.set(toolUseId, taskId);
+    taskIdToToolUseId.set(taskId, toolUseId);
+
+    // Reconcile: if a terminal notification arrived earlier with no toolUseId,
+    // promote it to a proper status now and dispatch once so listeners catch up.
+    const orphan = orphanByTaskId.get(taskId);
+    if (orphan) {
+        orphanByTaskId.delete(taskId);
+        applyStatus(taskId, orphan.status, toolUseId);
+    }
+}
+
+// ─── Status updates ───
 
 /** Called by TabProvider when `chat:task-started` arrives. Stores description for later display. */
 export function setBackgroundTaskDescription(taskId: string, description: string): void {
     descriptions.set(taskId, description);
 }
 
-/** Read task description (set at task-started time). */
-export function getBackgroundTaskDescription(taskId: string): string | undefined {
+/** Read task description (set at task-started time).
+ * Accepts either taskId or toolUseId — resolves through the mapping like getBackgroundTaskStatus.
+ */
+export function getBackgroundTaskDescription(key: string): string | undefined {
+    const taskId = toolUseIdToTaskId.get(key) ?? key;
     return descriptions.get(taskId);
 }
 
-/** Called by TabProvider when `chat:task-notification` arrives. */
-export function setBackgroundTaskStatus(taskId: string, status: string): void {
+/** Called by TabProvider when `chat:task-notification` arrives.
+ * @param directToolUseId - toolUseId forwarded from the SSE event (preferred).
+ *   Falls back to the mapping registered at task-started time if absent.
+ *   If still absent and the status is terminal, the notification is parked
+ *   in the orphan pool for later reconciliation via reconcileOrphanForToolUse.
+ */
+export function setBackgroundTaskStatus(taskId: string, status: string, directToolUseId?: string): void {
+    const toolUseId = directToolUseId ?? taskIdToToolUseId.get(taskId);
+
+    if (!toolUseId && isTerminalStatus(status)) {
+        // No association available — park in orphan pool so a late TaskTool can reconcile.
+        // Evict oldest first if pool full.
+        if (orphanByTaskId.size >= MAX_ORPHAN_RETAINED) {
+            const oldest = orphanByTaskId.keys().next().value;
+            if (oldest !== undefined) orphanByTaskId.delete(oldest);
+        }
+        orphanByTaskId.set(taskId, { taskId, status });
+        console.warn(
+            '[backgroundTaskStatus] Terminal notification for taskId=%s has no toolUseId ' +
+            'mapping — parked in orphan pool (%d/%d).',
+            taskId, orphanByTaskId.size, MAX_ORPHAN_RETAINED,
+        );
+        return;
+    }
+
+    applyStatus(taskId, status, toolUseId);
+}
+
+/** Core status-apply path: writes status, updates LRU, dispatches event, enforces caps. */
+function applyStatus(taskId: string, status: string, toolUseId: string | undefined): void {
     statuses.set(taskId, status);
+
+    if (isTerminalStatus(status)) {
+        // Refresh LRU position: delete+re-add so this entry becomes most-recent.
+        terminalOrder.delete(taskId);
+        terminalOrder.set(taskId, true);
+        enforceTerminalCap();
+    }
+
+    // Soft warn on active-set inflation — active entries are only cleared by session reset.
+    const activeCount = statuses.size - terminalOrder.size;
+    if (activeCount > MAX_ACTIVE_SOFT_WARN) {
+        console.warn(
+            '[backgroundTaskStatus] Active entries exceed soft cap (%d > %d). Long session?',
+            activeCount, MAX_ACTIVE_SOFT_WARN,
+        );
+    }
+
     window.dispatchEvent(new CustomEvent(EVENT_NAME, {
-        detail: { taskId, status },
+        detail: { taskId, toolUseId, status },
     }));
 }
 
-/** Read current status (may be undefined if no notification received yet). */
-export function getBackgroundTaskStatus(taskId: string): string | undefined {
+/** Evict oldest terminal entries (and their associated metadata) to stay under cap. */
+function enforceTerminalCap(): void {
+    while (terminalOrder.size > MAX_TERMINAL_RETAINED) {
+        const oldestTaskId = terminalOrder.keys().next().value;
+        if (oldestTaskId === undefined) break;
+        terminalOrder.delete(oldestTaskId);
+        statuses.delete(oldestTaskId);
+        descriptions.delete(oldestTaskId);
+        const tuid = taskIdToToolUseId.get(oldestTaskId);
+        taskIdToToolUseId.delete(oldestTaskId);
+        if (tuid) toolUseIdToTaskId.delete(tuid);
+    }
+}
+
+// ─── Reads ───
+
+/**
+ * Read current status by toolUseId (the key TaskTool components have).
+ * Falls back to direct taskId lookup for backward compatibility.
+ */
+export function getBackgroundTaskStatus(key: string): string | undefined {
+    // Try as toolUseId first (new path), then as taskId (old path / direct)
+    const taskId = toolUseIdToTaskId.get(key) ?? key;
     return statuses.get(taskId);
 }
 
@@ -49,6 +177,10 @@ export function getBackgroundTaskStatus(taskId: string): string | undefined {
 export function clearAllBackgroundTaskStatuses(): void {
     statuses.clear();
     descriptions.clear();
+    toolUseIdToTaskId.clear();
+    taskIdToToolUseId.clear();
+    terminalOrder.clear();
+    orphanByTaskId.clear();
 }
 
 /** Event name for addEventListener — exported to avoid magic strings. */

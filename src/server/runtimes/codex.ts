@@ -406,7 +406,15 @@ export class CodexRuntime implements AgentRuntime {
     // Clean up stale temp images from previous sessions
     cleanupStaleTempImages();
 
-    const proc = spawn([resolveCommand('codex'), 'app-server'], {
+    // Cross-runtime workspace protocol: make Codex natively discover CLAUDE.md
+    // when no AGENTS.md is present. The -c flag overrides config.toml at runtime
+    // without modifying any external config files. Codex's search order becomes:
+    // AGENTS.override.md → AGENTS.md → CLAUDE.md (per directory, first found wins).
+    const proc = spawn([
+      resolveCommand('codex'),
+      '-c', 'project_doc_fallback_filenames=["CLAUDE.md"]',
+      'app-server',
+    ], {
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',

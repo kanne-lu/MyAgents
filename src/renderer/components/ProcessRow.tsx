@@ -139,7 +139,7 @@ const ProcessRow = memo(function ProcessRow({
     // Check if block has expandable content
     const hasContent =
         (isThinking && block.thinking && block.thinking.length > 0) ||
-        (isTool && block.tool && (block.tool.inputJson || block.tool.result || block.tool.subagentCalls?.length));
+        (isTool && block.tool && (block.tool.inputJson || block.tool.result || block.tool.isLoading || block.tool.subagentCalls?.length));
 
     // 派生展开状态（无 useEffect，避免无限循环）
     // 规则：

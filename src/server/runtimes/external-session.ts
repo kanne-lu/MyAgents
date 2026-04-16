@@ -10,6 +10,7 @@ import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
+import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
@@ -99,7 +100,12 @@ type ExternalPendingInteractiveRequest = {
   };
 };
 let externalSessionState: ExternalSessionState = 'idle';
-let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string } | null = null;
+let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string; prewarm?: boolean } | null = null;
+// True between the start of a pre-warm (no initialMessage) and the first real user turn.
+// Consumed by the session_init broadcast so the frontend knows not to flip isLoading:true
+// — a pre-warmed process is "alive but idle", not "processing a turn". Cleared when the
+// first user message arrives or on session reset.
+let isPrewarmingSession = false;
 const pendingExternalInteractiveRequests = new Map<string, ExternalPendingInteractiveRequest>();
 
 function setExternalSessionState(state: ExternalSessionState): void {
@@ -135,6 +141,7 @@ function resetModuleState(): void {
   pendingExternalInteractiveRequests.clear();
   externalSystemInitPayload = null;
   externalSessionState = 'idle';
+  isPrewarmingSession = false;
 }
 
 /** Flush accumulated text into a text content block */
@@ -165,6 +172,28 @@ function clearPendingThinking(): void {
   pendingThinkingIndex = 0;
   pendingThinkingActive = false;
   pendingThinkingStartedAt = 0;
+}
+
+/** Register a new session in SessionStore on first user message.
+ *  Idempotent: no-op if metadata already exists. Used by both the initial
+ *  message path (_doStartExternalSession) and the post-pre-warm Case 3 path
+ *  (sendExternalMessage) — both need the same registration, so the logic
+ *  lives here to prevent drift. */
+function registerSessionMetadataIfNew(
+  sessionId: string,
+  workspacePath: string,
+  messageText: string,
+  origin: string,
+): void {
+  if (!sessionId || getSessionMetadata(sessionId)) return;
+  const meta = createSessionMetadata(workspacePath);
+  meta.id = sessionId;
+  meta.runtime = getCurrentRuntimeType();
+  const trimmed = messageText.trim();
+  meta.title = trimmed.slice(0, 40);
+  if (meta.title.length < trimmed.length) meta.title += '...';
+  saveSessionMetadata(meta);
+  console.log(`[external-session] session ${sessionId} persisted to SessionStore (${origin})`);
 }
 
 function flushPendingThinking(forceComplete: boolean): void {
@@ -404,9 +433,34 @@ export function setExternalImStreamCallback(cb: ImStreamCallback | null): void {
  * Called from index.ts /api/model/set when runtime is external.
  */
 export async function setExternalModel(model: string): Promise<void> {
+  // Wait for any in-flight startExternalSession (notably pre-warm) to finish
+  // before dispatching. Without this, a user-initiated model change during
+  // the 10–14s handshake window sees `activeProcess=null` → skips the in-place
+  // path → falls through to `stopExternalSession()` which itself early-returns
+  // on `!activeProcess` → the change is silently lost: the live runtime keeps
+  // its original model and `runtime.sendMessage` in Case 3 routes future turns
+  // through the stale session. Serializing here lets the correct branch run.
+  if (startingPromise) {
+    await startingPromise;
+  }
   lastModel = model;
   console.log(`[external-session] Model set to "${model}"`);
-  // Stop running process — next message will start with new model via resume
+
+  // Try in-place switch first if the active runtime supports it (currently
+  // Gemini via ACP `session/set_model`). This preserves the live process +
+  // session state — no stdin/stdout teardown, no re-handshake, and the next
+  // user message hits Case 3 immediately with the new model.
+  if (isExternalSessionActive() && activeProcess && activeRuntime?.setModel) {
+    try {
+      await activeRuntime.setModel(activeProcess, model);
+      return;
+    } catch (err) {
+      console.warn(`[external-session] In-place setModel failed — falling back to process restart:`, err);
+      // Fall through to the stop-and-resume path below.
+    }
+  }
+
+  // Fallback: stop running process so the next message resumes with the new model.
   if (isRunning || activeProcess) {
     console.log('[external-session] Stopping process for model change');
     await stopExternalSession();
@@ -419,6 +473,13 @@ export async function setExternalModel(model: string): Promise<void> {
  * Called from index.ts /api/session/permission-mode when runtime is external.
  */
 export async function setExternalPermissionMode(mode: string): Promise<void> {
+  // Wait for any in-flight startExternalSession (notably pre-warm) to finish
+  // before dispatching — same reasoning as setExternalModel: during handshake
+  // `activeProcess=null` makes `stopExternalSession()` early-return, and the
+  // change is lost against the stale live session.
+  if (startingPromise) {
+    await startingPromise;
+  }
   lastPermissionMode = mode;
   console.log(`[external-session] Permission mode set to "${mode}"`);
   if (isRunning || activeProcess) {
@@ -440,7 +501,7 @@ export function getExternalSessionState(): ExternalSessionState {
   return externalSessionState;
 }
 
-export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string } | null {
+export function getExternalSystemInitPayload(): { info: SystemInitInfo; sessionId: string; prewarm?: boolean } | null {
   return externalSystemInitPayload;
 }
 
@@ -643,16 +704,42 @@ async function _doStartExternalSession(options: {
   // The builtin path at agent-session.ts keeps cliToolsEnabled off and
   // continues to use the in-process MCP servers — no behaviour change. See
   // prd_0.1.67_external_runtime_cli_skill.md.
-  const systemPromptAppend = buildSystemPromptAppend(options.scenario, {
+  const baseSystemPrompt = buildSystemPromptAppend(options.scenario, {
     runtime: runtimeType,
     cliToolsEnabled: true,
   });
 
+  // Cross-runtime workspace protocol: append workspace instruction files
+  // so external runtimes receive the same project context as the builtin SDK.
+  //   - Codex: only .claude/rules/*.md (CLAUDE.md is loaded natively via -c flag)
+  //   - Gemini: full chain fallback (handled inside writeSessionSystemPrompt)
+  //   - Claude Code: no injection needed (reads CLAUDE.md natively)
+  const workspaceInstructions = runtimeType === 'codex'
+    ? resolveCodexWorkspaceInstructions(options.workspacePath)
+    : '';  // Gemini handles it in writeSessionSystemPrompt; CC reads natively
+  if (workspaceInstructions) {
+    console.log(`[external-session] Injecting workspace instructions for ${runtimeType} (${workspaceInstructions.length} bytes)`);
+  }
+  const systemPromptAppend = workspaceInstructions
+    ? baseSystemPrompt + '\n\n' + workspaceInstructions
+    : baseSystemPrompt;
+
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${options.model || '(default)'}, permissionMode=${options.permissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
+  // Detect pre-warm: prewarmExternalSession calls us with initialMessage=undefined.
+  // Stamp this onto the session_init broadcast so the frontend doesn't enter the
+  // "loading" state for a process that hasn't started processing any turn yet.
+  isPrewarmingSession = !options.initialMessage;
   turnCompleted = false;
   lastTurnSucceeded = false;  // Reset — success only set after turn_complete
   resetTurnAccumulators();
-  resetWatchdog();  // Start watchdog — will kill process if no activity for 10 min
+  // Watchdog is per-turn, not per-process. Pre-warm (no initialMessage) leaves
+  // the process idle awaiting a user message — starting a 10-min timer here
+  // would fire a bogus "timed out" toast if the user takes >10 min to type.
+  // The real watchdog is armed when the first turn begins (Case 3 in
+  // sendExternalMessage, or the initialMessage block below).
+  if (options.initialMessage) {
+    resetWatchdog();
+  }
   currentTurnStartTime = 0;
   // Track latest config for resume
   if (options.model !== undefined) lastModel = options.model;
@@ -681,19 +768,18 @@ async function _doStartExternalSession(options: {
     catch (err) { console.error('[external-session] Failed to persist user message:', err); }
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
-    if (!options.resumeSessionId && !getSessionMetadata(options.sessionId)) {
-      const meta = createSessionMetadata(options.workspacePath);
-      meta.id = options.sessionId;
-      meta.runtime = getCurrentRuntimeType();
-      const trimmed = options.initialMessage.trim();
-      meta.title = trimmed.slice(0, 40);
-      if (meta.title.length < trimmed.length) meta.title += '...';
-      saveSessionMetadata(meta);
-      console.log(`[external-session] session ${options.sessionId} persisted to SessionStore`);
+    if (!options.resumeSessionId) {
+      registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message');
     }
   }
 
-  setExternalSessionState('running');
+  // Pre-warm path (no initialMessage) keeps state as 'idle' so the UI doesn't
+  // show a spinner for a process that isn't actually processing a turn. Real
+  // turn activity transitions to 'running' via Case 3 in sendExternalMessage
+  // or the initial message path below.
+  if (options.initialMessage) {
+    setExternalSessionState('running');
+  }
 
   // Set session context BEFORE startSession so that events fired during startup
   // (e.g., Codex's synchronous session_init) can reference lastSessionId for persistence.
@@ -730,8 +816,14 @@ async function _doStartExternalSession(options: {
     clearWatchdog();
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[external-session] Failed to start ${runtimeType}:`, message);
-    setExternalSessionState('error');
-    broadcast('chat:agent-error', { message: `Failed to start ${runtimeType}: ${message}` });
+    // Pre-warm failures are silent — the user didn't ask for this optimization
+    // and shouldn't see an error toast for it. The next real user message will
+    // retry via the normal send path; if that also fails, the error surfaces
+    // there with full context (which runtime, which sessionId, etc).
+    if (options.initialMessage) {
+      setExternalSessionState('error');
+      broadcast('chat:agent-error', { message: `Failed to start ${runtimeType}: ${message}` });
+    }
     // Re-throw so the HTTP handler returns an error response
     throw err;
   }
@@ -763,6 +855,27 @@ export async function sendExternalMessage(
   context?: ExternalSendContext,
 ): Promise<{ queued: boolean; error?: string }> {
   const hasImages = images && images.length > 0;
+
+  // If a pre-warm (or other concurrent start) is still bringing the process
+  // up, wait for it to finish before deciding which case to take. Without
+  // this await, a user-send racing an in-flight pre-warm would see
+  // `isRunning=true` but `activeProcess=null` — falling into Case 2's resume
+  // path, which calls startExternalSession again, which then hits the
+  // `if (isRunning) return` early-exit and silently drops the user's message.
+  if (startingPromise) {
+    await startingPromise;
+  }
+
+  // Serialize against any in-flight turn. Persistent-process runtimes (Codex
+  // app-server, Gemini --acp) accept one turn at a time — dispatching a
+  // second user message while the first is still running can cause silent
+  // drops or interleaved output. `turnCompleted=false && currentTurnStartTime
+  // !== 0` means a previous user turn kicked off and hasn't finished. On
+  // crash, session_complete resets currentTurnStartTime via
+  // resetTurnAccumulators(), so this gate doesn't spuriously trip.
+  if (!turnCompleted && currentTurnStartTime !== 0 && activeProcess && !activeProcess.exited) {
+    await waitForExternalSessionIdle(5 * 60 * 1000, 100);
+  }
 
   // Case 1: No previous session — start fresh
   if (!lastRuntimeSessionId && !isRunning) {
@@ -833,6 +946,20 @@ export async function sendExternalMessage(
     resetWatchdog();  // Start watchdog for this turn (Case 3 bypasses startExternalSession)
     currentTurnStartTime = Date.now();
 
+    // First real user turn clears the pre-warm marker. Also strip it from the
+    // cached system_init payload so SSE reconnect replay reflects the current
+    // "actually processing a turn" state, not the stale "alive but idle" hint.
+    isPrewarmingSession = false;
+    if (externalSystemInitPayload) {
+      externalSystemInitPayload = { ...externalSystemInitPayload, prewarm: undefined };
+    }
+
+    // Register session metadata on first real message of a pre-warmed session.
+    // Normally this happens inside startExternalSession's initialMessage block,
+    // but pre-warm calls startExternalSession WITHOUT an initialMessage, so we
+    // have to register here when the first actual message arrives via Case 3.
+    registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm');
+
     // Persist user message immediately (crash safety)
     if (lastSessionId) {
       try { saveSessionMessages(lastSessionId, allSessionMessages); }
@@ -887,6 +1014,13 @@ export async function stopExternalSession(): Promise<boolean> {
     activeProcess = null;
     activeRuntime = null;
     isRunning = false;
+    // Any pre-warm that raced with a stop is no longer relevant. Keeping the
+    // flag around would leak 'prewarm' into a subsequent session's session_init
+    // broadcast. _doStartExternalSession resets this per-call too, but some
+    // paths (setExternalPermissionMode fallback) call stopExternalSession
+    // without a follow-up start — explicit reset here keeps the state machine
+    // consistent regardless of what runs next.
+    isPrewarmingSession = false;
     pendingPermissionSuggestions.clear();  // Prevent stale suggestions leaking across sessions
     pendingExternalInteractiveRequests.clear();
     externalSystemInitPayload = null;
@@ -901,6 +1035,80 @@ export async function stopExternalSession(): Promise<boolean> {
  */
 export function isExternalSessionActive(): boolean {
   return isRunning && activeProcess !== null && !activeProcess.exited;
+}
+
+/**
+ * Pre-warm an external runtime process so the first user message skips the
+ * cold-start cost (spawn + `initialize` + `session/new` + prompt-file write).
+ *
+ * Called from the `/api/runtime/prewarm` HTTP endpoint when the frontend opens
+ * a Chat tab whose runtime is Gemini or Codex (both persistent JSON-RPC
+ * processes). Claude Code's `-p` mode exits after every turn, so pre-warming
+ * it is wasted work — the endpoint gates that out before reaching this path.
+ *
+ * Flow:
+ *   1. Bail out if a session is already active (pre-warm is idempotent).
+ *   2. Call startExternalSession with NO initialMessage — the runtime spawns
+ *      the CLI, does its handshake, opens a session, and then sits idle.
+ *   3. First real user message hits sendExternalMessage Case 3 (process alive)
+ *      and writes directly to stdin via activeRuntime.sendMessage — no cold
+ *      boot.
+ *
+ * The startExternalSession `startingPromise` guard serializes pre-warm against
+ * any concurrent send, so a user who sends a message before pre-warm finishes
+ * spawning is safely queued behind it.
+ */
+export async function prewarmExternalSession(options: {
+  sessionId: string;
+  workspacePath: string;
+  scenario: InteractionScenario;
+  model?: string;
+  permissionMode?: string;
+}): Promise<{ prewarmed: boolean; reason?: string }> {
+  const runtimeType = getCurrentRuntimeType();
+  // Only Gemini and Codex run as persistent JSON-RPC processes — pre-warming
+  // CC's `-p` mode is wasted because the process exits after each turn.
+  if (runtimeType !== 'gemini' && runtimeType !== 'codex') {
+    return { prewarmed: false, reason: `Pre-warm not applicable for runtime=${runtimeType}` };
+  }
+  // Already warm (from previous pre-warm or live session) — no-op.
+  if (isExternalSessionActive() || isRunning || startingPromise) {
+    return { prewarmed: false, reason: 'Session already active or starting' };
+  }
+
+  // Cross-runtime guard — refuse to warm a session whose persisted metadata
+  // names a different runtime. Frontend Chat.tsx also guards this, but the
+  // frontend's sessionRuntime is populated async via loadSession, so the
+  // effect may fire before that state settles. Backend check uses the
+  // authoritative source (SessionStore) and closes the race-window hole.
+  const meta = getSessionMetadata(options.sessionId);
+  if (meta?.runtime && meta.runtime !== runtimeType) {
+    return { prewarmed: false, reason: `Session runtime mismatch: persisted=${meta.runtime}, current=${runtimeType}` };
+  }
+
+  // Pick resume ID if restoreExternalSessionState populated one — but only if
+  // it actually belongs to this session. lastRuntimeSessionId is module-level
+  // state that can carry over from a previous session in Handover scenario 4,
+  // or simply be stale if restoreExternalSessionState hasn't run yet for this
+  // sessionId. Using a mismatched resume ID would produce "No conversation
+  // found" from the CLI and wipe user intent.
+  const resumeSessionId = (lastSessionId === options.sessionId && lastRuntimeSessionId)
+    ? lastRuntimeSessionId
+    : undefined;
+
+  console.log(`[external-session] Pre-warming ${runtimeType} for session ${options.sessionId}${resumeSessionId ? ` (resume=${resumeSessionId})` : ' (fresh)'}`);
+
+  await startExternalSession({
+    sessionId: options.sessionId,
+    workspacePath: options.workspacePath,
+    // initialMessage intentionally omitted — this is the pre-warm signal
+    model: options.model,
+    permissionMode: options.permissionMode,
+    scenario: options.scenario,
+    resumeSessionId,
+  });
+
+  return { prewarmed: true };
 }
 
 /**
@@ -1194,11 +1402,17 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       }
       // Match builtin broadcast shape: { info: {...}, sessionId } — top-level sessionId
       // is read by frontend for session ID sync (TabProvider).
+      // `prewarm` distinguishes a cold-start session_init (fired before any user
+      // turn) from one triggered by the user's first message. The frontend uses
+      // it to decide whether to flip isLoading:true — a pre-warmed process is
+      // alive but idle, and stamping loading state on it would leave the UI
+      // stuck showing a spinner until the user finally sends something.
       externalSystemInitPayload = {
         info: {
           ...info,
         },
         sessionId: lastSessionId,
+        prewarm: isPrewarmingSession || undefined,
       };
       broadcast('chat:system-init', externalSystemInitPayload);
       break;
@@ -1260,8 +1474,15 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         // leaving a session idle for 26 minutes with no interaction. See
         // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
         const isIdleExit = turnCompleted && !currentAssistantText.trim();
+        // Pre-warm exit: process crashed after spawn but before any user turn
+        // started. `currentTurnStartTime === 0` distinguishes this from a
+        // mid-turn failure (which sets the timestamp at turn kickoff). Silent
+        // failure — the next user message will retry through the normal path.
+        const isPrewarmExit = !turnCompleted && currentTurnStartTime === 0;
         if (isIdleExit) {
           console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
+        } else if (isPrewarmExit) {
+          console.log(`[external-session] Ignoring pre-warm exit "${errorMessage}" — no user turn was in flight; next send will start fresh`);
         } else {
           broadcast('chat:agent-error', { message: errorMessage });
           broadcast('chat:message-error', errorMessage);

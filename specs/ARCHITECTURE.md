@@ -13,7 +13,7 @@ MyAgents 是基于 Tauri v2 的桌面应用，提供 Claude Agent SDK 的图形�
 | 前端 | React 19 + TypeScript + Vite + TailwindCSS |
 | 桌面框架 | Tauri v2 (Rust) |
 | 后端 | Bun + TypeScript (多实例 Sidecar 进程) |
-| AI | Anthropic Claude Agent SDK 0.2.84 |
+| AI | Anthropic Claude Agent SDK 0.2.111 |
 | 通信 | Rust HTTP/SSE Proxy (reqwest via `local_http` 模块) |
 | 拖拽 | @dnd-kit/sortable |
 

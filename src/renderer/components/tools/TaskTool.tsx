@@ -489,36 +489,35 @@ export default function TaskTool({ tool }: TaskToolProps) {
     }
   }, [tool.result]);
 
-  // Background task: extract agentId from text result for status matching.
-  // SDK returns "agentId: xxx (...)" in the async_launched tool_result text.
-  const bgAgentId = useMemo(() => {
-    if (!isBackgroundTask || !tool.result) return null;
-    const match = tool.result.match(/agentId:\s*(\S+)/);
-    if (!match?.[1] && tool.result.length > 0) {
-      console.warn('[TaskTool] Background task result has no agentId — SDK text format may have changed');
-    }
-    return match?.[1] ?? null;
-  }, [isBackgroundTask, tool.result]);
+  // Background task status matching: use tool.id (= toolUseId) as the lookup key.
+  // chat:task-started registers the toolUseId↔taskId mapping in backgroundTaskStatus.ts;
+  // chat:task-notification later fires with taskId, which the module bridges back to
+  // toolUseId via that mapping. This replaces the old regex-from-text approach which
+  // was brittle (SDK text format changes) and fundamentally broken (agentId ≠ taskId).
+  const bgToolUseId = isBackgroundTask ? tool.id : null;
 
   // Terminal status: solely from SDK's task_notification (persisted in module-level Map).
   // Map survives timing races — if notification arrived before mount, we read it on mount.
   const [bgTerminalStatus, setBgTerminalStatus] = useState<BackgroundTaskTerminalStatus | null>(null);
   useEffect(() => {
-    if (!isBackgroundTask || !bgAgentId || bgTerminalStatus) return;
-    const existing = getBackgroundTaskStatus(bgAgentId);
+    if (!isBackgroundTask || !bgToolUseId || bgTerminalStatus) return;
+    const existing = getBackgroundTaskStatus(bgToolUseId);
     if (isTerminalStatus(existing)) {
       const rafId = requestAnimationFrame(() => setBgTerminalStatus(existing));
       return () => cancelAnimationFrame(rafId);
     }
     const handler = (e: Event) => {
-      const { taskId, status } = (e as CustomEvent).detail;
-      if (taskId === bgAgentId && isTerminalStatus(status)) {
-        setBgTerminalStatus(status);
+      const detail = (e as CustomEvent).detail;
+      // Match strictly by toolUseId — the mapping module and server both
+      // resolve taskId→toolUseId, so detail.toolUseId is always populated
+      // when the mapping was registered at task-started time.
+      if (detail.toolUseId === bgToolUseId && isTerminalStatus(detail.status)) {
+        setBgTerminalStatus(detail.status);
       }
     };
     window.addEventListener(BACKGROUND_TASK_STATUS_EVENT, handler);
     return () => window.removeEventListener(BACKGROUND_TASK_STATUS_EVENT, handler);
-  }, [isBackgroundTask, bgAgentId, bgTerminalStatus]);
+  }, [isBackgroundTask, bgToolUseId, bgTerminalStatus]);
 
   const bgComplete = bgTerminalStatus !== null;
 

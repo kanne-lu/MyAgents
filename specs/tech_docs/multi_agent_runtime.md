@@ -337,17 +337,64 @@ interface PersistContentBlock {
 
 ### 配置变更
 
-Model / Permission Mode 变更 → `setExternalModel()` / `setExternalPermissionMode()` → 停止当前进程 → 下次 `sendExternalMessage` 自动以新配置 resume。
+**Permission Mode**:`setExternalPermissionMode()` 停止当前进程 → 下次 `sendExternalMessage` 以新模式 resume。
+
+**Model**:`setExternalModel()` 优先尝试 in-place 切换(`activeRuntime.setModel()`),失败或不支持再 fallback 到停进程 resume 路径:
+
+| Runtime | 切换方式 |
+|---------|---------|
+| Gemini | ACP `session/set_model` RPC,保留活进程 + session 状态,无需 re-handshake |
+| Codex | 无等价 RPC → fallback 到停进程 resume |
+| Claude Code | `-p` 模式每轮都重启,无意义 → fallback 到停进程 resume |
+
+### 预热 Pre-warm (v0.1.68)
+
+Gemini / Codex 冷启动(spawn CLI + `initialize` + `session/new`)约 10–15 秒,用户在此期间打字无反馈。`prewarmExternalSession()` 把这段时间挪到 Tab 打开的瞬间:
+
+**适用范围**:仅 Gemini / Codex(持久 JSON-RPC 进程)。CC `-p` 模式每轮退出,预热无意义 → HTTP 端点在到达此路径之前就拒绝。
+
+**触发链路**:前端 `Chat.tsx` 在 Tab ready(`isActive && isConnected && sessionId`)的瞬间 POST `/api/runtime/prewarm` → `prewarmExternalSession()` → `startExternalSession({ ...options, initialMessage: undefined })`。**不**等待 `/api/runtime/models` — 该接口自身也 spawn 一个 `gemini --acp` 子进程查模型,会付同样的 ~14s 冷启动。两件事并行进行:prewarm 在用户打字时暖 session,models-fetch 在后台填充模型下拉。首次 prewarm 用 `effectiveModel`(可能 `undefined` → runtime 用自带默认),用户随后在 UI 里切模型时走 `setExternalModel()` → in-place `runtime.setModel()` 路径(见「配置变更」)。
+
+**关键差异**(pre-warm vs 正常 start):
+
+| 项 | pre-warm | 正常 start |
+|----|----------|-----------|
+| `initialMessage` | 省略 | 含用户消息 |
+| Session state | 保持 `idle`(UI 不显示 spinner) | 切 `running` |
+| 看门狗 | **不启动**(10 分钟进程空等是合法的) | 启动 |
+| Session metadata 落盘 | 推迟 | 创建时写入 |
+| 失败处理 | **静默**(log-only,不 toast) | broadcast `chat:agent-error` |
+
+**守卫**:
+- **双层重复守卫**:`isExternalSessionActive() || isRunning || startingPromise` 任一成立即视为已暖,直接返回。
+- **后端 cross-runtime 校验**:读 `getSessionMetadata(sessionId)?.runtime`,若与当前 Sidecar 的 runtime 不匹配则拒绝。前端 `Chat.tsx` 也有对应校验,但 `sessionRuntime` 状态异步注入,后端检查关掉 race-window 漏洞。
+- **Resume ID 守卫**:`lastSessionId === options.sessionId && lastRuntimeSessionId` 同时成立才传 `resumeSessionId`,防止 Handover 场景 4 遗留的 runtime session id 误 resume 到新 session → "No conversation found" CLI 错误。
+
+**首条消息路径**:
+- 预热成功 → `sendExternalMessage` 命中 Case 3(进程活着),`registerSessionMetadataIfNew()` 在此处写 metadata + 启动看门狗。
+- 预热失败 → 进程未起,`sendExternalMessage` 命中 Case 1 或 Case 2,走正常启动路径,metadata 在 `_doStartExternalSession` 的 `initialMessage` 分支写入。
+- 两条路径通过 `registerSessionMetadataIfNew()` 幂等 helper 共享逻辑,防止漂移。
+
+**Session Complete 特判**:`!turnCompleted && currentTurnStartTime === 0` 判为 pre-warm exit(进程 spawn 后、首轮 turn 开始前崩溃),静默吞掉错误 — 下一条用户消息会走正常启动路径重试。
+
+### 并发与序列化
+
+`sendExternalMessage` 在分派 Case 1/2/3 之前有两道 gate:
+
+1. **Start 并发 gate**:`await startingPromise` 等待任何在飞的 `startExternalSession`(包括 pre-warm)完成。否则用户消息可能在 `isRunning=true && activeProcess=null` 的中间态被错分到 Case 2,触发 "session already running" 静默丢弃。
+2. **Turn 序列化 gate**:`!turnCompleted && currentTurnStartTime !== 0 && activeProcess` → `waitForExternalSessionIdle(5 分钟, 100ms)`。持久进程运行时(Codex/Gemini)一次只接一个 turn,并发写入 stdin 会出现 drop 或交错输出。崩溃恢复路径通过 `resetTurnAccumulators()` 把 `currentTurnStartTime` 归零,此 gate 不会误触。
 
 ### 安全机制
 
 | 机制 | 说明 |
 |------|------|
 | **并发守卫** | `startingPromise` 序列化并发 `startExternalSession` 调用 |
-| **看门狗** | 10 分钟无活动（text_delta / thinking_delta / tool_input_delta / tool_result）→ 自动 kill |
-| **Stale text 防护** | `lastTurnSucceeded` 标志，cron/heartbeat 路径检查，防止崩溃后返回上一轮旧回复 |
-| **用户消息即时落盘** | 发送后立即 `saveSessionMessages()`，崩溃不丢用户消息 |
-| **Token 用量** | 存储 Codex `usage` 事件（running total，replace 而非 accumulate），附加到 assistant message |
+| **Turn 序列化** | 持久进程 runtime 下,新消息等待上一个 in-flight turn 结束再派送 |
+| **看门狗** | **Per-turn**(不是 per-process):pre-warm idle 不计时,turn 启动才启动计时器。10 分钟无活动 → kill |
+| **Stale text 防护** | `lastTurnSucceeded` 标志,cron/heartbeat 路径检查,防止崩溃后返回上一轮旧回复 |
+| **用户消息即时落盘** | 发送后立即 `saveSessionMessages()`,崩溃不丢用户消息 |
+| **Token 用量** | 存储 Codex `usage` 事件(running total,replace 而非 accumulate),附加到 assistant message |
+| **Cross-runtime 守卫** | pre-warm / restore / send 路径均用 `SessionMetadata.runtime` 校验,阻止跨 runtime 污染 |
 
 ## 功能门控链路
 

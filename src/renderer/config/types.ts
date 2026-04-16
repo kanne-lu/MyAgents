@@ -413,9 +413,18 @@ export interface ProjectSettings {
 /** Anthropic 官方预设模型（订阅和 API 共用） */
 const ANTHROPIC_MODELS: ModelEntity[] = [
   { model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude' },
+  { model: 'claude-opus-4-7', modelName: 'Claude Opus 4.7', modelSeries: 'claude' },
   { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude' },
   { model: 'claude-haiku-4-5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude' },
 ];
+
+/** Anthropic 官方默认别名（对齐 SDK 0.2.111 内置默认：opus47/sonnet46/haiku45）。
+ *  显式 pin 可避免未来 SDK 默认变动时用户体验突变。 */
+const ANTHROPIC_ALIASES = {
+  sonnet: 'claude-sonnet-4-6',
+  opus: 'claude-opus-4-7',
+  haiku: 'claude-haiku-4-5',
+} as const;
 
 export const PRESET_PROVIDERS: Provider[] = [
   {
@@ -427,6 +436,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'claude-sonnet-4-6',
     isBuiltin: true,
     config: {},
+    modelAliases: { ...ANTHROPIC_ALIASES },
     models: ANTHROPIC_MODELS,
   },
   {
@@ -441,6 +451,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://api.anthropic.com',
     },
+    modelAliases: { ...ANTHROPIC_ALIASES },
     models: ANTHROPIC_MODELS,
   },
   {

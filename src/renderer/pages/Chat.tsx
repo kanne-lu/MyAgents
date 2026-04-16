@@ -673,6 +673,77 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => { cancelled = true; };
   }, [multiAgentRuntimeEnabled, currentRuntime, apiGet]);
 
+  // ─── External runtime pre-warm (v0.1.68) ───
+  //
+  // Gemini and Codex run as persistent JSON-RPC processes (`gemini --acp` /
+  // `codex app-server`). On a cold start their first message pays 10–15s for
+  // CLI spawn + initialize handshake + session/new (and on Gemini: base-prompt
+  // extraction). Firing /api/runtime/prewarm as soon as the tab is ready
+  // overlaps that cost with the user still typing — by the time they hit
+  // send, the process is already alive and the message goes straight to
+  // stdin via sendExternalMessage Case 3.
+  //
+  // Only fires for Gemini/Codex (backend no-ops for CC since `-p` mode exits
+  // per turn) and only once per (tab, session, runtime) combo — a ref keyed
+  // by sessionId+runtime guards against re-firing on model/permission changes
+  // or mid-session SSE reconnects. If the user sends a message before the
+  // pre-warm finishes, sendExternalMessage's `startingPromise` await safely
+  // serializes the two calls.
+  const prewarmedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!multiAgentRuntimeEnabled) return;
+    if (currentRuntime !== 'gemini' && currentRuntime !== 'codex') return;
+    if (!isActive || !isConnected || !sessionId) return;
+    // Cross-runtime sessions are opened in read-only mode until the user
+    // confirms a fresh session — don't pre-warm those (the confirmation flow
+    // resets sessionId, which retriggers this effect). Mirrors the
+    // `isCrossRuntimeSession` const defined later in this file, inlined here
+    // to avoid the TDZ ordering dependency.
+    // Backend also enforces this via SessionStore metadata check — belt-and-
+    // suspenders against a loading-session race where sessionRuntime is still
+    // null when this effect fires.
+    if (sessionRuntime !== null && sessionRuntime !== currentRuntime) return;
+    // Do NOT gate on runtime-model list readiness. /api/runtime/models itself
+    // spawns a `gemini --acp` (or codex app-server) subprocess that pays the
+    // same ~14s cold-start as pre-warm — gating pre-warm on it would serialize
+    // the two 14s costs and defeat the whole optimization (user would stare
+    // at 14s+ of empty UI after hitting send). Firing with an undefined model
+    // is safe: gemini.ts:~809 guards `options.model && options.model.length>0`
+    // and Codex treats null `model` as "use default". When the user later
+    // picks a specific model in the UI, setExternalModel() routes through
+    // the in-place `runtime.setModel()` path (Gemini: one ACP RPC; Codex/CC:
+    // fall back to stop+resume) — cheap in the common case.
+    const key = `${sessionId}::${currentRuntime}`;
+    if (prewarmedKeyRef.current === key) return;
+    prewarmedKeyRef.current = key;
+    apiPost('/api/runtime/prewarm', {
+      sessionId,
+      model: effectiveModel,  // may be undefined — runtime falls back to its default
+      permissionMode: effectivePermissionMode,
+    }).then((res) => {
+      // Backend returns { success: true, prewarmed: false, reason: '...' } when
+      // the endpoint short-circuits (already-active/starting, runtime mismatch,
+      // non-persistent runtime). In those cases the subprocess is NOT warm, so
+      // clear the ref to allow a retry when conditions change (e.g., sessionRuntime
+      // populates later and matches currentRuntime).
+      const data = res as { prewarmed?: boolean } | undefined;
+      if (data && data.prewarmed === false) {
+        prewarmedKeyRef.current = null;
+      }
+    }).catch((err) => {
+      // Pre-warm failure is non-fatal — the first user message path still
+      // starts the runtime normally (just without the latency optimization).
+      console.debug('[prewarm] request failed (non-fatal):', err);
+      prewarmedKeyRef.current = null; // allow a later retry
+    });
+    // Intentionally omit effectiveModel/effectivePermissionMode from deps —
+    // config changes kill the pre-warmed process via setExternalModel/
+    // setExternalPermissionMode, and the next user message will resume with
+    // the new settings. Re-firing pre-warm on every keystroke-driven option
+    // change would thrash the subprocess.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [multiAgentRuntimeEnabled, currentRuntime, isActive, isConnected, sessionId, sessionRuntime, apiPost]);
+
   const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
     : currentRuntime === 'codex' ? codexModels
     : currentRuntime === 'gemini' ? geminiModels

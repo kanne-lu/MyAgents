@@ -71,7 +71,7 @@ onTokenChange((serverId, event) => {
 
   if (event === 'acquired' || event === 'refreshed') {
     console.log(`[agent] OAuth token ${event} for MCP ${serverId}, deferring restart to pre-warm debounce`);
-    if (querySession) pendingConfigRestart = true;
+    if (querySession) scheduleDeferredRestart('oauth');
     preWarmFailCount = 0;
     if (!isProcessing || isPreWarming) {
       schedulePreWarm();
@@ -373,13 +373,54 @@ let sessionState: SessionState = 'idle';
 let querySession: Query | null = null;
 let isProcessing = false;
 let shouldAbortSession = false;
-// Deferred config restart: MCP/Agents config changes set this flag instead of
-// aborting immediately. Two consumers drain it:
+
+/**
+ * Reasons a deferred config restart can be scheduled. Used for observability
+ * (so the drain-point log line tells operators which configs changed during
+ * the turn) and for future extensibility (reasons can gain priorities).
+ */
+type RestartReason =
+  | 'mcp'          // setMcpServers — MCP server list / env / args changed
+  | 'agents'       // setAgents — sub-agent definitions changed
+  | 'provider'     // setSessionProviderEnv — provider env (baseUrl, apiKey, etc.) changed
+  | 'proxy'        // triggerProxyRestart — HTTP proxy changed via Settings
+  | 'oauth';       // MCP OAuth token acquired/refreshed
+
+// Deferred config restart: config changes during an active turn / pre-warm
+// stage set a reason in this set instead of aborting immediately. Two consumers
+// drain it, both reading-and-clearing as a unit:
 // 1. schedulePreWarm() timer — batches rapid-fire changes (e.g. React state sync
 //    firing 7× /api/mcp/set in 4s) into a single abort+restart.
 // 2. Turn-complete handler — when config changed during an active user turn,
 //    the restart is deferred until the turn finishes to avoid killing mid-response.
-let pendingConfigRestart = false;
+//
+// Invariant: the set is cleared whenever `clearMessageState()` runs (fresh
+// session) and whenever a drain-point consumes it. Error paths in
+// startStreamingSession also clear it to prevent stuck flags across failed
+// starts (see `finally` block on session errors).
+const pendingConfigRestart = new Set<RestartReason>();
+
+/** Schedule a deferred restart for the given reason. Multiple reasons within
+ *  one turn collapse into a single restart at the next drain point. */
+function scheduleDeferredRestart(reason: RestartReason): void {
+  pendingConfigRestart.add(reason);
+}
+
+/** True when at least one reason is pending. */
+function hasDeferredRestart(): boolean {
+  return pendingConfigRestart.size > 0;
+}
+
+/** Drain-and-clear: returns the pending reasons (as a comma-joined string for
+ *  logging) and empties the set. Always call this at the point a restart is
+ *  actually applied — callers must not peek without draining. */
+function drainDeferredRestart(): string {
+  if (pendingConfigRestart.size === 0) return '';
+  const reasons = [...pendingConfigRestart].join(',');
+  pendingConfigRestart.clear();
+  return reasons;
+}
+
 let sessionTerminationPromise: Promise<void> | null = null;
 
 /**
@@ -904,12 +945,16 @@ function applyProxyEnvVars(proxyUrl: string, noProxyVal: string): void {
   delete process.env.all_proxy;
 }
 
-/** Restart session after proxy change (same pattern as MCP config changes) */
+/** Restart session after proxy change.
+ * Attempts immediate abort when idle; during active turns falls back to
+ * pendingConfigRestart (same deferred mechanism as setMcpServers/setAgents).
+ * Differs from MCP/agents in that it doesn't go through schedulePreWarm's
+ * 500ms debounce — proxy changes are discrete user actions from Settings. */
 function triggerProxyRestart(): void {
   if (querySession) {
     if (isProcessing && !isPreWarming) {
       console.log('[agent] Proxy changed, deferring restart (active turn)');
-      pendingConfigRestart = true;
+      scheduleDeferredRestart('proxy');
     } else {
       if (isDebugMode) console.log('[agent] Proxy changed, restarting session with resume');
       abortPersistentSession();
@@ -972,7 +1017,7 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   if (mcpChanged && querySession) {
     const ids = servers.map(s => s.id).join(', ') || 'none';
     console.log(`[agent] MCP config changed → [${ids}], deferring restart to pre-warm debounce`);
-    pendingConfigRestart = true;
+    scheduleDeferredRestart('mcp');
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1018,7 +1063,7 @@ export function setAgents(agents: Record<string, AgentDefinition>): void {
   // Defer restart to pre-warm debounce (same as setMcpServers — see comment there).
   if (agentsChanged && querySession) {
     console.log(`[agent] Sub-agents changed (${currentNames || 'none'} -> ${newNames || 'none'}), deferring restart to pre-warm debounce`);
-    pendingConfigRestart = true;
+    scheduleDeferredRestart('agents');
   }
 
   // Pre-warm: start/restart subprocess + MCP servers ahead of user's first message
@@ -1101,7 +1146,10 @@ export function getSessionProviderEnv(): ProviderEnv | undefined {
  * Provider env is baked into SDK subprocess environment variables at spawn time
  * and CANNOT be updated on a running process. If a session is already running
  * with stale env (e.g., pre-warm started before sync_ai_config arrived),
- * we must restart it — same pattern as setMcpServers().
+ * we must restart it. Attempts immediate abort when idle; during active turns
+ * falls back to pendingConfigRestart. Differs from MCP/agents in that it doesn't
+ * go through schedulePreWarm's 500ms debounce — provider changes are discrete
+ * Rust-layer calls, not rapid-fire React state sync.
  */
 export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): void {
   const oldLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
@@ -1132,7 +1180,7 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
       // Active user turn in progress — defer restart to avoid killing mid-response.
       // The restart will fire after the current turn completes (pendingConfigRestart).
       console.log('[agent] provider changed during active turn → deferring restart');
-      pendingConfigRestart = true;
+      scheduleDeferredRestart('provider');
     } else {
       console.log(`[agent] provider changed (${oldLabel} → ${newLabel}) → aborting session (preWarm=${isPreWarming})`);
       abortPersistentSession();
@@ -1140,9 +1188,9 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   } else if (isProcessing) {
     // startStreamingSession() is in progress but querySession hasn't been assigned yet.
     // buildClaudeSessionEnv() may have already read the stale currentProviderEnv.
-    // Set pendingConfigRestart so it triggers a restart after the first turn completes.
+    // Schedule a deferred restart so it fires after the first turn completes.
     console.log('[agent] provider changed while session starting → will restart after first turn');
-    pendingConfigRestart = true;
+    scheduleDeferredRestart('provider');
   }
 
   // Reset retry counter and re-warm (same tail as setMcpServers/triggerProxyRestart)
@@ -1191,18 +1239,20 @@ function schedulePreWarm(): void {
     if (!agentDir) return;
 
     // Drain deferred config restart: abort the stale session so the next
-    // startStreamingSession() picks up the latest MCP/agents/provider config.
-    // This is the single exit point for all config-change restarts — setMcpServers,
-    // setAgents etc. only set pendingConfigRestart=true and let this timer batch them.
-    if (pendingConfigRestart && querySession) {
-      pendingConfigRestart = false;
-      console.log('[agent] pre-warm: applying batched config restart');
+    // startStreamingSession() picks up the latest MCP/agents/provider/proxy config.
+    // Batched exit point for rapid-fire config changes (setMcpServers, setAgents,
+    // OAuth) and active-turn fallbacks from provider/proxy immediate-abort paths.
+    if (hasDeferredRestart() && querySession) {
+      const reasons = drainDeferredRestart();
+      console.log(`[agent] pre-warm: applying batched config restart (reasons=${reasons})`);
       abortPersistentSession();
       // Session is now terminating — retry after cleanup finishes
       schedulePreWarm();
       return;
     }
-    pendingConfigRestart = false;
+    // No active session to restart — clear any leftover reasons (e.g. reason was
+    // scheduled during a failed startup and the session never came up).
+    drainDeferredRestart();
 
     if (isSessionActive()) {
       // Session still cleaning up — RETRY instead of calling startStreamingSession().
@@ -2661,11 +2711,17 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     // the loopback request to http://127.0.0.1:{port} to be routed through the system proxy,
     // resulting in timeout/502 errors. The subprocess only needs to talk to our local bridge;
     // the bridge handler itself handles upstream proxy if needed (via process.env).
+    //
+    // NOTE: SDK 0.2.111+ changed env semantics from replace ({...$.env ?? process.env})
+    // to overlay ({...process.env, ...$.env}) — so `delete env[proxyVar]` no longer removes
+    // the parent's proxy vars from the subprocess env. Convert deletes into explicit empty
+    // strings; the CLI's proxy-from-env lookup (Yf6) uses `process.env[k] || ""` which
+    // treats empty string as "not set". Same sealing pattern as sealCcAuthEnv() above.
     for (const proxyVar of [
       'http_proxy', 'HTTP_PROXY', 'https_proxy', 'HTTPS_PROXY',
       'ALL_PROXY', 'all_proxy', 'no_proxy', 'NO_PROXY',
     ]) {
-      delete env[proxyVar];
+      env[proxyVar] = '';
     }
     // Store upstream config for bridge handler (includes proxy from process.env for upstream fetch)
     // Note: model is NOT stored here — getOpenAiBridgeConfig() derives it from currentModel
@@ -2834,10 +2890,17 @@ function parseSystemStatus(message: unknown): { isStatusMessage: boolean; status
   if (record.type !== 'system' || record.subtype !== 'status') {
     return { isStatusMessage: false, status: null, permissionMode: null };
   }
+  // SDK 0.2.108+: emits status:'requesting' before every API request when includePartialMessages is on.
+  // Treat as transient/no-op — we already surface thinking/streaming via partial message events,
+  // and propagating it would flash the send button into a disabled state on every tool-call round trip.
+  const statusValue = typeof record.status === 'string' ? record.status : null;
+  if (statusValue === 'requesting') {
+    return { isStatusMessage: false, status: null, permissionMode: null };
+  }
   // This IS a status message, status can be 'compacting' or null, permissionMode can be 'plan'/'acceptEdits'/etc.
   return {
     isStatusMessage: true,
-    status: typeof record.status === 'string' ? record.status : null,
+    status: statusValue,
     permissionMode: typeof record.permissionMode === 'string' ? record.permissionMode : null,
   };
 }
@@ -3655,7 +3718,7 @@ function clearMessageState(): void {
   liveSessionUuids.clear();
   isStreamingMessage = false;
   messageSequence = 0;
-  pendingConfigRestart = false;
+  pendingConfigRestart.clear();
   // Reset browser tool tracking for new session
   sessionBrowserToolUsed = false;
   sessionStorageStateSaved = false;
@@ -5608,6 +5671,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent] Background task ${taskMsg.status}: ${taskMsg.task_id} — ${taskMsg.summary}`);
           broadcast('chat:task-notification', {
             taskId: taskMsg.task_id,
+            toolUseId: taskMsg.tool_use_id,
             status: taskMsg.status,
             summary: taskMsg.summary,
             outputFile: taskMsg.output_file,
@@ -6433,9 +6497,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // The 500ms timer gives enough time for the finally block to run (isProcessing=false)
         // before the new startStreamingSession is called.
         // sessionRegistered is preserved, so the new session will use resume.
-        if (pendingConfigRestart) {
-          console.log('[agent] Turn complete, applying deferred config restart');
-          pendingConfigRestart = false;
+        if (hasDeferredRestart()) {
+          const reasons = drainDeferredRestart();
+          console.log(`[agent] Turn complete, applying deferred config restart (reasons=${reasons})`);
           abortPersistentSession();
           schedulePreWarm();
         }
