@@ -78,6 +78,8 @@ export const CUSTOM_EVENTS = {
     SKILL_COPIED_TO_PROJECT: 'skill-copied-to-project',
     /** Fired to open Settings page with optional section (e.g., 'mcp', 'providers') */
     OPEN_SETTINGS: 'open-settings',
+    /** Fired to open the Task Center singleton tab. No payload. */
+    OPEN_TASK_CENTER: 'open-task-center',
     /** Fired when user tries to open a Session that's already active in another Tab */
     JUMP_TO_TAB: 'jump-to-tab',
     /** Fired to launch AI bug report: opens new Chat tab with ~/.myagents workspace */

@@ -1,13 +1,21 @@
 /**
  * BrandSection - Left panel of the Launcher page
  * Layout: Logo+Slogan pinned to upper area, input box anchored to lower area
- * with workspace selector integrated into the input toolbar
+ * with workspace selector integrated into the input toolbar.
+ *
+ * Phase 2 (v0.1.69): a 任务 / 想法 ModeSegment sits between the slogan and the
+ * input. Switching to 「想法」 repurposes the input as a freeform Thought entry
+ * (persisted to ~/.myagents/thoughts/ via `thoughtCreate`), bypassing the full
+ * Chat launch flow. Switching back to 「任务」 restores the default behavior.
  */
 
-import { memo, useCallback, useMemo } from 'react';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 
 import SimpleChatInput, { type ImageAttachment } from '@/components/SimpleChatInput';
 import WorkspaceSelector from './WorkspaceSelector';
+import ModeSegment, { type InputMode } from '@/components/task-center/ModeSegment';
+import { useToast } from '@/components/Toast';
+import { thoughtCreate, taskCenterAvailable } from '@/api/taskCenter';
 import { type Project, type Provider, type PermissionMode, type ProviderVerifyStatus } from '@/config/types';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../../shared/types/runtime';
 
@@ -72,10 +80,46 @@ export default memo(function BrandSection({
     runtimeModels,
     runtimePermissionModes,
 }: BrandSectionProps) {
-    const handleSend = useCallback((text: string, images?: ImageAttachment[]) => {
-        onSend(text, images);
-        return undefined; // SimpleChatInput expects boolean | void
-    }, [onSend]);
+    const toast = useToast();
+    const [mode, setMode] = useState<InputMode>('task');
+    // Gracefully degrade in browser dev mode — ModeSegment is Tauri-only.
+    const modeSegmentEnabled = taskCenterAvailable();
+
+    const handleSend = useCallback(
+        async (text: string, images?: ImageAttachment[]) => {
+            if (mode === 'thought' && modeSegmentEnabled) {
+                // Thought mode: persist to ~/.myagents/thoughts/ and drop back
+                // to the input without launching a chat / workspace.
+                try {
+                    await thoughtCreate({ content: text });
+                    toast.success('想法已记录，可在任务中心查看');
+                    // PRD §4.4: after save, clear input, keep focus, auto-revert
+                    // to 「任务」 so the next press is a normal launch.
+                    setMode('task');
+                    return true; // tell SimpleChatInput to clear the textarea
+                } catch (e) {
+                    toast.error(`保存想法失败：${e}`);
+                    return false;
+                }
+            }
+            onSend(text, images);
+            return undefined; // SimpleChatInput expects boolean | void
+        },
+        [mode, modeSegmentEnabled, onSend, toast],
+    );
+
+    // PRD §4.1.1 hotkey: Cmd/Ctrl+Shift+T toggles task ↔ thought.
+    useEffect(() => {
+        if (!modeSegmentEnabled) return;
+        const handler = (e: KeyboardEvent) => {
+            if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
+                e.preventDefault();
+                setMode((m) => (m === 'task' ? 'thought' : 'task'));
+            }
+        };
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [modeSegmentEnabled]);
 
     // Check if any provider is available (has valid subscription or API key configured)
     // Validation status is informational — having a key is enough to be "available"
@@ -101,8 +145,15 @@ export default memo(function BrandSection({
                 </p>
             </div>
 
+            {/* Mode declaration: 任务 / 想法 (see DESIGN.md §6.8, PRD §4.1) */}
+            {modeSegmentEnabled && (
+                <div className="mt-3 mb-4">
+                    <ModeSegment value={mode} onChange={setMode} size="launcher" />
+                </div>
+            )}
+
             {/* Lower area: Input box with workspace selector in toolbar */}
-            <div className="mt-8 w-full max-w-[640px] pb-[12vh]">
+            <div className="w-full max-w-[640px] pb-[12vh]">
                 <div className="relative w-full">
                     <SimpleChatInput
                         mode="launcher"

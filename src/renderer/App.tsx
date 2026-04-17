@@ -18,6 +18,7 @@ import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Chat from '@/pages/Chat';
 import Launcher from '@/pages/Launcher';
 import Settings from '@/pages/Settings';
+import TaskCenter from '@/pages/TaskCenter';
 import {
   type Project,
   type Provider,
@@ -124,6 +125,8 @@ const MemoizedTabContent = memo(function TabContent({
           onCheckForUpdate={onCheckForUpdate}
           onRestartAndUpdate={onRestartAndUpdate}
         />
+      ) : tab.view === 'taskcenter' ? (
+        <TaskCenter isActive={isActive} />
       ) : (
         <TabProvider
           tabId={tab.id}
@@ -1511,6 +1514,36 @@ export default function App() {
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callback stabilized via tabsRef
   }, []);
+
+  // Open TaskCenter as a singleton tab (mirrors handleOpenSettings)
+  const handleOpenTaskCenter = useCallback(() => {
+    const currentTabs = tabsRef.current;
+    const existing = currentTabs.find((t) => t.view === 'taskcenter');
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    if (currentTabs.length >= MAX_TABS) {
+      console.warn(`[App] Max tabs (${MAX_TABS}) reached`);
+      return;
+    }
+    const newTab: Tab = {
+      id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      agentDir: null,
+      sessionId: null,
+      view: 'taskcenter',
+      title: '任务中心',
+    };
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+  }, []);
+
+  // Listen for OPEN_TASK_CENTER custom event from child components
+  useEffect(() => {
+    const handler = () => handleOpenTaskCenter();
+    window.addEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
+    return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
+  }, [handleOpenTaskCenter]);
 
   // Listen for JUMP_TO_TAB custom event (Session singleton constraint)
   useEffect(() => {

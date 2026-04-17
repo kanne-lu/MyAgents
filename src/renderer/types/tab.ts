@@ -18,7 +18,7 @@ export interface Tab {
     id: string;
     agentDir: string | null;  // null = showing Launcher
     sessionId: string | null; // null = not started
-    view: 'launcher' | 'chat' | 'settings';
+    view: 'launcher' | 'chat' | 'settings' | 'taskcenter';
     title: string;            // Display title for the tab
     isGenerating?: boolean;   // true = AI is outputting, used for close confirmation
     hasUnread?: boolean;      // true = task completed but user hasn't viewed this tab yet

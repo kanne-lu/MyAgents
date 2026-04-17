@@ -9,9 +9,10 @@
  * we use decorations: false on Windows for custom title bar styling.
  */
 
-import { BotMessageSquare, Minus, Square, X, RefreshCw, Settings, Copy } from 'lucide-react';
+import { BotMessageSquare, Minus, Square, X, RefreshCw, Settings, Copy, CheckSquare } from 'lucide-react';
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { isTauri } from '@/api/tauriClient';
+import { CUSTOM_EVENTS } from '@/../shared/constants';
 import FeedbackPopover from './FeedbackPopover';
 
 interface CustomTitleBarProps {
@@ -206,6 +207,17 @@ export default function CustomTitleBar({
                         />
                     )}
                 </div>
+
+                {isTauri() && (
+                    <button
+                        onClick={() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER))}
+                        className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                        title="任务中心"
+                    >
+                        <CheckSquare className="h-4 w-4" />
+                        <span className="text-[13px] font-medium">任务</span>
+                    </button>
+                )}
 
                 <button
                     onClick={onSettingsClick || (() => console.log('Settings clicked - TODO'))}
