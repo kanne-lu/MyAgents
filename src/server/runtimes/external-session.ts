@@ -112,7 +112,8 @@ let isPrewarmingSession = false;
 let earlyBroadcastedUserMsg: SessionMessage | null = null;
 // Deferred runtimeSessionId: set when session_init fires before metadata exists (pre-warm).
 // Consumed by registerSessionMetadataIfNew to patch runtimeSessionId onto newly created metadata.
-let deferredRuntimeSessionId: string | null = null;
+// Includes forSessionId to prevent cross-session contamination if session switches between set and consume.
+let deferredRuntimeSessionId: { forSessionId: string; runtimeSessionId: string } | null = null;
 const pendingExternalInteractiveRequests = new Map<string, ExternalPendingInteractiveRequest>();
 
 function setExternalSessionState(state: ExternalSessionState): void {
@@ -201,8 +202,9 @@ function registerSessionMetadataIfNew(
   // Patch deferred runtimeSessionId from pre-warm session_init (if any).
   // During pre-warm, session_init fires before metadata exists, so runtimeSessionId
   // couldn't be persisted. Consume it here when metadata is first created.
-  if (deferredRuntimeSessionId) {
-    meta.runtimeSessionId = deferredRuntimeSessionId;
+  // Session affinity check prevents cross-session contamination.
+  if (deferredRuntimeSessionId && deferredRuntimeSessionId.forSessionId === sessionId) {
+    meta.runtimeSessionId = deferredRuntimeSessionId.runtimeSessionId;
     deferredRuntimeSessionId = null;
   }
   const trimmed = messageText.trim();
@@ -940,6 +942,7 @@ export async function sendExternalMessage(
       });
       return { queued: true };
     } catch (err) {
+      earlyBroadcastedUserMsg = null;  // Defensive: prevent stale msg leaking to next send
       return { queued: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
@@ -967,6 +970,7 @@ export async function sendExternalMessage(
       });
       return { queued: true };
     } catch (err) {
+      earlyBroadcastedUserMsg = null;  // Defensive: prevent stale msg leaking to next send
       return { queued: false, error: err instanceof Error ? err.message : String(err) };
     }
   }
@@ -1447,8 +1451,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           if (!updated) {
             // Metadata doesn't exist yet (pre-warm). The in-memory lastRuntimeSessionId
             // is already set above. When registerSessionMetadataIfNew creates the metadata
-            // later, we need to patch it. Schedule a deferred update.
-            deferredRuntimeSessionId = event.sessionId;
+            // later, we need to patch it. Schedule a deferred update with session affinity.
+            deferredRuntimeSessionId = { forSessionId: lastSessionId, runtimeSessionId: event.sessionId };
           }
         }
       }
