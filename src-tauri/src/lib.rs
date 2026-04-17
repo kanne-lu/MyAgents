@@ -15,9 +15,11 @@ mod proxy_config;
 pub mod system_binary;
 mod sidecar;
 mod sse_proxy;
+pub mod task;
 pub mod terminal;
 pub mod browser;
 pub mod search;
+pub mod thought;
 mod tray;
 mod updater;
 
@@ -101,6 +103,13 @@ pub fn run() {
     let browser_state_for_exit = browser_state.clone();
     let browser_state_for_window = browser_state.clone();
 
+    // Create Task Center state (v0.1.69 — thought & task stores)
+    let data_dir = app_dirs::myagents_data_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let thought_state: thought::ManagedThoughtStore =
+        Arc::new(thought::ThoughtStore::new(data_dir.join("thoughts")));
+    let task_state: task::ManagedTaskStore =
+        Arc::new(task::TaskStore::new(data_dir.clone()));
+
     // Create SSE proxy state
     let sse_proxy_state = Arc::new(sse_proxy::SseProxyState::default());
 
@@ -129,6 +138,8 @@ pub fn run() {
         .manage(agent_state)
         .manage(terminal_state)
         .manage(browser_state)
+        .manage(thought_state)
+        .manage(task_state)
         // SearchEngine will be added as managed state in .setup()
         .invoke_handler(tauri::generate_handler![
             // Legacy commands (backward compatibility)
@@ -272,6 +283,24 @@ pub fn run() {
             search::cmd_search_index_status,
             search::cmd_invalidate_workspace_index,
             search::cmd_refresh_workspace_index,
+            // Task Center — Thought commands (v0.1.69)
+            thought::cmd_thought_create,
+            thought::cmd_thought_list,
+            thought::cmd_thought_get,
+            thought::cmd_thought_update,
+            thought::cmd_thought_delete,
+            // Task Center — Task commands (v0.1.69)
+            task::cmd_task_create_direct,
+            task::cmd_task_create_from_alignment,
+            task::cmd_task_list,
+            task::cmd_task_get,
+            task::cmd_task_update,
+            task::cmd_task_update_status,
+            task::cmd_task_update_progress,
+            task::cmd_task_append_session,
+            task::cmd_task_archive,
+            task::cmd_task_delete,
+            task::cmd_task_set_cron,
         ])
         .setup(|app| {
             // Initialize logging FIRST — acquire_lock() and cleanup_stale_sidecars()
