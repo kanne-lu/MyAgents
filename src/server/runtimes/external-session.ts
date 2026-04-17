@@ -107,6 +107,12 @@ let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string; prewar
 // — a pre-warmed process is "alive but idle", not "processing a turn". Cleared when the
 // first user message arrives or on session reset.
 let isPrewarmingSession = false;
+// Set by sendExternalMessage when it pre-broadcasts the user message for instant display.
+// Consumed by _doStartExternalSession / Case 3 to reuse the message (skip duplicate broadcast).
+let earlyBroadcastedUserMsg: SessionMessage | null = null;
+// Deferred runtimeSessionId: set when session_init fires before metadata exists (pre-warm).
+// Consumed by registerSessionMetadataIfNew to patch runtimeSessionId onto newly created metadata.
+let deferredRuntimeSessionId: string | null = null;
 const pendingExternalInteractiveRequests = new Map<string, ExternalPendingInteractiveRequest>();
 
 function setExternalSessionState(state: ExternalSessionState): void {
@@ -143,6 +149,8 @@ function resetModuleState(): void {
   externalSystemInitPayload = null;
   externalSessionState = 'idle';
   isPrewarmingSession = false;
+  earlyBroadcastedUserMsg = null;
+  deferredRuntimeSessionId = null;
 }
 
 /** Flush accumulated text into a text content block */
@@ -190,6 +198,13 @@ function registerSessionMetadataIfNew(
   const meta = createSessionMetadata(workspacePath);
   meta.id = sessionId;
   meta.runtime = getCurrentRuntimeType();
+  // Patch deferred runtimeSessionId from pre-warm session_init (if any).
+  // During pre-warm, session_init fires before metadata exists, so runtimeSessionId
+  // couldn't be persisted. Consume it here when metadata is first created.
+  if (deferredRuntimeSessionId) {
+    meta.runtimeSessionId = deferredRuntimeSessionId;
+    deferredRuntimeSessionId = null;
+  }
   const trimmed = messageText.trim();
   meta.title = trimmed.slice(0, 40);
   if (meta.title.length < trimmed.length) meta.title += '...';
@@ -761,16 +776,20 @@ async function _doStartExternalSession(options: {
     allSessionMessages = [];
   }
 
-  // Broadcast user message so frontend displays it in the chat
-  // Also record it for SessionStore persistence
+  // Record user message for SessionStore persistence.
+  // If sendExternalMessage already broadcast this message (earlyBroadcastedUserMsg),
+  // reuse that instance to keep IDs consistent and skip the redundant SSE broadcast.
   if (options.initialMessage) {
-    const userMsg: SessionMessage = {
+    const userMsg: SessionMessage = earlyBroadcastedUserMsg ?? {
       id: `user-${Date.now()}`,
       role: 'user',
       content: options.initialMessage,
       timestamp: new Date().toISOString(),
     };
-    broadcast('chat:message-replay', { message: userMsg });
+    if (!earlyBroadcastedUserMsg) {
+      broadcast('chat:message-replay', { message: userMsg });
+    }
+    earlyBroadcastedUserMsg = null;  // Consumed
     allSessionMessages.push(userMsg);
     resetTurnAccumulators();
     currentTurnStartTime = Date.now();
@@ -868,6 +887,21 @@ export async function sendExternalMessage(
 ): Promise<{ queued: boolean; error?: string }> {
   const hasImages = images && images.length > 0;
 
+  // Show user message immediately — don't block on pre-warm or turn serialization.
+  // The message appears in the chat as soon as the user presses send, giving
+  // responsive feedback even when the runtime takes 10-15s to cold-start.
+  // Downstream code (Case 1/2/3) also calls broadcast('chat:message-replay')
+  // for the same message — we set earlyBroadcastedUserMsg so they can skip
+  // the redundant broadcast while still recording for persistence.
+  const earlyUserMsg: SessionMessage = {
+    id: `user-${Date.now()}`,
+    role: 'user',
+    content: text,
+    timestamp: new Date().toISOString(),
+  };
+  broadcast('chat:message-replay', { message: earlyUserMsg });
+  earlyBroadcastedUserMsg = earlyUserMsg;
+
   // If a pre-warm (or other concurrent start) is still bringing the process
   // up, wait for it to finish before deciding which case to take. Without
   // this await, a user-send racing an in-flight pre-warm would see
@@ -943,14 +977,18 @@ export async function sendExternalMessage(
     return { queued: false, error: 'No active runtime' };
   }
   try {
-    // Broadcast user message + record for persistence (same as startExternalSession)
-    const userMsg: SessionMessage = {
+    // Record user message for persistence. Reuse early-broadcast message if available
+    // (sendExternalMessage already showed it to the user for instant feedback).
+    const userMsg: SessionMessage = earlyBroadcastedUserMsg ?? {
       id: `user-${Date.now()}`,
       role: 'user',
       content: text,
       timestamp: new Date().toISOString(),
     };
-    broadcast('chat:message-replay', { message: userMsg });
+    if (!earlyBroadcastedUserMsg) {
+      broadcast('chat:message-replay', { message: userMsg });
+    }
+    earlyBroadcastedUserMsg = null;  // Consumed
     allSessionMessages.push(userMsg);
     turnCompleted = false;
     lastTurnSucceeded = false;  // Reset for this turn (prevents stale text on failure)
@@ -1395,12 +1433,23 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'session_init': {
       // Capture runtime's session ID for multi-turn resume
-      // CC: session_id from hook; Codex: threadId from thread/start response
+      // CC: session_id from hook; Codex: threadId from thread/start response; Gemini: from session/new
       if (event.sessionId) {
         lastRuntimeSessionId = event.sessionId;
-        // Persist to SessionMetadata for cross-restart resume
+        // Persist to SessionMetadata for cross-restart resume.
+        // During pre-warm, metadata may not exist yet (registerSessionMetadataIfNew
+        // runs on first user message, not on pre-warm). Attempt update; if metadata
+        // doesn't exist yet, store the ID in-memory — it will be persisted when
+        // registerSessionMetadataIfNew runs and then updateSessionMetadata succeeds
+        // on the next session_init or turn_complete.
         if (lastSessionId && event.sessionId !== lastSessionId) {
-          updateSessionMetadata(lastSessionId, { runtimeSessionId: event.sessionId });
+          const updated = updateSessionMetadata(lastSessionId, { runtimeSessionId: event.sessionId });
+          if (!updated) {
+            // Metadata doesn't exist yet (pre-warm). The in-memory lastRuntimeSessionId
+            // is already set above. When registerSessionMetadataIfNew creates the metadata
+            // later, we need to patch it. Schedule a deferred update.
+            deferredRuntimeSessionId = event.sessionId;
+          }
         }
       }
       const info: SystemInitInfo = {
