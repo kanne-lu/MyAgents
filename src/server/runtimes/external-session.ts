@@ -12,6 +12,7 @@ import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from '.
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import type { RuntimeType } from '../../shared/types/runtime';
+import { isPendingSessionId } from '../../shared/constants';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
 import type { MessageUsage, SessionMessage } from '../types/session';
@@ -723,6 +724,17 @@ async function _doStartExternalSession(options: {
   const systemPromptAppend = workspaceInstructions
     ? baseSystemPrompt + '\n\n' + workspaceInstructions
     : baseSystemPrompt;
+
+  // External runtimes don't go through the SDK's session creation flow, so the
+  // "pending-{tabId}" placeholder that the frontend assigns never gets upgraded
+  // to a real UUID. A pending-prefixed ID in SessionStore breaks history reload
+  // because the frontend's loadSession guard skips any session whose ID starts
+  // with "pending-". Fix: mint a real UUID here on the first start (not resume).
+  if (isPendingSessionId(options.sessionId) && !options.resumeSessionId) {
+    const realId = crypto.randomUUID();
+    console.log(`[external-session] Upgrading pending session ID: ${options.sessionId} → ${realId}`);
+    options.sessionId = realId;
+  }
 
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${options.model || '(default)'}, permissionMode=${options.permissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
   // Detect pre-warm: prewarmExternalSession calls us with initialMessage=undefined.
