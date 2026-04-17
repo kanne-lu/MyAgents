@@ -35,6 +35,10 @@ export default function TaskCenter({ isActive }: Props) {
     setRefreshKey((k) => k + 1);
   }, []);
 
+  // The DispatchTaskDialog returns the full Task, but for Phase 4 we only need
+  // to know "something changed" to re-fetch both panels. Future Phase 5 hook:
+  // pass the task down so the newly created one can be highlighted/scrolled to.
+
   if (!taskCenterAvailable()) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--paper)] px-8 text-center">
