@@ -25,7 +25,7 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useConfig } from '@/hooks/useConfig';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 import { useToast } from '@/components/Toast';
-import { taskCreateDirect } from '@/api/taskCenter';
+import { taskCreateDirect, taskRun } from '@/api/taskCenter';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
 import type { Thought } from '@/../shared/types/thought';
 import type {
@@ -155,7 +155,7 @@ const EXECUTION_TABS: Array<{
     value: 'once',
     label: '立即执行',
     icon: Play,
-    description: '创建后一次性触发，不进入调度队列',
+    description: '创建后立刻开始执行；任务会出现在右侧任务列表。',
   },
   {
     value: 'scheduled',
@@ -383,7 +383,20 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
         tags,
         notification: buildNotification(),
       });
-      toast.success(`任务「${task.name}」已创建，可在右侧点「立即执行」派发`);
+      // PRD §8.2: `once` dispatches should fire immediately — the user
+      // just asked to "立即执行", they shouldn't also have to click a
+      // play button in the right panel. Other modes wait for their
+      // schedule / recurrence to hit naturally.
+      if (isOnce) {
+        try {
+          await taskRun(task.id);
+          toast.success(`任务「${task.name}」已派发，AI 正在执行`);
+        } catch (e) {
+          toast.error(`任务已创建，但启动执行失败：${extractErrorMessage(e)}`);
+        }
+      } else {
+        toast.success(`任务「${task.name}」已创建`);
+      }
       onDispatched(task);
     } catch (e) {
       toast.error(extractErrorMessage(e));

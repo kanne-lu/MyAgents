@@ -1,6 +1,10 @@
 // TaskListPanel — right column of Task Center: task cards + filter bar.
-// Three sections: pending (todo/blocked/stopped), active (running/verifying),
+// Three sections: active (running/verifying), pending (todo/blocked/stopped),
 // finished (done/archived). PRD §7.2.
+//
+// Two render modes: a 2-column card view (default) and a dense single-line
+// list view (quick scan / filter). The choice is persisted in localStorage
+// so returning users see their last-picked view.
 //
 // Legacy cron tasks (CronTasks with no `task_id` back-pointer) are "上浮" here
 // alongside native tasks (PRD §11.4) — they render with a 「遗留」 badge and
@@ -8,17 +12,28 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Layers, Search, X } from 'lucide-react';
-import { taskList, taskCenterAvailable } from '@/api/taskCenter';
+
+import {
+  taskCenterAvailable,
+  taskDelete,
+  taskList,
+  taskRerun,
+  taskRun,
+  taskUpdateStatus,
+} from '@/api/taskCenter';
+import { useToast } from '@/components/Toast';
 import type { Task, TaskStatus } from '@/../shared/types/task';
-import { TaskCard } from './TaskCard';
-import { LegacyCronCard } from './LegacyCronCard';
-import { TaskDetailOverlay } from './TaskDetailOverlay';
 import { LegacyCronOverlay } from './LegacyCronOverlay';
+import { TaskDetailOverlay } from './TaskDetailOverlay';
+import { TaskCardItem } from './views/TaskCardItem';
+import { TaskListRow } from './views/TaskListRow';
+import { ViewToggle, type TaskView } from './views/ViewToggle';
+import type { LegacyCronRow } from './views/types';
 
 /** Union of what the right-column list renders — a real Task or a legacy cron. */
 type TaskCardLike =
   | { kind: 'task'; task: Task }
-  | { kind: 'legacy-cron'; legacy: LegacyCron };
+  | { kind: 'legacy-cron'; legacy: LegacyCronRow };
 
 interface Props {
   highlightTaskId?: string | null;
@@ -34,27 +49,40 @@ const BUCKETS: Record<Bucket, { label: string; statuses: TaskStatus[] }> = {
   finished: { label: '已完成', statuses: ['done', 'archived'] },
 };
 
-/** Shape of a legacy CronTask row when surfaced in the Task Center. */
-interface LegacyCron {
-  kind: 'legacy-cron';
-  id: string;
-  name: string;
-  status: 'running' | 'stopped';
-  /** Original CronTask — passed to LegacyCronOverlay for read-only detail. */
-  raw: Record<string, unknown>;
-  workspacePath: string;
-  updatedAt: number;
+const VIEW_STORAGE_KEY = 'myagents:task-center:view';
+
+function loadStoredView(): TaskView {
+  if (typeof window === 'undefined') return 'card';
+  const raw = window.localStorage.getItem(VIEW_STORAGE_KEY);
+  return raw === 'list' ? 'list' : 'card';
 }
 
 export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
+  const toast = useToast();
+  const toastRef = useRef(toast);
+  useEffect(() => {
+    toastRef.current = toast;
+  }, [toast]);
+
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [legacy, setLegacy] = useState<LegacyCron[]>([]);
+  const [legacy, setLegacy] = useState<LegacyCronRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
   const [isSearchMode, setIsSearchMode] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
-  const [selectedLegacy, setSelectedLegacy] = useState<LegacyCron | null>(null);
+  const [selectedLegacy, setSelectedLegacy] = useState<LegacyCronRow | null>(null);
+  const [view, setView] = useState<TaskView>(loadStoredView);
+  // Per-id busy flag so only the affected card/row greys out during an action,
+  // instead of locking the whole panel.
+  const [pendingIds, setPendingIds] = useState<Set<string>>(() => new Set());
+
+  const updateView = useCallback((next: TaskView) => {
+    setView(next);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(VIEW_STORAGE_KEY, next);
+    }
+  }, []);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -108,6 +136,59 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       unlisten?.();
     };
   }, [reload]);
+
+  // ── Per-task action handlers. Shared by card and list views via callbacks.
+  // Each one toggles `pendingIds[id]` around the RPC so only that one card
+  // disables its buttons while the request is in flight.
+  const runAction = useCallback(
+    async (taskId: string, label: string, fn: () => Promise<unknown>) => {
+      setPendingIds((prev) => {
+        const next = new Set(prev);
+        next.add(taskId);
+        return next;
+      });
+      try {
+        await fn();
+        // SSE will trigger a reload and refresh the list in-place.
+      } catch (e) {
+        toastRef.current.error(`${label}失败：${String(e)}`);
+      } finally {
+        setPendingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(taskId);
+          return next;
+        });
+      }
+    },
+    [],
+  );
+
+  const handleRun = useCallback(
+    (task: Task) => runAction(task.id, '执行', () => taskRun(task.id)),
+    [runAction],
+  );
+  const handleStop = useCallback(
+    (task: Task) =>
+      runAction(task.id, '中止', () =>
+        taskUpdateStatus({ id: task.id, status: 'stopped', message: '用户手动中止' }),
+      ),
+    [runAction],
+  );
+  const handleRerun = useCallback(
+    (task: Task) => runAction(task.id, '重新派发', () => taskRerun(task.id)),
+    [runAction],
+  );
+  const handleDelete = useCallback(
+    (task: Task) => {
+      if (!window.confirm(`确认删除任务「${task.name}」？此操作不可恢复。`)) return;
+      void runAction(task.id, '删除', async () => {
+        await taskDelete(task.id);
+        // Optimistic removal — SSE will not fire a status-changed for delete.
+        setTasks((prev) => prev.filter((x) => x.id !== task.id));
+      });
+    },
+    [runAction],
+  );
 
   const buckets = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -174,9 +255,61 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
 
   const totalCount = tasks.length + legacy.length;
 
+  const renderCard = (c: TaskCardLike) => {
+    if (c.kind === 'task') {
+      const t = c.task;
+      return (
+        <TaskCardItem
+          key={`t-${t.id}`}
+          task={t}
+          highlighted={highlightTaskId === t.id}
+          busy={pendingIds.has(t.id)}
+          onOpen={() => setSelectedTask(t)}
+          onRun={() => handleRun(t)}
+          onStop={() => handleStop(t)}
+          onRerun={() => handleRerun(t)}
+          onDelete={() => handleDelete(t)}
+        />
+      );
+    }
+    return (
+      <TaskCardItem
+        key={`l-${c.legacy.id}`}
+        legacy={c.legacy}
+        onOpen={() => setSelectedLegacy(c.legacy)}
+      />
+    );
+  };
+
+  const renderRow = (c: TaskCardLike) => {
+    if (c.kind === 'task') {
+      const t = c.task;
+      return (
+        <TaskListRow
+          key={`t-${t.id}`}
+          task={t}
+          highlighted={highlightTaskId === t.id}
+          busy={pendingIds.has(t.id)}
+          onOpen={() => setSelectedTask(t)}
+          onRun={() => handleRun(t)}
+          onStop={() => handleStop(t)}
+          onRerun={() => handleRerun(t)}
+          onDelete={() => handleDelete(t)}
+        />
+      );
+    }
+    return (
+      <TaskListRow
+        key={`l-${c.legacy.id}`}
+        legacy={c.legacy}
+        onOpen={() => setSelectedLegacy(c.legacy)}
+      />
+    );
+  };
+
   return (
     <div className="flex h-full flex-col">
-      {/* Section header — label + search toggle (collapsed by default). */}
+      {/* Section header — label + view toggle + search toggle. */}
       {isSearchMode ? (
         <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-4 py-2">
           <div className="relative flex flex-1 items-center">
@@ -210,18 +343,21 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
               任务
             </span>
           </div>
-          <button
-            type="button"
-            onClick={() => setIsSearchMode(true)}
-            title="搜索任务"
-            className="flex h-6 w-6 items-center justify-center rounded p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-          >
-            <Search className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center gap-2">
+            <ViewToggle value={view} onChange={updateView} />
+            <button
+              type="button"
+              onClick={() => setIsSearchMode(true)}
+              title="搜索任务"
+              className="flex h-6 w-6 items-center justify-center rounded p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto px-4 py-3">
+      <div className={`flex-1 overflow-y-auto ${view === 'list' ? '' : 'px-4 py-3'}`}>
         {loading ? (
           <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]">
             加载中…
@@ -234,32 +370,21 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           (['active', 'pending', 'finished'] as Bucket[]).map((b) => {
             const rows = buckets[b];
             if (rows.length === 0) return null;
-            return (
+            return view === 'card' ? (
               <section key={b} className="mb-6">
                 <h3 className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                   {BUCKETS[b].label}（{rows.length}）
                 </h3>
-                <div className="flex flex-col gap-2">
-                  {rows.map((c) =>
-                    c.kind === 'task' ? (
-                      <TaskCard
-                        key={`t-${c.task.id}`}
-                        task={c.task}
-                        onClick={() => setSelectedTask(c.task)}
-                        highlighted={highlightTaskId === c.task.id}
-                      />
-                    ) : (
-                      <LegacyCronCard
-                        key={`l-${c.legacy.id}`}
-                        name={c.legacy.name}
-                        status={c.legacy.status}
-                        workspacePath={c.legacy.workspacePath}
-                        updatedAt={c.legacy.updatedAt}
-                        onClick={() => setSelectedLegacy(c.legacy)}
-                      />
-                    ),
-                  )}
+                <div className="grid grid-cols-2 gap-2.5">
+                  {rows.map(renderCard)}
                 </div>
+              </section>
+            ) : (
+              <section key={b} className="mb-4">
+                <h3 className="mb-1 px-3 pt-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+                  {BUCKETS[b].label}（{rows.length}）
+                </h3>
+                <div>{rows.map(renderRow)}</div>
               </section>
             );
           })
@@ -291,8 +416,6 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           legacy={selectedLegacy.raw}
           onClose={() => setSelectedLegacy(null)}
           onChanged={() => {
-            // After user operated on the legacy cron (stop/start/delete in the
-            // overlay's read-only surface), refetch so the list matches disk.
             void reload();
           }}
         />
@@ -307,7 +430,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
  * the Tauri environment isn't ready or the CLI round-trip fails — we don't
  * want a transient error to blank out the whole task list.
  */
-async function fetchLegacyCronTasks(): Promise<LegacyCron[]> {
+async function fetchLegacyCronTasks(): Promise<LegacyCronRow[]> {
   if (!taskCenterAvailable()) return [];
   try {
     const { invoke } = await import('@tauri-apps/api/core');
@@ -316,7 +439,7 @@ async function fetchLegacyCronTasks(): Promise<LegacyCron[]> {
     )) as Array<Record<string, unknown>>;
     return all
       .filter((t) => !t.taskId && !t.task_id)
-      .map<LegacyCron>((t) => {
+      .map<LegacyCronRow>((t) => {
         const status = (t.status as string | undefined) === 'running' ? 'running' : 'stopped';
         const updatedAt =
           typeof t.updatedAt === 'string'
@@ -325,7 +448,6 @@ async function fetchLegacyCronTasks(): Promise<LegacyCron[]> {
               ? Date.parse(t.createdAt)
               : 0;
         return {
-          kind: 'legacy-cron',
           id: String(t.id ?? ''),
           name: String(t.name ?? t.prompt ?? '未命名定时任务').slice(0, 80),
           status,
