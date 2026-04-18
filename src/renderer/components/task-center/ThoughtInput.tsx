@@ -55,7 +55,11 @@ export function ThoughtInput({
   const [tagIndex, setTagIndex] = useState(0);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const overlayRef = useRef<HTMLDivElement>(null);
+  const overlayInnerRef = useRef<HTMLDivElement>(null);
+  // Pending caret position — consumed by the useLayoutEffect below after
+  // React commits the new value, so `setSelectionRange` runs against the
+  // up-to-date DOM instead of racing with rAF.
+  const pendingCaretRef = useRef<number | null>(null);
 
   const segments = useMemo(() => splitWithTagHighlights(value), [value]);
 
@@ -74,17 +78,33 @@ export function ThoughtInput({
     setTagIndex(0);
   }, [tagMenu?.query, tagMenu?.anchor]);
 
+  // The overlay wrapper is `overflow: hidden` (to clip past the textarea
+  // bounds), so setting `scrollTop` on it would no-op. Instead we translate
+  // the inner content upward by the textarea's scrollTop — produces the
+  // same visual scroll without needing a scrollable overlay container.
   const syncScroll = useCallback(() => {
     const ta = textareaRef.current;
-    const ov = overlayRef.current;
-    if (!ta || !ov) return;
-    ov.scrollTop = ta.scrollTop;
-    ov.scrollLeft = ta.scrollLeft;
+    const inner = overlayInnerRef.current;
+    if (!ta || !inner) return;
+    inner.style.transform = `translateY(${-ta.scrollTop}px)`;
   }, []);
 
   useLayoutEffect(() => {
     syncScroll();
   }, [value, syncScroll]);
+
+  // Consume any pending caret position after React flushes `setValue` to
+  // the DOM — safer than `requestAnimationFrame`, which can run before
+  // the commit.
+  useLayoutEffect(() => {
+    const pos = pendingCaretRef.current;
+    if (pos === null) return;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    ta.setSelectionRange(pos, pos);
+    ta.focus();
+    pendingCaretRef.current = null;
+  }, [value]);
 
   const recomputeTagMenu = useCallback((nextValue: string, cursor: number) => {
     setTagMenu(findActiveTagContext(nextValue, cursor));
@@ -107,8 +127,7 @@ export function ThoughtInput({
 
   const insertTag = useCallback(
     (tag: string) => {
-      const ta = textareaRef.current;
-      if (!ta || !tagMenu) return;
+      if (!tagMenu) return;
       const { anchor } = tagMenu;
       // Replace the WHOLE tag body at the anchor — including any chars
       // after the caret that are still valid tag chars — so picking a
@@ -119,13 +138,9 @@ export function ThoughtInput({
       const after = value.slice(bodyEnd);
       const insertion = `#${tag} `;
       const next = before + insertion + after;
+      pendingCaretRef.current = before.length + insertion.length;
       setValue(next);
       setTagMenu(null);
-      requestAnimationFrame(() => {
-        const pos = before.length + insertion.length;
-        ta.setSelectionRange(pos, pos);
-        ta.focus();
-      });
     },
     [tagMenu, value],
   );
@@ -141,13 +156,10 @@ export function ThoughtInput({
     const needsSpace = start > 0 && start === end && !isBoundaryChar(prev);
     const insertion = needsSpace ? ' #' : '#';
     const next = value.slice(0, start) + insertion + value.slice(end);
+    const newPos = start + insertion.length;
+    pendingCaretRef.current = newPos;
     setValue(next);
-    requestAnimationFrame(() => {
-      const newPos = start + insertion.length;
-      ta.setSelectionRange(newPos, newPos);
-      ta.focus();
-      recomputeTagMenu(next, newPos);
-    });
+    recomputeTagMenu(next, newPos);
   }, [recomputeTagMenu, value]);
 
   const handleSubmit = useCallback(async () => {
@@ -214,29 +226,39 @@ export function ThoughtInput({
             spans sit under the same glyphs the user is typing.
             `pointer-events: none` keeps clicks reaching the textarea. */}
         <div className="relative">
+          {/* Overlay clip box — matches textarea bounds (absolute inset-0)
+              and hides anything past its edges. The actual text lives in
+              an inner `overlayInnerRef` div that gets `translateY(-scrollTop)`
+              applied whenever the textarea scrolls, so highlighted spans
+              track the real text when the thought is long. */}
           <div
-            ref={overlayRef}
             aria-hidden
-            className="pointer-events-none absolute inset-0 overflow-hidden px-3 pt-3 text-[13px] leading-relaxed text-[var(--ink)]"
-            style={{
-              fontFamily: 'inherit',
-              whiteSpace: 'pre-wrap',
-              overflowWrap: 'break-word',
-            }}
+            className="pointer-events-none absolute inset-0 overflow-hidden"
           >
-            {segments.map((seg, i) =>
-              seg.type === 'tag' ? (
-                <span
-                  key={i}
-                  className="rounded-[3px] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
-                >
-                  {seg.value}
-                </span>
-              ) : (
-                <span key={i}>{seg.value}</span>
-              ),
-            )}
-            {value.endsWith('\n') && '\u200b'}
+            <div
+              ref={overlayInnerRef}
+              className="px-3 pt-3 text-[13px] leading-relaxed text-[var(--ink)]"
+              style={{
+                fontFamily: 'inherit',
+                whiteSpace: 'pre-wrap',
+                overflowWrap: 'break-word',
+                willChange: 'transform',
+              }}
+            >
+              {segments.map((seg, i) =>
+                seg.type === 'tag' ? (
+                  <span
+                    key={i}
+                    className="rounded-[3px] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
+                  >
+                    {seg.value}
+                  </span>
+                ) : (
+                  <span key={i}>{seg.value}</span>
+                ),
+              )}
+              {value.endsWith('\n') && '\u200b'}
+            </div>
           </div>
           <textarea
             ref={textareaRef}

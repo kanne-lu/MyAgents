@@ -54,10 +54,14 @@ export function ThoughtCard({
   const [expanded, setExpanded] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  // Auto-flip: when the menu would clip past the viewport bottom we drop
+  // it above the anchor button instead of below.
+  const [menuDropUp, setMenuDropUp] = useState(false);
 
   const viewRef = useRef<HTMLDivElement>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuAnchorRef = useRef<HTMLButtonElement>(null);
 
   // Overflow detection — measure only in collapsed state so flipping to
   // expanded doesn't reset the flag (clientHeight would grow to match).
@@ -96,6 +100,27 @@ export function ThoughtCard({
       document.removeEventListener('mousedown', clickHandler);
       document.removeEventListener('keydown', keyHandler);
     };
+  }, [showMenu]);
+
+  // Flip the menu above its anchor when there isn't room below — the
+  // card lives in a scrollable list, so the last card's default
+  // `top-full` menu would otherwise be clipped.
+  useLayoutEffect(() => {
+    if (!showMenu) {
+      setMenuDropUp(false);
+      return;
+    }
+    const btn = menuAnchorRef.current;
+    if (!btn) return;
+    const MENU_ESTIMATED_HEIGHT = 72; // 2 rows × ~34 px + padding
+    const rect = btn.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    // Prefer "below" when it fits; flip up only if below is tight AND
+    // above has more room.
+    setMenuDropUp(
+      spaceBelow < MENU_ESTIMATED_HEIGHT && spaceAbove > spaceBelow,
+    );
   }, [showMenu]);
 
   const handleSave = useCallback(async () => {
@@ -269,6 +294,7 @@ export function ThoughtCard({
                   one-click-adjacent to the primary 派发 affordance. */}
               <div className="relative" ref={menuRef}>
                 <button
+                  ref={menuAnchorRef}
                   type="button"
                   onClick={() => setShowMenu((v) => !v)}
                   disabled={busy}
@@ -278,7 +304,11 @@ export function ThoughtCard({
                   <MoreHorizontal className="h-3.5 w-3.5" />
                 </button>
                 {showMenu && (
-                  <div className="absolute right-0 top-full z-10 mt-1 min-w-[120px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md">
+                  <div
+                    className={`absolute right-0 z-10 min-w-[120px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md ${
+                      menuDropUp ? 'bottom-full mb-1' : 'top-full mt-1'
+                    }`}
+                  >
                     <button
                       type="button"
                       onClick={() => {
