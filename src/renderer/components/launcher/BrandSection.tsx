@@ -9,13 +9,16 @@
  * Chat launch flow. Switching back to 「任务」 restores the default behavior.
  */
 
-import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import SimpleChatInput, { type ImageAttachment } from '@/components/SimpleChatInput';
 import WorkspaceSelector from './WorkspaceSelector';
 import ModeSegment, { type InputMode } from '@/components/task-center/ModeSegment';
+import RecentThoughtsRow from '@/components/task-center/RecentThoughtsRow';
 import { useToast } from '@/components/Toast';
 import { thoughtCreate, taskCenterAvailable } from '@/api/taskCenter';
+import { hasOverlayLayer } from '@/utils/closeLayer';
+import { CUSTOM_EVENTS } from '@/../shared/constants';
 import { type Project, type Provider, type PermissionMode, type ProviderVerifyStatus } from '@/config/types';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../../shared/types/runtime';
 
@@ -81,41 +84,91 @@ export default memo(function BrandSection({
     runtimePermissionModes,
 }: BrandSectionProps) {
     const toast = useToast();
+    // Project convention: keep `toast` behind a ref so it stays out of
+    // useCallback dep arrays and doesn't re-trigger memoization (see
+    // specs/tech_docs/react_stability_rules.md). Updated via effect to
+    // satisfy the `react-hooks/refs` no-mutate-during-render rule.
+    const toastRef = useRef(toast);
+    useEffect(() => {
+        toastRef.current = toast;
+    }, [toast]);
     const [mode, setMode] = useState<InputMode>('task');
+    // Bumped after each successful thoughtCreate so the Recent Thoughts strip
+    // re-fetches and the just-saved note slides in as the first chip.
+    const [thoughtRefreshKey, setThoughtRefreshKey] = useState(0);
     // Gracefully degrade in browser dev mode — ModeSegment is Tauri-only.
     const modeSegmentEnabled = taskCenterAvailable();
 
     const handleSend = useCallback(
         async (text: string, images?: ImageAttachment[]) => {
             if (mode === 'thought' && modeSegmentEnabled) {
-                // Thought mode: persist to ~/.myagents/thoughts/ and drop back
-                // to the input without launching a chat / workspace.
+                // Thought mode: persist to ~/.myagents/thoughts/; stay in
+                // 想法 mode so the just-saved note appears in
+                // RecentThoughtsRow and the user can keep jotting.
                 try {
                     await thoughtCreate({ content: text });
-                    toast.success('想法已记录，可在任务中心查看');
-                    // PRD §4.4: after save, clear input, keep focus, auto-revert
-                    // to 「任务」 so the next press is a normal launch.
-                    setMode('task');
-                    return true; // tell SimpleChatInput to clear the textarea
+                    toastRef.current.success('想法已记录，可在任务中心查看');
+                    setThoughtRefreshKey((k) => k + 1);
+                    return true;
                 } catch (e) {
-                    toast.error(`保存想法失败：${e}`);
+                    toastRef.current.error(`保存想法失败：${e}`);
                     return false;
                 }
             }
             onSend(text, images);
-            return undefined; // SimpleChatInput expects boolean | void
+            return undefined;
         },
-        [mode, modeSegmentEnabled, onSend, toast],
+        [mode, modeSegmentEnabled, onSend],
     );
 
-    // PRD §4.1.1 hotkey: Cmd/Ctrl+Shift+T toggles task ↔ thought.
+    const openTaskCenter = useCallback(() => {
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER));
+    }, []);
+
+    // Scoping ref for the Tab handler below — we only hijack Tab when the
+    // focus is inside this Launcher subtree, so Chat tabs / settings /
+    // modals keep their native focus navigation.
+    const sectionRef = useRef<HTMLElement | null>(null);
+
+    // PRD §4.1.1 hotkeys:
+    //   • Cmd/Ctrl+Shift+T toggles mode globally while the Launcher is
+    //     mounted — an explicit chord, safe to listen on `window`.
+    //   • Plain Tab also toggles, but only when (a) no editable target
+    //     has focus, (b) no overlay is open (Cmd+W stack), and (c) focus
+    //     is inside the Launcher subtree or on `<body>`. These guards
+    //     keep Tab's default focus-nav semantics everywhere else.
     useEffect(() => {
         if (!modeSegmentEnabled) return;
+        const isEditableTarget = (t: EventTarget | null): boolean => {
+            if (!(t instanceof HTMLElement)) return false;
+            if (t.isContentEditable) return true;
+            const tag = t.tagName;
+            return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+        };
         const handler = (e: KeyboardEvent) => {
             if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'T' || e.key === 't')) {
                 e.preventDefault();
                 setMode((m) => (m === 'task' ? 'thought' : 'task'));
+                return;
             }
+            if (
+                e.key !== 'Tab' ||
+                e.metaKey ||
+                e.ctrlKey ||
+                e.altKey ||
+                e.shiftKey ||
+                isEditableTarget(e.target) ||
+                hasOverlayLayer()
+            ) {
+                return;
+            }
+            const section = sectionRef.current;
+            const target = e.target as Node | null;
+            const inScope =
+                !target || target === document.body || (section?.contains(target) ?? false);
+            if (!inScope) return;
+            e.preventDefault();
+            setMode((m) => (m === 'task' ? 'thought' : 'task'));
         };
         window.addEventListener('keydown', handler);
         return () => window.removeEventListener('keydown', handler);
@@ -134,7 +187,7 @@ export default memo(function BrandSection({
     }, [providers, apiKeys, providerVerifyStatus]);
 
     return (
-        <section className="flex flex-1 flex-col items-center px-12">
+        <section ref={sectionRef} className="flex flex-1 flex-col items-center px-12">
             {/* Upper area: Brand Name + Slogans */}
             <div className="flex flex-1 flex-col items-center justify-center">
                 <h1 className="brand-title mb-5 text-[2.5rem] text-[var(--ink)] md:text-[3.5rem]">
@@ -145,14 +198,25 @@ export default memo(function BrandSection({
                 </p>
             </div>
 
-            {/* Mode declaration: 任务 / 想法 (see DESIGN.md §6.8, PRD §4.1) */}
+            {/* Mode declaration: 任务 / 想法 (see DESIGN.md §6.8, PRD §4.1).
+                `tabSwitchHint` surfaces the Tab-toggle shortcut as a hover
+                tooltip, matching the global handler installed above. */}
             {modeSegmentEnabled && (
                 <div className="mt-3 mb-4">
-                    <ModeSegment value={mode} onChange={setMode} size="launcher" />
+                    <ModeSegment
+                        value={mode}
+                        onChange={setMode}
+                        size="launcher"
+                        tabSwitchHint
+                    />
                 </div>
             )}
 
-            {/* Lower area: Input box with workspace selector in toolbar */}
+            {/* Lower area: Input box with workspace selector in toolbar.
+                When 「想法」 mode is active, a compact Recent Thoughts strip is
+                absolute-positioned below the input so it hangs in the existing
+                `pb-[12vh]` bottom space without shifting the brand/input
+                vertically (PRD §4.2). */}
             <div className="w-full max-w-[640px] pb-[12vh]">
                 <div className="relative w-full">
                     <SimpleChatInput
@@ -187,6 +251,14 @@ export default memo(function BrandSection({
                             />
                         }
                     />
+                    {mode === 'thought' && modeSegmentEnabled && (
+                        <div className="absolute left-0 right-0 top-full mt-3">
+                            <RecentThoughtsRow
+                                refreshKey={thoughtRefreshKey}
+                                onOpenTaskCenter={openTaskCenter}
+                            />
+                        </div>
+                    )}
                 </div>
                 {!hasAnyProvider && (
                     <p className="mt-6 text-center text-[13px] text-[var(--ink-muted)]">

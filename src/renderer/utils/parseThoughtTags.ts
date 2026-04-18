@@ -11,7 +11,7 @@
 // `，`; our `splitWithTagHighlights` below does the same.
 
 /** Characters that may appear inside a tag body. Mirrors `is_tag_char` in Rust. */
-function isTagChar(ch: string): boolean {
+export function isTagChar(ch: string): boolean {
   const code = ch.codePointAt(0) ?? 0;
   // ASCII alphanumeric / `_` / `-`
   if (
@@ -48,9 +48,67 @@ const BOUNDARY_PUNCT = new Set([
   '【',
 ]);
 
-function isBoundaryChar(ch: string): boolean {
+export function isBoundaryChar(ch: string): boolean {
   if (/\s/.test(ch)) return true;
   return BOUNDARY_PUNCT.has(ch);
+}
+
+/**
+ * Given `value` + a cursor position (UTF-16 code unit offset), find the active
+ * `#…` hashtag context at the cursor, if any. Returns `{ anchor, query }`
+ * where `anchor` is the index of the `#` and `query` is the tag body between
+ * `#` and `cursor`. Used by input widgets (autocomplete dropdown).
+ *
+ * Walks backward from the cursor in codepoint-aware form so emoji / astral
+ * plane chars preceding the `#` are recognised as boundary characters.
+ */
+export function findActiveTagContext(
+  value: string,
+  cursor: number,
+): { anchor: number; query: string } | null {
+  // Build a codepoint array of the prefix up to the cursor so indexing is
+  // codepoint-safe. `anchor` must be returned as a UTF-16 offset (consumers
+  // slice the original string), so we track both.
+  const prefix = value.slice(0, cursor);
+  const cps = [...prefix];
+  for (let i = cps.length - 1; i >= 0; i--) {
+    const ch = cps[i];
+    if (ch === '#') {
+      const prev = i === 0 ? '' : cps[i - 1];
+      if (i === 0 || isBoundaryChar(prev)) {
+        const bodyCps = cps.slice(i + 1);
+        if (bodyCps.length === 0 || bodyCps.every(isTagChar)) {
+          // Convert codepoint index back to UTF-16 offset.
+          const utf16Anchor = cps.slice(0, i).join('').length;
+          return { anchor: utf16Anchor, query: bodyCps.join('') };
+        }
+      }
+      return null;
+    }
+    if (/\s/.test(ch)) return null;
+  }
+  return null;
+}
+
+/**
+ * Given `value` and a UTF-16 offset pointing at a `#`, scan forward and
+ * return the UTF-16 offset just past the tag body (first non-tag-char).
+ * Used when a user picks an autocomplete entry while the caret is inside
+ * an existing tag — the full body (including what's after the caret)
+ * should be replaced.
+ */
+export function tagBodyEndOffset(value: string, hashIndex: number): number {
+  // Walk codepoints from just after `#` until a non-tag-char is hit.
+  let cursor = hashIndex + 1;
+  while (cursor < value.length) {
+    // Handle potential surrogate pair at `cursor`.
+    const code = value.charCodeAt(cursor);
+    const isHighSurrogate = code >= 0xd800 && code <= 0xdbff;
+    const ch = isHighSurrogate ? value.slice(cursor, cursor + 2) : value[cursor];
+    if (!isTagChar(ch)) break;
+    cursor += isHighSurrogate ? 2 : 1;
+  }
+  return cursor;
 }
 
 export interface TagSegment {

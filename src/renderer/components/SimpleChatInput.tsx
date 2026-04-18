@@ -17,7 +17,7 @@ import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 import { isProviderAvailable } from '@/config/configService';
 import RuntimeSelector from '@/components/RuntimeSelector';
-import { thoughtCreate, taskCenterAvailable } from '@/api/taskCenter';
+import { taskCenterAvailable } from '@/api/taskCenter';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // ===== Module-level pure helpers (extracted from render body) =====
@@ -50,9 +50,9 @@ interface SimpleChatInputProps {
   /**
    * When `true`, the input is rendered as a minimal **note-taking box** instead
    * of a chat-send box (PRD §4.2): toolbar hidden, placeholder swapped to the
-   * thought-mode copy, Enter stores the text as a Thought via `thoughtCreate`
-   * instead of firing `onSend`. Controlled by the parent (Launcher passes this
-   * based on its own ModeSegment state).
+   * thought-mode copy. Submission still goes through `onSend`; the parent
+   * (Launcher BrandSection) decides whether to persist as a Thought or
+   * launch a Chat, and signals "saved" by returning `true` from `onSend`.
    */
   thoughtMode?: boolean;
   /**
@@ -981,24 +981,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     sendingRef.current = true;
 
     try {
-      // PRD §4.2 — thought mode persists via `cmd_thought_create` instead of
-      // going up through `onSend`. Caller (Launcher BrandSection) owns mode
-      // toggling; the auto-revert to 任务 happens parent-side via the
-      // `onSend` boolean-return protocol (`return true` here signals "saved
-      // cleanly, clear textarea + revert"). Silent fallthrough to onSend when
-      // Tauri isn't available (browser dev mode).
-      if (thoughtModeActive && text) {
-        try {
-          await thoughtCreate({ content: text });
-          toast.success('想法已记录，可在任务中心查看');
-          setInputValue('');
-          setImages([]);
-        } catch (e) {
-          toast.error(`保存想法失败：${e}`);
-        }
-        return;
-      }
-
+      // Delegate thought-mode persistence to the caller (Launcher
+      // BrandSection owns `thoughtCreate` + refresh-key bump). The
+      // boolean-return protocol (`return true` = saved, clear textarea)
+      // lets the parent signal when to reset input state here.
       const result = onSend(text, images.length > 0 ? images : undefined);
       // If onSend returns a promise, await it; if sync, use directly
       const accepted = result instanceof Promise ? await result : result;
@@ -1010,7 +996,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     } finally {
       sendingRef.current = false;
     }
-  }, [onSend, images, inputValue, thoughtModeActive, toast]);
+  }, [onSend, images, inputValue]);
 
   // Handle keyboard navigation in file search and slash menu
   const handleKeyDown = useCallback(async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1273,12 +1259,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     ? '今天，想干点啥？'
                     : '输入消息，使用 @ 引用文件，/ 使用技能...'
               }
-              rows={thoughtModeActive ? 4 : 2}
+              rows={2}
               className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
               style={{
-                minHeight: `${LINE_HEIGHT * (thoughtModeActive ? 4 : 2)}px`,
+                minHeight: `${LINE_HEIGHT * 2}px`,
                 maxHeight: `${LINE_HEIGHT * (isExpanded ? MAX_LINES_EXPANDED : MAX_LINES_COLLAPSED)}px`,
-                overflowY: 'auto'
+                overflowY: 'auto',
+                // Explicit property list + `height` so collapse animates
+                // symmetrically to expand (WebKit textareas sometimes drop the
+                // transition on shrink when only `max-height` is listed).
+                transitionProperty: 'max-height, height, min-height',
+                transitionDuration: '220ms',
+                transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
+                willChange: 'max-height',
               }}
             />
 
@@ -1353,8 +1346,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               In thought mode (PRD §4.2) the left-side action strip collapses so
               the input reads as a pure note-taking box; the right-side send
               button remains so users can commit the thought with a click. */}
-          <div className="toolbar-menus flex items-center justify-between px-3 pb-2 pt-1 flex-nowrap min-w-0" style={{ containerType: 'inline-size' }}>
-            {/* Left side - action buttons (hidden in thought mode). */}
+          <div className="toolbar-menus flex items-center px-3 pb-2 pt-1 flex-nowrap min-w-0" style={{ containerType: 'inline-size' }}>
+            {/* Left side - action buttons (hidden in thought mode). Uses
+                `ml-auto` on the right group instead of `justify-between` so
+                the send button stays right-aligned even when the left strip
+                is removed from the flex flow. */}
             <div
               className="flex items-center gap-1 min-w-0 flex-nowrap"
               style={thoughtModeActive ? { display: 'none' } : undefined}
@@ -1654,9 +1650,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             </div>
 
             {/* Right side - model selector + send/stop button */}
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="ml-auto flex items-center gap-2 shrink-0">
               {/* v0.1.69: Unlocked indicator for legacy pre-snapshot sessions */}
-              {sessionUnlocked && (
+              {sessionUnlocked && !thoughtModeActive && (
                 <span
                   className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)]/60"
                   title="该 session 未锁定，跟随 agent 默认（修改 agent 会影响此会话）"
@@ -1664,8 +1660,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <Unlock className="h-3 w-3" />
                 </span>
               )}
-              {/* Model Dropdown with Provider Selector */}
-              <div className="relative">
+              {/* Model Dropdown with Provider Selector — hidden in thought mode
+                  (PRD §4.2: thought input is a note box, not an AI chat input). */}
+              <div
+                className="relative"
+                style={thoughtModeActive ? { display: 'none' } : undefined}
+              >
                 <button
                   type="button"
                   onClick={(e) => {

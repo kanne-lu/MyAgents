@@ -1,30 +1,154 @@
 // ThoughtInput — compact freeform note input for Thought mode.
 // Writes through to ~/.myagents/thoughts/ via `cmd_thought_create`.
 //
-// Visual structure mirrors SimpleChatInput so behavior is consistent across
-// product surfaces: textarea on top, toolbar row at the bottom with a left
-// slot (reserved for future attachment affordances — PRD §6.4 image attach)
-// and a right-aligned send button. All inside the same bordered container.
+// flomo-style inline tag editor: `#word ` as you type → `#word` renders
+// highlighted inline; typing `#` (or clicking the # toolbar button) opens
+// a tag picker filtered by the partial tag; Enter / Tab / click picks.
+//
+// Implementation: a transparent <textarea> layered on top of a mirror
+// <div> that renders the same text with `#tag` runs coloured via
+// `splitWithTagHighlights` (the shared parser with Rust + ThoughtCard, so
+// highlight ≡ server-extracted `thought.tags[]`).
 
-import { useCallback, useState } from 'react';
-import { Paperclip, Send } from 'lucide-react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import { Hash, Send } from 'lucide-react';
 import { thoughtCreate } from '@/api/taskCenter';
+import {
+  findActiveTagContext,
+  isBoundaryChar,
+  splitWithTagHighlights,
+  tagBodyEndOffset,
+} from '@/utils/parseThoughtTags';
 import type { Thought } from '@/../shared/types/thought';
 
 interface Props {
   onCreated?: (t: Thought) => void;
   placeholder?: string;
   autoFocus?: boolean;
+  /**
+   * Existing tags sorted by frequency. Populates the `#` autocomplete menu.
+   * Parent (ThoughtPanel) already aggregates this from `thoughts[].tags`; we
+   * accept it as a prop so there's one source of truth.
+   */
+  existingTags?: Array<[string, number]>;
 }
 
 export function ThoughtInput({
   onCreated,
   placeholder = '此刻有什么想法？',
   autoFocus = false,
+  existingTags = [],
 }: Props) {
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Tag autocomplete state.
+  const [tagMenu, setTagMenu] = useState<{ anchor: number; query: string } | null>(null);
+  const [tagIndex, setTagIndex] = useState(0);
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  const segments = useMemo(() => splitWithTagHighlights(value), [value]);
+
+  // Substring (not prefix) match — flomo behaviour; typing "ag" finds
+  // "myagents", "tags", etc. Capped at 8 rows.
+  const filteredTags = useMemo(() => {
+    if (!tagMenu) return [];
+    const q = tagMenu.query.toLowerCase();
+    const list = q
+      ? existingTags.filter(([t]) => t.toLowerCase().includes(q))
+      : existingTags;
+    return list.slice(0, 8);
+  }, [existingTags, tagMenu]);
+
+  useEffect(() => {
+    setTagIndex(0);
+  }, [tagMenu?.query, tagMenu?.anchor]);
+
+  const syncScroll = useCallback(() => {
+    const ta = textareaRef.current;
+    const ov = overlayRef.current;
+    if (!ta || !ov) return;
+    ov.scrollTop = ta.scrollTop;
+    ov.scrollLeft = ta.scrollLeft;
+  }, []);
+
+  useLayoutEffect(() => {
+    syncScroll();
+  }, [value, syncScroll]);
+
+  const recomputeTagMenu = useCallback((nextValue: string, cursor: number) => {
+    setTagMenu(findActiveTagContext(nextValue, cursor));
+  }, []);
+
+  const handleChange = useCallback(
+    (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      const next = e.target.value;
+      setValue(next);
+      recomputeTagMenu(next, e.target.selectionStart ?? next.length);
+    },
+    [recomputeTagMenu],
+  );
+
+  const handleSelect = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    recomputeTagMenu(ta.value, ta.selectionStart ?? ta.value.length);
+  }, [recomputeTagMenu]);
+
+  const insertTag = useCallback(
+    (tag: string) => {
+      const ta = textareaRef.current;
+      if (!ta || !tagMenu) return;
+      const { anchor } = tagMenu;
+      // Replace the WHOLE tag body at the anchor — including any chars
+      // after the caret that are still valid tag chars — so picking a
+      // suggestion while the cursor is mid-word doesn't orphan the tail
+      // (e.g. caret in `#abc|def` + pick `#abc` no longer leaves `def`).
+      const bodyEnd = tagBodyEndOffset(value, anchor);
+      const before = value.slice(0, anchor);
+      const after = value.slice(bodyEnd);
+      const insertion = `#${tag} `;
+      const next = before + insertion + after;
+      setValue(next);
+      setTagMenu(null);
+      requestAnimationFrame(() => {
+        const pos = before.length + insertion.length;
+        ta.setSelectionRange(pos, pos);
+        ta.focus();
+      });
+    },
+    [tagMenu, value],
+  );
+
+  const handleHashButton = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    // Replace any active selection — matches standard form-input
+    // semantics when a new character is inserted.
+    const start = ta.selectionStart ?? value.length;
+    const end = ta.selectionEnd ?? start;
+    const prev = start === 0 ? '' : value[start - 1];
+    const needsSpace = start > 0 && start === end && !isBoundaryChar(prev);
+    const insertion = needsSpace ? ' #' : '#';
+    const next = value.slice(0, start) + insertion + value.slice(end);
+    setValue(next);
+    requestAnimationFrame(() => {
+      const newPos = start + insertion.length;
+      ta.setSelectionRange(newPos, newPos);
+      ta.focus();
+      recomputeTagMenu(next, newPos);
+    });
+  }, [recomputeTagMenu, value]);
 
   const handleSubmit = useCallback(async () => {
     const content = value.trim();
@@ -34,6 +158,7 @@ export function ThoughtInput({
     try {
       const t = await thoughtCreate({ content });
       setValue('');
+      setTagMenu(null);
       onCreated?.(t);
     } catch (e) {
       setError(String(e));
@@ -44,46 +169,136 @@ export function ThoughtInput({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // Skip all custom key handling during IME composition — otherwise
+      // pressing Enter to commit a pinyin candidate would instead pick a
+      // tag suggestion (or submit).
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+
+      if (tagMenu && filteredTags.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setTagIndex((i) => Math.min(filteredTags.length - 1, i + 1));
+          return;
+        }
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setTagIndex((i) => Math.max(0, i - 1));
+          return;
+        }
+        if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          insertTag(filteredTags[tagIndex][0]);
+          return;
+        }
+      }
+      if (tagMenu && e.key === 'Escape') {
+        e.preventDefault();
+        setTagMenu(null);
+        return;
+      }
       if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         void handleSubmit();
       }
     },
-    [handleSubmit],
+    [tagMenu, filteredTags, tagIndex, insertTag, handleSubmit],
   );
 
   const canSend = value.trim().length > 0 && !busy;
 
   return (
     <div className="w-full">
-      {/* Container mirrors SimpleChatInput — textarea stacked over a toolbar
-          row. Tap focus is captured on the container border so clicking
-          anywhere in the card focuses the textarea. */}
-      <div className="flex flex-col rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors focus-within:border-[var(--line-strong)]">
-        <textarea
-          value={value}
-          onChange={(e) => setValue(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={placeholder}
-          rows={3}
-          disabled={busy}
-          autoFocus={autoFocus}
-          className="w-full resize-none bg-transparent px-3 pt-3 text-[13px] leading-relaxed text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
-        />
+      <div className="relative flex flex-col rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors focus-within:border-[var(--line-strong)]">
+        {/* Mirror layer: same text as the textarea but with coloured `#tag`
+            runs. Must match the textarea's font metrics so the highlighted
+            spans sit under the same glyphs the user is typing.
+            `pointer-events: none` keeps clicks reaching the textarea. */}
+        <div className="relative">
+          <div
+            ref={overlayRef}
+            aria-hidden
+            className="pointer-events-none absolute inset-0 overflow-hidden px-3 pt-3 text-[13px] leading-relaxed text-[var(--ink)]"
+            style={{
+              fontFamily: 'inherit',
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'break-word',
+            }}
+          >
+            {segments.map((seg, i) =>
+              seg.type === 'tag' ? (
+                <span
+                  key={i}
+                  className="rounded-[3px] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
+                >
+                  {seg.value}
+                </span>
+              ) : (
+                <span key={i}>{seg.value}</span>
+              ),
+            )}
+            {value.endsWith('\n') && '\u200b'}
+          </div>
+          <textarea
+            ref={textareaRef}
+            value={value}
+            onChange={handleChange}
+            onSelect={handleSelect}
+            onClick={handleSelect}
+            onKeyDown={handleKeyDown}
+            onScroll={syncScroll}
+            placeholder={placeholder}
+            rows={3}
+            disabled={busy}
+            autoFocus={autoFocus}
+            className="relative w-full resize-none bg-transparent px-3 pt-3 text-[13px] leading-relaxed text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
+            style={{
+              fontFamily: 'inherit',
+              WebkitTextFillColor: 'transparent',
+              overflowWrap: 'break-word',
+            }}
+          />
+        </div>
+
+        {tagMenu && filteredTags.length > 0 && (
+          <div className="absolute left-2 top-full z-20 mt-1 w-56 overflow-hidden rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md">
+            <div className="px-3 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+              {tagMenu.query ? `匹配 #${tagMenu.query}` : '选择标签'}
+            </div>
+            {filteredTags.map(([tag, n], i) => (
+              <button
+                key={tag}
+                type="button"
+                onMouseDown={(e) => {
+                  // Prevent textarea blur so the selection state survives.
+                  e.preventDefault();
+                  insertTag(tag);
+                }}
+                onMouseEnter={() => setTagIndex(i)}
+                className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition-colors ${
+                  i === tagIndex
+                    ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
+                    : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
+                }`}
+              >
+                <span>#{tag}</span>
+                <span className="text-[10px] text-[var(--ink-muted)]/60">{n}</span>
+              </button>
+            ))}
+          </div>
+        )}
+
         <div className="flex items-center justify-between px-2 pb-2 pt-1">
-          {/* Left slot — future attachments, tag quick-pick, etc. Disabled
-              placeholder keeps the visual alignment with SimpleChatInput. */}
           <div className="flex items-center gap-1">
             <button
               type="button"
-              disabled
-              title="附件（即将推出）"
-              className="rounded-lg p-1.5 text-[var(--ink-muted)]/50 disabled:cursor-not-allowed"
+              onClick={handleHashButton}
+              disabled={busy}
+              title="插入 # 标签"
+              className="rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <Paperclip className="h-4 w-4" />
+              <Hash className="h-4 w-4" />
             </button>
           </div>
-          {/* Right side — send */}
           <button
             type="button"
             onClick={() => void handleSubmit()}
@@ -94,12 +309,6 @@ export function ThoughtInput({
             <Send className="h-4 w-4" />
           </button>
         </div>
-      </div>
-      <div className="mt-1.5 flex items-center justify-between text-[11px] text-[var(--ink-muted)]/70">
-        <span>
-          写下碎片想法，稍后可派发为任务 · <kbd className="font-mono">⌘</kbd>
-          <kbd className="font-mono">↵</kbd> 发送
-        </span>
       </div>
       {error && (
         <div className="mt-1.5 text-[11px] text-[var(--error)]">{error}</div>

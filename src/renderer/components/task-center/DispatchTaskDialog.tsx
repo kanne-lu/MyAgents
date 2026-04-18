@@ -26,6 +26,7 @@ import { useConfig } from '@/hooks/useConfig';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
 import { useToast } from '@/components/Toast';
 import { taskCreateDirect } from '@/api/taskCenter';
+import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
 import type { Thought } from '@/../shared/types/thought';
 import type {
   EndConditions,
@@ -454,7 +455,7 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  maxLength={120}
+                  maxLength={MAX_NAME_LEN}
                   placeholder="例如: 升级 OpenClaw lark 适配器到 v2.4"
                   className={INPUT_CLS}
                 />
@@ -829,10 +830,26 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
   );
 }
 
+// Derive a concise task name from thought body:
+//   1. take the first non-empty line
+//   2. strip `#tag` runs using the shared tag parser so title/tag extraction
+//      stay in lock-step with the Rust side (was a regex that disagreed with
+//      the server's boundary rules on mid-word `#`).
+//   3. clamp to MAX_NAME_LEN codepoints (not UTF-16 code units) so we can't
+//      slice mid-surrogate and leave a dangling high/low on emoji / astral
+//      plane chars.
+const MAX_NAME_LEN = 40;
+
 function deriveTaskName(content: string): string {
   const firstLine = content.split('\n').find((l) => l.trim().length > 0) ?? '';
-  const stripped = firstLine.replace(/#[^\s]+/g, '').trim();
-  return stripped.length > 60 ? stripped.slice(0, 57) + '…' : stripped;
+  const stripped = splitWithTagHighlights(firstLine)
+    .filter((seg) => seg.type !== 'tag')
+    .map((seg) => seg.value)
+    .join('')
+    .trim();
+  const cps = Array.from(stripped);
+  if (cps.length <= MAX_NAME_LEN) return stripped;
+  return cps.slice(0, MAX_NAME_LEN - 1).join('') + '…';
 }
 
 function extractErrorMessage(e: unknown): string {

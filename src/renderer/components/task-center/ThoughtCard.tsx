@@ -1,8 +1,28 @@
 // ThoughtCard — single thought row rendered in the left-column stream.
-// Supports inline edit, delete, and "dispatch to task" split-button entry.
+// Supports inline edit, an overflow "更多" menu for destructive actions,
+// and a "dispatch to task" split-button entry.
+//
+// Two height regimes:
+//   • View (非编辑态): long content clamps to `VIEW_CLAMP_LINES` lines and
+//     surfaces a 展开/收起 toggle. The overflow flag is measured post-render
+//     so the toggle only appears when content is actually clipped.
+//   • Edit (编辑态): textarea auto-resizes with content up to
+//     `EDIT_MAX_HEIGHT_PX`, beyond which it scrolls internally. This keeps
+//     a single oversized draft from eating the whole panel.
 
-import { useCallback, useState } from 'react';
-import { MessageSquare, Trash2, Zap } from 'lucide-react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
+import {
+  MessageSquare,
+  MoreHorizontal,
+  Trash2,
+  Zap,
+} from 'lucide-react';
 import { thoughtDelete, thoughtUpdate } from '@/api/taskCenter';
 import type { Thought } from '@/../shared/types/thought';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
@@ -17,6 +37,9 @@ interface Props {
   onTagClick?: (tag: string) => void;
 }
 
+const VIEW_CLAMP_LINES = 5;
+const EDIT_MAX_HEIGHT_PX = 224; // ~9–10 lines at 13px/1.55
+
 export function ThoughtCard({
   thought,
   onChanged,
@@ -28,10 +51,57 @@ export function ThoughtCard({
   const [draft, setDraft] = useState(thought.content);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [hasOverflow, setHasOverflow] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
+
+  const viewRef = useRef<HTMLDivElement>(null);
+  const editRef = useRef<HTMLTextAreaElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Overflow detection — measure only in collapsed state so flipping to
+  // expanded doesn't reset the flag (clientHeight would grow to match).
+  useLayoutEffect(() => {
+    if (editing || expanded) return;
+    const el = viewRef.current;
+    if (!el) return;
+    setHasOverflow(el.scrollHeight > el.clientHeight + 1);
+  }, [thought.content, editing, expanded]);
+
+  // Auto-resize the edit textarea on every draft change, bounded by
+  // EDIT_MAX_HEIGHT_PX. Beyond that the textarea scrolls internally.
+  useLayoutEffect(() => {
+    if (!editing) return;
+    const el = editRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, EDIT_MAX_HEIGHT_PX)}px`;
+  }, [draft, editing]);
+
+  // Close the kebab menu on outside click or Escape — keyboard parity
+  // with the tag autocomplete in ThoughtInput.
+  useEffect(() => {
+    if (!showMenu) return;
+    const clickHandler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setShowMenu(false);
+      }
+    };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowMenu(false);
+    };
+    document.addEventListener('mousedown', clickHandler);
+    document.addEventListener('keydown', keyHandler);
+    return () => {
+      document.removeEventListener('mousedown', clickHandler);
+      document.removeEventListener('keydown', keyHandler);
+    };
+  }, [showMenu]);
 
   const handleSave = useCallback(async () => {
     if (draft.trim() === thought.content.trim()) {
       setEditing(false);
+      setExpanded(false);
       return;
     }
     setBusy(true);
@@ -40,6 +110,10 @@ export function ThoughtCard({
       const updated = await thoughtUpdate({ id: thought.id, content: draft });
       onChanged(updated);
       setEditing(false);
+      // Return to collapsed state so the effect re-measures against the new
+      // content; otherwise `hasOverflow` can stay stale from the pre-edit
+      // body length.
+      setExpanded(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -48,6 +122,7 @@ export function ThoughtCard({
   }, [draft, thought.content, thought.id, onChanged]);
 
   const handleDelete = useCallback(async () => {
+    setShowMenu(false);
     setBusy(true);
     setError(null);
     try {
@@ -73,42 +148,65 @@ export function ThoughtCard({
     [thought.content, handleSave],
   );
 
+  const enterEdit = useCallback(() => {
+    setDraft(thought.content);
+    setEditing(true);
+    setExpanded(true); // opening edit always shows the full body
+  }, [thought.content]);
+
   const convertedCount = thought.convertedTaskIds?.length ?? 0;
 
   return (
     <div className="group rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] p-3 transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px]">
       {editing ? (
         <textarea
+          ref={editRef}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={handleEditKeyDown}
           autoFocus
-          rows={Math.max(2, draft.split('\n').length)}
-          className="w-full resize-none rounded-[var(--radius-sm)] bg-transparent text-[13px] text-[var(--ink)] focus:outline-none"
+          rows={2}
+          style={{
+            minHeight: '2.75rem',
+            maxHeight: `${EDIT_MAX_HEIGHT_PX}px`,
+            overflowY: 'auto',
+          }}
+          className="w-full resize-none rounded-[var(--radius-sm)] bg-transparent text-[13px] leading-[1.55] text-[var(--ink)] focus:outline-none"
         />
       ) : (
         <div
-          className="cursor-text whitespace-pre-wrap text-[13px] leading-[1.55] text-[var(--ink-secondary)]"
-          onDoubleClick={() => setEditing(true)}
+          ref={viewRef}
+          className="cursor-text whitespace-pre-wrap break-words text-[13px] leading-[1.55] text-[var(--ink-secondary)]"
+          style={
+            expanded
+              ? undefined
+              : {
+                  display: '-webkit-box',
+                  WebkitLineClamp: VIEW_CLAMP_LINES,
+                  WebkitBoxOrient: 'vertical',
+                  overflow: 'hidden',
+                }
+          }
+          onDoubleClick={enterEdit}
         >
           {renderWithTagHighlights(thought.content, onTagClick)}
         </div>
       )}
-      {error && (
-        <div className="mt-2 text-[11px] text-[var(--error)]">{error}</div>
+
+      {/* Expand/collapse toggle — only when the clamp actually clipped
+          content. Sits directly below the body so it feels attached to it. */}
+      {!editing && hasOverflow && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-1 text-[12px] text-[var(--accent-warm)] hover:underline"
+        >
+          {expanded ? '收起' : '展开全文'}
+        </button>
       )}
 
-      {thought.tags.length > 0 && !editing && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {thought.tags.map((t) => (
-            <span
-              key={t}
-              className="rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px] text-[var(--ink-muted)]"
-            >
-              #{t}
-            </span>
-          ))}
-        </div>
+      {error && (
+        <div className="mt-2 text-[11px] text-[var(--error)]">{error}</div>
       )}
 
       <div className="mt-2 flex items-center justify-between">
@@ -120,7 +218,7 @@ export function ThoughtCard({
             </span>
           )}
         </span>
-        <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
           {editing ? (
             <>
               <button
@@ -167,15 +265,41 @@ export function ThoughtCard({
                   派发
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => void handleDelete()}
-                disabled={busy}
-                title="删除"
-                className="rounded-[var(--radius-md)] p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--error)]"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
+              {/* More menu — houses destructive actions so they're not
+                  one-click-adjacent to the primary 派发 affordance. */}
+              <div className="relative" ref={menuRef}>
+                <button
+                  type="button"
+                  onClick={() => setShowMenu((v) => !v)}
+                  disabled={busy}
+                  title="更多操作"
+                  className="rounded-[var(--radius-md)] p-1 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                >
+                  <MoreHorizontal className="h-3.5 w-3.5" />
+                </button>
+                {showMenu && (
+                  <div className="absolute right-0 top-full z-10 mt-1 min-w-[120px] overflow-hidden rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] py-1 shadow-md">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowMenu(false);
+                        enterEdit();
+                      }}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                    >
+                      编辑
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDelete()}
+                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--error)] hover:bg-[var(--error-bg)]"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      删除
+                    </button>
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>
@@ -188,10 +312,12 @@ function renderWithTagHighlights(
   content: string,
   onTagClick?: (tag: string) => void,
 ) {
-  // Use the shared parser so the UI highlight stays in lock-step with the Rust
-  // parser (`thought.tags[]`) — previously the regex accepted mid-word `#` and
-  // any Unicode letter, causing UI/backend disagreement.
+  // Pill styling matches the ThoughtInput overlay — single source of truth
+  // for what a `#tag` looks like across authoring & display. Parser is
+  // shared with Rust (`thought.tags[]`) so highlight ≡ persisted tags.
   const parts = splitWithTagHighlights(content);
+  const pillCls =
+    'rounded-[3px] bg-[var(--accent-warm-subtle)] px-1 text-[var(--accent-warm)]';
   return parts.map((p, i) => {
     if (p.type === 'tag' && p.tag) {
       const body = p.tag;
@@ -203,12 +329,12 @@ function renderWithTagHighlights(
             e.stopPropagation();
             onTagClick(body);
           }}
-          className="cursor-pointer text-[var(--accent-cool)] transition-colors hover:text-[var(--accent-cool-hover)] hover:underline"
+          className={`${pillCls} cursor-pointer transition-colors hover:bg-[var(--accent-warm-muted)]`}
         >
           {p.value}
         </button>
       ) : (
-        <span key={i} className="text-[var(--accent-cool)]">
+        <span key={i} className={pillCls}>
           {p.value}
         </span>
       );
