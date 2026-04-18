@@ -157,6 +157,7 @@ export default memo(function BrandSection({
                 <div className="relative w-full">
                     <SimpleChatInput
                         mode="launcher"
+                        thoughtMode={mode === 'thought'}
                         onSend={handleSend}
                         isLoading={!!isStarting}
                         provider={provider}

@@ -2589,7 +2589,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             ref={chatInputRef}
             onSend={handleSendMessage}
             onStop={handleStop}
-            enableThoughtMode={true}
             active={isActive}
             isLoading={isLoading || sessionState === 'running'}
             sessionState={sessionState}

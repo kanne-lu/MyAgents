@@ -2,7 +2,6 @@
 // PRD §5 / §6.
 
 import { useCallback, useState } from 'react';
-import { Lightbulb, Layers } from 'lucide-react';
 import { ThoughtPanel } from '@/components/task-center/ThoughtPanel';
 import { TaskListPanel } from '@/components/task-center/TaskListPanel';
 import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
@@ -81,20 +80,19 @@ export default function TaskCenter({ isActive }: Props) {
         </span>
       </div>
 
-      {/* Two-column body */}
+      {/* Two-column body — each panel renders its own section header
+          (icon + label + collapsible 🔍 search toggle). */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Thought stream */}
-        <div className="flex flex-col overflow-hidden" style={{ width: '420px' }}>
-          <SectionLabel icon={<Lightbulb className="h-3.5 w-3.5" />}>
-            想法
-          </SectionLabel>
-          <div className="flex-1 overflow-hidden">
-            <ThoughtPanel
-              onDispatchThought={handleDispatch}
-              onDiscussThought={handleDiscuss}
-              refreshKey={`${refreshKey}:${isActive ? '1' : '0'}`}
-            />
-          </div>
+        <div
+          className="flex flex-col overflow-hidden"
+          style={{ width: '420px' }}
+        >
+          <ThoughtPanel
+            onDispatchThought={handleDispatch}
+            onDiscussThought={handleDiscuss}
+            refreshKey={`${refreshKey}:${isActive ? '1' : '0'}`}
+          />
         </div>
 
         {/* Divider */}
@@ -102,9 +100,6 @@ export default function TaskCenter({ isActive }: Props) {
 
         {/* Right: Task list */}
         <div className="flex flex-1 flex-col overflow-hidden">
-          <SectionLabel icon={<Layers className="h-3.5 w-3.5" />}>
-            任务
-          </SectionLabel>
           <TaskListPanel
             refreshKey={`${refreshKey}:${isActive ? '1' : '0'}`}
           />
@@ -122,19 +117,3 @@ export default function TaskCenter({ isActive }: Props) {
   );
 }
 
-function SectionLabel({
-  children,
-  icon,
-}: {
-  children: React.ReactNode;
-  icon?: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-4 py-2.5">
-      <span className="text-[var(--ink-muted)]">{icon}</span>
-      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-        {children}
-      </span>
-    </div>
-  );
-}
