@@ -180,7 +180,11 @@ export function ThoughtPanel({
                   'max-height 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease-out',
               }}
             >
-              <div className="mx-3 border-t border-[var(--line-subtle)]" />
+              {/* Hair-thin divider — inset enough that it reads as a
+                  whisper, not a cut. Uses a low-opacity `--ink-muted`
+                  directly so the line stays visibly grey even when the
+                  surrounding `--accent` border is present. */}
+              <div className="mx-8 h-px bg-[var(--ink-muted)]/15" />
               <div className="flex max-h-[220px] flex-wrap gap-1.5 overflow-y-auto p-2">
                 {allTags.map(([tag, n]) => (
                   <button
