@@ -86,7 +86,7 @@ export default function TaskCenter({ isActive }: Props) {
         {/* Left: Thought stream */}
         <div
           className="flex flex-col overflow-hidden"
-          style={{ width: '420px' }}
+          style={{ width: '480px' }}
         >
           <ThoughtPanel
             onDispatchThought={handleDispatch}
