@@ -1,7 +1,7 @@
 // TaskDetailOverlay — modal covering Task Center with full details of one Task.
 // PRD §7.3. Uses the shared OverlayBackdrop + closeLayer Cmd+W integration.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
   Bot,
@@ -69,6 +69,18 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
     return p?.agentId ?? null;
   }, [projects, task.workspacePath]);
 
+  // Guard every async setState call so a late-returning sync / refetch
+  // can't hit an already-unmounted overlay. The toast / onChanged callback
+  // paths are fine (they're called by the parent or the toast portal),
+  // but local setBusy / setSyncing / setTask need protection.
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   useCloseLayer(() => {
     onClose();
     return true;
@@ -95,8 +107,15 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
   // config. Mirrors CronTaskDetailPanel.handleSyncToAgent, but scoped to
   // `task.model` / `task.permissionMode` rather than a session snapshot
   // (Task Center does not carry a session-level snapshot).
-  const canSyncToAgent =
-    !!agentId && (!!task.model || !!task.permissionMode);
+  //
+  // Button is hidden when there's nothing meaningful to sync: auto is the
+  // Agent default, so `permissionMode === 'auto'` with no model override
+  // produces a no-op patch that only confuses the user.
+  const hasMeaningfulOverride =
+    !!task.model ||
+    (!!task.permissionMode && task.permissionMode !== 'auto');
+  const canSyncToAgent = !!agentId && hasMeaningfulOverride;
+  const isDangerousSync = task.permissionMode === 'fullAgency';
 
   const doSyncToAgent = useCallback(async () => {
     if (!agentId) return;
@@ -106,12 +125,14 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
       if (task.model) patch.model = task.model;
       if (task.permissionMode) patch.permissionMode = task.permissionMode;
       await patchAgentConfig(agentId, patch);
+      if (!isMountedRef.current) return;
       toast.success('已同步到 Agent');
       setShowSyncConfirm(false);
     } catch (e) {
+      if (!isMountedRef.current) return;
       toast.error(`同步失败:${extractErrorMessage(e)}`);
     } finally {
-      setSyncing(false);
+      if (isMountedRef.current) setSyncing(false);
     }
   }, [agentId, task.model, task.permissionMode, toast]);
 
@@ -121,7 +142,8 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
     void (async () => {
       try {
         const fresh = await taskGet(task.id);
-        if (!cancelled && fresh) setTask(fresh);
+        if (cancelled || !isMountedRef.current) return;
+        if (fresh) setTask(fresh);
       } catch {
         /* silent — use `initial` */
       }
@@ -142,9 +164,11 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
       const unlisten = await listen<{ taskId?: string }>(
         'task:status-changed',
         async (evt) => {
+          if (cancelled || !isMountedRef.current) return;
           if (evt.payload?.taskId !== task.id) return;
           try {
             const fresh = await taskGet(task.id);
+            if (cancelled || !isMountedRef.current) return;
             if (fresh) {
               setTask(fresh);
               setReloadToken((n) => n + 1);
@@ -172,12 +196,14 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
       setErr(null);
       try {
         const updated = await taskUpdateStatus({ id: task.id, status: next });
+        if (!isMountedRef.current) return;
         setTask(updated);
         onChanged?.(updated);
       } catch (e) {
+        if (!isMountedRef.current) return;
         setErr(extractErrorMessage(e));
       } finally {
-        setBusy(false);
+        if (isMountedRef.current) setBusy(false);
       }
     },
     [task.id, onChanged],
@@ -271,10 +297,15 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
     <>
       {showSyncConfirm && (
         <ConfirmDialog
-          title="同步到 Agent"
-          message="将该任务的模型 / 权限覆盖写回所属 Agent 的默认配置。这会影响之后新开的会话。确定继续？"
-          confirmText="同步"
+          title={isDangerousSync ? '⚠️ 同步到 Agent(含完全自治)' : '同步到 Agent'}
+          message={
+            isDangerousSync
+              ? '此任务使用【完全自治 (fullAgency)】权限 — 同步后该 Agent 未来所有新会话都将默认跳过权限确认，可直接执行删改文件等破坏性操作。确认要把这个宽松权限设为 Agent 默认吗？'
+              : '将该任务的模型 / 权限覆盖写回所属 Agent 的默认配置。这会影响之后新开的会话。确定继续?'
+          }
+          confirmText={isDangerousSync ? '仍然同步' : '同步'}
           cancelText="取消"
+          confirmVariant={isDangerousSync ? 'danger' : undefined}
           loading={syncing}
           onConfirm={() => void doSyncToAgent()}
           onCancel={() => setShowSyncConfirm(false)}
@@ -405,7 +436,7 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
             <>
               <Meta task={task} />
 
-              {runStats && runStats.executionCount > 0 && (
+              {runStats && (runStats.executionCount > 0 || runStats.cronStatus) && (
                 <>
                   <hr className="my-4 border-[var(--line-subtle)]" />
                   <RunStatsSection stats={runStats} />
