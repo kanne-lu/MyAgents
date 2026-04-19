@@ -1,10 +1,10 @@
 // Shared form controls used by the task-center editors (DispatchTaskDialog,
-// TaskDetailOverlay edit mode). Extracted so both surfaces stay pixel-
-// aligned with the cron TaskCreateModal visual language.
+// TaskDetailOverlay edit mode). Extracted so every surface that touches a
+// Task stays pixel-aligned — input widths, pill shape, toggle animation.
 
 import { Check } from 'lucide-react';
 
-/** Shared input class — identical to TaskCreateModal for visual consistency. */
+/** Shared input class for every text/number/datetime field in the task dialogs. */
 export const INPUT_CLS =
   'w-full rounded-lg border border-[var(--line)] bg-transparent px-3 py-2.5 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:border-[var(--accent)] focus:outline-none transition-colors';
 
