@@ -33,6 +33,8 @@ interface MessageListProps {
   virtuosoRef: React.RefObject<VirtuosoHandle | null>;
   onScrollerRef?: (el: HTMLElement | Window | null) => void;
   followEnabledRef: React.MutableRefObject<boolean | 'force'>;
+  /** Drives the session-switch scroll pin — goes through the hook so grace/degrade state stays consistent. */
+  scrollToBottom: (behavior?: 'smooth' | 'auto') => void;
   handleAtBottomChange: (atBottom: boolean) => void;
   pendingPermission?: PermissionRequest | null;
   onPermissionDecision?: (decision: 'deny' | 'allow_once' | 'always_allow') => void;
@@ -150,6 +152,7 @@ const MessageList = memo(function MessageList({
   virtuosoRef,
   onScrollerRef,
   followEnabledRef,
+  scrollToBottom,
   handleAtBottomChange,
   pendingPermission,
   onPermissionDecision,
@@ -208,19 +211,17 @@ const MessageList = memo(function MessageList({
   // Scroll to bottom after session load / switch. Runs synchronously before
   // the next paint so there's no visible top→bottom jump when the new session's
   // data prop arrives — critical now that Virtuoso stays mounted across switches
-  // (see the note below about removing `key={sessionId}`).
+  // (see the note below about removing `key={sessionId}`). Routes through the hook's
+  // scrollToBottom('auto') so the force/grace/auto-degrade state machine stays in one
+  // place — writing `followEnabledRef.current = 'force'` inline would leak force into
+  // subsequent content changes without the safety timer.
   const lastScrolledSessionRef = useRef<string | null>(null);
   useLayoutEffect(() => {
     if (!sessionId || sessionId === lastScrolledSessionRef.current) return;
     if (allMessages.length === 0) return;
     lastScrolledSessionRef.current = sessionId;
-    followEnabledRef.current = 'force';
-    virtuosoRef.current?.scrollToIndex({
-      index: allMessages.length - 1,
-      align: 'end',
-      behavior: 'auto',
-    });
-  }, [sessionId, allMessages.length, virtuosoRef, followEnabledRef]);
+    scrollToBottom('auto');
+  }, [sessionId, allMessages.length, scrollToBottom]);
 
   // ── Auto-scroll during streaming — throttled to ~20fps (48ms) ──
   // followOutput only fires on count change. During streaming the last message keeps

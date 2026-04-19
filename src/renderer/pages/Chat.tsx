@@ -1460,12 +1460,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
   }, [joinedExistingSidecar]);
 
-  const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange } = useVirtuosoScroll();
-
-  // Capture virtuoso's internal scroller element for QueryNavigator
-  const handleScrollerRef = useCallback((el: HTMLElement | Window | null) => {
-    scrollerRef.current = el instanceof HTMLElement ? el : null;
-  }, [scrollerRef]);
+  const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange, attachScroller } = useVirtuosoScroll();
 
   // ── In-page text finder (Cmd/Ctrl+F) ──
   // Scope: already-rendered messages only (Virtuoso virtualizes the rest).
@@ -2540,8 +2535,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               isSessionLoading={isSessionLoading}
               sessionId={sessionId}
               virtuosoRef={virtuosoRef}
-              onScrollerRef={handleScrollerRef}
+              onScrollerRef={attachScroller}
               followEnabledRef={followEnabledRef}
+              scrollToBottom={scrollToBottom}
               handleAtBottomChange={handleAtBottomChange}
               pendingPermission={pendingPermission}
               onPermissionDecision={handlePermissionDecision}
