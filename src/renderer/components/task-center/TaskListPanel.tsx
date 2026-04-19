@@ -48,10 +48,11 @@ type Bucket = 'pending' | 'active' | 'finished';
 // "进行中" 的产品语义是「应当被执行的任务」，不是字面"正在跑"。
 // `stopped`（用户暂停）和 `blocked`（执行受阻）都是**临时子状态**，
 // 任务本身仍被认为该跑 —— 徽章的黄/灰配色已经区分了子状态，列表聚合
-// 不必再按这些小波动分桶。`待启动` 留给真正的新建未调度态（todo）。
+// 不必再按这些小波动分桶。`规划中` 留给真正的新建未调度态（todo）——
+// 任务已被构思并创建，但尚未被调度器首次触发。
 const BUCKETS: Record<Bucket, { label: string; statuses: TaskStatus[] }> = {
   active: { label: '进行中', statuses: ['running', 'verifying', 'stopped', 'blocked'] },
-  pending: { label: '待启动', statuses: ['todo'] },
+  pending: { label: '规划中', statuses: ['todo'] },
   finished: { label: '已完成', statuses: ['done', 'archived'] },
 };
 
