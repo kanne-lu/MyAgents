@@ -228,8 +228,19 @@ function ActivityBar({
       </div>
     );
   }
+  // `color-mix(srgb, info-bg 60%, paper-elevated)` gives a softer tint
+  // than plain info-bg would — the running activity bar should read as
+  // "subtle ongoing update", not as a full-weight status chip.
+  // Tailwind's `/40` alpha modifier doesn't work on arbitrary CSS vars,
+  // so we go through color-mix explicitly.
   return (
-    <div className="flex items-start gap-2 rounded-[var(--radius-sm)] bg-[var(--info-bg)]/40 px-2 py-1.5 text-[12px] leading-snug text-[var(--ink-secondary)]">
+    <div
+      className="flex items-start gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-[12px] leading-snug text-[var(--ink-secondary)]"
+      style={{
+        backgroundColor:
+          'color-mix(in srgb, var(--info-bg) 60%, var(--paper-elevated))',
+      }}
+    >
       <span className="mt-[3px] h-3 w-[2px] shrink-0 bg-[var(--info)]" aria-hidden />
       <span className="line-clamp-2">{message}</span>
     </div>
