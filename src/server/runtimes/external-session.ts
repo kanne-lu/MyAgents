@@ -9,6 +9,7 @@ import { broadcast } from '../sse';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
+import type { AskUserQuestionInput } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import type { RuntimeType } from '../../shared/types/runtime';
@@ -94,15 +95,24 @@ let pendingThinkingActive = false;  // reasoning block started, even if no delta
 let pendingThinkingStartedAt = 0;   // timestamp for duration calculation / history reopen parity
 const pendingToolInputs = new Map<string, { name: string; inputJson: string }>(); // toolUseId → input accumulator
 type ExternalSessionState = 'idle' | 'running' | 'error';
-type ExternalPendingInteractiveRequest = {
-  type: 'permission:request';
-  data: {
-    requestId: string;
-    toolName: string;
-    toolUseId: string;
-    input: string;
+type ExternalPendingInteractiveRequest =
+  | {
+    type: 'permission:request';
+    data: {
+      requestId: string;
+      toolName: string;
+      toolUseId: string;
+      input: string;
+    };
+  }
+  | {
+    type: 'ask-user-question:request';
+    data: {
+      requestId: string;
+      questions: AskUserQuestionInput['questions'];
+      previewFormat: 'html' | 'markdown';
+    };
   };
-};
 let externalSessionState: ExternalSessionState = 'idle';
 let externalSystemInitPayload: { info: SystemInitInfo; sessionId: string; prewarm?: boolean; runtime: RuntimeType } | null = null;
 // True between the start of a pre-warm (no initialMessage) and the first real user turn.
@@ -149,6 +159,7 @@ function resetModuleState(): void {
   pendingThinkingStartedAt = 0;
   pendingToolInputs.clear();
   pendingPermissionSuggestions.clear();
+  pendingExternalAskUserQuestions.clear();
   pendingExternalInteractiveRequests.clear();
   externalSystemInitPayload = null;
   externalSessionState = 'idle';
@@ -361,6 +372,31 @@ let imCallbackNulledDuringTurn = false; // Prevents stale turn events leaking to
 // CC sends permission_suggestions in control_request; we echo them back as updatedPermissions
 // in control_response for "always_allow" so CC persists the rule.
 const pendingPermissionSuggestions = new Map<string, unknown[] | undefined>();
+
+// AskUserQuestion requests routed through external runtime (currently only CC has this tool).
+// CC sends the question payload via can_use_tool; we render the structured prompt in the UI
+// and echo the user's answers back as updatedInput when allowing the tool.
+const pendingExternalAskUserQuestions = new Map<string, { input: Record<string, unknown> }>();
+
+// Mirrors agent-session.ts `isValidAskUserQuestionInput`. Malformed input would crash
+// AskUserQuestionPrompt (which maps over `options` etc.); the fallback path on failure
+// is the generic permission card, so the user at least sees a denial affordance.
+function isAskUserQuestionInput(input: unknown): input is AskUserQuestionInput {
+  if (!input || typeof input !== 'object') return false;
+  const obj = input as Record<string, unknown>;
+  if (!Array.isArray(obj.questions) || obj.questions.length === 0) return false;
+  return obj.questions.every((q: unknown) => {
+    if (!q || typeof q !== 'object') return false;
+    const question = q as Record<string, unknown>;
+    return (
+      typeof question.question === 'string' &&
+      typeof question.header === 'string' &&
+      Array.isArray(question.options) &&
+      question.options.length >= 2 &&
+      typeof question.multiSelect === 'boolean'
+    );
+  });
+}
 
 /** Fire IM callback only if not stale (guard mirrors agent-session.ts pattern) */
 function fireImCallback(event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string): void {
@@ -1064,6 +1100,48 @@ export async function respondExternalPermission(
 }
 
 /**
+ * Whether an outstanding external AskUserQuestion request is tracked for this requestId.
+ * Used by the HTTP layer to route /api/ask-user-question/respond to the external runtime
+ * when the request originated from CC (rather than the builtin SDK handler).
+ */
+export function hasPendingExternalAskUserQuestion(requestId: string): boolean {
+  return pendingExternalAskUserQuestions.has(requestId);
+}
+
+/**
+ * Deliver the user's AskUserQuestion answers (or a cancellation) back to the external runtime.
+ * For CC: allow the tool call with `updatedInput = { ...original, answers }`, or deny on cancel.
+ */
+export async function respondExternalAskUserQuestion(
+  requestId: string,
+  answers: Record<string, string> | null,
+): Promise<boolean> {
+  const pending = pendingExternalAskUserQuestions.get(requestId);
+  if (!pending) {
+    console.warn(`[external-session] Unknown AskUserQuestion requestId: ${requestId}`);
+    return false;
+  }
+  pendingExternalAskUserQuestions.delete(requestId);
+  pendingExternalInteractiveRequests.delete(requestId);
+
+  if (!activeProcess || !activeRuntime) {
+    console.warn('[external-session] No active process for AskUserQuestion response');
+    return false;
+  }
+
+  if (answers === null) {
+    console.log(`[external-session] AskUserQuestion cancelled for requestId=${requestId}`);
+    await activeRuntime.respondPermission(activeProcess, requestId, 'deny', '用户取消了问答');
+    return true;
+  }
+
+  console.log(`[external-session] AskUserQuestion answered for requestId=${requestId}`);
+  const updatedInput = { ...pending.input, answers };
+  await activeRuntime.respondPermission(activeProcess, requestId, 'allow_once', undefined, undefined, updatedInput);
+  return true;
+}
+
+/**
  * Stop the active external session
  */
 export async function stopExternalSession(): Promise<boolean> {
@@ -1088,6 +1166,7 @@ export async function stopExternalSession(): Promise<boolean> {
     // consistent regardless of what runs next.
     isPrewarmingSession = false;
     pendingPermissionSuggestions.clear();  // Prevent stale suggestions leaking across sessions
+    pendingExternalAskUserQuestions.clear();  // Stale AskUserQuestion requestIds would misroute to new session
     pendingExternalInteractiveRequests.clear();
     externalSystemInitPayload = null;
     // Notify IM stream callback if active (prevents orphaned SSE streams on user-stop)
@@ -1423,6 +1502,28 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'permission_request':
+      // AskUserQuestion carries a structured payload (questions/options/previews) and
+      // needs the dedicated wizard UI, not the generic allow/deny card. Route it through
+      // the ask-user-question:request channel so the frontend mounts AskUserQuestionPrompt
+      // and the user's answers flow back as CC `updatedInput.answers`.
+      if (event.toolName === 'AskUserQuestion' && isAskUserQuestionInput(event.input)) {
+        pendingExternalAskUserQuestions.set(event.requestId, { input: event.input as Record<string, unknown> });
+        const questions = event.input.questions;
+        const previewFormat: 'html' | 'markdown' = 'html';
+        pendingExternalInteractiveRequests.set(event.requestId, {
+          type: 'ask-user-question:request',
+          data: { requestId: event.requestId, questions, previewFormat },
+        });
+        broadcast('ask-user-question:request', {
+          requestId: event.requestId,
+          questions,
+          previewFormat,
+        });
+        // IM/agent-channel bots can't render AskUserQuestion; claude-code.ts already
+        // puts it in --disallowed-tools for those scenarios, so no imStreamCallback fan-out here.
+        break;
+      }
+
       // Store suggestions so respondExternalPermission can echo them back for "always_allow"
       pendingPermissionSuggestions.set(event.requestId, event.suggestions);
       pendingExternalInteractiveRequests.set(event.requestId, {
@@ -1580,6 +1681,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         }
       }
       pendingPermissionSuggestions.clear();
+      pendingExternalAskUserQuestions.clear();
       pendingExternalInteractiveRequests.clear();
       externalSystemInitPayload = null;
       setExternalSessionState('idle');

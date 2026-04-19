@@ -177,6 +177,8 @@ import {
   shouldUseExternalRuntime,
   sendExternalMessage,
   respondExternalPermission,
+  respondExternalAskUserQuestion,
+  hasPendingExternalAskUserQuestion,
   stopExternalSession,
   isExternalSessionActive,
   queryRuntimeModels,
@@ -5157,12 +5159,19 @@ async function main() {
       }
 
       // POST /api/ask-user-question/respond - Handle user's answers to AskUserQuestion
+      // Auto-routes to external runtime (CC) when the request was originated there, otherwise
+      // uses builtin SDK handler. External-runtime tracking lives in external-session.ts.
       if (pathname === '/api/ask-user-question/respond' && request.method === 'POST') {
         try {
           const payload = await request.json() as {
             requestId: string;
             answers: Record<string, string> | null;  // null means user cancelled
           };
+
+          if (shouldUseExternalRuntime() && isExternalSessionActive() && hasPendingExternalAskUserQuestion(payload.requestId)) {
+            const success = await respondExternalAskUserQuestion(payload.requestId, payload.answers);
+            return jsonResponse({ success });
+          }
 
           const { handleAskUserQuestionResponse } = await import('./agent-session');
           const success = handleAskUserQuestionResponse(payload.requestId, payload.answers);

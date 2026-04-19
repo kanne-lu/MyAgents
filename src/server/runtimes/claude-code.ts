@@ -403,6 +403,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     decision: 'deny' | 'allow_once' | 'always_allow',
     reason?: string,
     suggestions?: unknown[],
+    updatedInput?: Record<string, unknown>,
   ): Promise<void> {
     // CC control_response schema (PermissionPromptToolResultSchema.ts):
     // allow: { behavior, updatedInput (required), updatedPermissions?, decisionClassification? }
@@ -415,7 +416,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
           subtype: 'success' as const,
           response: {
             behavior: 'allow' as const,
-            updatedInput: {},  // Required by CC schema — empty = use original input
+            // Required by CC schema. Empty = use original input (common case).
+            // Populated for AskUserQuestion: caller injects `answers` so CC sees the user's reply.
+            updatedInput: updatedInput ?? {},
             decisionClassification: decision === 'always_allow' ? 'user_permanent' as const : 'user_temporary' as const,
             // For always_allow: echo permission_suggestions back as updatedPermissions
             // so CC persists the rule and doesn't re-prompt for this tool

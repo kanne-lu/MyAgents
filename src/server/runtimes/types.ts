@@ -162,6 +162,8 @@ export interface AgentRuntime {
     reason?: string,
     /** CC: echoed permission_suggestions for 'always_allow' → updatedPermissions */
     suggestions?: unknown[],
+    /** CC: override the tool's input (e.g. AskUserQuestion needs answers injected). Empty = use original. */
+    updatedInput?: Record<string, unknown>,
   ): Promise<void>;
 
   /** Stop the session gracefully */
