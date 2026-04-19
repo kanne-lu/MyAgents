@@ -1,8 +1,9 @@
 // TaskCardItem — richer card rendered in the 2-column card view.
-// Replaces the previous flat TaskCard. Adds a left status stripe (only for
-// active/blocked states so calm states stay calm), a persistent hover
-// action row wired through <TaskItemActions>, and a meta row that doesn't
-// try to squeeze every field onto one line.
+// Replaces the previous flat TaskCard. Adds a left status stripe keyed to
+// the status-badge color family (info/success/error/muted — see
+// `stripeFor()` at the bottom of the file), a persistent hover action row
+// wired through <TaskItemActions>, and a meta row that doesn't try to
+// squeeze every field onto one line.
 //
 // Deliberately omits the "来自想法: ..." reference (per product decision:
 // that context lives in the detail overlay instead) to keep the card scan-
