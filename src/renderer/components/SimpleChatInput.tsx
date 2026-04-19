@@ -1575,6 +1575,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               {/* Tool/MCP Dropdown - hidden for external runtimes (they use their own tools) */}
               {!isExternalRuntime && (
               <>
+              {(() => {
+                // Count only MCPs the user will actually see *and* that are live: present in the
+                // catalogue (mcpServers), globally enabled, and workspace-enabled. Using the raw
+                // `workspaceMcpEnabled.length` drifts from the popover contents when a workspace
+                // still references IDs that were disabled globally or removed from the catalogue.
+                const effectiveMcpCount = workspaceMcpEnabled.filter(
+                  id => globalMcpEnabled.includes(id) && mcpServers.some(s => s.id === id)
+                ).length;
+                return (
               <button
                 ref={toolBtnRef}
                 type="button"
@@ -1590,12 +1599,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               >
                 <Wrench className="h-3.5 w-3.5" />
                 <span className="toolbar-label">工具</span>
-                {workspaceMcpEnabled.length > 0 && (
+                {effectiveMcpCount > 0 && (
                   <span className="text-[11px] text-[var(--ink-muted)]">
-                    {workspaceMcpEnabled.length}
+                    {effectiveMcpCount}
                   </span>
                 )}
               </button>
+                );
+              })()}
               <Popover
                 open={showToolMenu}
                 onClose={() => setShowToolMenu(false)}
@@ -1868,7 +1879,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 // and is crucial because thought mode swaps the usual
                 // "Enter sends" contract (Enter is a newline there).
                 thoughtModeActive ? (
-                  <Tip label="保存笔记" shortcut="⌘ + Enter" align="end">
+                  <Tip label="保存想法" shortcut="⌘ + Enter" align="end">
                     <button
                       type="button"
                       onClick={handleSend}
