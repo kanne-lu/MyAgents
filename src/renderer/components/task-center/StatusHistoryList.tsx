@@ -1,12 +1,17 @@
 // StatusHistoryList — renders a Task's statusHistory with pagination (PRD §7.3.1).
-// Default view shows the most recent 50 transitions; "加载更多" reveals earlier
-// ones in the same chunk size. "导出为 JSON" downloads the full history.
+//
+// v0.1.69 review: the preview overlay was rendering the full 50-item
+// list by default which drowned out everything else. `defaultCollapsed`
+// starts with just the 3 most recent rows visible and a "查看全部 (N)"
+// expand button — inline timeline for scanning, full list on demand.
+// Once expanded, the usual pagination (`PAGE_SIZE` at a time) takes over.
 
 import { useMemo, useState } from 'react';
-import { Download } from 'lucide-react';
+import { ChevronRight, Download } from 'lucide-react';
 import type { StatusTransition, Task, TaskStatus } from '@/../shared/types/task';
 
 const PAGE_SIZE = 50;
+const COLLAPSED_PREVIEW = 3;
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
   todo: '待启动',
@@ -21,16 +26,22 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
 
 interface Props {
   task: Task;
+  /** Start with only the 3 most recent rows visible. Click "查看全部"
+   *  to expand to the normal paginated list. */
+  defaultCollapsed?: boolean;
 }
 
-export function StatusHistoryList({ task }: Props) {
+export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
   const history = task.statusHistory;
+  const [expanded, setExpanded] = useState(!defaultCollapsed);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
   // Newest first for UI; statusHistory is stored append-only, oldest first.
   const ordered = useMemo(() => [...history].reverse(), [history]);
-  const shown = ordered.slice(0, visibleCount);
-  const hasMore = ordered.length > visibleCount;
+  const effectiveCount = expanded ? visibleCount : COLLAPSED_PREVIEW;
+  const shown = ordered.slice(0, effectiveCount);
+  const hasMore = expanded && ordered.length > visibleCount;
+  const hiddenInCollapsed = !expanded && ordered.length > COLLAPSED_PREVIEW;
 
   if (history.length === 0) {
     return (
@@ -43,31 +54,45 @@ export function StatusHistoryList({ task }: Props) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+        <div className="text-[14px] font-semibold text-[var(--ink)]">
           状态变更记录 ({history.length})
         </div>
-        <button
-          type="button"
-          onClick={() => downloadAsJson(task)}
-          className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-          title="下载完整 JSON"
-        >
-          <Download className="h-3 w-3" />
-          导出为 JSON
-        </button>
+        {/* Export button is only useful in the fully expanded view;
+            hiding it in collapsed mode keeps the row tidy. */}
+        {expanded && (
+          <button
+            type="button"
+            onClick={() => downloadAsJson(task)}
+            className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            title="下载完整 JSON"
+          >
+            <Download className="h-3 w-3" />
+            导出为 JSON
+          </button>
+        )}
       </div>
       <ol className="relative flex flex-col gap-0 before:absolute before:left-[7px] before:top-1 before:bottom-1 before:w-px before:bg-[var(--line)]">
         {shown.map((t, i) => (
           <TransitionRow key={`${t.at}-${i}`} t={t} />
         ))}
       </ol>
+      {hiddenInCollapsed && (
+        <button
+          type="button"
+          onClick={() => setExpanded(true)}
+          className="flex items-center gap-1 self-center rounded-[var(--radius-md)] px-3 py-1 text-[12px] text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+        >
+          <ChevronRight className="h-3 w-3" />
+          查看全部 {ordered.length} 条
+        </button>
+      )}
       {hasMore && (
         <button
           type="button"
           onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
           className="self-center rounded-[var(--radius-md)] px-3 py-1 text-[12px] text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
         >
-          加载更多（剩余 {ordered.length - visibleCount}）
+          加载更多(剩余 {ordered.length - visibleCount})
         </button>
       )}
     </div>
@@ -77,6 +102,12 @@ export function StatusHistoryList({ task }: Props) {
 function TransitionRow({ t }: { t: StatusTransition }) {
   const from = t.from ? STATUS_LABEL[t.from] : '—';
   const to = STATUS_LABEL[t.to];
+  // Self-loop transitions (from === to) are audit-only entries — e.g.
+  // crash recovery of a recurring task where the status didn't actually
+  // change but we wanted to record the event. Render them as a single
+  // status pill (no arrow) so they read as "an event happened at this
+  // status" rather than a confusing "running → running".
+  const selfLoop = t.from !== null && t.from === t.to;
   return (
     <li className="relative flex gap-3 py-1.5 pl-5">
       <span
@@ -85,9 +116,15 @@ function TransitionRow({ t }: { t: StatusTransition }) {
       />
       <div className="flex-1 text-[12px]">
         <div className="flex items-center gap-1.5 text-[var(--ink)]">
-          <span className="text-[var(--ink-muted)]">{from}</span>
-          <span className="text-[var(--ink-muted)]">→</span>
-          <span className="font-medium">{to}</span>
+          {selfLoop ? (
+            <span className="font-medium">{to}</span>
+          ) : (
+            <>
+              <span className="text-[var(--ink-muted)]">{from}</span>
+              <span className="text-[var(--ink-muted)]">→</span>
+              <span className="font-medium">{to}</span>
+            </>
+          )}
           <span className="text-[10px] text-[var(--ink-muted)]/70">
             · {actorLabel(t.actor)}
             {t.source && ` · ${t.source}`}

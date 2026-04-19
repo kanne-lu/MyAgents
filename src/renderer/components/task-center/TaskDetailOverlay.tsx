@@ -4,8 +4,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
+  Bell,
   Bot,
   CheckCircle,
+  MoreHorizontal,
   Pencil,
   Play,
   RotateCcw,
@@ -15,7 +17,9 @@ import {
 } from 'lucide-react';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
+import { Popover } from '@/components/ui/Popover';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
+import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { useConfig } from '@/hooks/useConfig';
 import { useToast } from '@/components/Toast';
 import {
@@ -25,39 +29,47 @@ import {
   taskGetRunStats,
   taskRerun,
   taskRun,
-  taskUpdate,
   taskUpdateStatus,
 } from '@/api/taskCenter';
 import { patchAgentConfig } from '@/config/services/agentConfigService';
-import type {
-  NotificationConfig,
-  Task,
-  TaskRunStats,
-} from '@/../shared/types/task';
+import type { Task, TaskRunStats } from '@/../shared/types/task';
 import { TaskStatusBadge } from './TaskStatusBadge';
 import { DispatchOriginBadge } from './DispatchOriginBadge';
 import { StatusHistoryList } from './StatusHistoryList';
-import NotificationConfigEditor from './NotificationConfigEditor';
+import { SummaryCard } from './SummaryCard';
 import { TaskDocBlock } from './TaskDocBlock';
-import { TaskEditPanel } from './TaskEditPanel';
+import { TaskEditPanel, type FocusDoc } from './TaskEditPanel';
 import { extractErrorMessage } from './errors';
 
 const OVERLAY_Z = 200;
 
 interface Props {
   task: Task;
+  /** When true, the overlay opens directly in edit mode — used by the
+   *  card/row "编辑" menu item. */
+  startEditing?: boolean;
   onClose: () => void;
   onChanged?: (next: Task | null) => void;
 }
 
-export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) {
+export function TaskDetailOverlay({
+  task: initial,
+  startEditing = false,
+  onClose,
+  onChanged,
+}: Props) {
   const [task, setTask] = useState<Task>(initial);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(startEditing);
+  // When edit mode opens via an inline "编辑" button on a specific doc
+  // (task.md / verify.md) or on the notification section, the edit
+  // panel needs to scroll/focus to that target. `null` = top of panel.
+  const [focusDoc, setFocusDoc] = useState<FocusDoc | null>(null);
   const [runStats, setRunStats] = useState<TaskRunStats | null>(null);
   const [showSyncConfirm, setShowSyncConfirm] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   // Bumped on every external task change so child blocks (TaskDocBlock) can
   // reload their document contents without us having to lift the content up.
   const [reloadToken, setReloadToken] = useState(0);
@@ -260,12 +272,17 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
     }
   }, [task.id, onChanged]);
 
+  // OverflowMenu's 删除 entry opens a <ConfirmDialog> (matching the
+  // sync-to-agent flow); `doDelete` is the confirmed path. Replaces the
+  // prior `window.confirm` which rendered as an OS-native modal that
+  // bypassed the overlay's Cmd+W closeLayer stack and ignored the
+  // app's design tokens.
   const doDelete = useCallback(async () => {
-    if (!window.confirm('确定删除此任务？软删除后 30 天内可恢复。')) return;
     setBusy(true);
     setErr(null);
     try {
       await taskDelete(task.id);
+      setShowDeleteConfirm(false);
       onChanged?.(null);
       onClose();
     } catch (e) {
@@ -276,22 +293,32 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
 
   const locked = task.status === 'running' || task.status === 'verifying';
 
-  const enterEdit = useCallback(() => {
-    if (locked) return;
-    setErr(null);
-    setEditing(true);
-  }, [locked]);
+  const enterEdit = useCallback(
+    (target: FocusDoc | null = null) => {
+      if (locked) return;
+      setErr(null);
+      setFocusDoc(target);
+      setEditing(true);
+    },
+    [locked],
+  );
 
   const onEditSaved = useCallback(
     (next: Task) => {
       setTask(next);
       onChanged?.(next);
       setEditing(false);
+      setFocusDoc(null);
       // Docs don't move here, but bump so dependent blocks re-render cleanly.
       setReloadToken((n) => n + 1);
     },
     [onChanged],
   );
+
+  const onEditCancel = useCallback(() => {
+    setEditing(false);
+    setFocusDoc(null);
+  }, []);
 
   return (
     <>
@@ -311,23 +338,43 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
           onCancel={() => setShowSyncConfirm(false)}
         />
       )}
+      {showDeleteConfirm && (
+        <ConfirmDialog
+          title="删除任务"
+          message={`确定删除任务「${task.name}」？软删除后 30 天内可恢复。`}
+          confirmText="删除"
+          cancelText="取消"
+          confirmVariant="danger"
+          loading={busy}
+          onConfirm={() => void doDelete()}
+          onCancel={() => setShowDeleteConfirm(false)}
+        />
+      )}
       <OverlayBackdrop onClose={onClose} className="z-[200]">
       <div
         onClick={(e) => e.stopPropagation()}
         className="flex max-h-[85vh] w-[min(780px,92vw)] flex-col overflow-hidden rounded-[var(--radius-2xl)] bg-[var(--paper-elevated)] shadow-2xl"
       >
-        {/* Header */}
-        <div className="flex items-center gap-3 border-b border-[var(--line)] px-5 py-4">
-          <div className="flex-1">
+        {/* Header — status chip inline with title (single row, saves
+            vertical space vs. the prior badge-then-title stack).
+            Description tucked under on its own line for tasks that have
+            one; tasks without a description skip it entirely. */}
+        <div className="flex items-start gap-3 border-b border-[var(--line)] px-5 py-3">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <TaskStatusBadge status={task.status} />
-              <DispatchOriginBadge origin={task.dispatchOrigin} />
+              {/* DispatchOriginBadge: v0.1.69 review — hide the default
+                  "直接派发" which applies to 99% of tasks. Only render
+                  when origin adds information (ai-aligned). */}
+              {task.dispatchOrigin === 'ai-aligned' && (
+                <DispatchOriginBadge origin={task.dispatchOrigin} />
+              )}
+              <h2 className="min-w-0 truncate text-[16px] font-semibold text-[var(--ink)]">
+                {task.name}
+              </h2>
             </div>
-            <h2 className="mt-1.5 text-[18px] font-semibold text-[var(--ink)]">
-              {task.name}
-            </h2>
             {task.description && (
-              <p className="mt-1 text-[13px] text-[var(--ink-muted)]">
+              <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
                 {task.description}
               </p>
             )}
@@ -335,16 +382,24 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
           <button
             type="button"
             onClick={onClose}
-            className="rounded-[var(--radius-md)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            className="shrink-0 rounded-[var(--radius-md)] p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             title="关闭 (Cmd+W)"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        {/* Action bar — hidden in edit mode (the edit panel has its own footer) */}
+        {/* Action bar — slim v0.1.69 design:
+              • primary lifecycle button (one of: 立即执行/中止/重新派发)
+              • 编辑
+              • ⋯ overflow menu (standardises all secondary actions,
+                including 删除 which used to sit as its own danger button)
+            Hidden in edit mode — the edit panel has its own footer.
+            `py-1.5` (was `py-3`) tightens the row; ActionBtn itself
+            already has `py-1.5` so the overall row height is just
+            buttonHeight + 12px breathing room. */}
         {!editing && (
-          <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-5 py-3">
+          <div className="flex items-center gap-2 border-b border-[var(--line-subtle)] px-5 py-1.5">
             {task.status === 'todo' && (
               <ActionBtn
                 icon={<Play className="h-3.5 w-3.5" />}
@@ -374,45 +429,23 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
                 title="reset → todo → run (PRD §10.2.2)"
               />
             )}
-            {task.status === 'verifying' && (
-              <ActionBtn
-                icon={<CheckCircle className="h-3.5 w-3.5" />}
-                label="标记完成"
-                disabled={busy}
-                onClick={() => runStatus('done')}
-              />
-            )}
-            {task.status === 'done' && (
-              <ActionBtn
-                icon={<Archive className="h-3.5 w-3.5" />}
-                label="归档"
-                disabled={busy}
-                onClick={doArchive}
-              />
-            )}
             <ActionBtn
               icon={<Pencil className="h-3.5 w-3.5" />}
               label="编辑"
               disabled={busy || locked}
-              onClick={enterEdit}
+              onClick={() => enterEdit(null)}
               title={locked ? '任务运行 / 验证中，不可编辑（PRD §9.4）' : undefined}
             />
-            {canSyncToAgent && (
-              <ActionBtn
-                icon={<Bot className="h-3.5 w-3.5" />}
-                label="同步到 Agent"
-                disabled={busy || syncing}
-                onClick={() => setShowSyncConfirm(true)}
-                title="把该任务的模型 / 权限覆盖写回所属 Agent 的默认配置"
-              />
-            )}
             <div className="flex-1" />
-            <ActionBtn
-              icon={<Trash2 className="h-3.5 w-3.5" />}
-              label="删除"
-              variant="danger"
-              disabled={busy}
-              onClick={doDelete}
+            <OverflowMenu
+              status={task.status}
+              busy={busy}
+              syncing={syncing}
+              canSyncToAgent={canSyncToAgent}
+              onMarkDone={() => runStatus('done')}
+              onArchive={doArchive}
+              onSyncToAgent={() => setShowSyncConfirm(true)}
+              onDelete={() => setShowDeleteConfirm(true)}
             />
           </div>
         )}
@@ -428,71 +461,58 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
           {editing ? (
             <TaskEditPanel
               task={task}
+              focusDoc={focusDoc}
               onSaved={onEditSaved}
-              onCancel={() => setEditing(false)}
+              onCancel={onEditCancel}
               onError={setErr}
             />
           ) : (
             <>
-              <Meta task={task} />
+              {/* 任务概览 — schedule headline + workspace/agent + run
+                  stats + tags + end conditions, with low-frequency
+                  fields behind "展开更多详情". Replaces the prior
+                  ~14-row <Meta> dl + conditional <RunStatsSection>. */}
+              <SummaryCard task={task} stats={runStats} />
 
-              {runStats && (runStats.executionCount > 0 || runStats.cronStatus) && (
-                <>
-                  <hr className="my-4 border-[var(--line-subtle)]" />
-                  <RunStatsSection stats={runStats} />
-                </>
-              )}
-
-              <hr className="my-4 border-[var(--line-subtle)]" />
-
-              {/* task.md — the executor prompt; editable via TaskDocBlock. */}
+              {/* task.md / verify.md / progress.md — read-only previews.
+                  The overlay's top-level "编辑" button is the single
+                  edit entry; per-block edit affordances were removed
+                  (v0.1.69 preview polish — one edit entry, not four). */}
               <TaskDocBlock
                 task={task}
                 doc="task"
                 title="task.md · 执行 Prompt"
-                emptyHint="还没有内容。点击「添加」写入这个任务的执行提示词。"
-                readOnly={locked}
+                emptyHint="还没有内容。点击上方「编辑」进入编辑页写入这个任务的执行提示词。"
                 reloadKey={reloadToken}
                 onError={setErr}
               />
 
-              {/* verify.md — acceptance criteria; same component handles empty state. */}
               <TaskDocBlock
                 task={task}
                 doc="verify"
                 title="verify.md · 验收标准"
-                emptyHint="还没有验收标准。点击「添加」写一份；AI 在 verifying 阶段会用它自检。"
-                readOnly={locked}
+                emptyHint="还没有验收标准。点击上方「编辑」写一份;AI 在 verifying 阶段会用它自检。"
                 reloadKey={reloadToken}
                 onError={setErr}
               />
 
-              {/* progress.md — read-only; agents append during runs. */}
               <TaskDocBlock
                 task={task}
                 doc="progress"
                 title="progress.md · 执行日志"
-                emptyHint="还没有执行记录。AI 在执行过程中会将阶段性进度追加到此处。"
-                readOnly
+                emptyHint=""
+                hideWhenEmpty
                 reloadKey={reloadToken}
                 onError={setErr}
               />
 
               <hr className="my-4 border-[var(--line-subtle)]" />
 
-              <StatusHistoryList task={task} />
+              <StatusHistoryList task={task} defaultCollapsed />
 
               <hr className="my-4 border-[var(--line-subtle)]" />
 
-              <NotificationSection
-                task={task}
-                disabled={locked}
-                onSaved={(updated) => {
-                  setTask(updated);
-                  onChanged?.(updated);
-                }}
-                onError={(msg) => setErr(msg)}
-              />
+              <NotificationSummary task={task} />
             </>
           )}
         </div>
@@ -502,117 +522,172 @@ export function TaskDetailOverlay({ task: initial, onClose, onChanged }: Props) 
   );
 }
 
-function Meta({ task }: { task: Task }) {
-  const scheduleSummary = (() => {
-    if (task.executionMode === 'scheduled' && task.dispatchAt) {
-      return `一次 · ${new Date(task.dispatchAt).toLocaleString()}`;
-    }
-    if (task.executionMode === 'recurring') {
-      if (task.cronExpression) {
-        return `Cron · ${task.cronExpression}${task.cronTimezone ? ` (${task.cronTimezone})` : ''}`;
-      }
-      if (task.intervalMinutes) return `每 ${task.intervalMinutes} 分钟`;
-    }
-    return task.executionMode;
-  })();
-
-  const rows: Array<[string, string]> = [
-    ['创建', new Date(task.createdAt).toLocaleString()],
-    ['更新', new Date(task.updatedAt).toLocaleString()],
-    [
-      '上次执行',
-      task.lastExecutedAt
-        ? new Date(task.lastExecutedAt).toLocaleString()
-        : '—',
-    ],
-    ['执行者', task.executor === 'agent' ? 'Agent' : '用户'],
-    ['执行模式', scheduleSummary],
-    ...(task.runMode
-      ? ([
-          ['会话策略', task.runMode === 'single-session' ? '连续对话' : '新开对话'],
-        ] as Array<[string, string]>)
-      : []),
-    ...(task.model ? ([['模型覆盖', task.model]] as Array<[string, string]>) : []),
-    ...(task.permissionMode && task.permissionMode !== 'auto'
-      ? ([['权限模式', task.permissionMode]] as Array<[string, string]>)
-      : []),
-    [
-      '工作区',
-      task.workspacePath ?? task.workspaceId,
-    ],
-    ['Runtime', task.runtime ?? 'builtin'],
-  ];
+/** OverflowMenu — "⋯" button with all secondary actions (标记完成,
+ *  归档, 同步到 Agent, 删除). Centralises the actions that used to live
+ *  as inline buttons on the ActionBar; v0.1.69 review said the bar
+ *  had too many competing targets. */
+function OverflowMenu({
+  status,
+  busy,
+  syncing,
+  canSyncToAgent,
+  onMarkDone,
+  onArchive,
+  onSyncToAgent,
+  onDelete,
+}: {
+  status: Task['status'];
+  busy: boolean;
+  syncing: boolean;
+  canSyncToAgent: boolean;
+  onMarkDone: () => void;
+  onArchive: () => void;
+  onSyncToAgent: () => void;
+  onDelete: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const canMarkDone = status === 'verifying';
+  const canArchive = status === 'done';
+  // If neither secondary action applies and delete is always-available,
+  // we still render the menu — delete alone is a legit reason to exist.
   return (
-    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12px]">
-      {rows.map(([k, v]) => (
-        <div key={k} className="contents">
-          <dt className="text-[var(--ink-muted)]/70">{k}</dt>
-          <dd className="truncate text-[var(--ink)]">{v}</dd>
-        </div>
-      ))}
-      {task.tags.length > 0 && (
-        <div className="contents">
-          <dt className="text-[var(--ink-muted)]/70">标签</dt>
-          <dd className="flex flex-wrap gap-1">
-            {task.tags.map((t) => (
-              <span
-                key={t}
-                className="rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px] text-[var(--ink-muted)]"
-              >
-                #{t}
-              </span>
-            ))}
-          </dd>
-        </div>
-      )}
-    </dl>
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        disabled={busy}
+        onClick={() => setOpen((v) => !v)}
+        className="flex h-8 w-8 items-center justify-center rounded-[var(--radius-md)] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
+        title="更多操作"
+      >
+        <MoreHorizontal className="h-4 w-4" />
+      </button>
+      <Popover
+        open={open}
+        onClose={() => setOpen(false)}
+        anchorRef={btnRef}
+        placement="bottom-end"
+        className="min-w-[160px] py-1"
+        zIndex={OVERLAY_Z + 1}
+      >
+        {canMarkDone && (
+          <MenuItem
+            icon={<CheckCircle className="h-3.5 w-3.5" />}
+            label="标记完成"
+            onClick={() => {
+              setOpen(false);
+              onMarkDone();
+            }}
+          />
+        )}
+        {canArchive && (
+          <MenuItem
+            icon={<Archive className="h-3.5 w-3.5" />}
+            label="归档"
+            onClick={() => {
+              setOpen(false);
+              onArchive();
+            }}
+          />
+        )}
+        {canSyncToAgent && (
+          <MenuItem
+            icon={<Bot className="h-3.5 w-3.5" />}
+            label={syncing ? '同步中…' : '同步到 Agent'}
+            title="把该任务的模型 / 权限覆盖写回所属 Agent 的默认配置"
+            onClick={() => {
+              setOpen(false);
+              onSyncToAgent();
+            }}
+            disabled={syncing}
+          />
+        )}
+        {(canMarkDone || canArchive || canSyncToAgent) && (
+          <div className="my-1 border-t border-[var(--line-subtle)]" />
+        )}
+        <MenuItem
+          icon={<Trash2 className="h-3.5 w-3.5" />}
+          label="删除"
+          danger
+          onClick={() => {
+            setOpen(false);
+            onDelete();
+          }}
+        />
+      </Popover>
+    </>
   );
 }
 
-function RunStatsSection({ stats }: { stats: TaskRunStats }) {
-  const lastRun = stats.lastExecutedAt
-    ? new Date(stats.lastExecutedAt).toLocaleString()
-    : '—';
-  const lastResult = stats.lastSuccess === true
-    ? '成功'
-    : stats.lastSuccess === false
-      ? '失败'
-      : '—';
-  const resultColor = stats.lastSuccess === true
-    ? 'text-[var(--success)]'
-    : stats.lastSuccess === false
-      ? 'text-[var(--error)]'
-      : 'text-[var(--ink)]';
-  const duration = stats.lastDurationMs != null
-    ? `${(stats.lastDurationMs / 1000).toFixed(1)}s`
-    : '—';
+function MenuItem({
+  icon,
+  label,
+  title,
+  onClick,
+  disabled,
+  danger,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  title?: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  const color = danger
+    ? 'text-[var(--error)] hover:bg-[var(--error-bg)]'
+    : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]';
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] disabled:cursor-not-allowed disabled:opacity-50 ${color}`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+/** NotificationSummary — read-only one-liner ("桌面 ✓ · 飞书·公司群").
+ *  v0.1.69 preview polish: no inline edit button — the overlay's
+ *  top-level "编辑" is the only edit entry across the whole preview. */
+function NotificationSummary({ task }: { task: Task }) {
+  const { statuses } = useAgentStatuses();
+  const cfg = task.notification;
+  const desktop = cfg?.desktop !== false;
+  const botChannelId = cfg?.botChannelId ?? null;
+  const channelLabel = useMemo(() => {
+    if (!botChannelId) return null;
+    for (const agent of Object.values(statuses)) {
+      for (const ch of agent.channels) {
+        if (ch.channelId === botChannelId) {
+          return `${agent.agentName} · ${ch.name ?? ch.channelType}`;
+        }
+      }
+    }
+    return `未知频道 (${botChannelId})`;
+  }, [botChannelId, statuses]);
+
   return (
     <div>
-      <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-        运行统计
+      <div className="mb-1.5 flex items-center gap-1.5 text-[14px] font-semibold text-[var(--ink)]">
+        <Bell className="h-3.5 w-3.5" />
+        通知
       </div>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12px]">
-        <dt className="text-[var(--ink-muted)]/70">累计执行</dt>
-        <dd className="text-[var(--ink)]">{stats.executionCount}</dd>
-        <dt className="text-[var(--ink-muted)]/70">最近执行</dt>
-        <dd className="text-[var(--ink)]">{lastRun}</dd>
-        <dt className="text-[var(--ink-muted)]/70">最近结果</dt>
-        <dd className={resultColor}>{lastResult}</dd>
-        <dt className="text-[var(--ink-muted)]/70">耗时</dt>
-        <dd className="text-[var(--ink)]">{duration}</dd>
-        {stats.sessionCount > 0 && (
-          <>
-            <dt className="text-[var(--ink-muted)]/70">关联会话</dt>
-            <dd className="text-[var(--ink)]">{stats.sessionCount}</dd>
-          </>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+        <span className={desktop ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
+          桌面通知 {desktop ? '✓ 开启' : '✗ 关闭'}
+        </span>
+        {channelLabel ? (
+          <span className="text-[var(--ink)]">IM Bot: {channelLabel}</span>
+        ) : (
+          <span className="text-[var(--ink-muted)]/70">不发送到 Bot</span>
         )}
-        {stats.cronStatus && (
-          <>
-            <dt className="text-[var(--ink-muted)]/70">调度器</dt>
-            <dd className="text-[var(--ink)]">{stats.cronStatus}</dd>
-          </>
-        )}
-      </dl>
+      </div>
     </div>
   );
 }
@@ -651,89 +726,6 @@ function ActionBtn({
       {icon}
       {label}
     </button>
-  );
-}
-
-/**
- * Notification config with local draft + explicit save. Avoids per-keystroke
- * Rust writes (CC review W5) and fully disables editing while the task is
- * running (W4 — the Rust `update()` guard would reject anyway, so we surface
- * the constraint in the UI instead of letting users bump against invisible
- * walls).
- */
-function NotificationSection({
-  task,
-  disabled,
-  onSaved,
-  onError,
-}: {
-  task: Task;
-  disabled: boolean;
-  onSaved: (updated: Task) => void;
-  onError: (msg: string) => void;
-}) {
-  const [draft, setDraft] = useState<NotificationConfig>(
-    task.notification ?? { desktop: true },
-  );
-  const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  // If parent task updates (e.g. SSE-driven refetch), reset draft to match.
-  useEffect(() => {
-    setDraft(task.notification ?? { desktop: true });
-    setDirty(false);
-  }, [task]);
-
-  const save = useCallback(async () => {
-    if (!dirty) return;
-    setSaving(true);
-    try {
-      const updated = await taskUpdate({ id: task.id, notification: draft });
-      onSaved(updated);
-      setDirty(false);
-    } catch (e) {
-      onError(extractErrorMessage(e));
-    } finally {
-      setSaving(false);
-    }
-  }, [dirty, draft, task.id, onSaved, onError]);
-
-  return (
-    <div className="mt-3">
-      <div className="mb-1.5 flex items-center justify-between">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-          通知
-        </div>
-        {dirty && !disabled && (
-          <button
-            type="button"
-            onClick={() => void save()}
-            disabled={saving}
-            className="rounded-[var(--radius-md)] bg-[var(--accent-warm-muted)] px-2.5 py-1 text-[11px] font-medium text-[var(--accent-warm)] hover:bg-[var(--accent-warm-subtle)] disabled:opacity-50"
-          >
-            {saving ? '保存中…' : '保存'}
-          </button>
-        )}
-      </div>
-      {disabled && (
-        <div className="mb-1.5 text-[11px] text-[var(--ink-muted)]/70">
-          任务运行 / 验证中，通知设置不可编辑
-        </div>
-      )}
-      <div
-        className={
-          disabled ? 'pointer-events-none opacity-50' : undefined
-        }
-      >
-        <NotificationConfigEditor
-          value={draft}
-          onChange={(next) => {
-            setDraft(next);
-            setDirty(true);
-          }}
-        />
-      </div>
-    </div>
   );
 }
 
