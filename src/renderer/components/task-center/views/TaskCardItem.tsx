@@ -71,18 +71,28 @@ export function TaskCardItem(props: TaskCardItemProps) {
     };
   }, [shouldFetchStats, task?.id]);
 
-  // Activity bar content — show the latest statusHistory message when the
-  // task is in a state where "what's going on" or "why is it stuck" is
-  // the actionable question. The message is posted by the agent via
-  // `update-status` — it's the freshest signal we have.
+  // Activity bar content — quote the latest statusHistory message IFF
+  // it's user-meaningful. Whitelist:
+  //   - `cli`   — agent-submitted via `myagents task update-status` (real
+  //               progress / blocker reason)
+  //   - `ui`    — user wrote it via the detail overlay (own note)
+  //   - `crash` — boot recovery ("上次被重启中断"); worth surfacing so
+  //               the user knows why the task landed in blocked without
+  //               their doing
+  // Creation entries (`from == null`) are skipped even when source is
+  // `ui` — the auto-generated "created (direct)" row isn't something a
+  // user needs to see on every new card. `system`/`scheduler`/`rerun`/
+  // `migration`/`watchdog`/`endCondition` are all audit-only: useful
+  // in the detail overlay's timeline, but noise on the card.
   const latestHistory = task?.statusHistory?.at(-1);
-  const activityMessage = latestHistory?.message?.trim();
-  const activityTone: 'info' | 'warning' | null =
-    activityMessage && status === 'blocked'
-      ? 'warning'
-      : activityMessage && status === 'running'
-        ? 'info'
-        : null;
+  const activityMessage: string | null = (() => {
+    if (!latestHistory) return null;
+    if (latestHistory.from === null) return null;
+    const src = latestHistory.source;
+    if (src !== 'cli' && src !== 'ui' && src !== 'crash') return null;
+    const msg = latestHistory.message?.trim();
+    return msg && msg.length > 0 ? msg : null;
+  })();
 
   return (
     <button
@@ -137,10 +147,11 @@ export function TaskCardItem(props: TaskCardItemProps) {
         updatedAt={updatedAt}
       />
 
-      {/* Row 4 — optional activity bar */}
-      {activityTone && activityMessage && (
-        <ActivityBar tone={activityTone} message={activityMessage} />
-      )}
+      {/* Row 4 — optional activity bar. Rendered only when there's a
+          user-meaningful message (see `activityMessage` derivation up
+          top). One visual treatment for all variants — this is a
+          "quote" of the last human/agent note, not a status colour. */}
+      {activityMessage && <ActivityBar message={activityMessage} />}
     </button>
   );
 }
@@ -217,42 +228,25 @@ function MetaRow({
 }
 
 /**
- * Inline activity bar — surfaces the latest statusHistory message when
- * the task is running or blocked. Styled by tone:
- *   - info     (running) → blue left stripe, info-bg, info text
- *   - warning  (blocked) → full warning-bg wash (the mock treats blocked
- *                           reasons as more prominent than in-flight
- *                           progress — you *want* the user's eye on a
- *                           blocker)
+ * Inline activity bar — one uniform "quote" treatment for every kind
+ * of message we surface (agent progress, agent blocker reason, user
+ * note, crash-recovery). Left hairline + paper tint is the same
+ * vocabulary the detail overlay uses for the "来自想法" source quote,
+ * so the two surfaces read as related. Status colour is carried by the
+ * status badge above; this bar doesn't re-encode it.
  */
-function ActivityBar({
-  tone,
-  message,
-}: {
-  tone: 'info' | 'warning';
-  message: string;
-}) {
-  if (tone === 'warning') {
-    return (
-      <div className="rounded-[var(--radius-sm)] bg-[var(--warning-bg)] px-2.5 py-1.5 text-[12px] leading-snug text-[var(--warning)]">
-        <span className="line-clamp-2">{message}</span>
-      </div>
-    );
-  }
-  // `color-mix(srgb, info-bg 60%, paper-elevated)` gives a softer tint
-  // than plain info-bg would — the running activity bar should read as
-  // "subtle ongoing update", not as a full-weight status chip.
-  // Tailwind's `/40` alpha modifier doesn't work on arbitrary CSS vars,
-  // so we go through color-mix explicitly.
+function ActivityBar({ message }: { message: string }) {
+  // Softer wash than solid `--paper-inset`. Tailwind's `/60` alpha
+  // modifier doesn't resolve against arbitrary CSS vars, so we go
+  // through color-mix instead.
   return (
     <div
-      className="flex items-start gap-2 rounded-[var(--radius-sm)] px-2 py-1.5 text-[12px] leading-snug text-[var(--ink-secondary)]"
+      className="flex items-start gap-2 rounded-r-[var(--radius-sm)] border-l-2 border-[var(--line-strong)] px-2.5 py-1.5 text-[12px] leading-snug text-[var(--ink-muted)]"
       style={{
         backgroundColor:
-          'color-mix(in srgb, var(--info-bg) 60%, var(--paper-elevated))',
+          'color-mix(in srgb, var(--paper-inset) 55%, var(--paper-elevated))',
       }}
     >
-      <span className="mt-[3px] h-3 w-[2px] shrink-0 bg-[var(--info)]" aria-hidden />
       <span className="line-clamp-2">{message}</span>
     </div>
   );

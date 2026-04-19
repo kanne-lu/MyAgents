@@ -641,7 +641,10 @@ impl TaskStore {
                     to: TaskStatus::Blocked,
                     at: now,
                     actor: TransitionActor::System,
-                    message: Some("crash recovery — app restarted while task was active".to_string()),
+                    // User-facing Chinese copy — this line shows up directly on the
+                    // task card as an activity-bar quote, so it needs to read as
+                    // natural product language, not an internal log string.
+                    message: Some("上次运行被应用重启中断,可重新派发以继续".to_string()),
                     source: Some(TransitionSource::Crash),
                 });
                 changed = true;
