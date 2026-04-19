@@ -124,16 +124,18 @@ export function taskWriteDoc(
 
 /**
  * Upgrade one legacy CronTask (no `task_id` back-pointer) to a new-model
- * Task in a single atomic Rust call. The primitive handles thought
- * creation, schedule / end-condition / run-mode type conversions, both
- * back-pointers, and rollback on any step failure — see
- * `src-tauri/src/legacy_upgrade.rs` for why this needed to move out of
- * the renderer. Returns the new Task + the id of the Thought that was
- * auto-created to satisfy the v1 `sourceThoughtId` invariant.
+ * Task in a single atomic Rust call. The primitive handles schedule /
+ * end-condition / run-mode type conversions, lifecycle-preserving status
+ * mapping (running → Running, naturally-ended → Done, user-paused →
+ * Stopped), both back-pointers, and rollback on any step failure — see
+ * `src-tauri/src/legacy_upgrade.rs`.
+ *
+ * Migrated Tasks have `sourceThoughtId = None` — legacy crons have no
+ * backing Thought and auto-minting one would pollute the user's thought
+ * stream with synthetic rows.
  */
 export interface TaskUpgradeLegacyResult {
   task: Task;
-  thoughtId: string;
 }
 export function taskUpgradeLegacyCron(
   cronTaskId: string,

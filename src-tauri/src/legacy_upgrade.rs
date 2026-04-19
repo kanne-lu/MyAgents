@@ -6,40 +6,47 @@
 //! conditions / runtime config — the existing CronTask keeps running, we
 //! just wire both-sided back-pointers.
 //!
-//! Why a Rust primitive instead of the renderer orchestrating four IPC
-//! calls?
+//! Design notes:
 //!
-//! The first upgrade attempt lived in TypeScript and hit two separate
-//! wire-format mismatches back-to-back (`deadline` ISO-string vs i64;
-//! `run_mode` snake vs kebab). Both are symptoms of the same class of
-//! bug: two namesake types in `task::*` and `cron_task::*` evolve with
-//! different serde conventions, and whenever the renderer copies a field
-//! from one side to the other, serde at the receiver rejects it. Boundary
-//! transforms in TS paper over each case but can't prevent the next one.
+//! 1. **No synthetic Thought.** Earlier iterations auto-created a Thought
+//!    whose content was the cron's prompt, on the theory that every Task
+//!    must have a `sourceThoughtId`. In practice this polluted the user's
+//!    thought stream with one "synthetic" entry per upgraded cron. The v1
+//!    invariant ("every NEW Task has a sourceThoughtId") doesn't need to
+//!    apply to migrations: a legacy cron has no thought and there was
+//!    never a moment at which one would have been captured. We leave
+//!    `source_thought_id = None` on migrated tasks.
 //!
-//! Here the conversion is strongly typed Rust-to-Rust — no JSON
-//! round-trip. If someone adds a `cron_task::RunMode::Whatever` variant
-//! without a `task::TaskRunMode` counterpart, the compiler refuses to
-//! build `run_mode_from_cron()` below. Same for every other field:
-//! conversions that drift produce a build error at CI time, not a
-//! runtime failure on the user's first opened overlay.
+//! 2. **Preserve lifecycle state.** Crons have two statuses (Running /
+//!    Stopped), but a stopped cron means any of three things — user
+//!    paused, end conditions fired, AI self-exited. `exit_reason` tells
+//!    them apart. We map:
+//!      - Running                           → Task::Running
+//!      - Stopped + exit_reason set         → Task::Done
+//!      - Stopped without exit_reason       → Task::Stopped
+//!    This is what `TaskStore::create_migrated` is for — the regular
+//!    `create_direct` always starts Todo, which lies about already-
+//!    completed crons by dumping them into 待启动.
 //!
-//! Concurrency + atomicity: the whole pipeline (thought creation → task
-//! creation → forward pointer → back pointer) lives inside a single
-//! `async fn` with explicit rollback on any failure path. The back
-//! pointer is written with `require_null = true`, so two concurrent
-//! upgrade callers (auto sweep + manual button, two open windows) can't
-//! both "win" — the loser sees `ALREADY_LINKED`, rolls back the partial
-//! Thought/Task it just created, and bubbles the error to the caller.
+//! 3. **Rust-native field conversions.** The whole reason this lives in
+//!    Rust (not TypeScript) is to let the type system catch serde-shape
+//!    drift between `cron_task::*` and `task::*` at `cargo check` time.
+//!    Every conversion helper below is a `match` on a strongly-typed
+//!    enum; add a variant on either side and the compiler refuses to
+//!    build.
+//!
+//! 4. **Atomic rollback.** The whole pipeline lives inside a single
+//!    `async fn`. `cron_manager.set_task_id` uses `require_null=true`,
+//!    so two concurrent upgrades on the same cron can't both "win" —
+//!    the loser sees `ALREADY_LINKED` and we undo the partial Task we
+//!    just created.
 
 use crate::cron_task;
 use crate::task;
 use crate::thought;
 use crate::ulog_info;
 
-/// Map a CronTask's `RunMode` to the Task-side enum. Strongly typed so
-/// an added variant on either side becomes a compile error here, not a
-/// runtime serde failure later.
+/// Map a CronTask's `RunMode` to the Task-side enum.
 fn run_mode_from_cron(rm: &cron_task::RunMode) -> task::TaskRunMode {
     match rm {
         cron_task::RunMode::SingleSession => task::TaskRunMode::SingleSession,
@@ -48,8 +55,7 @@ fn run_mode_from_cron(rm: &cron_task::RunMode) -> task::TaskRunMode {
 }
 
 /// Map a CronTask's `EndConditions` (deadline as `DateTime<Utc>`) to the
-/// Task-side shape (deadline as `i64` ms-epoch). The only field that
-/// actually needs transforming is `deadline`; the rest pass through.
+/// Task-side shape (deadline as `i64` ms-epoch).
 fn end_conditions_from_cron(ec: &cron_task::EndConditions) -> task::TaskEndConditions {
     task::TaskEndConditions {
         deadline: ec.deadline.map(|dt| dt.timestamp_millis()),
@@ -59,10 +65,6 @@ fn end_conditions_from_cron(ec: &cron_task::EndConditions) -> task::TaskEndCondi
 }
 
 /// Derive the Task's `execution_mode` from the cron's schedule kind.
-/// `At` → one-shot → `Scheduled`; `Loop` → `Loop`; everything else
-/// (`Every` / `Cron` / unset) → `Recurring`. The concrete interval /
-/// expression lives on the CronTask; the new Task just remembers the
-/// category.
 fn execution_mode_from_cron_schedule(
     schedule: &Option<cron_task::CronSchedule>,
 ) -> task::TaskExecutionMode {
@@ -73,10 +75,9 @@ fn execution_mode_from_cron_schedule(
     }
 }
 
-/// Build a Task-side `NotificationConfig` from the cron's notification
-/// surface (which lives as separate fields on CronTask, not a nested
-/// struct). `CronDelivery.platform` has no Task-side counterpart — the
-/// channel id carries the platform implicitly via the bot registry.
+/// Build a Task-side `NotificationConfig` from the cron's (flat) notification
+/// fields. `CronDelivery.platform` has no Task-side counterpart — the channel
+/// id carries the platform implicitly via the bot registry.
 fn notification_from_cron(
     notify_enabled: bool,
     delivery: &Option<cron_task::CronDelivery>,
@@ -93,9 +94,34 @@ fn notification_from_cron(
     }
 }
 
-/// Derive a human-readable Task name from the cron. Prefers the
-/// explicit `name` field; falls back to the first non-empty line of the
-/// prompt, truncated to 60 codepoints for the task card.
+/// Compute the Task status that best represents the cron's current
+/// lifecycle state. See the module doc for mapping rules.
+fn initial_status_from_cron(cron: &cron_task::CronTask) -> task::TaskStatus {
+    match cron.status {
+        cron_task::TaskStatus::Running => task::TaskStatus::Running,
+        cron_task::TaskStatus::Stopped => {
+            if cron.exit_reason.is_some() {
+                task::TaskStatus::Done
+            } else {
+                task::TaskStatus::Stopped
+            }
+        }
+    }
+}
+
+fn migration_message_for(status: task::TaskStatus, cron: &cron_task::CronTask) -> String {
+    match status {
+        task::TaskStatus::Running => "migrated from legacy cron (running)".to_string(),
+        task::TaskStatus::Done => cron
+            .exit_reason
+            .as_deref()
+            .map(|r| format!("migrated from legacy cron (done: {})", r))
+            .unwrap_or_else(|| "migrated from legacy cron (done)".to_string()),
+        task::TaskStatus::Stopped => "migrated from legacy cron (paused)".to_string(),
+        _ => "migrated from legacy cron".to_string(),
+    }
+}
+
 fn derive_task_name(cron: &cron_task::CronTask) -> String {
     if let Some(name) = cron.name.as_deref() {
         let trimmed = name.trim();
@@ -121,24 +147,25 @@ fn truncate_chars(s: &str, max: usize) -> String {
     format!("{}…", keep)
 }
 
-/// Upgrade result returned to the renderer.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpgradeResult {
     pub task: task::Task,
-    pub thought_id: String,
 }
 
 /// Upgrade one legacy CronTask to a new-model Task.
 ///
 /// The renderer resolves `workspace_path → workspace_id` from its config
-/// and passes the id in (Rust doesn't have a clean cross-process view of
-/// the projects list). Everything else — schedule mapping, end-condition
-/// shape conversion, rollback — happens server-side under a single
-/// `async fn`.
+/// and passes the id in (Rust doesn't have a cross-process view of the
+/// projects list). Everything else — schedule mapping, status derivation,
+/// rollback — happens server-side under a single `async fn`.
+///
+/// `thought_store` is kept in the signature so future revisions can use
+/// it (e.g. if we add user-opt-in "also create a thought on upgrade"
+/// behavior), but the default migration does NOT create a Thought.
 pub async fn upgrade_legacy_cron(
     task_store: &task::TaskStore,
-    thought_store: &thought::ThoughtStore,
+    _thought_store: &thought::ThoughtStore,
     cron_task_id: &str,
     workspace_id: &str,
 ) -> Result<UpgradeResult, String> {
@@ -148,9 +175,6 @@ pub async fn upgrade_legacy_cron(
         .await
         .ok_or_else(|| format!("CronTask not found: {}", cron_task_id))?;
 
-    // Early-out if this cron is already linked. The back-pointer setter
-    // catches this concurrently, but checking up front avoids the
-    // Thought/Task side effects of a doomed attempt.
     if let Some(existing_task_id) = &cron.task_id {
         return Err(format!(
             "ALREADY_LINKED: CronTask {} is already linked to Task {}",
@@ -163,24 +187,14 @@ pub async fn upgrade_legacy_cron(
         return Err("CronTask has an empty prompt; refusing to upgrade".to_string());
     }
 
-    // Step 1 — mint a source Thought. v1 requires every Task to reference
-    // a Thought (PRD §3.2); for legacy upgrades we create one whose
-    // content is the cron's original prompt.
-    let thought = thought_store
-        .create(thought::ThoughtCreateInput {
-            content: prompt.to_string(),
-            images: vec![],
-        })
-        .await
-        .map_err(|e| format!("create source thought: {}", e))?;
-
-    // Step 2 — build the Task input using strongly-typed Rust
-    // conversions. Any field drift between the cron- and task- side
-    // enums produces a compile error in the helpers above.
+    // Build input from strongly-typed Rust conversions — no JSON round-
+    // trip means field drift between cron_task::* and task::* becomes a
+    // compile error in the helpers above, not a runtime serde failure.
     let execution_mode = execution_mode_from_cron_schedule(&cron.schedule);
     let run_mode = Some(run_mode_from_cron(&cron.run_mode));
     let end_conditions = Some(end_conditions_from_cron(&cron.end_conditions));
     let notification = Some(notification_from_cron(cron.notify_enabled, &cron.delivery));
+    let initial_status = initial_status_from_cron(&cron);
 
     let input = task::TaskCreateDirectInput {
         name: derive_task_name(&cron),
@@ -194,61 +208,56 @@ pub async fn upgrade_legacy_cron(
         end_conditions,
         runtime: cron.runtime.clone(),
         runtime_config: cron.runtime_config.clone(),
-        source_thought_id: Some(thought.id.clone()),
+        // Legacy crons have no source Thought and we don't mint one —
+        // synthetic thoughts pollute the user's thought stream without
+        // carrying any of the "captured a raw idea" meaning the field
+        // is supposed to represent.
+        source_thought_id: None,
         tags: vec![],
         notification,
     };
 
-    // Step 3 — create the Task. On failure, clean up the thought.
-    let task = match task_store.create_direct(input).await {
-        Ok(t) => t,
-        Err(e) => {
-            if let Err(cleanup) = thought_store.delete(&thought.id).await {
-                ulog_info!(
-                    "[legacy-upgrade] rollback: thought delete failed after task-create error: {}",
-                    cleanup
-                );
-            }
-            return Err(format!("create task: {}", e));
-        }
-    };
+    // Create the Task with the status that matches the cron's current
+    // lifecycle state — not the default Todo.
+    let task = task_store
+        .create_migrated(
+            input,
+            initial_status,
+            migration_message_for(initial_status, &cron),
+        )
+        .await
+        .map_err(|e| format!("create migrated task: {}", e))?;
 
-    // Step 4 — forward pointer Task → CronTask.
+    // Forward pointer Task → CronTask.
     if let Err(e) = task_store
         .set_cron_task_id(&task.id, Some(cron_task_id.to_string()))
         .await
     {
         let _ = task_store.delete(&task.id).await;
-        let _ = thought_store.delete(&thought.id).await;
         return Err(format!("set Task.cron_task_id: {}", e));
     }
 
-    // Step 5 — back pointer CronTask → Task, with link-if-null guard.
-    // When two upgrade flows race on the same cron, the loser sees
-    // `ALREADY_LINKED` here and we roll back everything we created in
-    // this attempt. The winner has already left the cron linked to
-    // their Task; ours becomes an orphan we clean up now.
+    // Back pointer CronTask → Task, with link-if-null guard. When two
+    // upgrade flows race on the same cron, the loser sees
+    // `ALREADY_LINKED` here and we roll back the partial Task we just
+    // created.
     if let Err(e) = manager
         .set_task_id(cron_task_id, Some(task.id.clone()), true)
         .await
     {
         let _ = task_store.set_cron_task_id(&task.id, None).await;
         let _ = task_store.delete(&task.id).await;
-        let _ = thought_store.delete(&thought.id).await;
         return Err(format!("set CronTask.task_id: {}", e));
     }
 
     ulog_info!(
-        "[legacy-upgrade] cron {} → task {} (thought {})",
+        "[legacy-upgrade] cron {} → task {} (status {})",
         cron_task_id,
         task.id,
-        thought.id
+        initial_status.as_str()
     );
 
-    Ok(UpgradeResult {
-        task,
-        thought_id: thought.id,
-    })
+    Ok(UpgradeResult { task })
 }
 
 /// Tauri command — thin wrapper around `upgrade_legacy_cron`.

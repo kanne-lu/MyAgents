@@ -30,7 +30,6 @@ export interface LegacyCronRaw {
 
 export interface UpgradeResult {
   task: Task;
-  thoughtId: string;
 }
 
 function getWorkspacePath(legacy: LegacyCronRaw): string {

@@ -159,6 +159,11 @@ pub enum TransitionSource {
     Scheduler,
     EndCondition,
     Rerun,
+    /// Task was created by the legacy-cron → new-model upgrade path
+    /// (`legacy_upgrade::upgrade_legacy_cron`). Rendered in the status-
+    /// history panel so the user can tell upgrade-originated tasks from
+    /// user-authored ones.
+    Migration,
 }
 
 impl TransitionSource {
@@ -171,6 +176,7 @@ impl TransitionSource {
             Self::Scheduler => "scheduler",
             Self::EndCondition => "endCondition",
             Self::Rerun => "rerun",
+            Self::Migration => "migration",
         }
     }
 }
@@ -756,6 +762,118 @@ impl TaskStore {
                 "actor": TransitionActor::User.as_str(),
                 "source": TransitionSource::Ui.as_str(),
                 "message": "created (direct)",
+                "event": "created",
+            }),
+        );
+        Ok(t)
+    }
+
+    /// Create a Task at an explicit initial status, bypassing the default
+    /// Todo entry point. Used ONLY by the legacy-cron upgrade path
+    /// (`legacy_upgrade::upgrade_legacy_cron`) — migrations preserve the
+    /// cron's lifecycle state (running crons → Running task, naturally
+    /// ended crons → Done, user-paused crons → Stopped) so the Task
+    /// Center doesn't spuriously mass-categorise every upgraded row as
+    /// 待启动. The status-history entry records `actor=System,
+    /// source=Migration` so the audit trail is clear.
+    ///
+    /// `initial_status` is validated against a whitelist of legitimate
+    /// migration targets — the full state-machine alphabet isn't
+    /// appropriate here (a migration can't plausibly land in Verifying
+    /// or Blocked, and Deleted / Archived aren't reachable via this
+    /// path).
+    pub async fn create_migrated(
+        &self,
+        input: TaskCreateDirectInput,
+        initial_status: TaskStatus,
+        message: String,
+    ) -> Result<Task, String> {
+        validate_task_name(&input.name)?;
+        if !matches!(
+            initial_status,
+            TaskStatus::Todo | TaskStatus::Running | TaskStatus::Done | TaskStatus::Stopped
+        ) {
+            return Err(format!(
+                "invalid migration target status: {}",
+                initial_status.as_str()
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = now_ms();
+        let workspace_path = canonicalize_workspace_path(&input.workspace_path)?;
+
+        // task_docs_dir() internally validates `id`, but `id` is our freshly-minted
+        // UUID so it cannot fail; the explicit check is still cheap insurance.
+        let task_dir = task_docs_dir(&workspace_path, &id)?;
+
+        let t = Task {
+            id: id.clone(),
+            name: input.name,
+            executor: input.executor,
+            description: input.description,
+            workspace_id: input.workspace_id,
+            workspace_path: workspace_path.clone(),
+            execution_mode: input.execution_mode,
+            cron_task_id: None,
+            run_mode: input.run_mode,
+            end_conditions: input.end_conditions,
+            runtime: input.runtime,
+            runtime_config: input.runtime_config,
+            source_thought_id: input.source_thought_id,
+            session_ids: Vec::new(),
+            status: initial_status,
+            tags: input.tags,
+            created_at: now,
+            updated_at: now,
+            last_executed_at: None,
+            status_history: vec![StatusTransition {
+                from: None,
+                to: initial_status,
+                at: now,
+                actor: TransitionActor::System,
+                message: Some(message.clone()),
+                source: Some(TransitionSource::Migration),
+            }],
+            notification: input.notification,
+            dispatch_origin: TaskDispatchOrigin::Direct,
+            deleted: false,
+            deleted_at: None,
+        };
+
+        let mut inner = self.inner.write().await;
+        let mut next = inner.clone();
+        next.insert(id.clone(), t.clone());
+        Self::persist_locked(&self.jsonl_path, &next)?;
+
+        fs::create_dir_all(&task_dir)
+            .map_err(|e| format!("Failed to create task doc dir: {}", e))?;
+        let task_md = task_dir.join("task.md");
+        if let Err(e) = write_atomic_text(&task_md, &input.task_md_content) {
+            ulog_warn!(
+                "[task] migrated jsonl committed but task.md write failed id={}: {}",
+                id, e
+            );
+            return Err(format!("Failed to write task.md: {}", e));
+        }
+        *inner = next;
+        drop(inner);
+        ulog_info!(
+            "[task] created migrated id={} name={} status={}",
+            id,
+            t.name,
+            initial_status.as_str()
+        );
+
+        emit_task_event(
+            "task:status-changed",
+            serde_json::json!({
+                "taskId": t.id,
+                "from": serde_json::Value::Null,
+                "to": initial_status.as_str(),
+                "at": t.created_at,
+                "actor": TransitionActor::System.as_str(),
+                "source": TransitionSource::Migration.as_str(),
+                "message": message,
                 "event": "created",
             }),
         );
