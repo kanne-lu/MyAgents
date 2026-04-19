@@ -47,7 +47,12 @@ export function TaskCardItem(props: TaskCardItemProps) {
   const name = task?.name ?? legacy?.name ?? '—';
   const updatedAt = task?.updatedAt ?? legacy?.updatedAt ?? 0;
   const category = task ? task.executionMode : inferLegacyCategory(legacy);
-  const actionAlwaysVisible = status === 'running' || status === 'verifying';
+  // Actions stay pinned to the top-right at all times — the earlier
+  // "fade in on hover" pattern made the card visibly reflow on hover,
+  // which was jarring when scanning a long list. Consistent placement
+  // is more valuable than the few pixels we gain by hiding them when
+  // idle.
+  const actionAlwaysVisible = true;
 
   // Loop + recurring tasks surface "第 N 轮" / "已执行 N 次" — both pull
   // from CronTask.execution_count. RunStats is a per-card fetch because
@@ -112,8 +117,14 @@ export function TaskCardItem(props: TaskCardItemProps) {
         </div>
       </div>
 
-      {/* Row 2 — title */}
-      <div className="line-clamp-2 text-base font-semibold leading-snug text-[var(--ink)]">
+      {/* Row 2 — title. 14px / weight 500 per the reference mock — the
+          earlier text-base/semibold read too heavy next to the card's
+          tiny meta row. Slight negative letter-spacing tightens the
+          CJK rhythm so the title doesn't feel "plumped" at weight 500. */}
+      <div
+        className="line-clamp-2 text-sm font-medium leading-snug text-[var(--ink)]"
+        style={{ letterSpacing: '-0.005em' }}
+      >
         {name}
       </div>
 

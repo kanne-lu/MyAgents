@@ -463,30 +463,21 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
             if (rows.length === 0) return null;
             return view === 'card' ? (
               <section key={b} className="mb-6">
-                {/* Bucket header — 16px semibold per DESIGN.md §2.2
-                    scale (text-base), count rendered as a muted sibling
-                    so the label owns the visual weight. The previous
-                    11px uppercase treatment read as a code-like overline
-                    rather than a real section title once the page had
-                    more than a handful of cards. */}
-                <h3 className="mb-3 flex items-baseline gap-2 text-base font-semibold text-[var(--ink)]">
-                  {BUCKETS[b].label}
-                  <span className="text-[13px] font-normal text-[var(--ink-muted)]">
-                    {rows.length}
-                  </span>
-                </h3>
+                {/* Bucket header — 11px uppercase small-caps + count +
+                    flex-1 hairline rule (per the reference mock). The
+                    previous "big semibold" treatment was too loud — the
+                    header should read as a quiet section divider, with
+                    the task cards below carrying the visual weight. */}
+                <BucketHeader label={BUCKETS[b].label} count={rows.length} />
                 <div className="grid grid-cols-2 gap-3">
                   {rows.map(renderCard)}
                 </div>
               </section>
             ) : (
               <section key={b} className="mb-4">
-                <h3 className="mb-1 flex items-baseline gap-2 px-3 pt-3 text-base font-semibold text-[var(--ink)]">
-                  {BUCKETS[b].label}
-                  <span className="text-[13px] font-normal text-[var(--ink-muted)]">
-                    {rows.length}
-                  </span>
-                </h3>
+                <div className="px-3 pt-3">
+                  <BucketHeader label={BUCKETS[b].label} count={rows.length} />
+                </div>
                 <div>{rows.map(renderRow)}</div>
               </section>
             );
@@ -537,6 +528,26 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+/**
+ * Bucket header — 11px uppercase label + muted count + flex-1 hairline
+ * rule, per the v0.1.69 visual mockup. Quiet enough to read as a
+ * section divider rather than a page heading; the task cards below
+ * carry the actual visual weight.
+ */
+function BucketHeader({ label, count }: { label: string; count: number }) {
+  return (
+    <div className="mb-2 flex items-center gap-2">
+      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+        {label}
+      </span>
+      <span className="text-[11px] tabular-nums text-[var(--ink-subtle)]">
+        {count}
+      </span>
+      <span className="ml-1 h-px flex-1 bg-[var(--line-subtle)]" aria-hidden />
     </div>
   );
 }

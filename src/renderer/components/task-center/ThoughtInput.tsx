@@ -246,7 +246,7 @@ export function ThoughtInput({
           >
             <div
               ref={overlayInnerRef}
-              className="px-3 pt-3 text-[13px] leading-relaxed text-[var(--ink)]"
+              className="px-3 pt-3 text-[14px] leading-relaxed text-[var(--ink)]"
               style={{
                 fontFamily: 'inherit',
                 whiteSpace: 'pre-wrap',
@@ -285,7 +285,13 @@ export function ThoughtInput({
             rows={2}
             disabled={busy}
             autoFocus={autoFocus}
-            className="relative w-full resize-none bg-transparent px-3 pt-3 text-[13px] leading-relaxed text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
+            // The textarea's own text is transparent (mirror layer above
+            // renders the glyphs) — but `-webkit-text-fill-color`
+            // overrides `::placeholder { color }` in WebKit, so without
+            // the `placeholder:[-webkit-text-fill-color:...]` override
+            // the placeholder inherits the transparent fill and is
+            // invisible. That was the silent bug in the prior rev.
+            className="relative w-full resize-none bg-transparent px-3 pt-3 text-[14px] leading-relaxed text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none"
             style={{
               fontFamily: 'inherit',
               WebkitTextFillColor: 'transparent',

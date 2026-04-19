@@ -155,12 +155,12 @@ export function ThoughtCard({
             maxHeight: `${EDIT_MAX_HEIGHT_PX}px`,
             overflowY: 'auto',
           }}
-          className="w-full resize-none rounded-[var(--radius-sm)] bg-transparent text-[13px] leading-[1.55] text-[var(--ink)] focus:outline-none"
+          className="w-full resize-none rounded-[var(--radius-sm)] bg-transparent text-[14px] leading-[1.6] text-[var(--ink)] focus:outline-none"
         />
       ) : (
         <div
           ref={viewRef}
-          className="cursor-text whitespace-pre-wrap break-words text-[13px] leading-[1.55] text-[var(--ink-secondary)]"
+          className="cursor-text whitespace-pre-wrap break-words text-[14px] leading-[1.6] text-[var(--ink-secondary)]"
           style={
             expanded
               ? undefined
