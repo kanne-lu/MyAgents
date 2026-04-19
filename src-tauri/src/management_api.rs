@@ -1467,8 +1467,18 @@ async fn task_rerun_handler(
 /// of truth for schedule compatibility rather than trusting callers.
 async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
     let manager = cron_task::get_cron_task_manager();
-    let desired = schedule_from_task(ta)
-        .ok_or_else(|| format!("task {} has no resolvable schedule", ta.id))?;
+    // Scheduled mode without an explicit `dispatch_at` (or legacy
+    // `endConditions.deadline`) returns None — we refuse to coin a synthetic
+    // timestamp because doing so would force a CronTask rebuild on every
+    // subsequent call (see the `schedules_equivalent` string-compare at the
+    // top of this file) and wipe `executionCount`.
+    let desired = schedule_from_task(ta).ok_or_else(|| {
+        if matches!(ta.execution_mode, task::TaskExecutionMode::Scheduled) {
+            "定时模式需要设置执行时间（dispatchAt），请在编辑面板中填写。".to_string()
+        } else {
+            format!("task {} has no resolvable schedule", ta.id)
+        }
+    })?;
     let desired_run_mode = resolve_run_mode(ta);
     let desired_end_conditions = ta
         .end_conditions
@@ -1585,35 +1595,38 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
 /// Translate a Task's scheduling intent into the underlying `CronSchedule`.
 ///
 /// Reads the v0.1.69 scheduling-detail fields in priority order:
-///   * `Scheduled`  → explicit `dispatch_at` (falls back to legacy
-///     `endConditions.deadline` for rows migrated before the split, then
-///     "now + 1 minute" when neither is set).
+///   * `Scheduled`  → explicit `dispatch_at`; falls back to legacy
+///     `endConditions.deadline` for rows migrated before the split. Returns
+///     `None` when neither is set — callers surface that as a user-visible
+///     validation error instead of silently coining a "now + 1 minute"
+///     schedule that varies per call and would thrash
+///     `schedules_equivalent` into a rebuild-and-lose-executionCount loop.
 ///   * `Recurring`  → `cron_expression` (advanced mode) wins over
 ///     `interval_minutes` (simple mode); defaults to every 60 minutes.
 ///   * `Loop`       → `CronSchedule::Loop` (no knobs).
-///   * `Once`       → fire in 2 s to survive clock jitter, then stop.
+///   * `Once`       → fire in 2 s to survive clock jitter, then stop. Still
+///     non-deterministic per call, but safe because Once tasks only invoke
+///     this path at dispatch time (not via projection), so there's no
+///     rebuild loop.
 ///
 /// Exposed to `task::TaskStore::update` so it can project an updated Task
 /// back into the linked CronTask without duplicating the mapping logic.
 pub(crate) fn schedule_from_task(ta: &task::Task) -> Option<cron_task::CronSchedule> {
-    Some(match ta.execution_mode {
+    match ta.execution_mode {
         task::TaskExecutionMode::Once => {
             let when = chrono::Utc::now() + chrono::Duration::seconds(2);
-            cron_task::CronSchedule::At {
+            Some(cron_task::CronSchedule::At {
                 at: when.to_rfc3339(),
-            }
+            })
         }
-        task::TaskExecutionMode::Scheduled => {
-            let when = ta
-                .dispatch_at
-                .or_else(|| ta.end_conditions.as_ref().and_then(|ec| ec.deadline))
-                .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms))
-                .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::minutes(1));
-            cron_task::CronSchedule::At {
+        task::TaskExecutionMode::Scheduled => ta
+            .dispatch_at
+            .or_else(|| ta.end_conditions.as_ref().and_then(|ec| ec.deadline))
+            .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms))
+            .map(|when| cron_task::CronSchedule::At {
                 at: when.to_rfc3339(),
-            }
-        }
-        task::TaskExecutionMode::Recurring => {
+            }),
+        task::TaskExecutionMode::Recurring => Some(
             if let Some(expr) = ta
                 .cron_expression
                 .as_ref()
@@ -1633,10 +1646,10 @@ pub(crate) fn schedule_from_task(ta: &task::Task) -> Option<cron_task::CronSched
                     minutes: ta.interval_minutes.unwrap_or(60).max(5),
                     start_at: None,
                 }
-            }
-        }
-        task::TaskExecutionMode::Loop => cron_task::CronSchedule::Loop,
-    })
+            },
+        ),
+        task::TaskExecutionMode::Loop => Some(cron_task::CronSchedule::Loop),
+    }
 }
 
 #[derive(Debug, Deserialize)]

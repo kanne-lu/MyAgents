@@ -201,7 +201,7 @@ pub struct CronDelivery {
 }
 
 /// Flexible schedule types for cron tasks (v0.1.21)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CronSchedule {
     /// One-shot: execute at a specific time, then stop
@@ -1443,6 +1443,35 @@ impl CronTaskManager {
 
     /// Update task fields (partial update, for management API)
     pub async fn update_task_fields(&self, task_id: &str, patch: serde_json::Value) -> Result<CronTask, String> {
+        // Capture pre-patch state so we can decide whether the scheduler needs
+        // to be bounced. The scheduler tokio task captures `schedule`/
+        // `interval_mins`/`cron_expr_info` by value at spawn time
+        // (`start_task_scheduler` line ~731), so editing these fields on disk
+        // alone is invisible to the running loop. If we don't restart the
+        // scheduler, the user sees "save succeeded" but the task keeps firing
+        // at the old cadence until natural stop/start.
+        let (was_running, prev_schedule, prev_interval, prev_end_conditions) = {
+            let tasks = self.tasks.read().await;
+            let task = tasks
+                .get(task_id)
+                .ok_or_else(|| format!("Task not found: {}", task_id))?;
+            (
+                task.status == TaskStatus::Running,
+                task.schedule.clone(),
+                task.interval_minutes,
+                task.end_conditions.clone(),
+            )
+        };
+
+        // Pit-of-success: do the stop BEFORE mutating, so a concurrent
+        // scheduler tick (reading stale schedule) doesn't interleave with the
+        // write. Mirrors `cmd_update_cron_task_fields`'s dance.
+        if was_running {
+            self.stop_task(task_id, None).await?;
+            let mut active = self.active_schedulers.write().await;
+            active.remove(task_id);
+        }
+
         let mut tasks = self.tasks.write().await;
         let task = tasks.get_mut(task_id)
             .ok_or_else(|| format!("Task not found: {}", task_id))?;
@@ -1502,10 +1531,32 @@ impl CronTaskManager {
         }
 
         task.updated_at = Utc::now();
+        // Detect schedule-shape change so we know whether to restart the
+        // scheduler (even shape-unchanged edits still go through this path
+        // for model/permission/name; those don't need a bounce).
+        let schedule_changed = task.schedule != prev_schedule
+            || task.interval_minutes != prev_interval
+            || task.end_conditions != prev_end_conditions;
         let updated = task.clone();
         drop(tasks);
         self.save_to_disk().await?;
         ulog_info!("[CronTask] Updated task fields: {}", task_id);
+
+        if was_running {
+            // Whether or not schedule changed, we stopped it — restart it so
+            // the task keeps running. If schedule changed, the restart is
+            // what makes the edit take effect; if not, it's just restoring
+            // the pre-edit state.
+            self.start_task(task_id).await?;
+            self.start_task_scheduler(task_id).await?;
+            if schedule_changed {
+                ulog_info!(
+                    "[CronTask] bounced scheduler for {} after schedule-shape edit",
+                    task_id
+                );
+            }
+        }
+
         Ok(updated)
     }
 
@@ -2366,62 +2417,61 @@ pub async fn cmd_update_cron_task_fields(
     delivery: Option<CronDelivery>,
     clear_delivery: Option<bool>,
 ) -> Result<CronTask, String> {
+    // Delegate to the single-source-of-truth implementation in
+    // `update_task_fields`. It handles the stop→apply→restart bounce
+    // uniformly for every caller (Tauri command + Task Center projection),
+    // so changing a running cron's schedule through any surface takes effect
+    // immediately.
     let manager = get_cron_task_manager();
-
-    // Check if task was running — if so, stop first, update, then restart
-    let was_running = {
-        let task = manager.get_task(&task_id).await
-            .ok_or_else(|| format!("Task not found: {}", task_id))?;
-        task.status == TaskStatus::Running
-    };
-
-    if was_running {
-        manager.stop_task(&task_id, None).await?;
-        // Clear active_schedulers to prevent start_task_scheduler from short-circuiting
-        // (stop_task sets status=Stopped but the old scheduler tokio task may not have
-        // polled the status change and removed itself from the set yet)
-        {
-            let mut active = manager.active_schedulers.write().await;
-            active.remove(&task_id);
-        }
+    let mut patch = serde_json::Map::new();
+    if let Some(n) = name {
+        patch.insert("name".to_string(), serde_json::Value::String(n));
+    }
+    if let Some(p) = prompt {
+        patch.insert("prompt".to_string(), serde_json::Value::String(p));
+    }
+    if let Some(s) = schedule {
+        patch.insert(
+            "schedule".to_string(),
+            serde_json::to_value(&s).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(im) = interval_minutes {
+        patch.insert(
+            "intervalMinutes".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(im)),
+        );
+    }
+    if let Some(ec) = end_conditions {
+        patch.insert(
+            "endConditions".to_string(),
+            serde_json::to_value(&ec).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    if let Some(ne) = notify_enabled {
+        patch.insert("notifyEnabled".to_string(), serde_json::Value::Bool(ne));
+    }
+    if let Some(m) = model {
+        patch.insert("model".to_string(), serde_json::Value::String(m));
+    }
+    if let Some(pm) = permission_mode {
+        patch.insert("permissionMode".to_string(), serde_json::Value::String(pm));
+    }
+    if let Some(d) = delivery {
+        patch.insert(
+            "delivery".to_string(),
+            serde_json::to_value(&d).unwrap_or(serde_json::Value::Null),
+        );
+    } else if clear_delivery == Some(true) {
+        patch.insert("clearDelivery".to_string(), serde_json::Value::Bool(true));
     }
 
-    // Apply updates
-    {
-        let mut tasks = manager.tasks.write().await;
-        let task = tasks.get_mut(&task_id)
-            .ok_or_else(|| format!("Task not found: {}", task_id))?;
-
-        if let Some(n) = name { task.name = Some(n); }
-        if let Some(p) = prompt { task.prompt = p; }
-        if let Some(s) = schedule {
-            // Also update interval_minutes for legacy compatibility
-            if let CronSchedule::Every { minutes, .. } = &s {
-                task.interval_minutes = *minutes;
-            }
-            task.schedule = Some(s);
-        }
-        if let Some(im) = interval_minutes { task.interval_minutes = im; }
-        if let Some(ec) = end_conditions { task.end_conditions = ec; }
-        if let Some(ne) = notify_enabled { task.notify_enabled = ne; }
-        if let Some(m) = model { task.model = Some(m); }
-        if let Some(pm) = permission_mode { task.permission_mode = pm; }
-        if let Some(d) = delivery { task.delivery = Some(d); }
-        else if clear_delivery == Some(true) { task.delivery = None; }
-        task.updated_at = Utc::now();
-    }
-
-    manager.save_to_disk().await?;
-
-    if was_running {
-        manager.start_task(&task_id).await?;
-        manager.start_task_scheduler(&task_id).await?;
-    }
+    let updated = manager
+        .update_task_fields(&task_id, serde_json::Value::Object(patch))
+        .await?;
 
     let _ = app_handle.emit("cron:task-updated", serde_json::json!({ "taskId": task_id }));
-
-    manager.get_task(&task_id).await
-        .ok_or_else(|| format!("Task not found after update: {}", task_id))
+    Ok(updated)
 }
 
 /// Task Center adapter (v0.1.69) — deliver a Task status notification to an IM

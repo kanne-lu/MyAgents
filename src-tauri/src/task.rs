@@ -1326,19 +1326,22 @@ impl TaskStore {
                         serde_json::Value::String(updated.name.clone()),
                     );
                 }
-                if input.prompt.is_some() {
+                if let Some(ref prompt_body) = input.prompt {
                     // Mirror the task.md body into the CronTask for legacy
-                    // read paths (IM delivery, cron prompt fallback).
-                    if let Ok(body) =
-                        fs::read_to_string(task_docs_dir(&updated.workspace_path, &updated.id)?.join("task.md"))
-                    {
-                        patch.insert(
-                            "prompt".to_string(),
-                            serde_json::Value::String(body),
-                        );
-                    }
+                    // read paths (IM delivery, cron prompt fallback). Use the
+                    // in-memory value we just wrote — re-reading from disk
+                    // would be both redundant and silently hide transient
+                    // I/O failures mid-update.
+                    patch.insert(
+                        "prompt".to_string(),
+                        serde_json::Value::String(prompt_body.clone()),
+                    );
                 }
                 if schedule_detail_changed {
+                    // Only project when we can resolve a concrete schedule.
+                    // Scheduled with no dispatch_at → None; skip the projection
+                    // so we don't corrupt the CronTask with a stale schedule
+                    // (the user will get a "需要执行时间" error at next run).
                     if let Some(schedule) = crate::management_api::schedule_from_task(&updated) {
                         patch.insert(
                             "schedule".to_string(),
