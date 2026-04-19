@@ -770,7 +770,7 @@ impl TaskStore {
         let id = Uuid::new_v4().to_string();
         // task_docs_dir() internally validates `id`, but `id` is our freshly-minted
         // UUID so it always passes; the guard is for callers that pass external ids.
-        let task_dir = task_docs_dir(&workspace_path, &id)?;
+        let task_dir = task_docs_dir(&id)?;
 
         let t = Task {
             id: id.clone(),
@@ -891,7 +891,7 @@ impl TaskStore {
 
         // task_docs_dir() internally validates `id`, but `id` is our freshly-minted
         // UUID so it cannot fail; the explicit check is still cheap insurance.
-        let task_dir = task_docs_dir(&workspace_path, &id)?;
+        let task_dir = task_docs_dir(&id)?;
 
         let t = Task {
             id: id.clone(),
@@ -982,14 +982,14 @@ impl TaskStore {
         validate_task_name(&input.name)?;
         validate_safe_id(&input.alignment_session_id, "alignmentSessionId")?;
 
-        let src = task_docs_dir(&workspace_path, &input.alignment_session_id)?;
+        let src = task_docs_dir(&input.alignment_session_id)?;
         if !src.exists() {
             return Err(format!("alignment dir not found: {}", src.display()));
         }
 
         let now = now_ms();
         let id = Uuid::new_v4().to_string();
-        let dst = task_docs_dir(&workspace_path, &id)?;
+        let dst = task_docs_dir(&id)?;
 
         let t = Task {
             id: id.clone(),
@@ -1109,7 +1109,7 @@ impl TaskStore {
             ));
         }
         // Resolve path through the sandbox guard — rejects id escape.
-        let dir = task_docs_dir(&existing.workspace_path, &existing.id)?;
+        let dir = task_docs_dir(&existing.id)?;
         let path = dir.join(filename);
 
         // Persist the markdown file first. If this fails we haven't
@@ -1285,7 +1285,7 @@ impl TaskStore {
                         .to_string(),
                 );
             }
-            let dir = task_docs_dir(&updated.workspace_path, &updated.id)?;
+            let dir = task_docs_dir(&updated.id)?;
             fs::create_dir_all(&dir)
                 .map_err(|e| format!("mkdir task dir: {}", e))?;
             write_atomic_text(&dir.join("task.md"), prompt)?;
@@ -1606,7 +1606,7 @@ impl TaskStore {
             .ok_or_else(|| String::from(TaskOpError::not_found(id)))?
             .clone();
         drop(inner);
-        let path = task_docs_dir(&task.workspace_path, &task.id)?.join("progress.md");
+        let path = task_docs_dir(&task.id)?.join("progress.md");
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("mkdir progress: {}", e))?;
         }
@@ -1767,18 +1767,25 @@ fn validate_task_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve `<workspace>/.task/<id>/` and verify the resolved path stays inside
-/// `<workspace>/.task/`. This is the pit-of-success guard — centralizing path
+/// Resolve `~/.myagents/tasks/<id>/` and verify the resolved path stays inside
+/// `~/.myagents/tasks/`. This is the pit-of-success guard — centralizing path
 /// join + boundary check here means no caller can accidentally escape the
 /// sandbox via a bad id.
-pub fn task_docs_dir(workspace_path: &str, task_id: &str) -> Result<PathBuf, String> {
+///
+/// v0.1.69 relocation: task docs used to live under `<workspace>/.task/<id>/`,
+/// keyed by the absolute workspace path. That coupled application data
+/// (markdown describing how the task runs) to project content (which could
+/// be moved, renamed, deleted, or tracked in git by accident). Tasks are
+/// now a first-class user-scoped artifact, alongside `thoughts/`,
+/// `sessions/`, and `cron_runs/` — the workspace remains the *execution
+/// context* (Sidecar cwd, AI bash tool base) but no longer the storage.
+pub fn task_docs_dir(task_id: &str) -> Result<PathBuf, String> {
     validate_safe_id(task_id, "taskId")?;
-    let ws = canonicalize_workspace_path(workspace_path)?;
-    let base = PathBuf::from(&ws).join(".task");
+    let base = task_docs_root()?;
     let resolved = base.join(task_id);
     // Defense in depth: after the `validate_safe_id` check above, any resolved
-    // path must still lexically start with `<ws>/.task/`. This catches future
-    // bypasses if the validator is weakened.
+    // path must still lexically start with `~/.myagents/tasks/`. This catches
+    // future bypasses if the validator is weakened.
     if !resolved.starts_with(&base) {
         return Err(format!(
             "task_docs_dir escaped base: {} (base={})",
@@ -1787,6 +1794,28 @@ pub fn task_docs_dir(workspace_path: &str, task_id: &str) -> Result<PathBuf, Str
         ));
     }
     Ok(resolved)
+}
+
+/// Root dir for all task documents — `~/.myagents/tasks/`.
+///
+/// Honors `MYAGENTS_TASK_DOCS_ROOT` when set so tests (and the one-off
+/// migration script) can redirect to a tempdir without touching the real
+/// user profile. The env var MUST be an absolute path; relative values are
+/// rejected so a stray `./tasks` in CI doesn't pollute the cwd.
+fn task_docs_root() -> Result<PathBuf, String> {
+    if let Ok(override_path) = std::env::var("MYAGENTS_TASK_DOCS_ROOT") {
+        let p = PathBuf::from(&override_path);
+        if !p.is_absolute() {
+            return Err(format!(
+                "MYAGENTS_TASK_DOCS_ROOT must be absolute, got {}",
+                override_path
+            ));
+        }
+        return Ok(p);
+    }
+    let home = dirs::home_dir()
+        .ok_or_else(|| "cannot resolve home dir for task docs".to_string())?;
+    Ok(home.join(".myagents").join("tasks"))
 }
 
 /// Crash-durable atomic text write: tmp write → sync_all → rename → cleanup
@@ -1942,7 +1971,7 @@ fn compose_dispatch_prompt(task: &Task) -> Result<String, String> {
             Ok(format!("/task-implement {}", task.id))
         }
         TaskDispatchOrigin::Direct => {
-            let dir = task_docs_dir(&task.workspace_path, &task.id)?;
+            let dir = task_docs_dir(&task.id)?;
             let task_md = dir.join("task.md");
             match fs::read_to_string(&task_md) {
                 Ok(body) => {
@@ -1967,16 +1996,13 @@ fn compose_dispatch_prompt(task: &Task) -> Result<String, String> {
     }
 }
 
-/// Best-effort append to `<workspace>/.task/<taskId>/progress.md` when a
+/// Best-effort append to `~/.myagents/tasks/<taskId>/progress.md` when a
 /// status transition fires. Schema: `[ISO_TIME] [actor/source] from → to — <message>`
 /// (PRD §10.2.1 step 5). A missing progress.md is created; failures are logged
 /// and swallowed — progress.md is an *additional* human-readable view, the
 /// authoritative audit log lives in `task.statusHistory`.
 fn append_progress_line(task: &Task, t: &StatusTransition) {
-    if task.workspace_path.is_empty() {
-        return;
-    }
-    let dir = match task_docs_dir(&task.workspace_path, &task.id) {
+    let dir = match task_docs_dir(&task.id) {
         Ok(p) => p,
         Err(e) => {
             ulog_warn!("[task] progress.md append skipped (bad path): {}", e);
@@ -2353,7 +2379,7 @@ pub async fn cmd_task_read_doc(
         .await
         .ok_or_else(|| String::from(TaskOpError::not_found(&id)))?;
     let filename = task_doc_filename(&doc)?;
-    let path = task_docs_dir(&task.workspace_path, &task.id)?.join(filename);
+    let path = task_docs_dir(&task.id)?.join(filename);
     match fs::read_to_string(&path) {
         Ok(content) => Ok(content),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
@@ -2467,7 +2493,25 @@ fn task_doc_filename(doc: &str) -> Result<&'static str, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::OnceLock;
     use tempfile::tempdir;
+
+    /// Shared task-docs root for the entire test binary. Set exactly once
+    /// (via `ensure_test_docs_root()`) before any test touches
+    /// `task_docs_dir()`. Each test uses a fresh UUID task id, so writes
+    /// never collide even though the root is shared.
+    ///
+    /// Per-test tempdir + env-var swapping doesn't work here: `cargo test`
+    /// runs tests in parallel within one process, and env vars are
+    /// process-global — two concurrent tests would race each other's
+    /// redirects.
+    static TEST_DOCS_ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+
+    fn ensure_test_docs_root() {
+        let dir = TEST_DOCS_ROOT
+            .get_or_init(|| tempdir().expect("create shared test docs tempdir"));
+        std::env::set_var("MYAGENTS_TASK_DOCS_ROOT", dir.path());
+    }
 
     fn sample_direct_input(ws: &PathBuf) -> TaskCreateDirectInput {
         TaskCreateDirectInput {
@@ -2533,6 +2577,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_direct_writes_task_md_and_history() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2548,8 +2593,9 @@ mod tests {
         assert_eq!(created.status_history[0].actor, TransitionActor::User);
         assert_eq!(created.dispatch_origin, TaskDispatchOrigin::Direct);
 
-        // task.md materialized
-        let md = ws.join(".task").join(&created.id).join("task.md");
+        // task.md materialized at the user-scoped location (no longer under
+        // `<workspace>/.task/`).
+        let md = task_docs_dir(&created.id).unwrap().join("task.md");
         assert!(md.exists());
         let body = std::fs::read_to_string(&md).unwrap();
         assert_eq!(body, "跑通 v2.4");
@@ -2557,6 +2603,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_status_appends_history_and_persists() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2619,6 +2666,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_status_rejects_invalid_transition() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2639,6 +2687,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_status_rejects_deleted_as_target() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2658,6 +2707,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_status_rejects_agent_without_cli_source() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2687,6 +2737,7 @@ mod tests {
 
     #[tokio::test]
     async fn archive_rejects_non_user_actor() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2731,6 +2782,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_rejects_while_running() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2755,10 +2807,18 @@ mod tests {
                 execution_mode: None,
                 run_mode: None,
                 end_conditions: None,
+                interval_minutes: None,
+                cron_expression: None,
+                cron_timezone: None,
+                dispatch_at: None,
+                model: None,
+                permission_mode: None,
+                preselected_session_id: None,
                 runtime: None,
                 runtime_config: None,
                 tags: None,
                 notification: None,
+                prompt: None,
             })
             .await
             .expect_err("should reject");
@@ -2767,6 +2827,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_soft_and_idempotent() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2798,22 +2859,19 @@ mod tests {
 
     #[test]
     fn task_docs_dir_rejects_traversal() {
-        // Setup: valid base workspace (must be absolute).
-        let ws = "/tmp/myagents-task-test-ws".to_string();
-        assert!(task_docs_dir(&ws, "../etc").is_err());
-        assert!(task_docs_dir(&ws, "..").is_err());
-        assert!(task_docs_dir(&ws, "a/b").is_err());
-        assert!(task_docs_dir(&ws, "a\\b").is_err());
-        assert!(task_docs_dir(&ws, ".hidden").is_err());
-        assert!(task_docs_dir(&ws, "").is_err());
-        assert!(task_docs_dir("relative/ws", "abc").is_err());
-        assert!(task_docs_dir("", "abc").is_err());
+        assert!(task_docs_dir("../etc").is_err());
+        assert!(task_docs_dir("..").is_err());
+        assert!(task_docs_dir("a/b").is_err());
+        assert!(task_docs_dir("a\\b").is_err());
+        assert!(task_docs_dir(".hidden").is_err());
+        assert!(task_docs_dir("").is_err());
         // Valid UUID-ish id works
-        assert!(task_docs_dir(&ws, "abc-123_ok").is_ok());
+        assert!(task_docs_dir("abc-123_ok").is_ok());
     }
 
     #[tokio::test]
     async fn crash_recovery_rewrites_running_to_blocked_on_reload() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2901,6 +2959,7 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_creates_preserve_all_rows() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2925,6 +2984,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_session_idempotent() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2939,6 +2999,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_progress_appends_to_file() {
+        ensure_test_docs_root();
         let dir = tempdir().unwrap();
         let ws = dir.path().join("workspace");
         std::fs::create_dir_all(&ws).unwrap();
@@ -2946,7 +3007,7 @@ mod tests {
         let created = store.create_direct(sample_direct_input(&ws)).await.unwrap();
         store.update_progress(&created.id, "round 1 complete").await.unwrap();
         store.update_progress(&created.id, "round 2 complete").await.unwrap();
-        let path = ws.join(".task").join(&created.id).join("progress.md");
+        let path = task_docs_dir(&created.id).unwrap().join("progress.md");
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("round 1 complete"));
         assert!(content.contains("round 2 complete"));
