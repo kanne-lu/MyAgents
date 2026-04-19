@@ -1425,6 +1425,42 @@ impl TaskStore {
                         "notifyEnabled".to_string(),
                         serde_json::Value::Bool(enabled),
                     );
+
+                    // IM delivery routing — mirror Task.notification
+                    // .botChannelId into CronTask.delivery so the
+                    // scheduler tick reaches the right bot. Kept in
+                    // lockstep with `ensure_cron_for_task` above; when
+                    // the bot channel is cleared, we explicitly push
+                    // `"clearDelivery": true` so `update_task_fields`
+                    // tears down the stale delivery instead of keeping
+                    // the old routing around.
+                    let bot_channel_id = updated
+                        .notification
+                        .as_ref()
+                        .and_then(|n| n.bot_channel_id.as_deref())
+                        .filter(|s| !s.is_empty());
+                    if let Some(bot_id) = bot_channel_id {
+                        let chat_id = updated
+                            .notification
+                            .as_ref()
+                            .and_then(|n| n.bot_thread.as_deref())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("_auto_")
+                            .to_string();
+                        patch.insert(
+                            "delivery".to_string(),
+                            serde_json::json!({
+                                "botId": bot_id,
+                                "chatId": chat_id,
+                                "platform": "task-center",
+                            }),
+                        );
+                    } else {
+                        patch.insert(
+                            "clearDelivery".to_string(),
+                            serde_json::Value::Bool(true),
+                        );
+                    }
                 }
 
                 if !patch.is_empty() {

@@ -1648,6 +1648,36 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
         .filter(|s| !s.trim().is_empty() && matches!(run_mode, cron_task::RunMode::SingleSession))
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    // Forward Task.notification.botChannelId → CronTask.delivery so
+    // scheduler tick can push the result to the configured IM bot
+    // (`deliver_cron_result_to_bot` at the cron_task.rs execution loop
+    // reads `task.delivery`). Prior rev hardcoded `None` here, which
+    // silently broke every Task-Center recurring task that had an IM
+    // channel configured — the AI would run, write output, and nothing
+    // would ever reach the bot.
+    //
+    // `platform = "task-center"` is a diagnostic-only marker; routing is
+    // by `bot_id` through ManagedAgents / ManagedImBots, not platform.
+    // `chat_id = "_auto_"` when `bot_thread` is unset — matches the
+    // legacy TaskCreateModal convention (`useDeliveryChannels.tsx` uses
+    // the same sentinel) so the bot router picks its default target.
+    let delivery = ta
+        .notification
+        .as_ref()
+        .and_then(|n| n.bot_channel_id.as_deref())
+        .filter(|s| !s.is_empty())
+        .map(|bot_id| cron_task::CronDelivery {
+            bot_id: bot_id.to_string(),
+            chat_id: ta
+                .notification
+                .as_ref()
+                .and_then(|n| n.bot_thread.as_deref())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("_auto_")
+                .to_string(),
+            platform: "task-center".to_string(),
+        });
+
     let config = cron_task::CronTaskConfig {
         workspace_path: ta.workspace_path.clone(),
         session_id,
@@ -1663,7 +1693,7 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
         runtime: ta.runtime.clone(),
         runtime_config: ta.runtime_config.clone(),
         source_bot_id: None,
-        delivery: None,
+        delivery,
         schedule: Some(schedule),
         name: Some(ta.name.clone()),
         task_id: Some(ta.id.clone()),
