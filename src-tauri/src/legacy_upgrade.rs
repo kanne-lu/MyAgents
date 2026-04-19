@@ -196,6 +196,25 @@ pub async fn upgrade_legacy_cron(
     let notification = Some(notification_from_cron(cron.notify_enabled, &cron.delivery));
     let initial_status = initial_status_from_cron(&cron);
 
+    // Carry scheduling detail from the CronTask so the migrated Task
+    // survives a schedule-shape edit without losing the user's interval /
+    // cron expression / dispatch time.
+    let (interval_minutes, cron_expression, cron_timezone, dispatch_at) = match &cron.schedule {
+        Some(cron_task::CronSchedule::Every { minutes, .. }) => {
+            (Some(*minutes), None, None, None)
+        }
+        Some(cron_task::CronSchedule::Cron { expr, tz }) => {
+            (None, Some(expr.clone()), tz.clone(), None)
+        }
+        Some(cron_task::CronSchedule::At { at }) => {
+            let ms = chrono::DateTime::parse_from_rfc3339(at)
+                .ok()
+                .map(|dt| dt.timestamp_millis());
+            (None, None, None, ms)
+        }
+        Some(cron_task::CronSchedule::Loop) | None => (None, None, None, None),
+    };
+
     let input = task::TaskCreateDirectInput {
         name: derive_task_name(&cron),
         executor: task::TaskExecutor::Agent,
@@ -206,6 +225,13 @@ pub async fn upgrade_legacy_cron(
         execution_mode,
         run_mode,
         end_conditions,
+        interval_minutes,
+        cron_expression,
+        cron_timezone,
+        dispatch_at,
+        model: cron.model.clone(),
+        permission_mode: Some(cron.permission_mode.clone()),
+        preselected_session_id: Some(cron.session_id.clone()),
         runtime: cron.runtime.clone(),
         runtime_config: cron.runtime_config.clone(),
         // Legacy crons have no source Thought and we don't mint one —

@@ -310,6 +310,7 @@ pub fn run() {
             task::cmd_task_delete,
             task::cmd_task_read_doc,
             task::cmd_task_write_doc,
+            task::cmd_task_get_run_stats,
             legacy_upgrade::cmd_task_upgrade_legacy_cron,
         ])
         .setup(|app| {

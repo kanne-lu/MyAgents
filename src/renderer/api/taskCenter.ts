@@ -11,6 +11,7 @@ import type {
   TaskCreateDirectInput,
   TaskCreateFromAlignmentInput,
   TaskListFilter,
+  TaskRunStats,
   TaskUpdateInput,
   TaskUpdateStatusInput,
 } from '@/../shared/types/task';
@@ -120,6 +121,15 @@ export function taskWriteDoc(
   content: string,
 ): Promise<void> {
   return inv('cmd_task_write_doc', { id, doc, content });
+}
+
+/**
+ * Aggregate runtime telemetry for the detail overlay — execution count,
+ * last-run result, linked CronTask scheduler status. Composed server-side
+ * from `TaskStore` + `CronTaskManager` + `cron_runs/<cronId>.jsonl`.
+ */
+export function taskGetRunStats(id: string): Promise<TaskRunStats> {
+  return inv('cmd_task_get_run_stats', { id });
 }
 
 /**

@@ -37,7 +37,8 @@ export type TransitionSource =
   | 'crash'
   | 'scheduler'
   | 'endCondition'
-  | 'rerun';
+  | 'rerun'
+  | 'migration';
 
 /** Execution mode — see PRD §9.2. */
 export type TaskExecutionMode = 'once' | 'scheduled' | 'recurring' | 'loop';
@@ -117,9 +118,23 @@ export interface Task {
   cronTaskId?: string;
   runMode?: TaskRunMode;
   endConditions?: EndConditions;
+  /** Recurring-mode fixed interval (minutes). Simple mode; mutually exclusive with `cronExpression`. */
+  intervalMinutes?: number;
+  /** Advanced-mode cron expression. Takes precedence over `intervalMinutes` when set. */
+  cronExpression?: string;
+  /** IANA timezone id for `cronExpression` (e.g. `Asia/Shanghai`). */
+  cronTimezone?: string;
+  /** Dedicated "when to fire" timestamp (ms) for `scheduled` mode. Decouples from `endConditions.deadline`. */
+  dispatchAt?: number;
+  /** Per-task model override. When absent, the Agent's default model is used. */
+  model?: string;
+  /** Per-task permission mode (auto / plan / fullAgency / …). Defaults to the Agent's default. */
+  permissionMode?: string;
+  /** For `single-session` run mode: id of a pre-existing SDK session to continue. */
+  preselectedSessionId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
-  /** The thought this task was derived from. v1 requires this; v2 may relax. */
+  /** Set only when the task was created from a Thought (v0.1.69 softened: Thought ↔ Task is loosely coupled). */
   sourceThoughtId?: string;
   sessionIds: string[];
   status: TaskStatus;
@@ -149,6 +164,20 @@ export interface TaskCreateDirectInput {
   executionMode: TaskExecutionMode;
   runMode?: TaskRunMode;
   endConditions?: EndConditions;
+  /** Recurring-mode fixed interval (minutes). Mutually exclusive with `cronExpression`. */
+  intervalMinutes?: number;
+  /** Advanced-mode cron expression. Takes precedence over `intervalMinutes` when set. */
+  cronExpression?: string;
+  /** IANA timezone id for `cronExpression`. */
+  cronTimezone?: string;
+  /** Fire time for `scheduled` mode (ms epoch). */
+  dispatchAt?: number;
+  /** Per-task model override. */
+  model?: string;
+  /** Per-task permission mode override. */
+  permissionMode?: string;
+  /** For `single-session` run mode: id of a pre-existing SDK session to continue. */
+  preselectedSessionId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
   sourceThoughtId?: string;
@@ -186,10 +215,45 @@ export interface TaskUpdateInput {
   executionMode?: TaskExecutionMode;
   runMode?: TaskRunMode;
   endConditions?: EndConditions;
+  /** Recurring-mode fixed interval (minutes). */
+  intervalMinutes?: number;
+  /** Advanced-mode cron expression. Empty string clears (switches back to simple mode). */
+  cronExpression?: string;
+  cronTimezone?: string;
+  /** Dedicated dispatch time for `scheduled` mode (ms epoch). */
+  dispatchAt?: number;
+  /** Per-task model override. Empty string clears. */
+  model?: string;
+  /** Per-task permission mode override. Empty string clears. */
+  permissionMode?: string;
+  /** For `single-session` run mode: id of a pre-existing SDK session to continue. */
+  preselectedSessionId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
   tags?: string[];
   notification?: NotificationConfig;
+  /**
+   * When provided, the new markdown body is atomically written to
+   * `.task/<id>/task.md` under the same write lock that persists the JSONL
+   * row. Empty string is rejected server-side. AI-aligned tasks may not
+   * overwrite their prompt this way — they use `/task-implement` + `alignment.md`.
+   */
+  prompt?: string;
+}
+
+/** Response from `cmd_task_get_run_stats` — aggregated telemetry for the task detail overlay. */
+export interface TaskRunStats {
+  executionCount: number;
+  lastExecutedAt?: number;
+  /** `ok` flag from the most recent `cron_runs/<id>.jsonl` row. */
+  lastSuccess?: boolean;
+  /** Duration of the most recent run (ms). */
+  lastDurationMs?: number;
+  /** Underlying CronTask status: 'running' | 'stopped' | … (string because `Debug` serialisation). */
+  cronStatus?: string;
+  cronTaskId?: string;
+  /** Number of SDK sessions this task has spanned. */
+  sessionCount: number;
 }
 
 /**

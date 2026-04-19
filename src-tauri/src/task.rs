@@ -221,7 +221,7 @@ pub struct StatusTransition {
     pub source: Option<TransitionSource>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationConfig {
     #[serde(default = "default_true")]
@@ -260,6 +260,37 @@ pub struct Task {
     pub run_mode: Option<TaskRunMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_conditions: Option<TaskEndConditions>,
+    /// Recurring-mode fixed interval (minutes). Set when
+    /// `execution_mode == Recurring` and `cron_expression` is absent. The
+    /// linked CronTask's `interval_minutes` is kept in sync via
+    /// `TaskStore::update`'s projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_minutes: Option<u32>,
+    /// Advanced-mode cron expression (takes precedence over
+    /// `interval_minutes` when set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_expression: Option<String>,
+    /// IANA timezone id for `cron_expression` (e.g. `Asia/Shanghai`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_timezone: Option<String>,
+    /// Dedicated "when to fire" timestamp for `Scheduled` mode
+    /// (ms since epoch). Decouples from `end_conditions.deadline`,
+    /// which semantically means "when to stop running".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_at: Option<i64>,
+    /// Per-task model override. When `None`, the linked Agent's default
+    /// model is used. Proxied into `CronTaskConfig.model` at cron-ensure
+    /// time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Per-task permission mode override (auto / plan / fullAgency / custom).
+    /// When `None`, the linked Agent's default is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// For `single-session` run mode: id of a pre-existing SDK session to
+    /// continue instead of minting a fresh uuid on first dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preselected_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,6 +335,22 @@ pub struct TaskCreateDirectInput {
     pub run_mode: Option<TaskRunMode>,
     #[serde(default)]
     pub end_conditions: Option<TaskEndConditions>,
+    // ── Scheduling detail fields (v0.1.69 unified model) ────────────────
+    #[serde(default)]
+    pub interval_minutes: Option<u32>,
+    #[serde(default)]
+    pub cron_expression: Option<String>,
+    #[serde(default)]
+    pub cron_timezone: Option<String>,
+    #[serde(default)]
+    pub dispatch_at: Option<i64>,
+    // ── Execution overrides ──────────────────────────────────────────────
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub preselected_session_id: Option<String>,
     #[serde(default)]
     pub runtime: Option<String>,
     #[serde(default)]
@@ -361,6 +408,22 @@ pub struct TaskUpdateInput {
     pub run_mode: Option<TaskRunMode>,
     #[serde(default)]
     pub end_conditions: Option<TaskEndConditions>,
+    // ── Scheduling detail fields ────────────────────────────────────────
+    #[serde(default)]
+    pub interval_minutes: Option<u32>,
+    #[serde(default)]
+    pub cron_expression: Option<String>,
+    #[serde(default)]
+    pub cron_timezone: Option<String>,
+    #[serde(default)]
+    pub dispatch_at: Option<i64>,
+    // ── Execution overrides ──────────────────────────────────────────────
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    #[serde(default)]
+    pub preselected_session_id: Option<String>,
     #[serde(default)]
     pub runtime: Option<String>,
     #[serde(default)]
@@ -369,6 +432,11 @@ pub struct TaskUpdateInput {
     pub tags: Option<Vec<String>>,
     #[serde(default)]
     pub notification: Option<NotificationConfig>,
+    /// When `Some`, the new contents are atomically written to
+    /// `.task/<id>/task.md` under the same write lock that persists the
+    /// JSONL row. Empty string is rejected — prompt must have content.
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 /// Internal-only status-transition payload. Accepts explicit `actor`/`source`
@@ -703,6 +771,13 @@ impl TaskStore {
             cron_task_id: None,
             run_mode: input.run_mode,
             end_conditions: input.end_conditions,
+            interval_minutes: input.interval_minutes,
+            cron_expression: input.cron_expression,
+            cron_timezone: input.cron_timezone,
+            dispatch_at: input.dispatch_at,
+            model: input.model,
+            permission_mode: input.permission_mode,
+            preselected_session_id: input.preselected_session_id,
             runtime: input.runtime,
             runtime_config: input.runtime_config,
             source_thought_id: input.source_thought_id,
@@ -817,6 +892,13 @@ impl TaskStore {
             cron_task_id: None,
             run_mode: input.run_mode,
             end_conditions: input.end_conditions,
+            interval_minutes: input.interval_minutes,
+            cron_expression: input.cron_expression,
+            cron_timezone: input.cron_timezone,
+            dispatch_at: input.dispatch_at,
+            model: input.model,
+            permission_mode: input.permission_mode,
+            preselected_session_id: input.preselected_session_id,
             runtime: input.runtime,
             runtime_config: input.runtime_config,
             source_thought_id: input.source_thought_id,
@@ -908,6 +990,13 @@ impl TaskStore {
             cron_task_id: None,
             run_mode: input.run_mode,
             end_conditions: input.end_conditions,
+            interval_minutes: None,
+            cron_expression: None,
+            cron_timezone: None,
+            dispatch_at: None,
+            model: None,
+            permission_mode: None,
+            preselected_session_id: None,
             runtime: input.runtime,
             runtime_config: input.runtime_config,
             source_thought_id: input.source_thought_id,
@@ -1082,6 +1171,29 @@ impl TaskStore {
         if let Some(v) = input.end_conditions {
             updated.end_conditions = Some(v);
         }
+        if let Some(v) = input.interval_minutes {
+            updated.interval_minutes = Some(v);
+        }
+        if let Some(v) = input.cron_expression {
+            // Empty string clears — the renderer uses "" to mean "switch back
+            // from advanced mode".
+            updated.cron_expression = if v.trim().is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = input.cron_timezone {
+            updated.cron_timezone = if v.trim().is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = input.dispatch_at {
+            updated.dispatch_at = Some(v);
+        }
+        if let Some(v) = input.model {
+            updated.model = if v.trim().is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = input.permission_mode {
+            updated.permission_mode = if v.trim().is_empty() { None } else { Some(v) };
+        }
+        if let Some(v) = input.preselected_session_id {
+            updated.preselected_session_id = if v.trim().is_empty() { None } else { Some(v) };
+        }
         if let Some(v) = input.runtime {
             updated.runtime = Some(v);
         }
@@ -1096,33 +1208,79 @@ impl TaskStore {
         }
         updated.updated_at = now_ms();
 
-        // Mode-transition hygiene: `run_mode` / `end_conditions` are only
-        // meaningful for recurring / loop / (conditional-scheduled). When the
-        // user flips `execution_mode → Once`, those fields would otherwise
-        // linger in the row — and worse, `ensure_cron_for_task` would copy
-        // them into any CronTask created for the next `run`. `TaskUpdateInput`
-        // uses `Option<T>` so the client can't express "clear me", so we
-        // clear them server-side the moment the mode no longer needs them.
-        if matches!(updated.execution_mode, TaskExecutionMode::Once) {
-            updated.run_mode = None;
-            updated.end_conditions = None;
+        // Mode-transition hygiene: `run_mode` / `end_conditions` / the
+        // schedule-detail fields are only meaningful for certain execution
+        // modes. When the user flips `execution_mode → Once`, lingering
+        // recurring/scheduled fields would pollute `ensure_cron_for_task`.
+        // `TaskUpdateInput` uses `Option<T>` so the client can't express
+        // "clear me", so we clear server-side the moment the mode no longer
+        // needs them.
+        match updated.execution_mode {
+            TaskExecutionMode::Once => {
+                updated.run_mode = None;
+                updated.end_conditions = None;
+                updated.interval_minutes = None;
+                updated.cron_expression = None;
+                updated.cron_timezone = None;
+                updated.dispatch_at = None;
+            }
+            TaskExecutionMode::Scheduled => {
+                // Scheduled only needs dispatch_at; clear recurring knobs.
+                updated.interval_minutes = None;
+                updated.cron_expression = None;
+                updated.cron_timezone = None;
+            }
+            TaskExecutionMode::Recurring | TaskExecutionMode::Loop => {
+                // dispatch_at belongs to Scheduled only.
+                updated.dispatch_at = None;
+            }
         }
 
-        // Detect schedule-shape changes that invalidate the linked CronTask
-        // (PRD §11.2). When any of these change, the existing CronTask's
-        // schedule/runMode/endConditions no longer match the Task, so the
-        // next `task run` should create a fresh CronTask. We drop the back-
-        // pointer here and leave the stale CronTask for the scheduler to
-        // garbage-collect; the actual cleanup happens in the command layer
-        // (it has access to CronTaskManager).
-        let schedule_changed = existing.execution_mode != updated.execution_mode
-            || existing.run_mode != updated.run_mode
-            || existing.end_conditions != updated.end_conditions;
-        let invalidated_cron_id = if schedule_changed {
+        // Atomic task.md write — when the client sent `prompt`, we want the
+        // new markdown body committed under the same write lock that
+        // persists the JSONL row. Status was already verified above, so a
+        // concurrent `update_status(running)` can't land between these two
+        // writes.
+        if let Some(ref prompt) = input.prompt {
+            if prompt.trim().is_empty() {
+                return Err("prompt is empty".to_string());
+            }
+            if matches!(updated.dispatch_origin, TaskDispatchOrigin::AiAligned) {
+                return Err(
+                    "ai-aligned tasks use /task-implement; edit alignment.md instead"
+                        .to_string(),
+                );
+            }
+            let dir = task_docs_dir(&updated.workspace_path, &updated.id)?;
+            fs::create_dir_all(&dir)
+                .map_err(|e| format!("mkdir task dir: {}", e))?;
+            write_atomic_text(&dir.join("task.md"), prompt)?;
+        }
+
+        // Detect what the caller actually changed so we can decide how to
+        // propagate to the linked CronTask (PRD §11.2):
+        //   * "kind" change (execution_mode) → detach + rebuild next run
+        //   * field-only change (interval / cron / model / permission /
+        //     end_conditions / run_mode / notification) → project via
+        //     `update_task_fields` so `executionCount` and `cron_runs/*.jsonl`
+        //     history are preserved.
+        let kind_changed = existing.execution_mode != updated.execution_mode;
+        let schedule_detail_changed = existing.run_mode != updated.run_mode
+            || existing.end_conditions != updated.end_conditions
+            || existing.interval_minutes != updated.interval_minutes
+            || existing.cron_expression != updated.cron_expression
+            || existing.cron_timezone != updated.cron_timezone
+            || existing.dispatch_at != updated.dispatch_at;
+        let exec_overrides_changed = existing.model != updated.model
+            || existing.permission_mode != updated.permission_mode;
+        let notification_changed = existing.notification != updated.notification;
+        let name_or_prompt_changed = existing.name != updated.name || input.prompt.is_some();
+
+        let invalidated_cron_id = if kind_changed {
             let taken = updated.cron_task_id.take();
             if taken.is_some() {
                 ulog_info!(
-                    "[task] execution-shape changed for {} → detaching CronTask {:?}",
+                    "[task] execution-mode changed for {} → detaching CronTask {:?}",
                     updated.id,
                     taken
                 );
@@ -1151,6 +1309,97 @@ impl TaskStore {
                     cron_id,
                     e
                 );
+            }
+        } else if let Some(cron_id) = updated.cron_task_id.clone() {
+            // Project the surviving CronTask — preserve executionCount /
+            // lastExecutedAt / linked Session. Only forward fields that
+            // actually changed so we don't stomp unrelated CronTask knobs.
+            if schedule_detail_changed
+                || exec_overrides_changed
+                || notification_changed
+                || name_or_prompt_changed
+            {
+                let mut patch = serde_json::Map::new();
+                if existing.name != updated.name {
+                    patch.insert(
+                        "name".to_string(),
+                        serde_json::Value::String(updated.name.clone()),
+                    );
+                }
+                if input.prompt.is_some() {
+                    // Mirror the task.md body into the CronTask for legacy
+                    // read paths (IM delivery, cron prompt fallback).
+                    if let Ok(body) =
+                        fs::read_to_string(task_docs_dir(&updated.workspace_path, &updated.id)?.join("task.md"))
+                    {
+                        patch.insert(
+                            "prompt".to_string(),
+                            serde_json::Value::String(body),
+                        );
+                    }
+                }
+                if schedule_detail_changed {
+                    if let Some(schedule) = crate::management_api::schedule_from_task(&updated) {
+                        patch.insert(
+                            "schedule".to_string(),
+                            serde_json::to_value(&schedule).unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    if let Some(ec) = updated.end_conditions.clone() {
+                        let cron_ec: crate::cron_task::EndConditions = ec.into();
+                        patch.insert(
+                            "endConditions".to_string(),
+                            serde_json::to_value(&cron_ec)
+                                .unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                }
+                if existing.model != updated.model {
+                    patch.insert(
+                        "model".to_string(),
+                        updated
+                            .model
+                            .clone()
+                            .map(serde_json::Value::String)
+                            .unwrap_or(serde_json::Value::Null),
+                    );
+                }
+                if existing.permission_mode != updated.permission_mode {
+                    patch.insert(
+                        "permissionMode".to_string(),
+                        serde_json::Value::String(
+                            updated
+                                .permission_mode
+                                .clone()
+                                .unwrap_or_else(|| "auto".to_string()),
+                        ),
+                    );
+                }
+                if notification_changed {
+                    let enabled = updated
+                        .notification
+                        .as_ref()
+                        .map(|n| n.desktop)
+                        .unwrap_or(true);
+                    patch.insert(
+                        "notifyEnabled".to_string(),
+                        serde_json::Value::Bool(enabled),
+                    );
+                }
+
+                if !patch.is_empty() {
+                    let manager = crate::cron_task::get_cron_task_manager();
+                    if let Err(e) = manager
+                        .update_task_fields(&cron_id, serde_json::Value::Object(patch))
+                        .await
+                    {
+                        ulog_warn!(
+                            "[task] CronTask {} projection failed: {}",
+                            cron_id,
+                            e
+                        );
+                    }
+                }
             }
         }
 
@@ -2098,6 +2347,86 @@ pub async fn cmd_task_write_doc(
     state.write_doc(&id, filename, &content).await
 }
 
+/// Aggregate runtime telemetry for a Task, composed from:
+///   * the Task row itself (`last_executed_at`, `session_ids.len()`)
+///   * the linked CronTask (`execution_count`, scheduler status)
+///   * the tail of `cron_runs/<id>.jsonl` (most recent success flag)
+///
+/// The renderer uses this in the detail overlay's "运行统计" section
+/// without having to stitch three data sources together.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRunStats {
+    pub execution_count: u32,
+    pub last_executed_at: Option<i64>,
+    pub last_success: Option<bool>,
+    pub last_duration_ms: Option<i64>,
+    pub cron_status: Option<String>,
+    pub cron_task_id: Option<String>,
+    pub session_count: usize,
+}
+
+#[tauri::command]
+pub async fn cmd_task_get_run_stats(
+    state: tauri::State<'_, ManagedTaskStore>,
+    id: String,
+) -> Result<TaskRunStats, String> {
+    let task = state
+        .get(&id)
+        .await
+        .ok_or_else(|| String::from(TaskOpError::not_found(&id)))?;
+
+    let mut stats = TaskRunStats {
+        execution_count: 0,
+        last_executed_at: task.last_executed_at,
+        last_success: None,
+        last_duration_ms: None,
+        cron_status: None,
+        cron_task_id: task.cron_task_id.clone(),
+        session_count: task.session_ids.len(),
+    };
+
+    if let Some(cron_id) = task.cron_task_id.as_deref() {
+        let manager = crate::cron_task::get_cron_task_manager();
+        if let Some(ct) = manager.get_task(cron_id).await {
+            stats.execution_count = ct.execution_count;
+            stats.cron_status = Some(format!("{:?}", ct.status).to_lowercase());
+            if let Some(ts) = ct.last_executed_at {
+                // Prefer the CronTask's timestamp (it's updated every tick);
+                // the Task's `last_executed_at` only refreshes on status
+                // transitions.
+                stats.last_executed_at = Some(ts.timestamp_millis());
+            }
+        }
+
+        // Tail of `cron_runs/<cronId>.jsonl` — most recent run result.
+        if let Some(home) = dirs::home_dir() {
+            let runs_path = home
+                .join(".myagents")
+                .join("cron_runs")
+                .join(format!("{}.jsonl", cron_id));
+            if let Ok(file) = fs::File::open(&runs_path) {
+                let reader = BufReader::new(file);
+                let mut last_line: Option<String> = None;
+                for line in reader.lines().flatten() {
+                    if !line.trim().is_empty() {
+                        last_line = Some(line);
+                    }
+                }
+                if let Some(line) = last_line {
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) {
+                        stats.last_success = val.get("ok").and_then(|v| v.as_bool());
+                        stats.last_duration_ms =
+                            val.get("durationMs").and_then(|v| v.as_i64());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
 fn task_doc_filename(doc: &str) -> Result<&'static str, String> {
     match doc {
         "task" => Ok("task.md"),
@@ -2128,6 +2457,13 @@ mod tests {
             execution_mode: TaskExecutionMode::Once,
             run_mode: None,
             end_conditions: None,
+            interval_minutes: None,
+            cron_expression: None,
+            cron_timezone: None,
+            dispatch_at: None,
+            model: None,
+            permission_mode: None,
+            preselected_session_id: None,
             runtime: None,
             runtime_config: None,
             source_thought_id: Some("thought-1".to_string()),

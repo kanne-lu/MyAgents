@@ -1464,8 +1464,41 @@ impl CronTaskManager {
             if schedule_val.is_null() {
                 task.schedule = None;
             } else if let Ok(s) = serde_json::from_value::<CronSchedule>(schedule_val.clone()) {
+                // Mirror interval_minutes when switching to a fixed-interval schedule,
+                // so any downstream reader that falls back to the legacy field stays
+                // consistent.
+                if let CronSchedule::Every { minutes, .. } = &s {
+                    task.interval_minutes = *minutes;
+                }
                 task.schedule = Some(s);
             }
+        }
+        if let Some(end_conditions_val) = patch.get("endConditions") {
+            if let Ok(ec) = serde_json::from_value::<EndConditions>(end_conditions_val.clone()) {
+                task.end_conditions = ec;
+            }
+        }
+        if let Some(notify) = patch.get("notifyEnabled").and_then(|v| v.as_bool()) {
+            task.notify_enabled = notify;
+        }
+        if let Some(model) = patch.get("model") {
+            if model.is_null() {
+                task.model = None;
+            } else if let Some(s) = model.as_str() {
+                task.model = Some(s.to_string());
+            }
+        }
+        if let Some(pm) = patch.get("permissionMode").and_then(|v| v.as_str()) {
+            task.permission_mode = pm.to_string();
+        }
+        if let Some(delivery_val) = patch.get("delivery") {
+            if delivery_val.is_null() {
+                task.delivery = None;
+            } else if let Ok(d) = serde_json::from_value::<CronDelivery>(delivery_val.clone()) {
+                task.delivery = Some(d);
+            }
+        } else if patch.get("clearDelivery").and_then(|v| v.as_bool()) == Some(true) {
+            task.delivery = None;
         }
 
         task.updated_at = Utc::now();

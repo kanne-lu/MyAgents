@@ -1467,13 +1467,19 @@ async fn task_rerun_handler(
 /// of truth for schedule compatibility rather than trusting callers.
 async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
     let manager = cron_task::get_cron_task_manager();
-    let desired = schedule_from_task(ta);
+    let desired = schedule_from_task(ta)
+        .ok_or_else(|| format!("task {} has no resolvable schedule", ta.id))?;
     let desired_run_mode = resolve_run_mode(ta);
     let desired_end_conditions = ta
         .end_conditions
         .clone()
         .map(cron_task::EndConditions::from)
         .unwrap_or_default();
+    let desired_model = ta.model.clone();
+    let desired_permission_mode = ta
+        .permission_mode
+        .clone()
+        .unwrap_or_else(|| "auto".to_string());
 
     // Candidate IDs: the Task's own cached `cron_task_id`, and any other
     // CronTask that carries this Task's id as a back-pointer (defensive —
@@ -1492,6 +1498,10 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
         let Some(existing) = manager.get_task(&id).await else {
             continue;
         };
+        // Compatibility check — schedule/runMode/endConditions are the
+        // invariants that force a rebuild; model/permissionMode/delivery
+        // are projected via `update_task_fields` and don't invalidate the
+        // CronTask identity (executionCount / cron_runs preserved).
         let compatible = schedules_equivalent(&existing.schedule, &desired)
             && existing.run_mode == desired_run_mode
             && existing.end_conditions == desired_end_conditions;
@@ -1527,9 +1537,14 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
     let run_mode = desired_run_mode;
     let end_conditions = desired_end_conditions;
 
-    // Each Task Center dispatch mints its own Sidecar session id, separate
-    // from the Task id (one Task can run across multiple sessions).
-    let session_id = uuid::Uuid::new_v4().to_string();
+    // `single-session` run mode may reuse an explicit pre-selected session
+    // (e.g. "continue the chat the user already has open"); otherwise each
+    // dispatch mints a fresh Sidecar session id.
+    let session_id = ta
+        .preselected_session_id
+        .clone()
+        .filter(|s| !s.trim().is_empty() && matches!(run_mode, cron_task::RunMode::SingleSession))
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let config = cron_task::CronTaskConfig {
         workspace_path: ta.workspace_path.clone(),
@@ -1540,8 +1555,8 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
         run_mode,
         notify_enabled: ta.notification.as_ref().map(|n| n.desktop).unwrap_or(true),
         tab_id: None,
-        permission_mode: "auto".to_string(),
-        model: None,
+        permission_mode: desired_permission_mode,
+        model: desired_model,
         provider_env: None,
         runtime: ta.runtime.clone(),
         runtime_config: ta.runtime_config.clone(),
@@ -1567,25 +1582,31 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
     Ok(created.id)
 }
 
-fn schedule_from_task(ta: &task::Task) -> cron_task::CronSchedule {
-    match ta.execution_mode {
+/// Translate a Task's scheduling intent into the underlying `CronSchedule`.
+///
+/// Reads the v0.1.69 scheduling-detail fields in priority order:
+///   * `Scheduled`  → explicit `dispatch_at` (falls back to legacy
+///     `endConditions.deadline` for rows migrated before the split, then
+///     "now + 1 minute" when neither is set).
+///   * `Recurring`  → `cron_expression` (advanced mode) wins over
+///     `interval_minutes` (simple mode); defaults to every 60 minutes.
+///   * `Loop`       → `CronSchedule::Loop` (no knobs).
+///   * `Once`       → fire in 2 s to survive clock jitter, then stop.
+///
+/// Exposed to `task::TaskStore::update` so it can project an updated Task
+/// back into the linked CronTask without duplicating the mapping logic.
+pub(crate) fn schedule_from_task(ta: &task::Task) -> Option<cron_task::CronSchedule> {
+    Some(match ta.execution_mode {
         task::TaskExecutionMode::Once => {
-            // Fire immediately (a few seconds in the future to survive any
-            // clock jitter). Scheduler will run once and then CronTask stays
-            // stopped.
             let when = chrono::Utc::now() + chrono::Duration::seconds(2);
             cron_task::CronSchedule::At {
                 at: when.to_rfc3339(),
             }
         }
         task::TaskExecutionMode::Scheduled => {
-            // Honor `endConditions.deadline` as the one-shot fire time when
-            // present, otherwise default to "now + 1 minute". Future iteration
-            // will accept an explicit dispatchAt field.
             let when = ta
-                .end_conditions
-                .as_ref()
-                .and_then(|ec| ec.deadline)
+                .dispatch_at
+                .or_else(|| ta.end_conditions.as_ref().and_then(|ec| ec.deadline))
                 .and_then(|ms| chrono::DateTime::<chrono::Utc>::from_timestamp_millis(ms))
                 .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::minutes(1));
             cron_task::CronSchedule::At {
@@ -1593,14 +1614,29 @@ fn schedule_from_task(ta: &task::Task) -> cron_task::CronSchedule {
             }
         }
         task::TaskExecutionMode::Recurring => {
-            // MVP — every 60 minutes. `endConditions.maxExecutions` caps iterations.
-            cron_task::CronSchedule::Every {
-                minutes: 60,
-                start_at: None,
+            if let Some(expr) = ta
+                .cron_expression
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                cron_task::CronSchedule::Cron {
+                    expr,
+                    tz: ta
+                        .cron_timezone
+                        .as_ref()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty()),
+                }
+            } else {
+                cron_task::CronSchedule::Every {
+                    minutes: ta.interval_minutes.unwrap_or(60).max(5),
+                    start_at: None,
+                }
             }
         }
         task::TaskExecutionMode::Loop => cron_task::CronSchedule::Loop,
-    }
+    })
 }
 
 #[derive(Debug, Deserialize)]
