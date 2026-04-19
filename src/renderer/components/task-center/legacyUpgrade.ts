@@ -38,6 +38,20 @@ import type {
 } from '@/../shared/types/task';
 import type { RuntimeType } from '@/../shared/types/runtime';
 
+/**
+ * CronTask's wire-shape `EndConditions`. Deliberately NOT typed as the
+ * Task-layer `EndConditions` — the cron side stores `deadline` as a
+ * `DateTime<Utc>` (ISO string over the wire) while Task uses `i64` (ms
+ * epoch). We transform at the boundary, see `transformLegacyEndConditions`.
+ */
+interface CronEndConditionsRaw {
+  deadline?: string | number | null;
+  maxExecutions?: number;
+  max_executions?: number;
+  aiCanExit?: boolean;
+  ai_can_exit?: boolean;
+}
+
 export interface LegacyCronRaw {
   id?: string;
   name?: string;
@@ -47,9 +61,9 @@ export interface LegacyCronRaw {
   workspaceId?: string;
   schedule?: Record<string, unknown> | null;
   intervalMinutes?: number;
-  endConditions?: EndConditions;
+  endConditions?: CronEndConditionsRaw;
   /** Rust-side snake_case variant — defend against either. */
-  end_conditions?: EndConditions;
+  end_conditions?: CronEndConditionsRaw;
   notifyEnabled?: boolean;
   notify_enabled?: boolean;
   delivery?: { botId?: string; chatId?: string; platform?: string };
@@ -74,6 +88,31 @@ function deriveExecutionMode(
   // 'every' / 'cron' / unknown → treat as recurring (matches the current
   // legacy overlay's `describeSchedule` fallback).
   return 'recurring';
+}
+
+/**
+ * Transform a CronTask-shape `EndConditions` into the Task-shape. The
+ * critical fix here is `deadline`: the cron side serialises it as an RFC
+ * 3339 string (because the Rust field is `Option<DateTime<Utc>>`), while
+ * Task expects an `i64` ms-epoch. Passing the raw cron shape into
+ * `taskCreateDirect` triggers `expected i64, got string` in serde.
+ *
+ * Also tolerates snake_case variants for defense in depth (older writes
+ * might have bypassed the top-level `rename_all = camelCase`).
+ */
+function transformLegacyEndConditions(ec: CronEndConditionsRaw | undefined): EndConditions {
+  const aiCanExit = ec?.aiCanExit ?? ec?.ai_can_exit ?? true;
+  const out: EndConditions = { aiCanExit };
+  const rawDeadline = ec?.deadline;
+  if (typeof rawDeadline === 'string') {
+    const ts = Date.parse(rawDeadline);
+    if (!Number.isNaN(ts)) out.deadline = ts;
+  } else if (typeof rawDeadline === 'number') {
+    out.deadline = rawDeadline;
+  }
+  const maxExec = ec?.maxExecutions ?? ec?.max_executions;
+  if (typeof maxExec === 'number' && maxExec > 0) out.maxExecutions = maxExec;
+  return out;
 }
 
 function deriveNotification(legacy: LegacyCronRaw): NotificationConfig {
@@ -190,7 +229,13 @@ export async function upgradeLegacyCron(
     taskMdContent: prompt,
     executionMode: deriveExecutionMode(legacy.schedule),
     runMode: legacy.runMode ?? legacy.run_mode ?? 'new-session',
-    endConditions: legacy.endConditions ?? legacy.end_conditions ?? { aiCanExit: true },
+    // `transformLegacyEndConditions` converts the cron-side ISO
+    // `deadline` into the Task-side ms-epoch representation — without
+    // this, Rust's serde rejects `taskCreateDirect` with
+    // `expected i64, got string`.
+    endConditions: transformLegacyEndConditions(
+      legacy.endConditions ?? legacy.end_conditions,
+    ),
     sourceThoughtId: thought.id,
     tags: [],
     notification: deriveNotification(legacy),

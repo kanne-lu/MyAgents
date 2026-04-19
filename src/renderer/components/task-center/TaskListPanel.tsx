@@ -120,10 +120,8 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       // The operation is idempotent — once a cron has `task_id` set,
       // `fetchLegacyCronTasks` filters it out, so re-running this does
       // nothing on subsequent reloads.
-      const { upgradedTasks, remainingLegacy } = await autoUpgradeEligible(
-        legacyList,
-        projectsRef.current,
-      );
+      const { upgradedTasks, remainingLegacy, failedCount, firstError } =
+        await autoUpgradeEligible(legacyList, projectsRef.current);
       const mergedNative = upgradedTasks.length
         ? [...upgradedTasks, ...nativeList]
         : nativeList;
@@ -132,6 +130,15 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
       if (upgradedTasks.length > 0) {
         toastRef.current.success(
           `已自动升级 ${upgradedTasks.length} 个旧定时任务为新版任务`,
+        );
+      }
+      // Surface auto-upgrade failures so the user understands why the
+      // legacy badge is still there. Detail goes to the console; the
+      // toast trims to the first error (at most one per reload).
+      if (failedCount > 0) {
+        toastRef.current.error(
+          `${failedCount} 个遗留任务自动升级失败：${firstError ?? '未知错误'}。可在详情面板点击「升级为新版任务」手动重试。`,
+          8000,
         );
       }
     } catch (err) {
@@ -576,12 +583,22 @@ async function fetchLegacyCronTasks(): Promise<LegacyCronRow[]> {
 async function autoUpgradeEligible(
   legacy: LegacyCronRow[],
   projects: import('@/config/types').Project[],
-): Promise<{ upgradedTasks: Task[]; remainingLegacy: LegacyCronRow[] }> {
+): Promise<{
+  upgradedTasks: Task[];
+  remainingLegacy: LegacyCronRow[];
+  failedCount: number;
+  firstError: string | null;
+}> {
   const upgradedTasks: Task[] = [];
   const remainingLegacy: LegacyCronRow[] = [];
+  let failedCount = 0;
+  let firstError: string | null = null;
   for (const row of legacy) {
     const raw = row.raw as LegacyCronRaw;
     if (!canAutoUpgrade(raw, projects)) {
+      // Not counted as "failed" — these are known-ineligible (missing
+      // prompt / unresolvable workspace) and the user sees them in the
+      // legacy list with the manual upgrade button.
       remainingLegacy.push(row);
       continue;
     }
@@ -591,9 +608,11 @@ async function autoUpgradeEligible(
     } catch (err) {
       console.warn('[TaskListPanel] auto-upgrade failed for', row.id, err);
       remainingLegacy.push(row);
+      failedCount += 1;
+      if (!firstError) firstError = String(err);
     }
   }
-  return { upgradedTasks, remainingLegacy };
+  return { upgradedTasks, remainingLegacy, failedCount, firstError };
 }
 
 export default TaskListPanel;
