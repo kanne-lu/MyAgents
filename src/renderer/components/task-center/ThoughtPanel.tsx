@@ -4,8 +4,9 @@
 // interaction pattern.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Lightbulb, Search, X } from 'lucide-react';
+import { Lightbulb, X } from 'lucide-react';
 import { thoughtList, taskCenterAvailable } from '@/api/taskCenter';
+import { SearchPill } from './SearchPill';
 import { ThoughtInput } from './ThoughtInput';
 import { ThoughtCard } from './ThoughtCard';
 import type { Thought } from '@/../shared/types/thought';
@@ -30,7 +31,12 @@ export function ThoughtPanel({
   const [query, setQuery] = useState('');
   const [activeTag, setActiveTag] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [isSearchMode, setIsSearchMode] = useState(false);
+  // `searchFocused` opens the tag-cloud panel below the search pill when
+  // the user has focused the input without typing anything yet — gives
+  // them a shortcut to "oh, pick a tag" vs. "type a search". Set on
+  // focus, cleared on blur; the blur is delayed by a frame so clicking
+  // a cloud tag doesn't get swallowed.
+  const [searchFocused, setSearchFocused] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const reload = useCallback(async () => {
@@ -50,12 +56,6 @@ export function ThoughtPanel({
     void reload();
   }, [reload, refreshKey]);
 
-  // Auto-focus the search input when the user toggles search mode on.
-  useEffect(() => {
-    if (isSearchMode) {
-      searchInputRef.current?.focus();
-    }
-  }, [isSearchMode]);
 
   // When a task transitions (including creation → convertedTaskIds backlink on
   // its source thought), refetch so "已派生 N 个任务" count stays live.
@@ -104,11 +104,12 @@ export function ThoughtPanel({
     return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
   }, [thoughts]);
 
-  // Search panel shows the tag cloud only when the user hasn't narrowed by
-  // text or picked a tag yet — typing text or selecting a tag collapses the
-  // cloud (animated) so the result list takes over.
+  // Search panel shows the tag cloud only when the user has focused the
+  // search input AND hasn't narrowed by text or picked a tag yet. Typing
+  // text or selecting a tag collapses the cloud (animated) so the result
+  // list takes over.
   const showTagCloud =
-    isSearchMode && query.trim() === '' && activeTag === null && allTags.length > 0;
+    searchFocused && query.trim() === '' && activeTag === null && allTags.length > 0;
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -119,105 +120,82 @@ export function ThoughtPanel({
     });
   }, [thoughts, query, activeTag]);
 
-  const exitSearch = useCallback(() => {
-    setIsSearchMode(false);
+  const clearSearch = useCallback(() => {
     setQuery('');
+    searchInputRef.current?.blur();
   }, []);
 
   return (
     <div className="flex h-full flex-col">
-      {/* Section header — fixed-height outer wrapper so toggling between
-          "label + search icon" and "search input" never shifts the layout
-          below. h-12 per DESIGN.md §7.4 (aligns with TaskCenter page
-          header and the TaskListPanel section header). */}
+      {/* Section header — label on the left, persistent search pill on
+          the right. The search pill replaces the prior "icon toggle →
+          full-width input" pattern with an always-visible affordance
+          per the reference mock. Tag-cloud dropdown is re-attached
+          relative to this header's container so it still appears right
+          under the search input, via absolute positioning. */}
       <div className="relative flex h-12 shrink-0 items-center border-b border-[var(--line-subtle)] px-4">
-        {isSearchMode ? (
-          <div className="group relative w-full">
-            <div
-              className={`rounded-md border bg-transparent transition-colors ${
-                showTagCloud
-                  ? 'rounded-b-none border-[var(--accent)]'
-                  : 'border-[var(--line)] group-focus-within:border-[var(--accent)]'
-              }`}
-            >
-              <div className="relative flex items-center">
-                <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="搜索想法，或点击下方标签快速筛选"
-                  className="h-7 w-full bg-transparent pl-8 pr-7 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)]/70 outline-none"
-                  onKeyDown={(e) => {
-                    if (e.key === 'Escape') exitSearch();
-                  }}
-                />
-                <button
-                  type="button"
-                  onClick={exitSearch}
-                  title="退出搜索"
-                  className="absolute right-2 flex items-center text-[var(--ink-muted)]/60 transition-colors hover:text-[var(--ink)]"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
+        <div className="flex items-center gap-2">
+          <Lightbulb className="h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
+          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+            想法
+          </span>
+        </div>
+        <div
+          className="ml-auto"
+          // Delayed blur so clicking a tag inside the floating cloud
+          // registers before the cloud collapses. Using mousedown to
+          // detect an in-cloud click would be more robust but requires
+          // a ref + outside-click handler; this simpler delay wins for
+          // the shape of interaction the cloud needs.
+          onBlur={() => setTimeout(() => setSearchFocused(false), 120)}
+          onFocus={() => setSearchFocused(true)}
+        >
+          <SearchPill
+            inputRef={searchInputRef}
+            value={query}
+            onChange={setQuery}
+            onClear={clearSearch}
+            placeholder="搜索想法…"
+          />
+        </div>
 
-            {/* Floating tail — absolute so it overlays rather than pushes
-                the list below. Background matches the input row (via
-                `--paper`, the panel's own base) so the compound reads as
-                one surface; a single inset grey line — not reaching the
-                border — divides input area from tag cloud per the spec's
-                "用不到顶的灰色线弱风格" ask. */}
-            <div
-              className="absolute left-0 right-0 top-full z-30 overflow-hidden rounded-b-md border border-t-0 border-[var(--accent)] bg-[var(--paper)] shadow-sm"
-              style={{
-                maxHeight: showTagCloud ? '220px' : '0px',
-                opacity: showTagCloud ? 1 : 0,
-                pointerEvents: showTagCloud ? 'auto' : 'none',
-                transition:
-                  'max-height 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease-out',
-              }}
-            >
-              {/* Hair-thin divider — inset enough that it reads as a
-                  whisper, not a cut. Uses a low-opacity `--ink-muted`
-                  directly so the line stays visibly grey even when the
-                  surrounding `--accent` border is present. */}
-              <div className="mx-8 h-px bg-[var(--ink-muted)]/15" />
-              <div className="flex max-h-[220px] flex-wrap gap-1.5 overflow-y-auto p-2">
-                {allTags.map(([tag, n]) => (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => setActiveTag(tag)}
-                    className="rounded-[var(--radius-md)] bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--accent-warm-subtle)] hover:text-[var(--accent-warm)]"
-                  >
-                    #{tag}
-                    <span className="ml-1 text-[var(--ink-muted)]/60">{n}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
+        {/* Tag cloud — floats under the search pill when focused and
+            the input is empty, anchored to the header's right edge so
+            it aligns with the pill's own width. */}
+        <div
+          className="absolute right-4 top-full z-30 mt-1 overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] shadow-md"
+          style={{
+            width: '240px',
+            maxHeight: showTagCloud ? '220px' : '0px',
+            opacity: showTagCloud ? 1 : 0,
+            pointerEvents: showTagCloud ? 'auto' : 'none',
+            transition:
+              'max-height 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease-out',
+          }}
+        >
+          <div className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+            按标签筛选
           </div>
-        ) : (
-          <>
-            <div className="flex items-center gap-2">
-              <Lightbulb className="h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
-              <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-                想法
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setIsSearchMode(true)}
-              title="搜索想法"
-              className="ml-auto flex h-6 w-6 items-center justify-center rounded-[var(--radius-sm)] p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-            >
-              <Search className="h-3.5 w-3.5" strokeWidth={1.5} />
-            </button>
-          </>
-        )}
+          <div className="flex max-h-[190px] flex-wrap gap-1.5 overflow-y-auto px-2 pb-2">
+            {allTags.map(([tag, n]) => (
+              <button
+                key={tag}
+                type="button"
+                onMouseDown={(e) => {
+                  // mousedown so we set state before the input's blur
+                  // triggers and collapses the cloud.
+                  e.preventDefault();
+                  setActiveTag(tag);
+                  searchInputRef.current?.blur();
+                }}
+                className="rounded-[var(--radius-md)] bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--accent-warm-subtle)] hover:text-[var(--accent-warm)]"
+              >
+                #{tag}
+                <span className="ml-1 text-[var(--ink-muted)]/60">{n}</span>
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       {/* Input — new thought */}

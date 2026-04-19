@@ -1,7 +1,22 @@
 /** Lightweight CSS-only tooltip — appears instantly on hover, no JS timers.
  *  `position="top"` (default) shows above; `position="bottom"` shows below.
- *  `align="center"` (default) centers; `"end"` aligns to the right edge. */
-export default function Tip({ label, children, position = 'top', align = 'center' }: { label: string; children: React.ReactNode; position?: 'top' | 'bottom'; align?: 'center' | 'end' }) {
+ *  `align="center"` (default) centers; `"end"` aligns to the right edge.
+ *  `shortcut` adds a muted second line (e.g. "⌘ + Enter") rendered below
+ *  the main label. Use for actions with a keyboard accelerator worth
+ *  teaching — keep it to a short inline string, no raw JSX. */
+export default function Tip({
+  label,
+  shortcut,
+  children,
+  position = 'top',
+  align = 'center',
+}: {
+  label: string;
+  shortcut?: string;
+  children: React.ReactNode;
+  position?: 'top' | 'bottom';
+  align?: 'center' | 'end';
+}) {
   const posClass = position === 'bottom'
     ? 'top-full mt-1.5'
     : 'bottom-full mb-1.5';
@@ -11,8 +26,15 @@ export default function Tip({ label, children, position = 'top', align = 'center
   return (
     <span className="group/tip relative inline-flex">
       {children}
-      <span className={`pointer-events-none absolute z-50 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)]/90 px-2 py-1 text-[11px] text-[var(--button-primary-text)] opacity-0 transition-opacity group-hover/tip:opacity-100 ${posClass} ${alignClass}`}>
+      <span
+        className={`pointer-events-none absolute z-50 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)]/90 px-2.5 py-1.5 text-[11px] leading-tight text-[var(--button-primary-text)] opacity-0 transition-opacity group-hover/tip:opacity-100 ${posClass} ${alignClass}`}
+      >
         {label}
+        {shortcut && (
+          <span className="mt-0.5 block text-[10px] text-white/70">
+            {shortcut}
+          </span>
+        )}
       </span>
     </span>
   );

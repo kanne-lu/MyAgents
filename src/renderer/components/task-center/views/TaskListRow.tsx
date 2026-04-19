@@ -1,13 +1,14 @@
 // TaskListRow — dense single-line row used by the list view for fast scan +
 // filter. No card chrome (no rounded corners, no shadow, no per-row border
-// box) so the list reads as a table. Actions only appear on hover.
+// box) so the list reads as a table.
 //
-// Layout (left → right): status pill · mode icon · name (flex-1) · workspace
-// · updated-at · hover-actions.
+// Layout (left → right): status chip · category chip · name (flex-1) ·
+// workspace · updated-at · overflow menu. Chip order mirrors the card view
+// exactly so switching between the two layouts doesn't rearrange the
+// visual vocabulary.
 
-import { Clock, Repeat, Timer, Calendar, Play } from 'lucide-react';
-
-import type { Task } from '@/../shared/types/task';
+import type { Task, TaskExecutionMode } from '@/../shared/types/task';
+import { TaskCategoryBadge } from '../TaskCategoryBadge';
 import { TaskStatusBadge } from '../TaskStatusBadge';
 import { TaskItemActions, deriveTaskRowStatus } from './TaskItemActions';
 import type { LegacyCronRow } from './types';
@@ -33,27 +34,26 @@ export function TaskListRow(props: TaskListRowProps) {
     ? shortenPath(legacy.workspacePath)
     : '';
   const updatedAt = task?.updatedAt ?? legacy?.updatedAt ?? 0;
-  const actionAlwaysVisible = status === 'running' || status === 'verifying';
+  const category: TaskExecutionMode = task
+    ? task.executionMode
+    : inferLegacyCategory(legacy);
 
   return (
     <button
       type="button"
       onClick={onOpen}
-      className={`group flex w-full items-center gap-3 border-b border-[var(--line-subtle)] px-3 py-2 text-left transition-colors hover:bg-[var(--hover-bg)] ${
+      className={`group flex w-full items-center gap-2 border-b border-[var(--line-subtle)] px-3 py-2 text-left transition-colors hover:bg-[var(--hover-bg)] ${
         highlighted ? 'bg-[var(--accent-warm-subtle)]' : ''
       }`}
     >
-      {/* Status badge — fixed slot so rows line up vertically */}
-      <span className="w-[68px] shrink-0">
-        {isLegacy ? (
-          <span className="inline-flex items-center rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
-            遗留
-          </span>
-        ) : (
-          <TaskStatusBadge status={status} compact />
-        )}
-      </span>
-      <ModeIconSlot isLegacy={isLegacy} mode={task?.executionMode} />
+      {/* Chip row — status first, category second. Wrapped in a
+          fixed-width flex cluster so rows visually align: the name
+          always starts at the same x-offset regardless of which chips
+          are present. */}
+      <div className="flex shrink-0 items-center gap-1.5">
+        <TaskStatusBadge status={status} compact />
+        <TaskCategoryBadge mode={category} legacy={isLegacy} compact />
+      </div>
       <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink)]">
         {name}
       </span>
@@ -74,28 +74,21 @@ export function TaskListRow(props: TaskListRowProps) {
         onRerun={onRerun}
         onOpenDetail={onOpen}
         onDelete={onDelete}
-        alwaysVisible={actionAlwaysVisible}
       />
     </button>
   );
 }
 
-/** Inline icon slot — kept as its own component so the render path never
- *  capitalises a local binding (which `react-hooks/static-components` treats
- *  as a new component created during render). */
-function ModeIconSlot({ isLegacy, mode }: { isLegacy: boolean; mode: Task['executionMode'] | undefined }) {
-  const cls = 'h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]';
-  if (isLegacy) return <Clock className={cls} />;
-  switch (mode) {
-    case 'scheduled':
-      return <Calendar className={cls} />;
-    case 'recurring':
-      return <Timer className={cls} />;
-    case 'loop':
-      return <Repeat className={cls} />;
-    default:
-      return <Play className={cls} />;
-  }
+/** Best guess at the "kind" of a legacy cron from its schedule shape —
+ *  same logic as TaskCardItem; kept local so the two files stay
+ *  independent of each other's internals. */
+function inferLegacyCategory(legacy?: LegacyCronRow): TaskExecutionMode {
+  if (!legacy) return 'once';
+  const sched = (legacy.raw as { schedule?: { kind?: string } }).schedule;
+  const kind = sched?.kind;
+  if (kind === 'loop') return 'loop';
+  if (kind === 'at') return 'scheduled';
+  return 'recurring';
 }
 
 function shortenPath(p: string): string {

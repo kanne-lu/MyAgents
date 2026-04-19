@@ -47,12 +47,6 @@ export function TaskCardItem(props: TaskCardItemProps) {
   const name = task?.name ?? legacy?.name ?? '—';
   const updatedAt = task?.updatedAt ?? legacy?.updatedAt ?? 0;
   const category = task ? task.executionMode : inferLegacyCategory(legacy);
-  // Actions stay pinned to the top-right at all times — the earlier
-  // "fade in on hover" pattern made the card visibly reflow on hover,
-  // which was jarring when scanning a long list. Consistent placement
-  // is more valuable than the few pixels we gain by hiding them when
-  // idle.
-  const actionAlwaysVisible = true;
 
   // Loop + recurring tasks surface "第 N 轮" / "已执行 N 次" — both pull
   // from CronTask.execution_count. RunStats is a per-card fetch because
@@ -94,27 +88,33 @@ export function TaskCardItem(props: TaskCardItemProps) {
     <button
       type="button"
       onClick={onOpen}
-      className={`group relative flex w-full flex-col gap-2.5 rounded-[var(--radius-lg)] border bg-[var(--paper-elevated)] p-4 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px] ${
+      className={`group relative flex w-full flex-col gap-2.5 rounded-[var(--radius-lg)] border bg-[var(--paper-elevated)] p-4 pr-10 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm hover:-translate-y-[1px] ${
         highlighted ? 'border-[var(--accent-warm)] shadow-sm' : 'border-[var(--line)]'
       }`}
     >
-      {/* Row 1 — category chip (left) + status chip + hover actions (right) */}
-      <div className="flex items-center gap-2">
+      {/* "…" menu — absolutely pinned to the card's top-right corner so
+          its position is stable no matter how wide the chip row gets.
+          Chip row gets `pr-10` reserved above so its rightmost chip
+          can't overlap the menu button. */}
+      <div className="absolute right-2 top-2 z-10">
+        <TaskItemActions
+          variant={isLegacy ? 'legacy' : 'task'}
+          status={status}
+          busy={busy}
+          onRun={onRun}
+          onStop={onStop}
+          onRerun={onRerun}
+          onOpenDetail={onOpen}
+          onDelete={onDelete}
+        />
+      </div>
+
+      {/* Row 1 — chip row, tags in explicit order: status first, category
+          second. Both chips are always pill-shaped; no hover-only
+          affordances in this row. */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        <TaskStatusBadge status={status} compact />
         <TaskCategoryBadge mode={category} legacy={isLegacy} />
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          <TaskStatusBadge status={status} compact />
-          <TaskItemActions
-            variant={isLegacy ? 'legacy' : 'task'}
-            status={status}
-            busy={busy}
-            onRun={onRun}
-            onStop={onStop}
-            onRerun={onRerun}
-            onOpenDetail={onOpen}
-            onDelete={onDelete}
-            alwaysVisible={actionAlwaysVisible}
-          />
-        </div>
       </div>
 
       {/* Row 2 — title. 14px / weight 500 per the reference mock — the

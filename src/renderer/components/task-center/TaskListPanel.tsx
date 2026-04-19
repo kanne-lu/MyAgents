@@ -11,7 +11,7 @@
 // their "remain in source chat tab" management pattern.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Layers, Search, X } from 'lucide-react';
+import { Layers } from 'lucide-react';
 
 import {
   taskCenterAvailable,
@@ -29,6 +29,7 @@ import { LegacyCronOverlay } from './LegacyCronOverlay';
 import { TaskDetailOverlay } from './TaskDetailOverlay';
 import { TaskCardItem } from './views/TaskCardItem';
 import { TaskListRow } from './views/TaskListRow';
+import { SearchPill } from './SearchPill';
 import { ViewToggle, type TaskView } from './views/ViewToggle';
 import type { LegacyCronRow } from './views/types';
 
@@ -87,7 +88,6 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
   const [legacy, setLegacy] = useState<LegacyCronRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
-  const [isSearchMode, setIsSearchMode] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [selectedLegacy, setSelectedLegacy] = useState<LegacyCronRow | null>(null);
@@ -185,11 +185,6 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
     }
   }, [projects.length, reload]);
 
-  useEffect(() => {
-    if (isSearchMode) {
-      searchInputRef.current?.focus();
-    }
-  }, [isSearchMode]);
 
   // SSE: listen for task:status-changed events fired by Rust `update_status`
   // and refetch so every open TaskCenter tab stays in sync with the source of
@@ -338,9 +333,9 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
     return out;
   }, [tasks, legacy, query]);
 
-  const exitSearch = useCallback(() => {
-    setIsSearchMode(false);
+  const clearSearch = useCallback(() => {
     setQuery('');
+    searchInputRef.current?.blur();
   }, []);
 
   const totalCount = tasks.length + legacy.length;
@@ -399,54 +394,29 @@ export function TaskListPanel({ highlightTaskId, refreshKey }: Props) {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Section header — label + view toggle + search toggle.
-          h-12 per DESIGN.md §7.4 (aligns with TaskCenter page header). */}
-      {isSearchMode ? (
-        <div className="flex h-12 items-center gap-2 border-b border-[var(--line-subtle)] px-4">
-          <div className="relative flex flex-1 items-center">
-            <Search className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
-            <input
-              ref={searchInputRef}
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="搜索任务（名称 / 描述 / 标签）"
-              className="h-7 w-full rounded-md border border-[var(--line)] bg-transparent pl-8 pr-7 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)]/70 outline-none transition-colors focus:border-[var(--accent)]"
-              onKeyDown={(e) => {
-                if (e.key === 'Escape') exitSearch();
-              }}
-            />
-            <button
-              type="button"
-              onClick={exitSearch}
-              title="退出搜索"
-              className="absolute right-2 flex items-center text-[var(--ink-muted)]/60 transition-colors hover:text-[var(--ink)]"
-            >
-              <X className="h-3.5 w-3.5" strokeWidth={1.5} />
-            </button>
-          </div>
+      {/* Section header — label + persistent search pill + view toggle.
+          h-12 per DESIGN.md §7.4 (aligns with TaskCenter page header).
+          The search pill is always visible (no toggle modal state) — per
+          the reference mock, searching is a constant affordance, not a
+          hidden mode the user has to enter first. */}
+      <div className="flex h-12 items-center gap-3 border-b border-[var(--line-subtle)] px-4">
+        <div className="flex items-center gap-2">
+          <Layers className="h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
+          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+            任务
+          </span>
         </div>
-      ) : (
-        <div className="flex h-12 items-center justify-between border-b border-[var(--line-subtle)] px-4">
-          <div className="flex items-center gap-2">
-            <Layers className="h-3.5 w-3.5 text-[var(--ink-muted)]" strokeWidth={1.5} />
-            <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-              任务
-            </span>
-          </div>
-          <div className="flex items-center gap-2">
-            <ViewToggle value={view} onChange={updateView} />
-            <button
-              type="button"
-              onClick={() => setIsSearchMode(true)}
-              title="搜索任务"
-              className="flex h-6 w-6 items-center justify-center rounded-[var(--radius-sm)] p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-            >
-              <Search className="h-3.5 w-3.5" strokeWidth={1.5} />
-            </button>
-          </div>
+        <div className="ml-auto flex items-center gap-2">
+          <SearchPill
+            inputRef={searchInputRef}
+            value={query}
+            onChange={setQuery}
+            onClear={clearSearch}
+            placeholder="搜索任务…"
+          />
+          <ViewToggle value={view} onChange={updateView} />
         </div>
-      )}
+      </div>
 
       <div className={`flex-1 overflow-y-auto ${view === 'list' ? '' : 'px-4 py-3'}`}>
         {loading ? (

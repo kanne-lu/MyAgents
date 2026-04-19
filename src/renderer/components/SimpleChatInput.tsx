@@ -1135,10 +1135,22 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
     // Normal send - but NOT during IME composition (e.g., Chinese input)
     // Check both event.nativeEvent.isComposing (standard) and event.keyCode === 229 (legacy)
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) {
-      event.preventDefault();
-      if ((inputValue.trim() || images.length > 0) && canSendMessageRef.current) {
-        handleSend();
+    //
+    // Thought mode splits the keyboard contract: plain Enter is a newline
+    // (note-taking convention — matches the TaskCenter ThoughtInput and
+    // apps like flomo / Apple Notes), and Cmd/Ctrl+Enter commits. Chat
+    // mode keeps the familiar "Enter sends" (Shift+Enter = newline).
+    if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+      const isCmdEnter = event.metaKey || event.ctrlKey;
+      const isPlainEnter = !event.shiftKey && !isCmdEnter;
+      const shouldSend = thoughtModeActive
+        ? isCmdEnter
+        : isPlainEnter;
+      if (shouldSend) {
+        event.preventDefault();
+        if ((inputValue.trim() || images.length > 0) && canSendMessageRef.current) {
+          handleSend();
+        }
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
@@ -1850,16 +1862,33 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <Square className="h-4 w-4" />
                 </button>
               ) : (
-                // Normal state - can send
-                <button
-                  type="button"
-                  onClick={handleSend}
-                  disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
-                  className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                  title={!canSendMessage ? '请前往设置页面设置模型供应商' : '发送'}
-                >
-                  <Send className="h-4 w-4" />
-                </button>
+                // Normal state - can send. In thought mode the send
+                // button gets a two-line tooltip teaching `⌘ + Enter`,
+                // which matches the TaskCenter ThoughtInput affordance
+                // and is crucial because thought mode swaps the usual
+                // "Enter sends" contract (Enter is a newline there).
+                thoughtModeActive ? (
+                  <Tip label="保存笔记" shortcut="⌘ + Enter" align="end">
+                    <button
+                      type="button"
+                      onClick={handleSend}
+                      disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
+                      className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
+                    >
+                      <Send className="h-4 w-4" />
+                    </button>
+                  </Tip>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleSend}
+                    disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
+                    className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
+                    title={!canSendMessage ? '请前往设置页面设置模型供应商' : '发送'}
+                  >
+                    <Send className="h-4 w-4" />
+                  </button>
+                )
               )}
             </div>
           </div>

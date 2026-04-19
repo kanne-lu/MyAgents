@@ -20,6 +20,7 @@ import {
 } from 'react';
 import { Hash, Send } from 'lucide-react';
 import { thoughtCreate } from '@/api/taskCenter';
+import Tip from '@/components/Tip';
 import { Popover } from '@/components/ui/Popover';
 import {
   findActiveTagContext,
@@ -28,6 +29,12 @@ import {
   tagBodyEndOffset,
 } from '@/utils/parseThoughtTags';
 import type { Thought } from '@/../shared/types/thought';
+
+// Auto-grow bounds for the idle textarea. 14px text × 1.6 line-height
+// ≈ 22.4px/row, plus 12px top padding. We target 2 rows idle and ~8 rows
+// max (+6 rows of growth before internal scroll kicks in).
+const TEXTAREA_MIN_HEIGHT_PX = 12 + 22 * 2;   // ≈ 56
+const TEXTAREA_MAX_HEIGHT_PX = 12 + 22 * 8;   // ≈ 188
 
 interface Props {
   onCreated?: (t: Thought) => void;
@@ -98,6 +105,23 @@ export function ThoughtInput({
   useLayoutEffect(() => {
     syncScroll();
   }, [value, syncScroll]);
+
+  // Auto-grow the textarea with content. Floor = 2 rows (idle state stays
+  // compact); ceiling = 8 rows (~2 idle + 6 extra, per product spec). Past
+  // the ceiling the textarea scrolls internally and the mirror overlay
+  // tracks via `syncScroll`. We measure `scrollHeight` which includes
+  // padding but not border — clamp via CSS values instead of px math so
+  // font-size changes stay in sync without recomputing constants here.
+  useLayoutEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    // Reset to 0 before reading scrollHeight so a shrinking value also
+    // triggers a recompute (otherwise the textarea is stuck at its tallest
+    // historical height).
+    ta.style.height = '0px';
+    const next = Math.min(ta.scrollHeight, TEXTAREA_MAX_HEIGHT_PX);
+    ta.style.height = `${Math.max(next, TEXTAREA_MIN_HEIGHT_PX)}px`;
+  }, [value]);
 
   // Consume any pending caret position after React flushes `setValue` to
   // the DOM — safer than `requestAnimationFrame`, which can run before
@@ -278,11 +302,10 @@ export function ThoughtInput({
             onKeyDown={handleKeyDown}
             onScroll={syncScroll}
             placeholder={placeholder}
-            // 2-row default (was 3) so the empty input doesn't consume
-            // ~25% of the left panel. Longer thoughts scroll inside the
-            // textarea — the mirror overlay tracks the scroll via
-            // `syncScroll` above so highlighted `#tag` runs stay aligned.
-            rows={2}
+            // Height is driven by the `useLayoutEffect` above (2-row
+            // minimum, 8-row max, internal scroll past that). We don't
+            // set `rows={N}` here because it would re-inject a min-height
+            // attribute that fights the JS sizer on first paint.
             disabled={busy}
             autoFocus={autoFocus}
             // The textarea's own text is transparent (mirror layer above
@@ -291,11 +314,13 @@ export function ThoughtInput({
             // the `placeholder:[-webkit-text-fill-color:...]` override
             // the placeholder inherits the transparent fill and is
             // invisible. That was the silent bug in the prior rev.
-            className="relative w-full resize-none bg-transparent px-3 pt-3 text-[14px] leading-relaxed text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none"
+            className="relative w-full resize-none overflow-y-auto bg-transparent px-3 pt-3 text-[14px] leading-relaxed text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none"
             style={{
               fontFamily: 'inherit',
               WebkitTextFillColor: 'transparent',
               overflowWrap: 'break-word',
+              minHeight: `${TEXTAREA_MIN_HEIGHT_PX}px`,
+              maxHeight: `${TEXTAREA_MAX_HEIGHT_PX}px`,
             }}
           />
         </div>
@@ -352,15 +377,16 @@ export function ThoughtInput({
               <Hash className="h-4 w-4" />
             </button>
           </div>
-          <button
-            type="button"
-            onClick={() => void handleSubmit()}
-            disabled={!canSend}
-            title="记下想法 (⌘/Ctrl + ↵)"
-            className="rounded-lg bg-[var(--accent)] p-1.5 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-          >
-            <Send className="h-4 w-4" />
-          </button>
+          <Tip label="保存笔记" shortcut="⌘ + Enter" align="end">
+            <button
+              type="button"
+              onClick={() => void handleSubmit()}
+              disabled={!canSend}
+              className="rounded-lg bg-[var(--accent)] p-1.5 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
+            >
+              <Send className="h-4 w-4" />
+            </button>
+          </Tip>
         </div>
       </div>
       {error && (
