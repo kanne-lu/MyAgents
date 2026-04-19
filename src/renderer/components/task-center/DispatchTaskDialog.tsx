@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Bell,
+  Bot,
   Clock,
   FileText,
   Flag,
@@ -67,6 +68,12 @@ const DEFAULT_EVENTS: NonNullable<NotificationConfig['events']> = [
   'endCondition',
 ];
 
+const PERMISSION_MODE_OPTIONS = [
+  { value: 'auto', label: '自动 (Auto)' },
+  { value: 'plan', label: '仅计划 (Plan)' },
+  { value: 'fullAgency', label: '完全自治 (Full Agency)' },
+];
+
 interface Props {
   thought: Thought;
   onClose: () => void;
@@ -125,6 +132,10 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
   const [intervalMinutes, setIntervalMinutes] = useState(30);
   const [cronExpression, setCronExpression] = useState('');
   const [cronTimezone, setCronTimezone] = useState('');
+
+  // Execution overrides — optional per-task model / permission mode.
+  const [modelOverride, setModelOverride] = useState('');
+  const [permissionMode, setPermissionMode] = useState('auto');
 
   // End conditions
   const [endConditionMode, setEndConditionMode] = useState<EndConditionMode>('forever');
@@ -255,6 +266,8 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
         intervalMinutes: isRecurring && !advancedCron ? intervalMinutes : undefined,
         cronExpression: isRecurring && advancedCron ? advancedCron : undefined,
         cronTimezone: isRecurring && advancedCron ? cronTimezone || undefined : undefined,
+        model: modelOverride.trim() || undefined,
+        permissionMode: permissionMode !== 'auto' ? permissionMode : undefined,
         sourceThoughtId: thought.id,
         tags,
         notification: buildNotification(),
@@ -291,6 +304,8 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
     intervalMinutes,
     cronExpression,
     cronTimezone,
+    modelOverride,
+    permissionMode,
     name,
     description,
     taskMd,
@@ -457,6 +472,38 @@ export function DispatchTaskDialog({ thought, onClose, onDispatched }: Props) {
               </div>
             </>
           )}
+
+          <div className="border-t border-[var(--line)]" />
+
+          {/* 执行覆盖 */}
+          <div>
+            <SectionHeader icon={Bot}>执行覆盖 (可选)</SectionHeader>
+            <div className="mt-4 space-y-4 pl-6">
+              <div>
+                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  模型
+                  <span className="ml-1 font-normal text-[var(--ink-muted)]">(留空使用 Agent 默认)</span>
+                </label>
+                <input
+                  type="text"
+                  value={modelOverride}
+                  onChange={(e) => setModelOverride(e.target.value)}
+                  placeholder="例如: claude-opus-4-7、deepseek-chat"
+                  className={INPUT_CLS}
+                />
+              </div>
+              <div>
+                <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
+                  权限模式
+                </label>
+                <CustomSelect
+                  value={permissionMode}
+                  options={PERMISSION_MODE_OPTIONS}
+                  onChange={setPermissionMode}
+                />
+              </div>
+            </div>
+          </div>
 
           <div className="border-t border-[var(--line)]" />
 
