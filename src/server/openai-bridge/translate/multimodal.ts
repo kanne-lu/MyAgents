@@ -1,10 +1,11 @@
 // Image content block translation
 
-import { writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'fs';
+import { writeFileSync , existsSync, readdirSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
 import { ensureGitignorePattern } from '../../utils/gitignore';
 import type { AnthropicImageBlock } from '../types/anthropic';
 import type { OpenAIContentPart } from '../types/openai';
+import { ensureDirSync } from '../../utils/fs-utils';
 
 /** Anthropic image block → OpenAI image_url content part */
 export function translateImageBlock(block: AnthropicImageBlock): OpenAIContentPart {
@@ -41,7 +42,7 @@ export function createToolImageSaver(workspacePath: string): ToolImageSaver {
     // Lazy dir creation + stale cleanup (once per session)
     if (!dirEnsured) {
       if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true });
+        ensureDirSync(dir);
       }
       ensureGitignorePattern(workspacePath, 'myagents_files/');
       // Clean up stale temp images older than 1 hour

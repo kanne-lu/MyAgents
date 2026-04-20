@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { getOAuthConfigDir, getServerState, updateServerState, loadStateStore } from './state-store';
 import type { OAuthTokenData, TokenChangeEvent, TokenChangeListener } from './types';
+import { ensureDirSync } from '../utils/fs-utils';
 
 // ===== Constants =====
 
@@ -63,7 +64,7 @@ async function acquireRefreshLock(serverId: string): Promise<() => void> {
   const lockDir = join(locksDir, `${lockNameForServer(serverId)}.lock`);
   const startedAt = Date.now();
 
-  mkdirSync(locksDir, { recursive: true });
+  ensureDirSync(locksDir);
 
   while (true) {
     try {

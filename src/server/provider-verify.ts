@@ -6,10 +6,11 @@
 import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
-import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv } from './agent-session';
+import { ensureDirSync } from './utils/fs-utils';
 // Subscription types (keep in sync with src/renderer/types/subscription.ts)
 export interface SubscriptionInfo {
   accountUuid?: string;
@@ -94,7 +95,7 @@ async function verifyViaSdk(
     // Use ~/.myagents/projects/ as cwd — a dedicated app directory with guaranteed permissions.
     // Avoids potential permission or .claude/ config issues in home directory.
     const cwd = join(homedir(), '.myagents', 'projects');
-    mkdirSync(cwd, { recursive: true });
+    ensureDirSync(cwd);
 
     async function* simplePrompt() {
       yield {
@@ -293,7 +294,7 @@ export async function verifyProviderViaSdk(
 export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; displayName: string; description: string }>> {
   const cliPath = resolveClaudeCodeCli();
   const cwd = join(homedir(), '.myagents', 'projects');
-  mkdirSync(cwd, { recursive: true });
+  ensureDirSync(cwd);
 
   // Use default Anthropic env (includes proxy config, NO_PROXY etc.)
   const env = buildClaudeSessionEnv();

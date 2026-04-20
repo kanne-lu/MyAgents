@@ -1,10 +1,11 @@
 import { randomUUID } from 'crypto';
-import { existsSync, mkdirSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
+import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
+import { ensureDirSync } from './utils/fs-utils';
 import { processImage, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
@@ -164,7 +165,7 @@ export function syncProjectUserConfig(projectDir: string): void {
   const projectSkillsDir = join(projectDir, '.claude', 'skills');
 
   if (existsSync(userSkillsDir)) {
-    try { mkdirSync(projectSkillsDir, { recursive: true }); } catch (e: any) { if (e?.code !== 'EEXIST') throw e; }
+    ensureDirSync(projectSkillsDir);
 
     // Read disabled list from skills-config.json
     let disabled: string[] = [];
@@ -238,7 +239,7 @@ export function syncProjectUserConfig(projectDir: string): void {
   const projectCommandsDir = join(projectDir, '.claude', 'commands');
 
   if (existsSync(userCommandsDir)) {
-    try { mkdirSync(projectCommandsDir, { recursive: true }); } catch (e: any) { if (e?.code !== 'EEXIST') throw e; }
+    ensureDirSync(projectCommandsDir);
 
     // Track managed command filenames for dangling symlink cleanup
     const managedCommandFiles = new Set<string>();

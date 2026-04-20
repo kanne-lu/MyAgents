@@ -6,12 +6,13 @@
  * Atomicity is guaranteed by write-to-tmp → rename pattern.
  */
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync, renameSync, mkdirSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, copyFileSync, existsSync, renameSync , readdirSync } from 'fs';
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
 import type { McpServerDefinition } from '../../renderer/config/types';
 import type { SessionMetadata } from '../types/session';
+import { ensureDirSync } from './fs-utils';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -126,7 +127,7 @@ export function atomicModifyConfig(
 
   // Ensure directory exists
   if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
+    ensureDirSync(configDir);
   }
 
   const config = loadConfig();

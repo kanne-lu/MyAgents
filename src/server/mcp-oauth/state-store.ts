@@ -11,6 +11,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync,
 import { join } from 'path';
 import { homedir } from 'os';
 import type { McpOAuthState, McpOAuthStateStore, LegacyOAuthToken } from './types';
+import { ensureDirSync } from '../utils/fs-utils';
 
 export function getOAuthConfigDir(): string {
   return process.env.MYAGENTS_CONFIG_DIR || join(homedir(), '.myagents');
@@ -32,7 +33,7 @@ const WRITE_LOCK_RETRY_MS = 50;
 
 function ensureDir(): void {
   const configDir = getOAuthConfigDir();
-  if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
+  ensureDirSync(configDir);
 }
 
 function sleepSync(ms: number): void {
@@ -44,7 +45,7 @@ function acquireWriteLock(): () => void {
   const lockDir = join(locksDir, 'state-store.lock');
   const startedAt = Date.now();
 
-  mkdirSync(locksDir, { recursive: true });
+  ensureDirSync(locksDir);
 
   while (true) {
     try {

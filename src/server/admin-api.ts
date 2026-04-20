@@ -27,7 +27,8 @@ import {
   type AgentConfigSlim,
   type ChannelConfigSlim,
 } from './utils/admin-config';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'fs';
+import { existsSync , writeFileSync, unlinkSync } from 'fs';
+import { ensureDirSync } from './utils/fs-utils';
 import { resolve } from 'path';
 import { setMcpServers, getMcpServers, getAgentState, getSidecarPort } from './agent-session';
 import { broadcast } from './sse';
@@ -1826,7 +1827,7 @@ function hasDangerousKeySegment(key: string): boolean {
 /** Save a custom provider JSON file */
 function saveCustomProviderFile(provider: Record<string, unknown>): void {
   const dir = getProvidersDir();
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  ensureDirSync(dir);
   const filePath = resolve(dir, `${provider.id}.json`);
   writeFileSync(filePath, JSON.stringify(provider, null, 2), 'utf-8');
 }

@@ -7,12 +7,13 @@
 // Session: --session-id / --resume
 
 import { spawn, type Subprocess } from 'bun';
-import { writeFileSync, mkdirSync, existsSync, unlinkSync } from 'fs';
+import { writeFileSync , existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
+import { ensureDirSync } from '../utils/fs-utils';
 
 /**
  * Build CC CLI message content — string for text-only, array of content blocks for images+text.
@@ -70,7 +71,7 @@ process.stdin.resume();
  */
 function generateHookSettings(sidecarPort: number): string | null {
   try {
-    mkdirSync(HOOK_DIR, { recursive: true });
+    ensureDirSync(HOOK_DIR);
 
     // Write forwarder script (idempotent)
     const forwarderPath = join(HOOK_DIR, 'forwarder.cjs');

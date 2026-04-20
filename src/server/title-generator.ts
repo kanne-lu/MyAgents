@@ -15,7 +15,6 @@
 import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
-import { mkdirSync } from 'fs';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv, type ProviderEnv } from './agent-session';
 import { ClaudeCodeRuntime } from './runtimes/claude-code';
@@ -23,6 +22,7 @@ import { CodexRuntime } from './runtimes/codex';
 import { GeminiRuntime } from './runtimes/gemini';
 import type { AgentRuntime, RuntimeProcess } from './runtimes/types';
 import type { RuntimeType } from '../shared/types/runtime';
+import { ensureDirSync } from './utils/fs-utils';
 
 const TITLE_MAX_LENGTH = 30;
 const TIMEOUT_MS = 15_000;
@@ -99,7 +99,7 @@ export async function generateTitle(
   try {
     const cliPath = resolveClaudeCodeCli();
     const cwd = join(homedir(), '.myagents', 'projects');
-    mkdirSync(cwd, { recursive: true });
+    ensureDirSync(cwd);
 
     const env = buildClaudeSessionEnv(providerEnv);
     const prompt = buildUserPrompt(rounds);

@@ -6,10 +6,11 @@
  * Workspace config: <cwd>/.claude/agents/_workspace.json
  */
 
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { parseAgentFrontmatter, parseFullAgentContent, toSdkAgentDefinition } from '../../shared/agentCommands';
 import type { AgentItem, AgentMeta, AgentWorkspaceConfig } from '../../shared/agentTypes';
+import { ensureDirSync } from '../utils/fs-utils';
 
 /**
  * Read _meta.json for a given agent folder
@@ -31,7 +32,7 @@ export function readAgentMeta(agentFolderPath: string): AgentMeta | undefined {
  */
 export function writeAgentMeta(agentFolderPath: string, meta: AgentMeta): void {
     if (!existsSync(agentFolderPath)) {
-        mkdirSync(agentFolderPath, { recursive: true });
+        ensureDirSync(agentFolderPath);
     }
     const metaPath = join(agentFolderPath, '_meta.json');
     writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
@@ -97,7 +98,7 @@ export function readWorkspaceConfig(agentDir: string): AgentWorkspaceConfig {
 export function writeWorkspaceConfig(agentDir: string, config: AgentWorkspaceConfig): void {
     const agentsDir = join(agentDir, '.claude', 'agents');
     if (!existsSync(agentsDir)) {
-        mkdirSync(agentsDir, { recursive: true });
+        ensureDirSync(agentsDir);
     }
     const configPath = join(agentsDir, '_workspace.json');
     writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');

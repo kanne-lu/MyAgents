@@ -7,12 +7,13 @@
 // Session: thread/start (new) / thread/resume (continuing)
 
 import { spawn, type Subprocess } from 'bun';
-import { writeFileSync, mkdirSync, existsSync, readdirSync, unlinkSync, statSync } from 'fs';
+import { writeFileSync , existsSync, readdirSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
+import { ensureDirSync } from '../utils/fs-utils';
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
 const TEMP_IMG_DIR = join(
@@ -26,7 +27,7 @@ const TEMP_IMG_DIR = join(
  */
 function writeImageToTempFile(img: ImagePayload): string {
   if (!existsSync(TEMP_IMG_DIR)) {
-    mkdirSync(TEMP_IMG_DIR, { recursive: true });
+    ensureDirSync(TEMP_IMG_DIR);
   }
   const buf = Buffer.from(img.data, 'base64');
   if (buf.length === 0) throw new Error('Empty image data');

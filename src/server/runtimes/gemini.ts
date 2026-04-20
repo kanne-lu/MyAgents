@@ -11,7 +11,6 @@
 import { spawn, type Subprocess } from 'bun';
 import {
   writeFileSync,
-  mkdirSync,
   existsSync,
   readFileSync,
   readdirSync,
@@ -37,6 +36,7 @@ import type {
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { resolveGeminiWorkspaceInstructions } from './workspace-instructions';
 import { broadcast } from '../sse';
+import { ensureDirSync } from '../utils/fs-utils';
 
 // ─── Tmp directory layout for system prompt files ───
 
@@ -64,7 +64,7 @@ function sessionSystemPromptPath(sessionId: string): string {
 function cleanupStaleSessionPrompts(): void {
   try {
     if (!existsSync(TMP_ROOT)) {
-      mkdirSync(TMP_ROOT, { recursive: true });
+      ensureDirSync(TMP_ROOT);
       return;
     }
     const cutoff = Date.now() - 60 * 60 * 1000;
@@ -103,7 +103,7 @@ async function extractGeminiBasePrompt(version: string): Promise<string | null> 
     }
   }
 
-  mkdirSync(TMP_ROOT, { recursive: true });
+  ensureDirSync(TMP_ROOT);
 
   let proc: Subprocess | null = null;
   try {
@@ -174,7 +174,7 @@ async function writeSessionSystemPrompt(
 ): Promise<string | null> {
   if (!myAgentsPrompt || myAgentsPrompt.trim().length === 0) return null;
 
-  mkdirSync(TMP_ROOT, { recursive: true });
+  ensureDirSync(TMP_ROOT);
   const path = sessionSystemPromptPath(sessionId);
 
   const basePrompt = await extractGeminiBasePrompt(geminiVersion);

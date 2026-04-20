@@ -4,11 +4,12 @@
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod/v4';
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'fs';
+import { existsSync , writeFileSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ensureGitignorePattern } from '../utils/gitignore';
 import { randomUUID } from 'crypto';
+import { ensureDirSync } from '../utils/fs-utils';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
 type CallToolResult = {
@@ -64,7 +65,7 @@ function getGeneratedDir(): string {
     ? join(workspace, 'myagents_files', 'generated_images')
     : join(homedir(), '.myagents', 'generated');
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    ensureDirSync(dir);
     if (workspace) ensureGitignorePattern(workspace, 'myagents_files/');
   }
   return dir;
@@ -72,7 +73,7 @@ function getGeneratedDir(): string {
 
 function getContextsDir(): string {
   const dir = join(homedir(), '.myagents', 'image-contexts');
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  ensureDirSync(dir);
   return dir;
 }
 

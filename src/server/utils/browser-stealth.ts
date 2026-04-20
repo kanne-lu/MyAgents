@@ -13,10 +13,11 @@
  * will stop overwriting it.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync , readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { getHomeDirOrNull } from './platform';
+import { ensureDirSync } from './fs-utils';
 
 // ---- Cached values (computed once per process) ----
 
@@ -196,7 +197,7 @@ export function ensureBrowserStealthConfig(): void {
   };
 
   try {
-    mkdirSync(configDir, { recursive: true });
+    ensureDirSync(configDir);
     writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n');
     console.log(`[agent-browser] Stealth config written: ${configPath}`);
   } catch (err) {

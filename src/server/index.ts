@@ -1,5 +1,5 @@
-import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync, mkdirSync, rmSync, renameSync } from 'fs';
-import { mkdir, rename, rm, stat } from 'fs/promises';
+import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
+import { rename, rm, stat } from 'fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import AdmZip from 'adm-zip';
@@ -25,6 +25,7 @@ import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } f
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition } from '../renderer/config/types';
+import { ensureDirSync, ensureDir } from './utils/fs-utils';
 import {
   setCronTaskContext,
   clearCronTaskContext,
@@ -325,7 +326,7 @@ async function ensureAgentDir(dir: string): Promise<string> {
   const expanded = expandTilde(dir);
   const resolved = resolve(expanded);
   if (!existsSync(resolved)) {
-    await mkdir(resolved, { recursive: true });
+    await ensureDir(resolved);
   }
   const info = await stat(resolved);
   if (!info.isDirectory()) {
@@ -369,7 +370,7 @@ function writeSkillsConfig(config: SkillsConfig): void {
   const configPath = getSkillsConfigPath();
   try {
     const dir = dirname(configPath);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    ensureDirSync(dir);
     // Auto-increment generation on every write — signals Tab Sidecars to re-sync symlinks
     config.generation = (config.generation || 0) + 1;
     writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
@@ -460,7 +461,7 @@ function seedBundledSkills(): void {
     const homeDir = getHomeDirOrNull() || '';
     const userSkillsDir = join(homeDir, '.myagents', 'skills');
 
-    if (!existsSync(userSkillsDir)) mkdirSync(userSkillsDir, { recursive: true });
+    ensureDirSync(userSkillsDir);
 
     const bundledFolders = readdirSync(bundledDir, { withFileTypes: true })
       .filter(d => d.isDirectory())
@@ -650,7 +651,7 @@ function migrateProfileToStorageState(): void {
 
     const storageState = { cookies, origins: [] as Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }> };
 
-    mkdirSync(myagentsDir, { recursive: true });
+    ensureDirSync(myagentsDir);
     writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2));
     console.log(`[migration] Migrated ${cookies.length} cookies from Chrome profile to ${storageStatePath}`);
     console.log('[migration] Old profile at ~/.playwright-mcp-profile/ can be safely deleted');
@@ -681,8 +682,8 @@ function writeAgentBrowserWrapper(cliPath: string): boolean {
   }
   const binDir = join(homeDir, '.myagents', 'bin');
   const shimsDir = join(homeDir, '.myagents', 'shims');
-  if (!existsSync(binDir)) mkdirSync(binDir, { recursive: true });
-  if (!existsSync(shimsDir)) mkdirSync(shimsDir, { recursive: true });
+  ensureDirSync(binDir);
+  ensureDirSync(shimsDir);
 
   // POSIX sh: escape backslash, double-quote, dollar, backtick inside double-quoted strings
   const shellEscape = (s: string) => s.replace(/([\\"`$])/g, '\\$1');
@@ -814,7 +815,7 @@ function autoInstallAgentBrowser(): void {
   const installDir = join(homeDir, '.myagents', 'agent-browser-cli');
   const lockFile = join(installDir, '.installing');
 
-  if (!existsSync(installDir)) mkdirSync(installDir, { recursive: true });
+  ensureDirSync(installDir);
 
   // Atomic lock: stale check + exclusive create (same pattern as ensureChromiumInstalled)
   if (existsSync(lockFile)) {
@@ -1222,7 +1223,7 @@ function stripYamlFrontmatter(content: string): string {
  * @param logPrefix Optional prefix for log messages
  */
 function copyDirRecursiveSync(src: string, dest: string, logPrefix = '[copyDir]'): void {
-  mkdirSync(dest, { recursive: true });
+  ensureDirSync(dest);
   const entries = readdirSync(src, { withFileTypes: true });
   for (const entry of entries) {
     const srcPath = join(src, entry.name);
@@ -1351,7 +1352,7 @@ function startupBeacon(step: string): void {
     const m = String(now.getMonth() + 1).padStart(2, '0');
     const d = String(now.getDate()).padStart(2, '0');
     const logsDir = join(homedir(), '.myagents', 'logs');
-    if (!existsSync(logsDir)) mkdirSync(logsDir, { recursive: true });
+    ensureDirSync(logsDir);
     const filePath = join(logsDir, `unified-${y}-${m}-${d}.log`);
     const h = String(now.getHours()).padStart(2, '0');
     const mi = String(now.getMinutes()).padStart(2, '0');
@@ -3409,7 +3410,7 @@ async function main() {
           if (files.length === 0) {
             return jsonResponse({ error: 'No files provided.' }, 400);
           }
-          await mkdir(resolvedTarget, { recursive: true });
+          await ensureDir(resolvedTarget);
           const saved: string[] = [];
           for (const file of files) {
             const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
@@ -3492,7 +3493,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Folder already exists.' }, 409);
           }
 
-          await mkdir(folderPath, { recursive: true });
+          await ensureDir(folderPath);
           return jsonResponse({ success: true, path: relative(currentAgentDir, folderPath) });
         } catch (error) {
           return jsonResponse(
@@ -3792,7 +3793,7 @@ async function main() {
             return jsonResponse({ error: 'No files provided.' }, 400);
           }
 
-          await mkdir(resolvedTarget, { recursive: true });
+          await ensureDir(resolvedTarget);
           const saved: string[] = [];
 
           for (const file of files) {
@@ -3836,7 +3837,7 @@ async function main() {
           }
 
           // Ensure target directory exists
-          await mkdir(resolvedTarget, { recursive: true });
+          await ensureDir(resolvedTarget);
 
           const saved: string[] = [];
 
@@ -3897,7 +3898,7 @@ async function main() {
           }
 
           // Ensure target directory exists
-          await mkdir(resolvedTarget, { recursive: true });
+          await ensureDir(resolvedTarget);
 
           const copiedFiles: Array<{ sourcePath: string; targetPath: string; renamed: boolean }> = [];
 
@@ -3923,7 +3924,7 @@ async function main() {
 
           // Helper function to copy directory recursively
           const copyDirectory = async (src: string, dest: string) => {
-            await mkdir(dest, { recursive: true });
+            await ensureDir(dest);
             const entries = readdirSync(src, { withFileTypes: true });
 
             for (const entry of entries) {
@@ -4536,7 +4537,7 @@ async function main() {
 
             // Acquire lock
             if (!existsSync(CACHE_DIR)) {
-              mkdirSync(CACHE_DIR, { recursive: true });
+              ensureDirSync(CACHE_DIR);
             }
             writeFileSync(LOCK_FILE, String(Date.now()));
 
@@ -5616,7 +5617,7 @@ async function main() {
           }
           const targetDir = queryAgentDir || currentAgentDir;
           const rulesDir = join(targetDir, '.claude', 'rules');
-          mkdirSync(rulesDir, { recursive: true });
+          ensureDirSync(rulesDir);
           const filePath = join(rulesDir, filename);
           if (existsSync(filePath)) {
             return jsonResponse({ success: false, error: 'File already exists' }, 409);
@@ -5733,7 +5734,7 @@ async function main() {
           }
           const targetDir = queryAgentDir || currentAgentDir;
           const rulesDir = join(targetDir, '.claude', 'rules');
-          mkdirSync(rulesDir, { recursive: true });
+          ensureDirSync(rulesDir);
           const filePath = join(rulesDir, filename);
           writeFileSync(filePath, payload.content, 'utf-8');
           return jsonResponse({ success: true });
@@ -5972,7 +5973,7 @@ async function main() {
 
           // Ensure MyAgents skills directory exists
           if (!existsSync(userSkillsBaseDir)) {
-            mkdirSync(userSkillsBaseDir, { recursive: true });
+            ensureDirSync(userSkillsBaseDir);
           }
 
           // Get existing folders in MyAgents skills directory
@@ -6259,7 +6260,7 @@ async function main() {
           }
 
           // Ensure global skills directory exists
-          mkdirSync(userSkillsBaseDir, { recursive: true });
+          ensureDirSync(userSkillsBaseDir);
 
           // Copy the skill folder
           copyDirRecursiveSync(srcDir, destDir, '[api/skill/copy-to-global]');
@@ -6304,7 +6305,7 @@ async function main() {
           }
 
           // Create directory structure
-          mkdirSync(skillDir, { recursive: true });
+          ensureDirSync(skillDir);
 
           // Create SKILL.md with default content
           const frontmatter: Partial<SkillFrontmatter> = {
@@ -6414,7 +6415,7 @@ async function main() {
               }
 
               // Create skill directory
-              mkdirSync(skillDir, { recursive: true });
+              ensureDirSync(skillDir);
 
               // Extract files, handling nested structure
               for (const entry of entries) {
@@ -6441,7 +6442,7 @@ async function main() {
 
                 // Create subdirectories if needed
                 if (!existsSync(dir)) {
-                  mkdirSync(dir, { recursive: true });
+                  ensureDirSync(dir);
                 }
 
                 // Write file
@@ -6482,7 +6483,7 @@ async function main() {
             }
 
             // Create skill directory
-            mkdirSync(skillDir, { recursive: true });
+            ensureDirSync(skillDir);
 
             // Write the md file as SKILL.md
             const skillPath = join(skillDir, 'SKILL.md');
@@ -6581,7 +6582,7 @@ async function main() {
 
           // Copy folder recursively
           const copyDir = (src: string, dest: string) => {
-            mkdirSync(dest, { recursive: true });
+            ensureDirSync(dest);
             const entries = readdirSync(src);
 
             for (const entry of entries) {
@@ -7158,7 +7159,7 @@ async function main() {
 
           // Ensure directory exists
           if (!existsSync(baseDir)) {
-            mkdirSync(baseDir, { recursive: true });
+            ensureDirSync(baseDir);
           }
 
           const cmdPath = join(baseDir, `${fileName}.md`);
@@ -7298,7 +7299,7 @@ async function main() {
           }
 
           if (!existsSync(userAgentsBaseDir)) {
-            mkdirSync(userAgentsBaseDir, { recursive: true });
+            ensureDirSync(userAgentsBaseDir);
           }
 
           let synced = 0;
@@ -7394,7 +7395,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Agent already exists' }, 409);
           }
 
-          mkdirSync(agentFolderDir, { recursive: true });
+          ensureDirSync(agentFolderDir);
 
           const frontmatter: Partial<AgentFrontmatter> = {
             name: payload.name,

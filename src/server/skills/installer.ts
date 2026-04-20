@@ -11,12 +11,13 @@
  * zip-slip-protected write path in `/api/skill/upload`.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { writeFileSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { load as yamlLoad, FAILSAFE_SCHEMA } from 'js-yaml';
 import { parseFullSkillContent } from '../../shared/slashCommands';
 import type { ExtractedTree } from './tarball-fetcher';
 import type { ResolvedSkillSource } from './url-resolver';
+import { ensureDirSync } from '../utils/fs-utils';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -314,7 +315,7 @@ function tryParseMarketplace(tree: ExtractedTree): InstallAnalysis | null {
  * before calling, or passing a fresh path).
  */
 export function writeSkillFiles(skillDir: string, files: Map<string, Buffer>): void {
-  mkdirSync(skillDir, { recursive: true });
+  ensureDirSync(skillDir);
   for (const [rel, data] of files) {
     const fullPath = resolve(join(skillDir, rel));
     // Zip-slip: resolved path MUST stay within skillDir
@@ -323,7 +324,7 @@ export function writeSkillFiles(skillDir: string, files: Map<string, Buffer>): v
       continue;
     }
     const dir = dirname(fullPath);
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    ensureDirSync(dir);
     writeFileSync(fullPath, data);
   }
 }

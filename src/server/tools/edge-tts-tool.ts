@@ -4,12 +4,13 @@
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod/v4';
-import { existsSync, mkdirSync, writeFileSync } from 'fs';
+import { existsSync , writeFileSync } from 'fs';
 import { ensureGitignorePattern } from '../utils/gitignore';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import * as tls from 'tls';
+import { ensureDirSync } from '../utils/fs-utils';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
 type CallToolResult = {
@@ -69,7 +70,7 @@ function getGeneratedAudioDir(): string {
     ? join(workspace, 'myagents_files', 'generated_audio')
     : join(homedir(), '.myagents', 'generated_audio');
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    ensureDirSync(dir);
     if (workspace) ensureGitignorePattern(workspace, 'myagents_files/');
   }
   return dir;

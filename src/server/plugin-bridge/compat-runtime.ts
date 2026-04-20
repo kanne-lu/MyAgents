@@ -13,7 +13,8 @@
 import { tmpdir } from 'os';
 import { join, basename, extname } from 'path';
 import { fileURLToPath } from 'url';
-import { writeFile, mkdir, readFile } from 'fs/promises';
+import { writeFile, readFile } from 'fs/promises';
+import { ensureDir } from '../utils/fs-utils';
 import { registerPendingDispatch, type PendingDispatchCallbacks } from './pending-dispatch';
 
 // ===== Media extraction utilities =====
@@ -589,7 +590,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           // Sanitize subdir to prevent path traversal (strip '..', '/', '\')
           const safeSubdir = (subdir || '').replace(/\.\./g, '').replace(/[/\\]/g, '');
           const dir = join(tmpdir(), 'myagents-media', safeSubdir);
-          await mkdir(dir, { recursive: true });
+          await ensureDir(dir);
           // Infer extension from originalFilename, then contentType
           let ext = '';
           if (originalFilename) {

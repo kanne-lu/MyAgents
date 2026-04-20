@@ -21,6 +21,7 @@ import { join } from 'path';
 import type { SessionMetadata, SessionData, SessionMessage, SessionStats } from './types/session';
 import { createSessionMetadata, generateSessionTitle } from './types/session';
 import { stripBom } from '../shared/utils';
+import { ensureDirSync } from './utils/fs-utils';
 
 const MYAGENTS_DIR = join(homedir(), '.myagents');
 const SESSIONS_FILE = join(MYAGENTS_DIR, 'sessions.json');
@@ -164,13 +165,13 @@ function atomicWriteSessionsFile(content: string): void {
  */
 function ensureStorageDir(): void {
     if (!existsSync(MYAGENTS_DIR)) {
-        mkdirSync(MYAGENTS_DIR, { recursive: true });
+        ensureDirSync(MYAGENTS_DIR);
     }
     if (!existsSync(SESSIONS_DIR)) {
-        mkdirSync(SESSIONS_DIR, { recursive: true });
+        ensureDirSync(SESSIONS_DIR);
     }
     if (!existsSync(ATTACHMENTS_DIR)) {
-        mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+        ensureDirSync(ATTACHMENTS_DIR);
     }
 }
 
@@ -660,7 +661,7 @@ export function saveAttachment(
     // Create session-specific attachments directory
     const sessionAttachmentsDir = join(ATTACHMENTS_DIR, sessionId);
     if (!existsSync(sessionAttachmentsDir)) {
-        mkdirSync(sessionAttachmentsDir, { recursive: true });
+        ensureDirSync(sessionAttachmentsDir);
     }
 
     // Determine file extension
