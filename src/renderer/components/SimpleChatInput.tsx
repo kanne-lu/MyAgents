@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronDown, ChevronUp, Loader, NotebookPen, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, PenLine, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import Tip from '@/components/Tip';
@@ -1913,12 +1913,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 // and is crucial because thought mode swaps the usual
                 // "Enter sends" contract (Enter is a newline there).
                 thoughtModeActive ? (
-                  // Thought mode: swap the paper-plane for a notebook-pen
+                  // Thought mode: swap the paper-plane for a single-pen
                   // icon — "send" implies dispatching to a recipient,
-                  // but saving a thought is a local memo. `NotebookPen`
-                  // matches the "记录想法" affordance the tooltip
-                  // promises. Kept on the same accent-warm pill so the
-                  // call-to-action weight is identical to other modes.
+                  // but saving a thought is a local memo. `PenLine`
+                  // (one clean pen + trailing stroke) reads as "记录
+                  // 想法" at a glance without the visual clutter of a
+                  // full notebook glyph. Distinct from `Pencil` (used
+                  // by the edit menu) so the two affordances don't
+                  // collapse into the same mental category.
                   <Tip label="记录想法" shortcut="⌘ + Enter" align="end">
                     <button
                       type="button"
@@ -1926,7 +1928,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
                       className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
                     >
-                      <NotebookPen className="h-4 w-4" />
+                      <PenLine className="h-4 w-4" />
                     </button>
                   </Tip>
                 ) : (
