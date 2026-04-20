@@ -1661,21 +1661,24 @@ export default function App() {
         // workspace so moving/renaming the workspace doesn't orphan them).
         const alignmentSessionId = `align-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+        // Prompt stays minimal by design — operational details (how to
+        // write the four docs, when to call `create-from-alignment`, what
+        // each of the 4 discussion outcomes looks like, CLI syntax) ALL
+        // live in `bundled-skills/task-alignment/SKILL.md`. The prompt
+        // only carries per-conversation data the skill can't know: the
+        // original thought text + four context-parameter values. Fewer
+        // instructions here means the AI doesn't get steered into "write
+        // files first" before the alignment dialog actually happens.
         const alignmentPrompt = [
-          '我想让你帮我对齐这件事（想法原文见下）。',
+          '我有一个想法希望进行讨论，请使用 Skill `/task-alignment` 与我讨论对齐。',
+          '本次上下文参数：',
+          `- alignmentSessionId: ${alignmentSessionId}`,
+          `- workspaceId: ${workspace.id}`,
+          `- workspacePath: ${workspace.path}`,
+          `- sourceThoughtId: ${thoughtId}`,
           '',
-          `请按 /task-alignment 流程把四份文档写入 \`~/.myagents/tasks/${alignmentSessionId}/\` 目录（用 Write 工具 + 绝对路径；$HOME 展开为真实 home 目录）：alignment.md / task.md / verify.md / progress.md。注意这是用户目录下的 MyAgents 应用数据，不在当前工作区。`,
-          '',
-          '如果讨论下来觉得值得做，请在沉淀完这四份文档后，调用 CLI 创建任务（CLI 会把目录重命名到 `~/.myagents/tasks/<newTaskId>/`）：',
-          '',
-          `\`myagents task create-from-alignment ${alignmentSessionId} --name "<任务名>" --workspaceId ${workspace.id} --workspacePath ${workspace.path} --sourceThoughtId ${thoughtId}\``,
-          '',
-          '如果不值得做或需要再想想，直接告诉我即可，不用强行创建任务。',
-          '',
-          '[想法原文]',
+          '[我的想法]',
           content,
-          '',
-          '请按 /task-alignment 流程跟我对话。',
         ].join('\n');
 
         const initialMessage: InitialMessage = {

@@ -852,7 +852,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "1";
+const SYSTEM_SKILLS_VERSION: &str = "2";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
