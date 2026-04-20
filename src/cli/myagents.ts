@@ -98,7 +98,7 @@ Commands:
   agent     Manage agents & channels
   skill     Manage skills (install from URL, list, enable/disable, sync)
   cron      Manage scheduled tasks (list/add/runs/exit ...)
-  task      Manage Task Center tasks (list/get/update-status/update-progress ...)
+  task      Manage Task Center tasks (list/get/update-status/run/rerun ...)
   thought   Manage Task Center thoughts (list/create)
   im        IM runtime actions for current chat (send-media)
   widget    Generative UI widget design guidelines (readme)
@@ -130,17 +130,16 @@ Examples:
   myagents skill sync
   myagents cron list
   myagents task list
-  myagents task get <taskId>
+  myagents task get <taskId>            # returns metadata + docs paths
+                                        # (task.md / verify.md / progress.md /
+                                        #  alignment.md — read/edit them with
+                                        #  standard Read/Edit/Write tools)
   myagents task update-status <taskId> running --message "starting work"
   myagents task update-status <taskId> verifying
   myagents task update-status <taskId> done --message "bundle size dropped 40%"
-  myagents task update-progress <taskId> "finished step 1/3"
   myagents task append-session <taskId> <sessionId>
   myagents task run <taskId>
   myagents task rerun <taskId>
-  myagents task show-doc <taskId> <task|verify|progress|alignment>
-  myagents task write-doc <taskId> <task|verify> --content "..."
-    # Or pipe from stdin: cat plan.md | myagents task write-doc <id> task
   myagents task create-from-alignment <alignmentSessionId> \
     --name "新任务" --workspaceId ws-abc --workspacePath /path/to/ws \
     --executionMode once --sourceThoughtId <thoughtId>
@@ -154,34 +153,6 @@ Run 'myagents <command> --help' for details on a specific command.`;
 // ---------------------------------------------------------------------------
 // HTTP client
 // ---------------------------------------------------------------------------
-
-/** Cap stdin payloads at 5 MB — task.md is a prompt, not a log dump. Catches
- *  `cat huge.log | myagents task write-doc` footguns and `cat /dev/urandom`
- *  OOM attacks. Management API `DefaultBodyLimit` is 50 MB; we're well under. */
-const STDIN_CONTENT_MAX_BYTES = 5 * 1024 * 1024;
-
-/**
- * Read all available bytes from stdin and return as a UTF-8 string. Used by
- * `task write-doc` so agents can pipe markdown in rather than escaping it
- * through a --content flag. Refuses payloads larger than STDIN_CONTENT_MAX_BYTES
- * so a runaway producer can't OOM the CLI.
- */
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  for await (const chunk of process.stdin) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    total += buf.length;
-    if (total > STDIN_CONTENT_MAX_BYTES) {
-      console.error(
-        `Error: stdin exceeds ${STDIN_CONTENT_MAX_BYTES / 1024 / 1024} MB limit (task docs should be prompts, not bulk data).`,
-      );
-      process.exit(2);
-    }
-    chunks.push(buf);
-  }
-  return Buffer.concat(chunks).toString('utf8');
-}
 
 async function callApi(route: string, body: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   try {
@@ -271,17 +242,6 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'task' && action === 'get') {
     printTaskDetail(result.data as Record<string, unknown>);
-    return;
-  }
-  if (group === 'task' && (action === 'show-doc' || action === 'read-doc')) {
-    // Print the raw markdown so agents can pipe to `cat`/`head`/`grep`.
-    // Empty content (missing file) → empty output + success exit code.
-    const data = result.data as { content?: string } | undefined;
-    process.stdout.write(data?.content ?? '');
-    return;
-  }
-  if (group === 'task' && action === 'write-doc') {
-    console.log('Task doc saved.');
     return;
   }
   if (group === 'thought' && action === 'list') {
@@ -524,27 +484,108 @@ function printTaskDetail(task: Record<string, unknown>): void {
     console.log('(task not found)');
     return;
   }
-  console.log(`Task ${task.id}: ${task.name}`);
-  console.log(`  Status:         ${task.status}`);
-  console.log(`  Executor:       ${task.executor}`);
-  console.log(`  Execution mode: ${task.executionMode}`);
-  console.log(`  Dispatch:       ${task.dispatchOrigin}`);
-  console.log(`  Workspace:      ${task.workspacePath ?? task.workspaceId}`);
+
+  // Identity + top-line state
+  console.log(`Task: ${task.name ?? '(unnamed)'}`);
+  console.log(`  ID:             ${task.id}`);
+  const statusLine = String(task.status ?? '?');
+  const updatedAt = typeof task.updatedAt === 'number' ? new Date(task.updatedAt).toISOString() : undefined;
+  console.log(`  Status:         ${statusLine}${updatedAt ? ` (updated ${updatedAt})` : ''}`);
+  console.log(`  Executor:       ${task.executor ?? '?'}`);
+  console.log(`  Execution mode: ${task.executionMode ?? '?'}`);
+  console.log(`  Dispatch:       ${task.dispatchOrigin ?? '?'}`);
+  if (task.workspacePath || task.workspaceId) {
+    console.log(`  Workspace:      ${task.workspacePath ?? task.workspaceId}`);
+  }
   if (task.description) console.log(`  Description:    ${task.description}`);
-  if (task.runMode) console.log(`  RunMode:        ${task.runMode}`);
+  if (task.runMode) console.log(`  Run mode:       ${task.runMode}`);
   if (task.runtime) console.log(`  Runtime:        ${task.runtime}`);
+  if (task.model) console.log(`  Model override: ${task.model}`);
+  if (task.permissionMode) console.log(`  Permission:     ${task.permissionMode}`);
   if (Array.isArray(task.tags) && (task.tags as string[]).length > 0) {
     console.log(`  Tags:           ${(task.tags as string[]).join(', ')}`);
   }
+
+  // Docs paths — the highlight of `task get`. AI consumers read these
+  // files with standard Read/Edit/Write tools; there are no separate
+  // `show-doc` / `write-doc` CLIs (removed v0.1.69+).
+  const docs = task.docs as Record<string, string | undefined> | undefined;
+  if (docs) {
+    console.log('\nDocs (read/edit/write these directly — they are YOUR workspace):');
+    if (docs.dir) console.log(`  Dir:            ${docs.dir}`);
+    if (docs.taskMd) console.log(`  task.md:        ${docs.taskMd}`);
+    if (docs.verifyMd) console.log(`  verify.md:      ${docs.verifyMd}`);
+    if (docs.progressMd) console.log(`  progress.md:    ${docs.progressMd}`);
+    if (docs.alignmentMd) console.log(`  alignment.md:   ${docs.alignmentMd}`);
+  }
+
+  // Schedule — only for scheduled / recurring / loop tasks
+  const mode = String(task.executionMode ?? 'once');
+  if (mode !== 'once') {
+    console.log('\nSchedule:');
+    if (task.cronExpression) {
+      console.log(
+        `  Cron:           ${task.cronExpression}${task.cronTimezone ? ` (${task.cronTimezone})` : ''}`,
+      );
+    } else if (task.intervalMinutes) {
+      console.log(`  Interval:       every ${task.intervalMinutes} minute(s)`);
+    } else if (task.dispatchAt) {
+      const when = typeof task.dispatchAt === 'number' ? new Date(task.dispatchAt).toISOString() : String(task.dispatchAt);
+      console.log(`  Dispatch at:    ${when}`);
+    }
+    if (task.lastExecutedAt) {
+      const last = typeof task.lastExecutedAt === 'number' ? new Date(task.lastExecutedAt).toISOString() : String(task.lastExecutedAt);
+      console.log(`  Last executed:  ${last}`);
+    }
+  }
+
+  // End conditions — when present, they're decision-relevant
+  const end = task.endConditions as Record<string, unknown> | undefined;
+  if (end && (end.deadline || end.maxExecutions || end.aiCanExit === false)) {
+    console.log('\nEnd conditions:');
+    if (end.deadline) {
+      const dl = typeof end.deadline === 'number' ? new Date(end.deadline).toISOString() : String(end.deadline);
+      console.log(`  Deadline:       ${dl}`);
+    }
+    if (end.maxExecutions) console.log(`  Max executions: ${end.maxExecutions}`);
+    if (end.aiCanExit === false) console.log(`  AI can exit:    no (must run to end conditions)`);
+  }
+
+  // Notification
+  const notif = task.notification as Record<string, unknown> | undefined;
+  if (notif) {
+    console.log('\nNotification:');
+    console.log(`  Desktop:        ${notif.desktop !== false ? 'on' : 'off'}`);
+    if (notif.botChannelId) console.log(`  Bot channel:    ${notif.botChannelId}`);
+  }
+
+  // Sessions + source thought
+  const sessionIds = Array.isArray(task.sessionIds) ? (task.sessionIds as string[]) : [];
+  if (sessionIds.length > 0) {
+    console.log(`\nSessions:         ${sessionIds.join(', ')} (${sessionIds.length} total)`);
+  }
+
+  // Recent status changes — last 5, with counter
   const hist = task.statusHistory as Array<Record<string, unknown>> | undefined;
   if (hist && hist.length > 0) {
-    const last = hist[hist.length - 1];
-    console.log(
-      `  Last change:    ${last.from ?? '—'} → ${last.to} (${last.actor}${last.source ? ` / ${last.source}` : ''})`,
-    );
-    if (last.message) console.log(`     message: ${last.message}`);
-    console.log(`  History entries: ${hist.length}`);
+    const last5 = hist.slice(-5);
+    console.log(`\nRecent changes (${last5.length} of ${hist.length}):`);
+    for (const h of last5) {
+      const at = typeof h.at === 'number' ? new Date(h.at).toISOString() : String(h.at ?? '');
+      const actor = String(h.actor ?? '?');
+      const source = h.source ? `/${h.source}` : '';
+      const from = h.from ?? '—';
+      const msg = h.message ? `   "${h.message}"` : '';
+      console.log(`  ${at}  ${actor}${source}  ${from} → ${h.to}${msg}`);
+    }
   }
+
+  // Footer — next-step hints so the AI / user doesn't have to guess
+  console.log('\nNext steps:');
+  console.log('  myagents task update-status <id> <status> [--message ...]  # transition state machine');
+  console.log('  myagents task run <id>                                     # dispatch immediately');
+  console.log('  myagents task rerun <id>                                   # re-arm stopped/blocked task');
+  console.log('  myagents task --help                                       # full Task CLI reference');
 }
 
 function printThoughtList(thoughts: Array<Record<string, unknown>>): void {
@@ -685,28 +726,6 @@ async function main(): Promise<void> {
     // Build request body based on group/action
     const restArgs = positional.slice(2);
     const body = buildRequestBody(group, action, restArgs, flags);
-
-    // `task write-doc` reads content from stdin when --content is
-    // **omitted entirely** — lets agents pipe markdown in with
-    // `cat plan.md | myagents task write-doc <id> task`. An explicit
-    // `--content ""` (empty string) is passed through unchanged so the
-    // user can clear a doc.
-    if (
-      group === 'task' &&
-      action === 'write-doc' &&
-      (body.content === undefined || body.content === null)
-    ) {
-      if (!process.stdin.isTTY) {
-        body.content = await readStdin();
-      }
-      if (body.content === undefined || body.content === null) {
-        console.error(
-          'Error: write-doc requires --content "..." or piped stdin. Use `--content ""` to clear a doc.',
-        );
-        process.exit(2);
-      }
-    }
-
     const route = buildRoute(group, action, restArgs);
     result = await callApi(route, body);
     printResult(group, action, result, jsonMode);
@@ -717,11 +736,6 @@ async function main(): Promise<void> {
 }
 
 function buildRoute(group: string, action: string, rest: string[]): string {
-  // `show-doc` is a CLI-only alias for `read-doc` — the underlying admin
-  // route is read-doc so the server stays file-operation shaped.
-  if (group === 'task' && action === 'show-doc') {
-    return 'task/read-doc';
-  }
   // Handle nested commands like "agent channel list/add/remove"
   if (group === 'agent' && action === 'channel') {
     const channelAction = rest[0] || 'list';
@@ -1023,32 +1037,11 @@ function buildRequestBody(
         message: flags.message,
       };
     }
-    if (action === 'update-progress') {
-      return {
-        id: rest[0],
-        message: rest.slice(1).join(' ') || flags.message,
-      };
-    }
     if (action === 'append-session') {
       return { id: rest[0], sessionId: rest[1] || flags.sessionId };
     }
     if (action === 'archive') return { id: rest[0], message: flags.message };
     if (action === 'delete') return { id: rest[0] };
-    if (action === 'read-doc' || action === 'show-doc') {
-      // `myagents task read-doc <id> <task|verify|progress|alignment>`.
-      // Aliases: `show-doc` reads more naturally in a terminal ("show me the doc").
-      return { id: rest[0], doc: rest[1] ?? 'task' };
-    }
-    if (action === 'write-doc') {
-      // `myagents task write-doc <id> <task|verify> --content "..."`.
-      // If --content is omitted and stdin is piped, read from stdin so
-      // agents can do `cat plan.md | myagents task write-doc <id> task`.
-      return {
-        id: rest[0],
-        doc: rest[1] ?? 'task',
-        content: flags.content,
-      };
-    }
     if (action === 'create-direct') {
       return {
         name: rest[0] || flags.name,

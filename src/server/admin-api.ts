@@ -1242,14 +1242,6 @@ export async function handleTaskUpdateStatus(
   return wrapMgmtResponse(resp);
 }
 
-export async function handleTaskUpdateProgress(payload: {
-  id: string;
-  message: string;
-}): Promise<AdminResponse> {
-  const resp = await managementApi('/api/task/update-progress', 'POST', payload);
-  return wrapMgmtResponse(resp);
-}
-
 export async function handleTaskAppendSession(payload: {
   id: string;
   sessionId: string;

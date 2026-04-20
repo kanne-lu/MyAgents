@@ -48,7 +48,7 @@ import {
   handlePluginList, handlePluginInstall, handlePluginUninstall,
   handleAgentRuntimeStatus,
   handleTaskList, handleTaskGet, handleTaskCreateDirect, handleTaskCreateFromAlignment,
-  handleTaskUpdateStatus, handleTaskUpdateProgress, handleTaskAppendSession,
+  handleTaskUpdateStatus, handleTaskAppendSession,
   handleTaskArchive, handleTaskDelete, handleTaskRun, handleTaskRerun,
   handleTaskReadDoc, handleTaskWriteDoc,
   handleThoughtList, handleThoughtCreate,
@@ -1154,7 +1154,6 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'task/run') return await handleTaskRun(payload as Parameters<typeof handleTaskRun>[0]);
   if (route === 'task/rerun') return await handleTaskRerun(payload as Parameters<typeof handleTaskRerun>[0]);
   if (route === 'task/update-status') return await handleTaskUpdateStatus(payload);
-  if (route === 'task/update-progress') return await handleTaskUpdateProgress(payload as Parameters<typeof handleTaskUpdateProgress>[0]);
   if (route === 'task/append-session') return await handleTaskAppendSession(payload as Parameters<typeof handleTaskAppendSession>[0]);
   if (route === 'task/archive') return await handleTaskArchive(payload as Parameters<typeof handleTaskArchive>[0]);
   if (route === 'task/delete') return await handleTaskDelete(payload as Parameters<typeof handleTaskDelete>[0]);

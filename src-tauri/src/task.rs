@@ -333,6 +333,68 @@ pub struct Task {
     pub deleted_at: Option<i64>,
 }
 
+/// Absolute paths to a task's markdown documents. Returned by `cmd_task_get`
+/// as a sibling of `Task` so the CLI / AI can read & edit the docs directly
+/// via standard file-system tools (Read / Edit / Write) without having to
+/// re-derive the paths from `task_docs_dir()`'s convention. Single source of
+/// truth for "where do the task docs live" — callers never guess the layout.
+///
+/// A doc path is only included when the file actually exists on disk
+/// (except `task_md`, which is always created at task creation time and is
+/// therefore always surfaced). This lets the consumer distinguish "AI has
+/// started working" (progress.md / verify.md present) from "fresh task"
+/// without a second `fs.exists()` round-trip.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskDocs {
+    /// Absolute path to the task's docs directory.
+    pub dir: String,
+    /// task.md — always created at task creation; always surfaced.
+    pub task_md: String,
+    /// verify.md — present when the AI or user has written verification rules.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verify_md: Option<String>,
+    /// progress.md — present when the AI has started recording execution progress.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_md: Option<String>,
+    /// alignment.md — present when the task was created via /task-alignment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alignment_md: Option<String>,
+}
+
+/// Build a [`TaskDocs`] for a task id by resolving `task_docs_dir()` and
+/// checking the on-disk existence of each optional doc file.
+pub fn build_task_docs(task_id: &str) -> Result<TaskDocs, String> {
+    let dir = task_docs_dir(task_id)?;
+    let dir_str = dir.to_string_lossy().into_owned();
+    let file_if_exists = |name: &str| -> Option<String> {
+        let p = dir.join(name);
+        if p.exists() {
+            Some(p.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    };
+    Ok(TaskDocs {
+        dir: dir_str,
+        task_md: dir.join("task.md").to_string_lossy().into_owned(),
+        verify_md: file_if_exists("verify.md"),
+        progress_md: file_if_exists("progress.md"),
+        alignment_md: file_if_exists("alignment.md"),
+    })
+}
+
+/// Response shape for `cmd_task_get` — flattens [`Task`] and adjoins a
+/// computed [`TaskDocs`]. `#[serde(flatten)]` keeps the JSON shape
+/// backwards-compatible (all prior Task fields appear at the top level);
+/// only `docs` is new. Consumers that don't know about `docs` ignore it.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskWithDocs {
+    #[serde(flatten)]
+    pub task: Task,
+    pub docs: TaskDocs,
+}
+
 // ================ Input DTOs ================
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1658,9 +1720,14 @@ impl TaskStore {
             }
         }
 
-        // PRD §10.2.1 step 5: append a human-readable line to progress.md.
-        // Best-effort — failure here doesn't roll back the audit entry.
-        append_progress_line(&updated, &transition);
+        // NB: progress.md is intentionally NOT touched here. It's the
+        // AI's own workspace document — `/task-alignment` creates it
+        // with a structured template and `/task-implement` updates it
+        // via standard Read / Edit / Write tools. The program code only
+        // writes `status_history` (authoritative audit log, above). The
+        // UI's "执行日志" panel reads progress.md directly from disk.
+        // (v0.1.69+: previously `append_progress_line` polluted the AI's
+        // doc with machine-format lines — removed.)
 
         // PRD §10.2.1 step 6: notification dispatch (desktop + bot) for
         // subscribed transitions. Side-effects fire AFTER persist so a
@@ -1778,32 +1845,6 @@ impl TaskStore {
         Ok(updated)
     }
 
-    /// Append a human-readable line to progress.md without writing to `statusHistory`.
-    pub async fn update_progress(&self, id: &str, msg: &str) -> Result<(), String> {
-        let inner = self.inner.read().await;
-        let task = inner
-            .get(id)
-            .ok_or_else(|| String::from(TaskOpError::not_found(id)))?
-            .clone();
-        drop(inner);
-        let path = task_docs_dir(&task.id)?.join("progress.md");
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("mkdir progress: {}", e))?;
-        }
-        let line = format!(
-            "- [{}] {}\n",
-            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-            msg
-        );
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| format!("open progress.md: {}", e))?;
-        file.write_all(line.as_bytes())
-            .map_err(|e| format!("write progress.md: {}", e))?;
-        Ok(())
-    }
 
     pub async fn set_cron_task_id(
         &self,
@@ -2185,60 +2226,6 @@ fn compose_dispatch_prompt(task: &Task) -> Result<String, String> {
     }
 }
 
-/// Best-effort append to `~/.myagents/tasks/<taskId>/progress.md` when a
-/// status transition fires. Schema: `[ISO_TIME] [actor/source] from → to — <message>`
-/// (PRD §10.2.1 step 5). A missing progress.md is created; failures are logged
-/// and swallowed — progress.md is an *additional* human-readable view, the
-/// authoritative audit log lives in `task.statusHistory`.
-fn append_progress_line(task: &Task, t: &StatusTransition) {
-    let dir = match task_docs_dir(&task.id) {
-        Ok(p) => p,
-        Err(e) => {
-            ulog_warn!("[task] progress.md append skipped (bad path): {}", e);
-            return;
-        }
-    };
-    if let Err(e) = fs::create_dir_all(&dir) {
-        ulog_warn!("[task] progress.md mkdir failed: {}", e);
-        return;
-    }
-    let path = dir.join("progress.md");
-    let from_str = t.from.map(|s| s.as_str()).unwrap_or("—");
-    let source_str = t.source.map(|s| s.as_str()).unwrap_or("");
-    let source_suffix = if source_str.is_empty() {
-        String::new()
-    } else {
-        format!("/{}", source_str)
-    };
-    // Sanitize newlines and carriage returns so a multi-line message doesn't
-    // corrupt the one-line-per-transition format. `\n` / `\r` → `⏎` marker so
-    // the full payload is preserved and still visually distinct.
-    let msg_suffix = match t.message.as_deref() {
-        Some(m) if !m.is_empty() => {
-            let clean = m.replace('\r', "").replace('\n', " ⏎ ");
-            format!(" — {}", clean)
-        }
-        _ => String::new(),
-    };
-    let line = format!(
-        "- [{}] [{}{}] {} → {}{}\n",
-        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
-        t.actor.as_str(),
-        source_suffix,
-        from_str,
-        t.to.as_str(),
-        msg_suffix
-    );
-    match OpenOptions::new().create(true).append(true).open(&path) {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(line.as_bytes()) {
-                ulog_warn!("[task] progress.md write failed: {}", e);
-            }
-        }
-        Err(e) => ulog_warn!("[task] progress.md open failed: {}", e),
-    }
-}
-
 /// Default events a task subscribes to when `NotificationConfig.events` is absent.
 const DEFAULT_NOTIFICATION_EVENTS: &[&str] = &["done", "blocked", "endCondition"];
 
@@ -2472,8 +2459,12 @@ pub async fn cmd_task_list(
 pub async fn cmd_task_get(
     state: tauri::State<'_, ManagedTaskStore>,
     id: String,
-) -> Result<Option<Task>, String> {
-    Ok(state.get(&id).await)
+) -> Result<Option<TaskWithDocs>, String> {
+    let Some(task) = state.get(&id).await else {
+        return Ok(None);
+    };
+    let docs = build_task_docs(&task.id)?;
+    Ok(Some(TaskWithDocs { task, docs }))
 }
 
 #[tauri::command]
@@ -2502,15 +2493,6 @@ pub async fn cmd_task_update_status(
         })
         .await
         .map(|(t, _)| t)
-}
-
-#[tauri::command]
-pub async fn cmd_task_update_progress(
-    state: tauri::State<'_, ManagedTaskStore>,
-    id: String,
-    message: String,
-) -> Result<(), String> {
-    state.update_progress(&id, &message).await
 }
 
 #[tauri::command]
@@ -2592,14 +2574,16 @@ pub async fn cmd_task_write_doc(
     content: String,
 ) -> Result<(), String> {
     let filename = task_doc_filename(&doc)?;
-    // progress.md + alignment.md are not user-writable here:
-    //   - progress.md is appended by the agent during runs (via
-    //     `cmd_task_update_progress` / `myagents task update-progress`).
-    //   - alignment.md is produced by the `/task-alignment` skill via the
-    //     Write tool directly; the UI has no editor for it.
+    // progress.md + alignment.md are AI-owned workspace documents — the
+    // `/task-alignment` skill creates alignment.md and `/task-implement`
+    // writes progress.md using standard Read / Edit / Write tools against
+    // the absolute path in `Task.docs`. The UI has no editor for them, so
+    // this Tauri command (which backs `TaskEditPanel`) rejects writes to
+    // both names — catches an accidental misroute rather than silently
+    // corrupting the AI's workbook.
     if filename == "progress.md" || filename == "alignment.md" {
         return Err(format!(
-            "{} is not writable via this API (progress=agent-appended, alignment=skill-written)",
+            "{} is AI-owned and not writable via this API",
             filename
         ));
     }

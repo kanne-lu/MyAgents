@@ -151,6 +151,30 @@ export interface Task {
   deleted?: boolean;
   /** Set when `deleted = true`. Used for retention cleanup. */
   deletedAt?: number;
+  /** Absolute paths to the four task markdown docs. Populated by
+   *  `cmd_task_get` / `/api/task/get` at read time (not persisted) — the
+   *  consumer (CLI, AI, UI) reads the files directly via Read/Edit/Write
+   *  rather than going through dedicated read-doc / write-doc commands.
+   *  Only existing files are surfaced (except `taskMd`, always present
+   *  at creation time). See Rust `TaskDocs` for semantics. */
+  docs?: TaskDocs;
+}
+
+/** Absolute paths to a task's markdown docs. Returned alongside a [`Task`]
+ *  by `cmd_task_get` so the AI / CLI can `Read` / `Edit` / `Write` them
+ *  directly. Only existing files are surfaced (task.md is always created
+ *  at task-creation time, so it's always present). */
+export interface TaskDocs {
+  /** Absolute path to the docs directory: `~/.myagents/tasks/<id>/`. */
+  dir: string;
+  /** `task.md` — always present; the task's instruction/prompt body. */
+  taskMd: string;
+  /** `verify.md` — present once the AI or user has written verification rules. */
+  verifyMd?: string;
+  /** `progress.md` — present once the AI has started recording execution progress. */
+  progressMd?: string;
+  /** `alignment.md` — present when the task was created via `/task-alignment`. */
+  alignmentMd?: string;
 }
 
 /** Payload for `cmd_task_create_direct` (PRD §10.2.2). */

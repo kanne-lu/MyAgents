@@ -109,7 +109,6 @@ pub async fn start_management_api() -> Result<u16, String> {
             post(task_create_from_alignment_handler),
         )
         .route("/api/task/update-status", post(task_update_status_handler))
-        .route("/api/task/update-progress", post(task_update_progress_handler))
         .route("/api/task/append-session", post(task_append_session_handler))
         .route("/api/task/archive", post(task_archive_handler))
         .route("/api/task/delete", post(task_delete_handler))
@@ -1095,7 +1094,24 @@ async fn task_get_handler(
         }));
     };
     match store.get(&q.id).await {
-        Some(t) => Json(serde_json::json!({ "ok": true, "task": t })),
+        Some(t) => {
+            // Attach task.docs (four absolute paths) so the AI / CLI
+            // reading this response knows where task.md / verify.md /
+            // progress.md / alignment.md live without having to
+            // re-derive the layout from convention. See
+            // `task::build_task_docs` for semantics of the optional
+            // fields (only existing files are surfaced).
+            let docs = match task::build_task_docs(&t.id) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("failed to build docs paths: {}", e)
+                    }));
+                }
+            };
+            Json(serde_json::json!({ "ok": true, "task": task::TaskWithDocs { task: t, docs } }))
+        }
         None => Json(serde_json::json!({
             "ok": false,
             "error": "not_found"
@@ -1166,28 +1182,6 @@ async fn task_update_status_handler(
             "task": task,
             "transition": transition
         })),
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TaskUpdateProgressApiRequest {
-    id: String,
-    message: String,
-}
-
-async fn task_update_progress_handler(
-    Json(req): Json<TaskUpdateProgressApiRequest>,
-) -> Json<serde_json::Value> {
-    let Some(store) = task::get_task_store() else {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": "task store not initialized"
-        }));
-    };
-    match store.update_progress(&req.id, &req.message).await {
-        Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
 }

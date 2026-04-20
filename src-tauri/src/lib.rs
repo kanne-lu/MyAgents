@@ -304,7 +304,6 @@ pub fn run() {
             task::cmd_task_get,
             task::cmd_task_update,
             task::cmd_task_update_status,
-            task::cmd_task_update_progress,
             task::cmd_task_append_session,
             task::cmd_task_archive,
             task::cmd_task_delete,
