@@ -479,7 +479,7 @@ export const PRESET_PROVIDERS: Provider[] = [
     vendor: 'Moonshot',
     cloudProvider: '模型官方',
     type: 'api',
-    primaryModel: 'kimi-k2.5',
+    primaryModel: 'kimi-k2.6',
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://platform.moonshot.cn/console',
@@ -487,11 +487,32 @@ export const PRESET_PROVIDERS: Provider[] = [
     config: {
       baseUrl: 'https://api.moonshot.cn/anthropic',
     },
-    modelAliases: { sonnet: 'kimi-k2.5', opus: 'kimi-k2.5', haiku: 'kimi-k2-thinking-turbo' },
+    modelAliases: { sonnet: 'kimi-k2.6', opus: 'kimi-k2.6', haiku: 'kimi-k2-thinking-turbo' },
     models: [
+      { model: 'kimi-k2.6', modelName: 'Kimi K2.6', modelSeries: 'moonshot' },
       { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot' },
       { model: 'kimi-k2-thinking-turbo', modelName: 'Kimi K2 Thinking', modelSeries: 'moonshot' },
       { model: 'kimi-k2-0711', modelName: 'Kimi K2', modelSeries: 'moonshot' },
+    ],
+  },
+  {
+    id: 'moonshot-coding',
+    name: 'Moonshot CodingPlan',
+    vendor: 'Moonshot',
+    cloudProvider: '模型官方',
+    type: 'api',
+    primaryModel: 'kimi-k2.6',
+    isBuiltin: true,
+    authType: 'api_key',
+    websiteUrl: 'https://platform.moonshot.cn/console',
+    config: {
+      baseUrl: 'https://api.kimi.com/coding/',
+    },
+    modelAliases: { sonnet: 'kimi-k2.6', opus: 'kimi-k2.6', haiku: 'kimi-k2-thinking-turbo' },
+    models: [
+      { model: 'kimi-k2.6', modelName: 'Kimi K2.6', modelSeries: 'moonshot' },
+      { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot' },
+      { model: 'kimi-k2-thinking-turbo', modelName: 'Kimi K2 Thinking', modelSeries: 'moonshot' },
     ],
   },
   {
