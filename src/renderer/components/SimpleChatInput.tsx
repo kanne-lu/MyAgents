@@ -168,6 +168,10 @@ export interface SimpleChatInputHandle {
   setValue: (value: string) => void;
   /** Set image attachments directly (used for restoring queued message images on cancel) */
   setImages: (images: ImageAttachment[]) => void;
+  /** Programmatically focus the textarea. Used by the Launcher's mode
+   *  switcher so the caret lands in the input the moment the user
+   *  clicks 任务 / 想法 — no second click required. */
+  focus: () => void;
 }
 
 // File search result type
@@ -215,8 +219,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   mode = 'chat',
   toolbarPrefix,
   thoughtMode = false,
-  // `active` is currently unused but retained for future tab-awareness hooks.
-  active: _active = true,
+  // Whether this input belongs to the currently active tab. Used to gate document-level
+  // listeners (Shift+Tab permission-mode cycle below) so background tabs don't also fire.
+  active = true,
   runtime = 'builtin',
   runtimeDetections,
   onRuntimeChange,
@@ -797,6 +802,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     insertSlashCommand,
     setValue,
     setImages,
+    focus: () => textareaRef.current?.focus(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
   }), [processDroppedFiles, processDroppedFilePaths, insertReferences, insertSlashCommand, setValue]);
 
   // Handle file input change
@@ -975,8 +982,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     onPermissionModeChange?.(nextMode);
   }, [permissionMode, onPermissionModeChange, runtimePermissionModes]);
 
-  // Global Shift+Tab handler with capture phase to prevent default Tab behavior
+  // Global Shift+Tab handler with capture phase to prevent default Tab behavior.
+  // Gated by `active` so pressing Shift+Tab doesn't cycle permission-mode on every
+  // mounted tab simultaneously (document-level listener otherwise fans out to all
+  // N tabs, each calling its own cyclePermissionMode).
   useEffect(() => {
+    if (!active) return;
     const handleShiftTab = (e: KeyboardEvent) => {
       if (e.key === 'Tab' && e.shiftKey) {
         e.preventDefault();
@@ -987,7 +998,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Use capture phase to intercept before default Tab behavior
     document.addEventListener('keydown', handleShiftTab, { capture: true });
     return () => document.removeEventListener('keydown', handleShiftTab, { capture: true });
-  }, [cyclePermissionMode]);
+  }, [active, cyclePermissionMode]);
 
   // Send message - defined before handleKeyDown to avoid circular dependency
   // Note: isLoading guard removed to allow queuing messages while AI is responding

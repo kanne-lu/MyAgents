@@ -1009,6 +1009,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [handleTauriChatDrop, handleTauriDirectoryDrop]);
 
   const { isDragging: isTauriDragging, activeZoneId, registerZone, unregisterZone } = useTauriFileDrop({
+    // Tauri drag events are window-global and fire on every mounted hook instance.
+    // Without this gate, a single Finder drop (or image drag) lands in ALL open tabs'
+    // attachment/workspace state because every hidden tab's zone still matches the
+    // geometric check (absolute inset-0 overlap) AND the `zoneId === null` fallback
+    // below defaults to chat-drop regardless. Gating at the hook ensures only the
+    // visible tab reacts.
+    enabled: isActive,
     onDrop: (paths, zoneId) => {
       if (isDebugMode()) {
         console.log('[Chat] Tauri drop event - zoneId:', zoneId, 'paths:', paths);

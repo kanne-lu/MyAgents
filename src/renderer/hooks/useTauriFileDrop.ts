@@ -37,6 +37,19 @@ interface UseTauriFileDropOptions {
   onDragLeave?: () => void;
   /** Called when files are dropped */
   onDrop?: (paths: string[], zoneId: string | null) => void;
+  /**
+   * Whether this hook instance should respond to Tauri drag events. Default `true`.
+   *
+   * Tauri emits each drag event exactly once, but every mounted consumer's listener
+   * receives it. In the multi-tab Chat app, inactive tabs are kept mounted with
+   * `visibility:hidden` / `pointer-events-none` / `absolute inset-0` — their
+   * `chatContentRef.current` element still reports the same bounding rect as the
+   * active tab, so `findZoneAtPosition` matches for ALL tabs and each tab's
+   * `onDrop` fires, causing a single file drop to land in every tab simultaneously.
+   *
+   * Pass `isActive` from the parent tab context so only the visible tab reacts.
+   */
+  enabled?: boolean;
 }
 
 interface UseTauriFileDropResult {
@@ -59,7 +72,7 @@ function isPointInElement(x: number, y: number, element: HTMLElement): boolean {
 }
 
 export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTauriFileDropResult {
-  const { onDragEnter, onDragLeave, onDrop } = options;
+  const { onDragEnter, onDragLeave, onDrop, enabled = true } = options;
   const [isDragging, setIsDragging] = useState(false);
   const [activeZoneId, setActiveZoneId] = useState<string | null>(null);
 
@@ -70,12 +83,17 @@ export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTaur
   const onDragEnterRef = useRef(onDragEnter);
   const onDragLeaveRef = useRef(onDragLeave);
   const onDropRef = useRef(onDrop);
+  // Track `enabled` via ref so the single listener setup (effect with [findZoneAtPosition]
+  // deps, not [enabled]) always reads the current value without re-subscribing on every
+  // tab switch — we want listeners stable, just gated per-fire.
+  const enabledRef = useRef(enabled);
 
   useEffect(() => {
     onDragEnterRef.current = onDragEnter;
     onDragLeaveRef.current = onDragLeave;
     onDropRef.current = onDrop;
-  }, [onDragEnter, onDragLeave, onDrop]);
+    enabledRef.current = enabled;
+  }, [onDragEnter, onDragLeave, onDrop, enabled]);
 
   /**
    * Find which drop zone contains the given position
@@ -108,7 +126,16 @@ export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTaur
       // Listen to Tauri drag events
       // The event names in Tauri v2 are tauri://drag-enter, tauri://drag-over, etc.
 
+      // ── Critical gate ──
+      // Tauri broadcasts each drag event to ALL mounted listeners. In a multi-tab
+      // app, every tab's hook instance would otherwise fire handlers + update its
+      // own state (isDragging / activeZoneId / onDrop → attachment state), so a
+      // single file drop leaks into every tab. Gate at the earliest point in each
+      // handler using the enabledRef the caller wires to their tab's `isActive`.
+      const enabledGate = () => enabledRef.current;
+
       const enterUnlisten = await listen<DragDropPayload>('tauri://drag-enter', (event) => {
+        if (!enabledGate()) return;
         if (isDebugMode()) {
           console.log('[useTauriFileDrop] drag-enter', event.payload);
         }
@@ -124,6 +151,7 @@ export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTaur
       unlisteners.push(enterUnlisten);
 
       const overUnlisten = await listen<DragDropPayload>('tauri://drag-over', (event) => {
+        if (!enabledGate()) return;
         // Update active zone based on position
         if (event.payload.position) {
           const zoneId = findZoneAtPosition(event.payload.position.x, event.payload.position.y);
@@ -133,6 +161,7 @@ export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTaur
       unlisteners.push(overUnlisten);
 
       const dropUnlisten = await listen<DragDropPayload>('tauri://drag-drop', (event) => {
+        if (!enabledGate()) return;
         if (isDebugMode()) {
           console.log('[useTauriFileDrop] drag-drop', event.payload);
         }
@@ -171,6 +200,7 @@ export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTaur
       unlisteners.push(dropUnlisten);
 
       const leaveUnlisten = await listen<DragDropPayload>('tauri://drag-leave', () => {
+        if (!enabledGate()) return;
         setIsDragging(false);
         setActiveZoneId(null);
         onDragLeaveRef.current?.();
@@ -179,6 +209,7 @@ export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTaur
 
       // Also listen to cancelled event (renamed in Tauri v2)
       const cancelUnlisten = await listen<DragDropPayload>('tauri://drag-cancelled', () => {
+        if (!enabledGate()) return;
         setIsDragging(false);
         setActiveZoneId(null);
         onDragLeaveRef.current?.();
