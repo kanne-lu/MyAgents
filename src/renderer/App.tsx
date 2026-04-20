@@ -28,16 +28,14 @@ import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
-import { apiGetJson, apiPostJson } from '@/api/apiFetch';
+import { apiGetJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
-import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
 import { ensureSelfAwarenessWorkspace } from '@/config/configService';
 import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
 import type { SessionMetadata } from '@/api/sessionClient';
-import { Loader2 } from 'lucide-react';
 
 // ============================================================
 // User Support Prompt Builder
@@ -185,7 +183,7 @@ export default function App() {
 
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
-  const { config, isLoading: configLoading, updateConfig, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const { config, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
 
   // Apply theme (light/dark/system) to <html> element
   useThemeEffect();
@@ -242,13 +240,6 @@ export default function App() {
     runningTaskCount: number;
     resolve: (value: boolean) => void;
   } | null>(null);
-
-  // Claude settings env override warning (cc-switch etc.)
-  const [claudeEnvOverride, setClaudeEnvOverride] = useState<{
-    baseUrl?: string;
-    hasApiKey: boolean;
-  } | null>(null);
-  const [claudeEnvClearing, setClaudeEnvClearing] = useState(false);
 
   // Content container ref for tab swipe gesture
   const contentRef = useRef<HTMLDivElement>(null);
@@ -458,28 +449,6 @@ export default function App() {
       // Rust handles sidecar cleanup on actual exit (WindowEvent::Destroyed, ExitRequested).
     };
   }, [startGlobalSidecarSilent]);
-
-  // Check ~/.claude/settings.json for env overrides on startup
-  // External tools (cc-switch etc.) may write ANTHROPIC_BASE_URL which overrides all providers
-  useEffect(() => {
-    if (configLoading) return; // Wait for config to load from disk before checking
-    if (config.dismissClaudeEnvWarning) return;
-    const checkClaudeEnvOverrides = async () => {
-      try {
-        const result = await apiGetJson<{
-          hasOverrides: boolean;
-          baseUrl?: string;
-          hasApiKey: boolean;
-        }>('/api/claude-settings/check-env');
-        if (result.hasOverrides) {
-          setClaudeEnvOverride({ baseUrl: result.baseUrl, hasApiKey: result.hasApiKey });
-        }
-      } catch {
-        // Silently ignore — non-critical check
-      }
-    };
-    void checkClaudeEnvOverrides();
-  }, [configLoading, config.dismissClaudeEnvWarning]);
 
   // Update tab isGenerating state (called from TabProvider via callback)
   const updateTabGenerating = useCallback((tabId: string, isGenerating: boolean) => {
@@ -1904,64 +1873,6 @@ export default function App() {
           }}
           onCancel={dismissPendingUpdate}
         />
-      )}
-
-      {/* Warning: ~/.claude/settings.json env overrides detected */}
-      {claudeEnvOverride && (
-        <OverlayBackdrop onClose={claudeEnvClearing ? undefined : () => setClaudeEnvOverride(null)} className="z-[300] px-4">
-          <div className="glass-panel w-full max-w-sm">
-            <div className="border-b border-[var(--line)] px-5 py-4">
-              <div className="text-[14px] font-semibold text-[var(--ink)]">检测到全局配置覆盖</div>
-            </div>
-            <div className="px-5 py-4">
-              <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
-                {`~/.claude/settings.json 中检测到${claudeEnvOverride.baseUrl ? ` ANTHROPIC_BASE_URL = ${claudeEnvOverride.baseUrl.length > 60 ? claudeEnvOverride.baseUrl.slice(0, 60) + '...' : claudeEnvOverride.baseUrl}` : ''}${claudeEnvOverride.baseUrl && claudeEnvOverride.hasApiKey ? '，' : ''}${claudeEnvOverride.hasApiKey ? 'ANTHROPIC_API_KEY' : ''}，该配置会覆盖 MyAgents 的供应商设置，导致所有请求发送到非预期地址。是否清除？`}
-              </p>
-            </div>
-            <div className="flex items-center justify-between border-t border-[var(--line)] px-5 py-3">
-              <button
-                type="button"
-                disabled={claudeEnvClearing}
-                className="text-[12px] text-[var(--ink-faint)] transition-colors hover:text-[var(--ink-muted)] disabled:opacity-50"
-                onClick={() => {
-                  void updateConfig({ dismissClaudeEnvWarning: true });
-                  setClaudeEnvOverride(null);
-                }}
-              >
-                不再提示
-              </button>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setClaudeEnvOverride(null)}
-                  disabled={claudeEnvClearing}
-                  className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-[12px] font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  disabled={claudeEnvClearing}
-                  className="flex items-center gap-1.5 rounded-full bg-[var(--error)] px-4 py-1.5 text-[12px] font-semibold text-white transition-colors hover:brightness-110 disabled:opacity-50"
-                  onClick={() => {
-                    setClaudeEnvClearing(true);
-                    void apiPostJson('/api/claude-settings/clear-env', {}).then(() => {
-                      setClaudeEnvOverride(null);
-                    }).catch((err) => {
-                      console.error('[App] Failed to clear claude settings env:', err);
-                      setClaudeEnvOverride(null);
-                    }).finally(() => {
-                      setClaudeEnvClearing(false);
-                    });
-                  }}
-                >
-                  {claudeEnvClearing && <Loader2 className="h-3 w-3 animate-spin" />}
-                  清除
-                </button>
-              </div>
-            </div>
-          </div>
-        </OverlayBackdrop>
       )}
 
       {/* Bug report overlay triggered from titlebar feedback button */}

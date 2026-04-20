@@ -1558,57 +1558,6 @@ async function main() {
         }
       }
 
-      // Check ~/.claude/settings.json for env overrides (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY)
-      // External tools like cc-switch write these, which override MyAgents' provider settings via SDK bug
-      if (pathname === '/api/claude-settings/check-env' && request.method === 'GET') {
-        try {
-          const homeDir = getHomeDirOrNull() || '';
-          if (!homeDir) return jsonResponse({ hasOverrides: false });
-          const settingsPath = join(homeDir, '.claude', 'settings.json');
-          const file = Bun.file(settingsPath);
-          if (!(await file.exists())) return jsonResponse({ hasOverrides: false });
-          const settings = await file.json() as { env?: Record<string, string> };
-          const env = settings?.env;
-          if (!env) return jsonResponse({ hasOverrides: false });
-          const baseUrl = env.ANTHROPIC_BASE_URL || undefined;
-          const apiKey = env.ANTHROPIC_API_KEY || env.ANTHROPIC_AUTH_TOKEN || undefined;
-          if (!baseUrl && !apiKey) return jsonResponse({ hasOverrides: false });
-          return jsonResponse({ hasOverrides: true, baseUrl, hasApiKey: !!apiKey });
-        } catch {
-          return jsonResponse({ hasOverrides: false });
-        }
-      }
-
-      // Clear env overrides from ~/.claude/settings.json
-      if (pathname === '/api/claude-settings/clear-env' && request.method === 'POST') {
-        try {
-          const homeDir = getHomeDirOrNull() || '';
-          if (!homeDir) return jsonResponse({ success: false, error: 'Home directory not found' }, 400);
-          const settingsPath = join(homeDir, '.claude', 'settings.json');
-          const file = Bun.file(settingsPath);
-          if (!(await file.exists())) return jsonResponse({ success: true });
-          const settings = await file.json() as Record<string, unknown>;
-          if (!settings.env) return jsonResponse({ success: true });
-          const env = settings.env as Record<string, string>;
-          delete env.ANTHROPIC_BASE_URL;
-          delete env.ANTHROPIC_API_KEY;
-          delete env.ANTHROPIC_AUTH_TOKEN;
-          // Remove env key entirely if empty
-          if (Object.keys(env).length === 0) {
-            delete settings.env;
-          }
-          // Atomic write: temp file + rename to prevent corruption
-          const tmpPath = settingsPath + '.tmp';
-          await Bun.write(tmpPath, JSON.stringify(settings, null, 2) + '\n');
-          await rename(tmpPath, settingsPath);
-          console.log('[claude-settings] Cleared ANTHROPIC_BASE_URL/API_KEY from ~/.claude/settings.json');
-          return jsonResponse({ success: true });
-        } catch (err) {
-          console.error('[claude-settings] Failed to clear env:', err);
-          return jsonResponse({ success: false, error: err instanceof Error ? err.message : String(err) }, 500);
-        }
-      }
-
       // 🔍 Debug endpoint: Expose logger diagnostics via HTTP
       if (pathname === '/debug/logger' && request.method === 'GET') {
         const diagnostics = getLoggerDiagnostics();

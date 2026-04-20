@@ -2678,6 +2678,24 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // Currently used for diagnostic logging only (parallel data collection).
   // Future: may replace self-built sessionState tracking for more accurate turn boundary detection.
   env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = '1';
+  // Declare MyAgents as the inference-routing host. Tells CC's `managedEnv` layer
+  // (see claude-code/src/utils/managedEnv.ts withoutHostManagedProviderVars) to
+  // strip the 26 provider-routing vars (ANTHROPIC_BASE_URL / ANTHROPIC_API_KEY /
+  // ANTHROPIC_AUTH_TOKEN / ANTHROPIC_DEFAULT_*_MODEL / CLAUDE_CODE_USE_BEDROCK
+  // etc.) out of ALL settings-sourced env — both ~/.claude.json.env and
+  // ~/.claude/settings.json.env — before they're `Object.assign`'d into the
+  // subprocess's process.env during applyConfigEnvironmentVariables().
+  //
+  // Effect: external tools like cc-switch / Claude Code Router that write those
+  // vars into user settings cannot silently redirect MyAgents requests to a
+  // third-party endpoint. `settingSources: ['project']` already excludes
+  // settings.json from the merged-settings path, but getGlobalConfig().env
+  // (~/.claude.json) is merged unconditionally — this flag closes that hole.
+  //
+  // Does NOT affect: Keychain OAuth lookup (subscription auth), env vars we pass
+  // directly via options.env, parent-shell env vars inherited from our process.
+  // Only settings-file-sourced provider vars are stripped.
+  env.CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST = '1';
   // DO NOT set CLAUDE_CONFIG_DIR here — it would change the Keychain service name
   // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
   // into project .claude/skills/ by syncProjectUserConfig() instead.
