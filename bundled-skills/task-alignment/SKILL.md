@@ -1,6 +1,6 @@
 ---
 name: task-alignment
-description: "Deep alignment conversation that turns a user's rough intent into a structured task definition with clear goals, verification criteria, and execution plan. Produces four documents (.task/) that serve as the contract between human and AI for autonomous task execution. Use when the user describes a non-trivial task they want done — especially multi-step work, refactoring, migrations, feature builds, or any task where 'what does done look like?' isn't immediately obvious. Trigger phrases include 'help me plan this', 'let's align on this task', 'I want to do X', '/task-alignment', or when the user describes a complex goal and you sense ambiguity about scope, approach, or acceptance criteria. Also use proactively when a user jumps straight into a big task without defining what success looks like — pause and align first."
+description: "Deep alignment conversation that turns a user's rough intent into a structured task definition with clear goals, verification criteria, and execution plan. Produces four documents in `~/.myagents/tasks/<id>/` that serve as the contract between human and AI for autonomous task execution. Use when the user describes a non-trivial task they want done — especially multi-step work, refactoring, migrations, feature builds, or any task where 'what does done look like?' isn't immediately obvious. Trigger phrases include 'help me plan this', 'let's align on this task', 'I want to do X', '/task-alignment', or when the user describes a complex goal and you sense ambiguity about scope, approach, or acceptance criteria. Also use proactively when a user jumps straight into a big task without defining what success looks like — pause and align first."
 ---
 
 # Task Alignment
@@ -11,7 +11,7 @@ This is NOT a form to fill out. It's a conversation. You ask, you listen, you pr
 
 ## Why this matters
 
-When a task is handed off to autonomous execution (by you or another agent), the quality of that execution depends entirely on how well the goal and verification criteria were defined upfront. A 5-minute alignment conversation can save 30 minutes of wasted execution going in the wrong direction. The documents you produce become the contract: goal.md is the north star during execution, verification.md is the acceptance test at the end.
+When a task is handed off to autonomous execution (by you or another agent), the quality of that execution depends entirely on how well the goal and verification criteria were defined upfront. A 5-minute alignment conversation can save 30 minutes of wasted execution going in the wrong direction. The documents you produce become the contract: task.md is the north star during execution, verify.md is the acceptance test at the end.
 
 ## The two artifacts you're extracting
 
@@ -92,18 +92,14 @@ Present your proposed criteria clearly and ask: "Does this cover what 'done' mea
 Once you and the user are aligned, summarize what you've agreed on — the goal in a few sentences, the verification criteria as a list. Get explicit confirmation before generating documents.
 
 Then generate all four documents and present them. Tell the user:
-- The documents are saved (in `~/.myagents/tasks/<id>/` for Task Center flows, `.task/` for manual flows) — they're the contract for this task
-- `task.md` is what guides execution; `verification.md` is what checks the result
-- They can be used with `/task-implement` (or manual execution) to carry out the work
+- The documents are saved in `~/.myagents/tasks/<id>/` — they're the contract for this task
+- `task.md` is what guides execution; `verify.md` is what checks the result
+- They can be used with `/task-implement` to carry out the work
 - If anything needs adjustment, just say so
 
 ## Document specifications
 
-Where the four documents live depends on which path invoked you:
-
-- **Task Center "AI 讨论" path** (user's first message contains an `alignmentSessionId` and a `myagents task create-from-alignment …` template): write to `~/.myagents/tasks/<alignmentSessionId>/`. Use the `Write` tool with the absolute path — these docs are AI-owned end-to-end (the program never touches them). The `create-from-alignment` CLI promotes that directory to `~/.myagents/tasks/<newTaskId>/` when you run it in step 1 below.
-
-- **Manual path** (`/task-alignment` invoked directly, no `alignmentSessionId`): write to `.task/` relative to the current working directory. No CLI promotion follows — the docs stay where they are, and the user can later run `/task-implement` in the same workspace to execute.
+All four documents live under `~/.myagents/tasks/<alignmentSessionId>/` — the `alignmentSessionId` comes from the parameter dictionary in the user's first message. Use the `Write` tool with absolute paths (expand `~` to `$HOME`). These docs are AI-owned end-to-end; program code never writes to them. The `create-from-alignment` CLI promotes that directory to `~/.myagents/tasks/<newTaskId>/` when you invoke it.
 
 If the target directory already contains docs from a previous run, ask the user whether to archive the old ones (move to `{target}/archive/{timestamp}/`) or overwrite.
 
@@ -168,7 +164,7 @@ Things that might seem related but are explicitly out of scope for this task.
 - File scope enforcement: [list of allowed paths, if restricted]
 ```
 
-### verification.md
+### verify.md
 
 The acceptance test. Written as instructions that an agent (or the user) can follow to determine if the task was completed correctly. This is a reusable "skill" — similar future tasks can reference or adapt it.
 
@@ -224,7 +220,7 @@ N. [ ] Execute verification
 
 **If the user provides a PRD or spec document**: Read it thoroughly, then use it as the starting point for alignment. Don't re-ask things that are already well-defined in the spec — focus your questions on gaps, ambiguities, and verification criteria that the spec doesn't cover.
 
-**If there's an existing `.task/` directory**: Ask whether this is a continuation/refinement of the previous task or a new task. If continuing, load the existing documents and use them as context for the conversation.
+**If `~/.myagents/tasks/<alignmentSessionId>/` already contains docs**: Ask whether this is a continuation/refinement of the previous alignment or a new one. If continuing, read the existing documents with the `Read` tool and use them as context for the conversation before rewriting.
 
 **If the user seems impatient**: Compress. Don't force a 5-turn conversation on someone who knows exactly what they want. Match their energy — if they're being terse and specific, be terse and specific back. The goal is alignment, not process theater.
 
@@ -232,7 +228,7 @@ N. [ ] Execute verification
 
 ## What success looks like
 
-A successful alignment produces documents that enable an agent to execute the task autonomously with minimal back-and-forth. The test: if you handed task.md and verification.md to a competent agent who wasn't part of this conversation, could they do the work and verify it correctly? If yes, the alignment was good.
+A successful alignment produces documents that enable an agent to execute the task autonomously with minimal back-and-forth. The test: if you handed task.md and verify.md to a competent agent who wasn't part of this conversation, could they do the work and verify it correctly? If yes, the alignment was good.
 
 ## Task Center integration (v0.1.69+)
 
@@ -248,11 +244,11 @@ When the user's first message contains a parameter dictionary shaped like:
 - sourceThoughtId: <uuid>
 ```
 
-…you are in **Task Center mode** — the user arrived via the "AI 讨论" button on a thought card. The four parameters are everything you need to sink the alignment into the Task Center; they're used twice (directory path for docs + CLI args for task creation).
+…the user arrived via the "AI 讨论" button on a thought card. The four parameters are everything you need to sink the alignment into the Task Center; they're used twice (directory path for docs + CLI args for task creation).
 
-If no such dictionary is present, fall through to **Manual mode** — the user invoked `/task-alignment` directly. Write the four docs to `.task/` relative to the current working directory and stop; no CLI call is appropriate, there's no task-entity to create.
+If no such dictionary is present, the user invoked `/task-alignment` outside the Task Center flow. Explain briefly that alignment docs need to live in the Task Center so they can be dispatched and tracked, and ask them to start from the 任务 panel's 新想法 entry (which launches AI 讨论 with the full parameter dictionary). Don't write any files; there's no session to anchor them to.
 
-### Where to write (Task Center mode)
+### Where to write
 
 All four documents go to `~/.myagents/tasks/<alignmentSessionId>/`:
 
@@ -285,7 +281,7 @@ Substitute the four values from the prompt's parameter dictionary; pick `--name`
 **② Should be split.** The "one thought" actually bundles multiple independent tasks. Don't force them into a single alignment.md. Explain the split to the user, then:
 
 - Pick the sharpest slice they want to pursue first and alignment that one via the CLI call above.
-- For the other slices, do NOT create tasks in this conversation. Tell the user they can re-trigger `/task-alignment` on the remaining ideas separately (from the thought card again, or as a manual flow). This keeps each task-entity focused and avoids the "mega-task that never finishes" trap.
+- For the other slices, do NOT create tasks in this conversation. Tell the user they can re-trigger `/task-alignment` on the remaining ideas separately by creating new thought cards and clicking "AI 讨论" on each. This keeps each task-entity focused and avoids the "mega-task that never finishes" trap.
 
 **③ Needs upstream work first.** The idea is real but the user can't commit to scope without more information — e.g. "first I need to run the profiler to see where the bottleneck actually is" before we can plan the fix. Don't create a task prematurely. Instead:
 
