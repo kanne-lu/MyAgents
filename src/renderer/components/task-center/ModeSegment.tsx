@@ -11,13 +11,14 @@
 // this component.)
 //
 // Icons:
-//   • 任务 → Sparkles — "AI 执行感觉"; distinct from the Task Center page
-//            header (Layers) so the launcher's switcher foreshadows "把
-//            任务交给 AI 做" rather than "浏览任务列表". The prior Layers
-//            icon read as "列表 / 堆叠" which was a type mismatch with
-//            launcher's dispatch intent.
+//   • 对话 → Sparkles — "AI 执行感觉"; the left button is now named
+//            "对话" (v0.1.69+ relabel) to reflect what actually happens
+//            when the user hits Enter: a fresh Chat tab + AI invocation.
+//            "任务" was misleading — Task Center tasks are a separate
+//            concept; here we're just starting a conversation that may
+//            or may not become a task.
 //   • 想法 → Lightbulb (same as `ThoughtPanel` header) — ideation pairs
-//            naturally with the Sparkles execute affordance.
+//            naturally with the Sparkles affordance.
 
 import { Lightbulb, Sparkles } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -47,7 +48,7 @@ export function ModeSegment({
   tabSwitchHint = false,
 }: ModeSegmentProps) {
   const taskTitle = tabSwitchHint ? '按 Tab 切换到「想法」' : undefined;
-  const thoughtTitle = tabSwitchHint ? '按 Tab 切换到「任务」' : undefined;
+  const thoughtTitle = tabSwitchHint ? '按 Tab 切换到「对话」' : undefined;
 
   // Segment button — the `active` state gets a raised paper-elevated
   // background (so the whole row reads as a track with a sliding
@@ -82,7 +83,7 @@ export function ModeSegment({
           className={`${baseBtn} ${value === 'task' ? activeBtn : inactiveBtn}`}
         >
           <Sparkles className="h-3.5 w-3.5" strokeWidth={1.75} />
-          任务
+          对话
         </button>
         <button
           type="button"

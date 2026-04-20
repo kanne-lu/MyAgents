@@ -239,14 +239,15 @@ export default memo(function BrandSection({
                 the brand group) and below (separating from the input
                 affordance) — deliberately generous so the Launcher
                 doesn't feel compressed even with the newly 3-row input.
-                `tabSwitchHint` surfaces the Tab-toggle shortcut as a hover
-                tooltip, matching the global handler installed above. */}
+                No `tabSwitchHint` — the hover tooltip was more noise than
+                signal; power users who need the shortcut will discover
+                it naturally, casual users shouldn't have a persistent
+                tooltip popping every time their cursor brushes past. */}
             {modeSegmentEnabled && (
                 <div className="mt-6 mb-6">
                     <ModeSegment
                         value={mode}
                         onChange={setModeAndFocus}
-                        tabSwitchHint
                     />
                 </div>
             )}
