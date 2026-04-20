@@ -831,6 +831,114 @@ pub fn cmd_sync_cli<R: Runtime>(
     Ok(true)
 }
 
+// ============= System Skills Sync =============
+//
+// A distinct tier from the "seed once" bundled-skills behaviour
+// (src/server/index.ts::seedBundledSkills). Those are open-ended utility
+// skills users are encouraged to customise — we copy them in on first
+// launch and then never touch them again.
+//
+// System skills are different: they encode flow-level contracts that
+// must evolve in lockstep with Rust / CLI / shape changes. Example:
+// `/task-implement` used to call `myagents task update-progress <id>
+// "..."`; when we removed that CLI in v0.1.69+ the skill had to update
+// in the same release, else existing users' AI calls would fail with
+// "unknown command". The seed-once path can't deliver updates — we
+// need version-gated force-overwrite, same pattern as ADMIN_AGENT
+// and CLI above.
+//
+// To add a new system skill: put the folder in bundled-skills/, append
+// its name to SYSTEM_SKILLS below, and bump SYSTEM_SKILLS_VERSION. The
+// matching exclusion list in src/server/index.ts::seedBundledSkills
+// MUST be kept in sync (comment there points back here).
+
+const SYSTEM_SKILLS_VERSION: &str = "1";
+
+/// Skills that ship with the app and MUST stay at the bundled version —
+/// the app's flows depend on them, users are not meant to customise.
+/// Keep in sync with the exclusion list in Bun's `seedBundledSkills()`.
+const SYSTEM_SKILLS: &[&str] = &["task-alignment", "task-implement"];
+
+/// Force-sync every system skill from the app bundle to
+/// `~/.myagents/skills/<name>/`. Runs once per `SYSTEM_SKILLS_VERSION`
+/// bump — idempotent otherwise. User edits to these directories will
+/// be overwritten when the version changes, by design (see module
+/// comment above).
+#[tauri::command]
+pub fn cmd_sync_system_skills<R: Runtime>(
+    app_handle: AppHandle<R>,
+) -> Result<bool, String> {
+    let home = dirs::home_dir().ok_or("Home dir not found")?;
+    let myagents_dir = home.join(".myagents");
+    let skills_dir = myagents_dir.join("skills");
+
+    // Version gate — skip the whole sweep if we've already landed
+    // SYSTEM_SKILLS_VERSION on this install.
+    let ver_file = myagents_dir.join(".system-skills-version");
+    if ver_file.exists() {
+        let ver = fs::read_to_string(&ver_file).unwrap_or_default();
+        if ver.trim() == SYSTEM_SKILLS_VERSION {
+            return Ok(false);
+        }
+    }
+
+    // Source: app bundle resources/bundled-skills/
+    let res = app_handle
+        .path()
+        .resource_dir()
+        .map_err(|e| format!("Resource dir: {}", e))?;
+    let bundled_skills_dir = res.join("bundled-skills");
+    if !bundled_skills_dir.exists() {
+        return Err(format!("bundled-skills not found: {:?}", bundled_skills_dir));
+    }
+
+    fs::create_dir_all(&skills_dir)
+        .map_err(|e| format!("Failed to create skills dir: {}", e))?;
+
+    let mut synced = Vec::new();
+    let mut missing = Vec::new();
+    for skill_name in SYSTEM_SKILLS {
+        let src = bundled_skills_dir.join(skill_name);
+        let dst = skills_dir.join(skill_name);
+        if !src.exists() {
+            // Packaging miss — skill listed in SYSTEM_SKILLS but not
+            // present in the bundle. Log and continue so one missing
+            // skill doesn't block the rest.
+            ulog_warn!("[system-skills] bundled skill missing: {}", skill_name);
+            missing.push(skill_name.to_string());
+            continue;
+        }
+        // Remove any existing target directory so stale files (e.g.
+        // renamed .md, old examples) don't linger. `merge_dir_recursive`
+        // only overwrites files it encounters; it can't delete removed
+        // ones, and SYSTEM_SKILLS_VERSION bumps specifically mean "the
+        // whole skill snapshot is new, replace it wholesale".
+        if dst.exists() {
+            if let Err(e) = fs::remove_dir_all(&dst) {
+                ulog_warn!(
+                    "[system-skills] failed to clear {}: {} — falling back to merge",
+                    skill_name,
+                    e
+                );
+            }
+        }
+        merge_dir_recursive(&src, &dst)
+            .map_err(|e| format!("sync {}: {}", skill_name, e))?;
+        synced.push(*skill_name);
+    }
+
+    fs::write(&ver_file, SYSTEM_SKILLS_VERSION)
+        .map_err(|e| format!("version write failed: {}", e))?;
+
+    ulog_info!(
+        "[system-skills] Synced v{} — ok: {:?}, missing: {:?}",
+        SYSTEM_SKILLS_VERSION,
+        synced,
+        missing
+    );
+    Ok(true)
+}
+
 /// Merge src/ into dst/ recursively. Creates missing dirs, overwrites files, never deletes.
 fn merge_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;

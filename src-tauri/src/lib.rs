@@ -194,6 +194,8 @@ pub fn run() {
             commands::cmd_sync_admin_agent,
             // CLI sync (independent version gate)
             commands::cmd_sync_cli,
+            // System skills sync (task-alignment / task-implement etc.)
+            commands::cmd_sync_system_skills,
             // Cron task commands
             cron_task::cmd_create_cron_task,
             cron_task::cmd_start_cron_task,

@@ -36,7 +36,9 @@
 
 **开发约束**：
 - 修改 `bundled-agents/myagents_helper/` 的 CLAUDE.md 或 Skills 后，MUST bump `ADMIN_AGENT_VERSION`（`src-tauri/src/commands.rs`），否则用户端小助理不会更新。
-- 修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` 后，MUST bump `CLI_VERSION`（`src-tauri/src/commands.rs`），否则用户端 CLI 不会更新。两个版本门控独立运作。
+- 修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` 后，MUST bump `CLI_VERSION`（`src-tauri/src/commands.rs`），否则用户端 CLI 不会更新。
+- 修改 `bundled-skills/` 中 **system skill**（目前：`task-alignment` / `task-implement`，清单见 `SYSTEM_SKILLS` 常量）后，MUST bump `SYSTEM_SKILLS_VERSION`（`src-tauri/src/commands.rs`），否则用户端 skill 不会强制更新。新增 system skill 时：(1) 放入 `bundled-skills/<name>/`；(2) 把 `<name>` 加到 Rust `SYSTEM_SKILLS` 和 Bun `src/server/index.ts::SYSTEM_SKILLS` 两个清单（保持同步）；(3) bump 版本号。三个版本门控独立运作。
+- **Utility skill vs system skill 区分**：`bundled-skills/` 里的 skill 分两类 —— **system skill**（清单里的）随版本强制更新，用户自定义会被覆盖；**utility skill**（其它）首次 seed 后就归用户所有，bump 不再动用户副本。新增 skill 默认是 utility；只有和 app 流程强耦合的才升级为 system。
 
 ## 开发命令
 

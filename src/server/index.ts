@@ -446,8 +446,27 @@ function resolveBundledSkillsDir(): string | null {
 }
 
 /**
+ * System skills — owned by the app, version-gated by the Rust side
+ * (`SYSTEM_SKILLS` + `SYSTEM_SKILLS_VERSION` in `src-tauri/src/commands.rs`).
+ * These are skipped by `seedBundledSkills` below because their lifecycle
+ * is "force-overwrite on every version bump", not "seed once then leave
+ * alone". Keep this list in sync with the Rust constant — a mismatch
+ * would either double-seed (harmless but confusing logs) or skip a
+ * genuine user skill named identically.
+ */
+const SYSTEM_SKILLS: readonly string[] = ['task-alignment', 'task-implement'];
+
+/**
  * Seed bundled skills to ~/.myagents/skills/ on first launch.
  * Only copies skills that haven't been seeded before (tracked in skills-config.json).
+ *
+ * System skills (SYSTEM_SKILLS above) are owned by Rust's
+ * `cmd_sync_system_skills` and are skipped here — they need the
+ * version-gated force-overwrite path, not the seed-once-then-hands-off
+ * path. If we seeded them here AND Rust overwrote them, the interaction
+ * would be harmless (Rust always wins, ordering-wise) but we'd log a
+ * "skipped existing folder" every boot, and the `config.seeded` array
+ * would grow stale entries users don't recognise.
  */
 function seedBundledSkills(): void {
   try {
@@ -469,6 +488,10 @@ function seedBundledSkills(): void {
 
     let changed = false;
     for (const folder of bundledFolders) {
+      if (SYSTEM_SKILLS.includes(folder)) {
+        // Owned by Rust version gate — skip silently.
+        continue;
+      }
       if (isSkillBlockedOnPlatform(folder)) {
         console.log(`[seed] Skipping ${folder} on ${process.platform} (platform blocked)`);
         continue;

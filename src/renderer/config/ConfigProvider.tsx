@@ -180,6 +180,11 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                 const results = await Promise.allSettled([
                     invoke('cmd_sync_admin_agent'),
                     invoke('cmd_sync_cli'),
+                    // System skills (task-alignment / task-implement) —
+                    // independent version gate (SYSTEM_SKILLS_VERSION in
+                    // commands.rs). Force-overwrites user copies so the
+                    // skill contracts always match the shipped CLI.
+                    invoke('cmd_sync_system_skills'),
                 ]);
                 for (const r of results) {
                     if (r.status === 'rejected') {
@@ -187,7 +192,7 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
                     }
                 }
             } catch (e) {
-                console.warn('[ConfigProvider] Agent/CLI sync failed:', e);
+                console.warn('[ConfigProvider] Agent/CLI/system-skills sync failed:', e);
             }
 
             const [rawConfig, loadedProjects, loadedProviders, loadedApiKeys, loadedVerifyStatus] = await Promise.all([
