@@ -454,7 +454,12 @@ function resolveBundledSkillsDir(): string | null {
  * would either double-seed (harmless but confusing logs) or skip a
  * genuine user skill named identically.
  */
-const SYSTEM_SKILLS: readonly string[] = ['task-alignment', 'task-implement'];
+const SYSTEM_SKILLS: readonly string[] = [
+  'task-alignment',
+  'task-implement',
+  'ultra-research',
+  'download-anything',
+];
 
 /**
  * Seed bundled skills to ~/.myagents/skills/ on first launch.

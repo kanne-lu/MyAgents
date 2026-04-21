@@ -11,6 +11,7 @@ description: >
   (6) download torrents or magnet links, (7) find free stock assets (images, video, audio, fonts),
   (8) search Chinese cloud drives for resources, or (9) any task involving finding or downloading
   digital content from the internet.
+author: MyAgents
 ---
 
 # Download Anything

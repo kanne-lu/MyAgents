@@ -852,12 +852,17 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "4";
+const SYSTEM_SKILLS_VERSION: &str = "5";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
 /// Keep in sync with the exclusion list in Bun's `seedBundledSkills()`.
-const SYSTEM_SKILLS: &[&str] = &["task-alignment", "task-implement"];
+const SYSTEM_SKILLS: &[&str] = &[
+    "task-alignment",
+    "task-implement",
+    "ultra-research",
+    "download-anything",
+];
 
 /// Force-sync every system skill from the app bundle to
 /// `~/.myagents/skills/<name>/`. Runs once per `SYSTEM_SKILLS_VERSION`

@@ -1,6 +1,7 @@
 ---
 name: task-alignment
 description: "Deep alignment conversation that turns a user's rough intent into a structured task definition with clear goals, verification criteria, and execution plan. Produces four documents in `~/.myagents/tasks/<id>/` that serve as the contract between human and AI for autonomous task execution. Use when the user describes a non-trivial task they want done — especially multi-step work, refactoring, migrations, feature builds, or any task where 'what does done look like?' isn't immediately obvious. Trigger phrases include 'help me plan this', 'let's align on this task', 'I want to do X', '/task-alignment', or when the user describes a complex goal and you sense ambiguity about scope, approach, or acceptance criteria. Also use proactively when a user jumps straight into a big task without defining what success looks like — pause and align first."
+author: MyAgents
 ---
 
 # Task Alignment

@@ -476,8 +476,14 @@ export default function SkillsCommandsList({
     );
 }
 
-// Skill Card Component - Card style with title badge
-// Exported for reuse in GlobalSkillsPanel
+// Skill Card Component — V2 "compact" layout (v0.1.69 polish):
+//   • padding trimmed to px-3.5 py-3 (from p-4)
+//   • title 14px (from 15px)
+//   • toggle moved INLINE with the title row so state reads at a glance
+//   • author folded into a tiny chip next to the toggle
+//   • description block keeps line-clamp-2 with a min-h reserve so cards in
+//     the same row stay the same height regardless of desc length
+// Exported for reuse in GlobalSkillsPanel.
 export function SkillCard({ skill, onClick, onToggleEnabled }: {
     skill: SkillItem;
     onClick: () => void;
@@ -486,23 +492,23 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
     const isDisabled = skill.enabled === false;
     return (
         <div
-            className={`group flex cursor-pointer flex-col rounded-xl bg-[var(--paper-elevated)] p-4 transition-shadow hover:shadow-sm ${isDisabled ? 'opacity-50' : ''}`}
+            className={`group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-3.5 py-3 transition-shadow hover:shadow-sm ${isDisabled ? 'opacity-55' : ''}`}
             onClick={onClick}
         >
-            {/* Title with badge */}
-            <div className="mb-2 flex items-center gap-1.5">
-                <h4 className="truncate text-[15px] font-semibold text-[var(--ink)]">
+            {/* Top row — title + decorative icon + (author chip) + toggle.
+                All the state-bearing affordances sit on the same line as
+                the name, so the eye doesn't have to travel to the footer
+                to read "is this on?". */}
+            <div className="flex items-center gap-2">
+                <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--ink)]">
                     {skill.name}
                 </h4>
-                <Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
-            </div>
-            {/* Description - 2 lines */}
-            <p className="mb-3 line-clamp-2 flex-1 text-[13px] leading-relaxed text-[var(--ink-muted)]">
-                {skill.description || '暂无描述'}
-            </p>
-            {/* Footer - author + optional enable/disable toggle */}
-            <div className="flex h-5 items-center justify-between text-xs text-[var(--ink-muted)]/70">
-                <span>{skill.author || ''}</span>
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                {skill.author && (
+                    <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[10px] font-medium tracking-[0.04em] text-[var(--ink-muted)]">
+                        {skill.author}
+                    </span>
+                )}
                 {onToggleEnabled && (
                     <button
                         type="button"
@@ -524,33 +530,38 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
                     </button>
                 )}
             </div>
+            {/* Description — `min-h-[2.6em]` reserves the 2-line height even
+                for short descriptions so cards in the same grid row align. */}
+            <p className="line-clamp-2 min-h-[2.6em] text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                {skill.description || '暂无描述'}
+            </p>
         </div>
     );
 }
 
-// Command Card Component - Card style with title badge
-// Exported for reuse in GlobalSkillsPanel
+// Command Card Component — V2 "compact" layout, same spec as SkillCard
+// minus the toggle (commands have no enabled/disabled state).
+// Exported for reuse in GlobalSkillsPanel.
 export function CommandCard({ command, onClick }: { command: CommandItem; onClick: () => void }) {
     return (
         <div
-            className="group flex cursor-pointer flex-col rounded-xl bg-[var(--paper-elevated)] p-4 transition-shadow hover:shadow-sm"
+            className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-3.5 py-3 transition-shadow hover:shadow-sm"
             onClick={onClick}
         >
-            {/* Title with badge */}
-            <div className="mb-2 flex items-center gap-1.5">
-                <h4 className="truncate text-[15px] font-semibold text-[var(--ink)]">
+            <div className="flex items-center gap-2">
+                <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--ink)]">
                     {command.name}
                 </h4>
-                <Terminal className="h-4 w-4 shrink-0 text-sky-500" />
+                <Terminal className="h-3.5 w-3.5 shrink-0 text-sky-500" />
+                {command.author && (
+                    <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[10px] font-medium tracking-[0.04em] text-[var(--ink-muted)]">
+                        {command.author}
+                    </span>
+                )}
             </div>
-            {/* Description - 2 lines */}
-            <p className="mb-3 line-clamp-2 flex-1 text-[13px] leading-relaxed text-[var(--ink-muted)]">
+            <p className="line-clamp-2 min-h-[2.6em] text-[13px] leading-relaxed text-[var(--ink-muted)]">
                 {command.description || '暂无描述'}
             </p>
-            {/* Footer - only show content when author exists, but maintain height */}
-            <div className="flex h-4 items-center text-xs text-[var(--ink-muted)]/70">
-                {command.author && <span>{command.author}</span>}
-            </div>
         </div>
     );
 }

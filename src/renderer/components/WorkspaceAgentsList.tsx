@@ -246,7 +246,7 @@ export default function WorkspaceAgentsList({
                             <h4 className="mb-2 text-sm font-medium text-[var(--ink-muted)]">
                                 本地 Agent ({localAgents.length})
                             </h4>
-                            <div className="space-y-2">
+                            <div className="grid grid-cols-2 gap-3">
                                 {localAgents.map(agent => (
                                     <AgentRow
                                         key={agent.folderName}
@@ -267,7 +267,7 @@ export default function WorkspaceAgentsList({
                             <h4 className="mb-2 text-sm font-medium text-[var(--ink-muted)]">
                                 全局引用 Agent ({globalRefAgents.length})
                             </h4>
-                            <div className="space-y-2">
+                            <div className="grid grid-cols-2 gap-3">
                                 {globalRefAgents.map(agent => (
                                     <AgentRow
                                         key={agent.folderName}
@@ -348,6 +348,15 @@ export default function WorkspaceAgentsList({
     );
 }
 
+// AgentRow — v0.1.69 polish: migrated from the single-column row layout
+// to the V2 "compact card" spec so the Workspace 技能 tab renders Skills /
+// Commands / Sub-Agents in one consistent 2-col grid. Matches SkillCard's
+// padding (px-3.5 py-3), title size (14px), inline toggle, and
+// `min-h-[2.6em]` description reserve that keeps same-row cards aligned.
+//
+// Row-specific affordances (delete for local, remove-ref for global) live
+// on the title line next to the toggle; they stay hidden until hover so
+// the resting state reads clean. Click on the card body opens the detail.
 function AgentRow({
     agent,
     enabled,
@@ -366,56 +375,56 @@ function AgentRow({
     onRemoveRef?: () => void;
 }) {
     return (
-        <div className="flex items-center gap-3 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3">
-            {/* Toggle */}
-            <button
-                onClick={e => { e.stopPropagation(); onToggle(); }}
-                className={`relative h-5 w-9 flex-shrink-0 rounded-full transition-colors ${
-                    enabled ? 'bg-[var(--accent-warm)]' : 'bg-[var(--ink-muted)]/20'
-                }`}
-            >
-                <span
-                    className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-[var(--toggle-thumb)] transition-transform ${
-                        enabled ? 'translate-x-4' : ''
-                    }`}
-                />
-            </button>
-
-            {/* Info */}
-            <div className="min-w-0 flex-1 cursor-pointer" onClick={onClick}>
-                <div className="flex items-center gap-1.5">
-                    <span className="truncate text-sm font-medium text-[var(--ink)]">{agent.name}</span>
-                    <Bot className="h-3.5 w-3.5 shrink-0 text-violet-500" />
-                    {isGlobalRef && (
-                        <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
-                            全局
-                        </span>
-                    )}
-                </div>
-                {agent.description && (
-                    <p className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">{agent.description}</p>
+        <div
+            className={`group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-3.5 py-3 transition-shadow hover:shadow-sm ${enabled ? '' : 'opacity-55'}`}
+            onClick={onClick}
+        >
+            <div className="flex items-center gap-2">
+                <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--ink)]">
+                    {agent.name}
+                </h4>
+                <Bot className="h-3.5 w-3.5 shrink-0 text-violet-500" />
+                {isGlobalRef && (
+                    <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[10px] font-medium tracking-[0.04em] text-[var(--ink-muted)]">
+                        全局
+                    </span>
                 )}
+                {/* Destructive action — hidden until hover so the resting
+                    state matches the cleaner SkillCard / CommandCard. */}
+                {isGlobalRef && onRemoveRef && (
+                    <button
+                        onClick={e => { e.stopPropagation(); onRemoveRef(); }}
+                        className="shrink-0 rounded-md p-1 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] group-hover:opacity-100"
+                        title="移除引用"
+                    >
+                        <XIcon className="h-3.5 w-3.5" />
+                    </button>
+                )}
+                {!isGlobalRef && onDelete && (
+                    <button
+                        onClick={e => { e.stopPropagation(); onDelete(); }}
+                        className="shrink-0 rounded-md p-1 text-[var(--ink-muted)] opacity-0 transition-opacity hover:bg-[var(--error-bg)] hover:text-[var(--error)] group-hover:opacity-100"
+                        title="删除"
+                    >
+                        <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                )}
+                <button
+                    onClick={e => { e.stopPropagation(); onToggle(); }}
+                    className={`relative h-5 w-9 flex-shrink-0 rounded-full transition-colors ${
+                        enabled ? 'bg-[var(--accent-warm)]' : 'bg-[var(--ink-muted)]/20'
+                    }`}
+                >
+                    <span
+                        className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-[var(--toggle-thumb)] transition-transform ${
+                            enabled ? 'translate-x-4' : ''
+                        }`}
+                    />
+                </button>
             </div>
-
-            {/* Action buttons */}
-            {isGlobalRef && onRemoveRef && (
-                <button
-                    onClick={e => { e.stopPropagation(); onRemoveRef(); }}
-                    className="shrink-0 rounded-md p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    title="移除引用"
-                >
-                    <XIcon className="h-3.5 w-3.5" />
-                </button>
-            )}
-            {!isGlobalRef && onDelete && (
-                <button
-                    onClick={e => { e.stopPropagation(); onDelete(); }}
-                    className="shrink-0 rounded-md p-1.5 text-[var(--ink-muted)] hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
-                    title="删除"
-                >
-                    <Trash2 className="h-3.5 w-3.5" />
-                </button>
-            )}
+            <p className="line-clamp-2 min-h-[2.6em] text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                {agent.description || '暂无描述'}
+            </p>
         </div>
     );
 }

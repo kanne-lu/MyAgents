@@ -497,27 +497,25 @@ export const PRESET_PROVIDERS: Provider[] = [
   },
   {
     id: 'moonshot-coding',
-    name: 'Moonshot CodingPlan',
+    name: 'Kimi Code',
     vendor: 'Moonshot',
     cloudProvider: '模型官方',
     type: 'api',
-    primaryModel: 'kimi-k2.6',
+    primaryModel: 'kimi-for-coding',
     isBuiltin: true,
     authType: 'api_key',
-    websiteUrl: 'https://platform.moonshot.cn/console',
+    websiteUrl: 'https://www.kimi.com/code',
     config: {
       baseUrl: 'https://api.kimi.com/coding/',
     },
-    modelAliases: { sonnet: 'kimi-k2.6', opus: 'kimi-k2.6', haiku: 'kimi-k2-thinking-turbo' },
+    modelAliases: { sonnet: 'kimi-for-coding', opus: 'kimi-for-coding', haiku: 'kimi-for-coding' },
     models: [
-      { model: 'kimi-k2.6', modelName: 'Kimi K2.6', modelSeries: 'moonshot' },
-      { model: 'kimi-k2.5', modelName: 'Kimi K2.5', modelSeries: 'moonshot' },
-      { model: 'kimi-k2-thinking-turbo', modelName: 'Kimi K2 Thinking', modelSeries: 'moonshot' },
+      { model: 'kimi-for-coding', modelName: 'Kimi for Coding', modelSeries: 'moonshot' },
     ],
   },
   {
     id: 'zhipu',
-    name: '智谱 AI',
+    name: '智谱 Coding Plan',
     vendor: 'Zhipu',
     cloudProvider: '模型官方',
     type: 'api',
@@ -530,6 +528,36 @@ export const PRESET_PROVIDERS: Provider[] = [
       baseUrl: 'https://open.bigmodel.cn/api/anthropic',
       timeout: 600000,
       disableNonessential: true,
+    },
+    modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
+    models: [
+      { model: 'glm-5.1', modelName: 'GLM 5.1', modelSeries: 'zhipu' },
+      { model: 'glm-5-turbo', modelName: 'GLM 5 Turbo', modelSeries: 'zhipu' },
+      { model: 'glm-4.7', modelName: 'GLM 4.7', modelSeries: 'zhipu' },
+      { model: 'glm-5', modelName: 'GLM 5', modelSeries: 'zhipu' },
+      { model: 'glm-4.5-air', modelName: 'GLM 4.5 Air', modelSeries: 'zhipu' },
+    ],
+  },
+  {
+    // Open BigModel API (OpenAI-protocol chat-completions path). Shares the
+    // "Zhipu" vendor + model catalog with the Coding Plan provider above;
+    // the distinction is protocol: Coding Plan uses the `/api/anthropic`
+    // path (Anthropic-native), this one uses `/api/paas/v4/chat/completions`
+    // via the Bridge's OpenAI translator (see src/server/openai-bridge).
+    id: 'zhipu-ai',
+    name: '智谱 AI',
+    vendor: 'Zhipu',
+    cloudProvider: '模型官方',
+    type: 'api',
+    primaryModel: 'glm-4.7',
+    isBuiltin: true,
+    authType: 'api_key',
+    apiProtocol: 'openai',
+    websiteUrl: 'https://bigmodel.cn/console/overview',
+    modelListUrl: 'https://open.bigmodel.cn/api/paas/v4/models',
+    config: {
+      baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+      timeout: 600000,
     },
     modelAliases: { sonnet: 'glm-5.1', opus: 'glm-5.1', haiku: 'glm-5.1' },
     models: [
