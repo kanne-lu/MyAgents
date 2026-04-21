@@ -722,7 +722,35 @@ export function getStreamingAssistantId(): string | null {
 const pendingMidTurnQueue: Array<{
   queueId: string;
   userMessage: Pick<MessageWire, 'id' | 'role' | 'content' | 'timestamp' | 'attachments'>;
+  // Retained for hard-kill recovery. Pending items have already been yielded to SDK
+  // stdin — SDK owns them. But if the subprocess is about to die (abortPersistentSession
+  // or interruptCurrentResponse hard-kill escalation), the SDK will never consume them.
+  // rescuePendingToQueue() moves this back to messageQueue front so the recovery
+  // session re-delivers it. See forceExecuteQueueItem pending branch.
+  sourceItem: MessageQueueItem;
 }> = [];
+
+/**
+ * Rescue pending mid-turn items back to messageQueue front when the SDK subprocess
+ * is about to die (abortPersistentSession or interruptCurrentResponse hard-kill).
+ *
+ * Why: pending items have been yielded to SDK stdin. If the subprocess dies before
+ * consuming them, they are lost — the user's text vanishes. Moving them back to
+ * messageQueue lets the recovery session (started by schedulePreWarm in the safety
+ * net) re-deliver them to the fresh subprocess.
+ *
+ * Must NOT be called when SDK stays alive (e.g. interrupt ACK without close) —
+ * double-delivery would occur: once via stdin buffer, once via messageQueue.
+ */
+function rescuePendingToQueue(): void {
+  if (pendingMidTurnQueue.length === 0) return;
+  console.log(`[agent] Rescuing ${pendingMidTurnQueue.length} pending mid-turn message(s) → messageQueue front`);
+  // Preserve original order: reverse-iterate so the first pending becomes messageQueue[0].
+  for (let i = pendingMidTurnQueue.length - 1; i >= 0; i--) {
+    messageQueue.unshift(pendingMidTurnQueue[i].sourceItem);
+  }
+  pendingMidTurnQueue.length = 0;
+}
 
 /**
  * Flush deferred mid-turn user messages: push to messages[] and broadcast queue:started.
@@ -752,8 +780,9 @@ function abortPersistentSession(): void {
   }
 
   shouldAbortSession = true;
-  // Discard pending mid-turn messages (session is being torn down)
-  pendingMidTurnQueue.length = 0;
+  // Subprocess is about to die — rescue pending items so the recovery session
+  // re-delivers them instead of losing them with the dead stdin buffer.
+  rescuePendingToQueue();
   // Notify IM stream callback before abort
   if (imStreamCallback) {
     imStreamCallback('error', '会话已中断，请重新发送');
@@ -3764,7 +3793,10 @@ export function getAndClearLastAgentError(): string | null {
  */
 function clearMessageState(): void {
   messages.length = 0;
-  messageQueue.length = 0;
+  // Queue clearing is always explicit (broadcast queue:cancelled to the frontend).
+  // Defensive: in practice, resetSession / switchToSession drain earlier (before
+  // awaitSessionTermination); initializeAgent is typically called on an empty queue.
+  drainQueueWithCancellation();
   pendingMidTurnQueue.length = 0;
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
@@ -3784,14 +3816,26 @@ function clearMessageState(): void {
 }
 
 /**
- * 排空消息队列，逐条广播 queue:cancelled。
+ * 排空消息队列，逐条广播 queue:cancelled。**清 messageQueue 的唯一正路**。
  *
- * 由显式 cancel 路径调用：
- *   - interruptCurrentResponse（用户按停止但已无活跃 turn，清理孤儿队列）
+ * 设计契约（architectural invariant）：
+ *   - 任何想清空 messageQueue 的地方都 MUST 走这个函数，禁止裸 `messageQueue.length = 0`
+ *     或逐项 splice。裸清是前端 pills 残留的来源。
+ *   - 频繁调用是幂等的（空队列 early-return），不必担心"多调一次"。
  *
- * 不由 startStreamingSession 的 finally 块调用 — 队列默认跨 session 存活，
- * 由该 finally 下方的 safety net（messageQueue + !preWarmTimer + !isProcessing
- * + querySession===null → schedulePreWarm）确保新 session 接管处理。
+ * 调用者：
+ *   - interruptCurrentResponse（停止按钮 / 无活跃 turn 的孤儿清理）
+ *   - resetSession / switchToSession / recoverFromStaleSession / rewindSession
+ *     （session 重置路径）
+ *   - enqueueUserMessage 的 Provider 切换分支（避免 phantom pills）
+ *   - clearMessageState（防御：initializeAgent 等路径通常队列为空 → no-op）
+ *   - startStreamingSession 的 finally safety net，仅当 preWarmDisabled 时
+ *     （正常模式下队列跨 session 存活，由 schedulePreWarm 接管）
+ *
+ * 不调用者：
+ *   - 正常 turn-complete 路径（队列由 generator 自然 drain）
+ *   - abortPersistentSession（只转移 pending，不清 messageQueue；
+ *     队列的清除由 abort 的上游调用者决定）
  */
 function drainQueueWithCancellation(): void {
   if (messageQueue.length === 0) return;
@@ -3891,7 +3935,8 @@ export async function resetSession(): Promise<void> {
   if (querySession || sessionTerminationPromise) {
     console.log('[agent] resetSession: terminating existing SDK session');
     abortPersistentSession();
-    messageQueue.length = 0; // Clear queue so old session doesn't pick up stale messages
+    // Explicit cancel — broadcasts queue:cancelled so frontend clears pills immediately.
+    drainQueueWithCancellation();
 
     await awaitSessionTermination(10_000, 'resetSession');
     console.log('[agent] resetSession: SDK session terminated (or timed out)');
@@ -3990,7 +4035,10 @@ async function recoverFromStaleSession(): Promise<void> {
     if (querySession || sessionTerminationPromise) {
       console.log('[agent] recoverFromStaleSession: terminating failed SDK subprocess');
       abortPersistentSession();
-      messageQueue.length = 0;
+      // Explicit cancel — this recovery path preserves visible message history but
+      // the queue is discarded. Without broadcast, queued pills would linger forever
+      // (no chat:init follows this path — that's the whole point of stale recovery).
+      drainQueueWithCancellation();
       await awaitSessionTermination(10_000, 'recoverFromStaleSession');
       querySession = null;
     }
@@ -4191,7 +4239,9 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   if (querySession || sessionTerminationPromise) {
     console.log('[agent] switchToSession: aborting current session');
     abortPersistentSession();
-    messageQueue.length = 0; // Clear queue before waiting so old session doesn't pick up stale messages
+    // Explicit cancel — broadcasts queue:cancelled so frontend clears pills immediately
+    // (chat:init follows but that's seconds later, after awaitSessionTermination).
+    drainQueueWithCancellation();
     await awaitSessionTermination(10_000, 'switchToSession');
     querySession = null;
   }
@@ -4404,9 +4454,10 @@ export async function enqueueUserMessage(
     querySession = null;
     isProcessing = false;
     setSessionState('idle');
-    // Clear message queue to avoid duplicate messages
-    // The current message will be added to the queue below
-    messageQueue.length = 0;
+    // Explicit cancel — broadcasts queue:cancelled so frontend clears stale pills
+    // before the new message (added below) fires queue:added. Without this, the UI
+    // would show old pills as phantoms alongside the new one.
+    drainQueueWithCancellation();
     // Clear stream state mappings (will be rebuilt by new session)
     streamIndexToToolId.clear();
     toolResultIndexToId.clear();
@@ -4807,6 +4858,9 @@ export async function interruptCurrentResponse(): Promise<boolean> {
     // with resumeSessionId (no data loss, no amnesia). (#60)
     if (!interrupted && querySession) {
       console.warn('[agent] Force-closing SDK session (interrupt unresponsive)');
+      // Rescue pending items BEFORE close: SDK stdin buffer dies with the subprocess.
+      // Must run before close() so the recovery session re-delivers them.
+      rescuePendingToQueue();
       const session = querySession;
       querySession = null;
       try { session.close(); } catch { /* already dead */ }
@@ -4835,6 +4889,8 @@ export async function interruptCurrentResponse(): Promise<boolean> {
         postInterruptTurnEndResolve = null;
         if (querySession) {
           console.warn('[agent] Force-closing: turn did not complete 3s after interrupt (hung MCP tool?)');
+          // Rescue pending items BEFORE close: see rescuePendingToQueue() doc.
+          rescuePendingToQueue();
           const session = querySession;
           querySession = null;
           try { session.close(); } catch { /* already dead */ }
@@ -4885,7 +4941,12 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
 
   // 消息可能已被 wakeGenerator 直接投递给 generator（跳过 messageQueue），
   // 此时它在 pendingMidTurnQueue 中（已 yield 给 SDK stdin，等待 AI 消费）。
-  // 这种情况下中断当前响应即可让 SDK 更快处理该消息。
+  //
+  // 两种情况的 force-execute 都走 interruptCurrentResponse：
+  //   - 响应式路径：SDK ACK interrupt → 处理当前 turn 的剩余内容 → 消费下一条
+  //     stdin 输入（即 pending 项）→ AI 回应
+  //   - 硬杀路径：interrupt 超时 → session.close() 前 rescuePendingToQueue() 把
+  //     pending 项搬回 messageQueue 队首 → 新 session pre-warm 起来后接手
   const inPendingMidTurn = index === -1 && pendingMidTurnQueue.some(p => p.queueId === queueId);
 
   if (index === -1 && !inPendingMidTurn) return false;
@@ -4897,8 +4958,6 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
   }
 
   if (isSessionActive()) {
-    // Session 存活：中断当前响应，generator 会自然消费队列头部
-    // （或 pendingMidTurnQueue 中的消息在中断后被 SDK 立即处理）
     await interruptCurrentResponse();
   } else {
     // Session 已死：generator 不存在，无人消费队列。
@@ -4981,7 +5040,8 @@ export async function rewindSession(userMessageId: string): Promise<{
 
     // 4. 中止当前 session（需要新 session 用 resumeSessionAt 截断 SDK 历史）
     abortPersistentSession();
-    messageQueue.length = 0;
+    // Explicit cancel — broadcasts queue:cancelled so frontend clears pills.
+    drainQueueWithCancellation();
     await awaitSessionTermination(10_000, 'rewind');
     shouldAbortSession = false;
 
@@ -6734,18 +6794,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     //     active turn (orphaned queue). When a turn is in flight, stop cancels
     //     THAT turn; queued messages naturally flow into the recovery session.
     //   - forceExecuteQueueItem: the force-executed item MUST survive a hard-kill
-    //     escalation into the recovery session — that's the whole point.
+    //     escalation into the recovery session. Both messageQueue items and items
+    //     already in pendingMidTurnQueue are covered — the latter via rescuePending
+    //     ToQueue() called inside interruptCurrentResponse's close() paths.
     //   - abortPersistentSession callers (config changes, provider switch): preserve
-    //     queue so the restarted session picks up pending work.
-    //   - resetSession / switchToSession / recoverFromStaleSession: clear queue
-    //     directly before termination (explicit via `messageQueue.length = 0`).
+    //     queue so the restarted session picks up pending work. The abort also
+    //     rescues pending mid-turn items back into messageQueue.
+    //   - resetSession / switchToSession / recoverFromStaleSession / rewindSession:
+    //     explicitly call drainQueueWithCancellation (broadcasts queue:cancelled).
     //   - Subprocess crash without explicit abort: preserve queue — the safety net
     //     below reschedules pre-warm so the new session drains it.
-    //
-    // This replaces earlier logic that used !shouldAbortSession as a proxy for
-    // "unexpected death, drain queue" — a proxy that conflated session-abort-reason
-    // with queue-lifecycle and silently dropped force-executed messages on the
-    // hard-kill escalation path.
 
     // 安全关闭 SDK session
     const session = querySession;
@@ -6901,6 +6959,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
             timestamp: userMessage.timestamp,
             attachments: userMessage.attachments,
           },
+          sourceItem: item,
         });
       }
     }
