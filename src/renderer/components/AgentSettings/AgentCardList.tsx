@@ -8,24 +8,10 @@ import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { HeartPulse } from 'lucide-react';
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import { DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
-import { findPromotedByPlatform } from '../ImSettings/promotedPlugins';
+import { getPlatformLabel } from '@/utils/platformLabel';
 
 interface AgentCardListProps {
   onSelectAgent: (agentId: string, workspacePath: string) => void;
-}
-
-const PLATFORM_LABELS: Record<string, string> = {
-  telegram: 'TG',
-  feishu: '飞书',
-  dingtalk: '钉钉',
-};
-
-function getPlatformBadge(type: string): string {
-  if (type.startsWith('openclaw:')) {
-    const promoted = findPromotedByPlatform(type);
-    return promoted?.name || type.slice('openclaw:'.length);
-  }
-  return PLATFORM_LABELS[type] || type;
 }
 
 function getStatusColor(onlineCount: number, totalCount: number, enabled: boolean): string {
@@ -112,7 +98,7 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
               <div className="mt-1.5 flex flex-wrap gap-1">
                 {(agent.channels ?? []).map(ch => (
                   <span key={ch.id} className="rounded px-1.5 py-0.5 text-[10px] bg-[var(--paper-inset)] text-[var(--ink-muted)]">
-                    {getPlatformBadge(ch.type)}
+                    {getPlatformLabel(ch.type)}
                   </span>
                 ))}
               </div>

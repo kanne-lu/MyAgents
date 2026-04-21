@@ -18,8 +18,9 @@
 // contracts.
 
 import { useMemo } from 'react';
-import { useAgentStatuses } from '@/hooks/useAgentStatuses';
+import { useConfig } from '@/hooks/useConfig';
 import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
+import { getPlatformLabel } from '@/utils/platformLabel';
 import type { NotificationConfig } from '@/../shared/types/task';
 
 const DEFAULT_EVENTS: NonNullable<NotificationConfig['events']> = [
@@ -34,20 +35,61 @@ interface Props {
 }
 
 export function NotificationConfigEditor({ value, onChange }: Props) {
-  const { statuses } = useAgentStatuses();
+  // Sourced from `config.agents` + `projects` instead of the 5s-polled
+  // `useAgentStatuses`. Two reasons:
+  //   1. Stability — `statuses` is re-fetched on a 5s interval and the
+  //      `Object.values()` iteration order can shift between ticks, so
+  //      the dropdown would silently reshuffle while the user had it open.
+  //   2. Label quality — `statuses` carries `agentName` + a per-channel
+  //      `name` that is usually the bot's handle (e.g. "@mino115_bot"),
+  //      not useful context. Users want to recognise their workspace, so
+  //      we show `workspace displayName · 平台`.
+  const { config, projects } = useConfig();
 
   const channelOptions: SelectOption[] = useMemo(() => {
-    const out: SelectOption[] = [{ value: '', label: '不发送到 Bot' }];
-    for (const agent of Object.values(statuses)) {
-      for (const ch of agent.channels) {
-        out.push({
-          value: ch.channelId,
-          label: `${agent.agentName} · ${ch.name ?? ch.channelType}`,
+    // agentId → workspace displayName, for the left half of each label.
+    const workspaceNameByAgentId = new Map<string, string>();
+    for (const p of projects) {
+      if (p.agentId) {
+        workspaceNameByAgentId.set(p.agentId, p.displayName || p.name);
+      }
+    }
+
+    interface Row {
+      value: string;
+      workspaceName: string;
+      platformLabel: string;
+    }
+    const rows: Row[] = [];
+    for (const agent of config.agents ?? []) {
+      // Skip agents the user has disabled — picking a channel on a disabled
+      // agent means notifications would never arrive.
+      if (!agent.enabled) continue;
+      const workspaceName = workspaceNameByAgentId.get(agent.id) || agent.name;
+      for (const ch of agent.channels ?? []) {
+        if (!ch.enabled) continue;
+        rows.push({
+          value: ch.id,
+          workspaceName,
+          platformLabel: getPlatformLabel(ch.type),
         });
       }
     }
+    // Stable sort: workspace name (locale-aware) → platform label. The
+    // underlying arrays are driven by React state that may arrive in any
+    // order; explicit sort guarantees the dropdown never reshuffles as
+    // long as workspaces/channels don't actually change.
+    rows.sort((a, b) => {
+      const ws = a.workspaceName.localeCompare(b.workspaceName, 'zh-Hans-CN');
+      if (ws !== 0) return ws;
+      return a.platformLabel.localeCompare(b.platformLabel, 'zh-Hans-CN');
+    });
+    const out: SelectOption[] = [{ value: '', label: '不发送到 Bot' }];
+    for (const r of rows) {
+      out.push({ value: r.value, label: `${r.workspaceName} · ${r.platformLabel}` });
+    }
     return out;
-  }, [statuses]);
+  }, [config.agents, projects]);
 
   const current: NotificationConfig = {
     desktop: value?.desktop ?? true,
