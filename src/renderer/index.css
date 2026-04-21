@@ -489,9 +489,12 @@ button {
   transition-duration: 150ms;
 }
 
-/* Subtle press feedback — unified scale(0.98) for all interactive elements */
-button:active:not(:disabled),
-[role="button"]:active {
+/* Subtle press feedback — unified scale(0.98) for all interactive elements.
+   `:not(:has(...))` ensures only the innermost active element scales — when a
+   nested button is pressed inside a card/row, the outer ancestor (which also
+   matches :active per CSS rules) opts out, so only the actual button animates. */
+button:active:not(:disabled):not(:has(:is(button, [role="button"], [data-tree-row]):active)),
+[role="button"]:active:not(:has(:is(button, [role="button"], [data-tree-row]):active)) {
   transform: scale(0.98);
 }
 
@@ -506,7 +509,7 @@ button:disabled {
   transition-duration: 100ms;
 }
 
-[data-tree-row]:active {
+[data-tree-row]:active:not(:has(:is(button, [role="button"], [data-tree-row]):active)) {
   transform: scale(0.98);
   background-color: var(--paper-inset) !important;
 }

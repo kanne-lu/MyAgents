@@ -603,10 +603,12 @@ transition: background var(--duration-fast),
             border-color var(--duration-fast),
             transform var(--duration-fast);
 
-/* 点击反馈 — 统一 scale(0.98)，全局生效 */
-button:active:not(:disabled),
-[role="button"]:active,
-[data-tree-row]:active {
+/* 点击反馈 — 统一 scale(0.98)，全局生效
+   `:not(:has(...))` 保证只有最内层被按下的元素缩放；点卡片内部按钮时，
+   外层卡片不会跟着动。 */
+button:active:not(:disabled):not(:has(:is(button, [role="button"], [data-tree-row]):active)),
+[role="button"]:active:not(:has(:is(button, [role="button"], [data-tree-row]):active)),
+[data-tree-row]:active:not(:has(:is(button, [role="button"], [data-tree-row]):active)) {
   transform: scale(0.98);
 }
 
