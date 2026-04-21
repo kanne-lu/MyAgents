@@ -166,6 +166,7 @@ import { findAgentByWorkspacePath } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
+import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics } from './logger';
 import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
@@ -2223,9 +2224,23 @@ async function main() {
           // freshness keeps "live-follow" semantics for cron without inventing a third
           // owner kind in resolveSessionConfig (PRD D4 footnote).
           const cronAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
-          const cronSnapshot = cronAgent ? snapshotForOwnedSession(cronAgent) : {};
+          const cronSnapshot: Partial<SessionMetadata> = cronAgent ? snapshotForOwnedSession(cronAgent) : {};
           const overrideRuntime = payload.runtime ?? getActiveRuntimeType();
           if (overrideRuntime) cronSnapshot.runtime = overrideRuntime;
+          // Rust rotates a fresh UUID per tick for new_session mode (see
+          // cron_task.rs::rotate_new_session_id) and passes it as
+          // payload.sessionId. Honour that id here — if we generated our
+          // own instead, Rust's ManagedSidecar registry would be keyed by
+          // the Rust-chosen id while the actual running session used a
+          // different Bun-chosen id, and opening the session via history
+          // would spawn a duplicate read-only sidecar (Bug A, v0.1.69).
+          //
+          // Fallback to a fresh random id only when payload.sessionId is
+          // missing — keeps backward-compat with older Rust builds that
+          // didn't pre-generate the id.
+          if (sessionId) {
+            cronSnapshot.id = sessionId;
+          }
           const newSession = createSession(agentDir, cronSnapshot);
           const switched = await switchToSession(newSession.id);
           if (!switched) {
@@ -2233,7 +2248,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Failed to create new session for execution.' }, 500);
           }
           effectiveSessionId = newSession.id;
-          console.log(`[cron] execute-sync taskId=${taskId} new_session mode: created fresh session ${newSession.id}`);
+          console.log(`[cron] execute-sync taskId=${taskId} new_session mode: created fresh session ${newSession.id} (from=${sessionId ? 'rust-payload' : 'bun-fallback'})`);
         } else if (sessionId) {
           // single_session mode: switch to the task's stored session (keeps context)
           // If already in the target session, skip switchToSession to avoid aborting

@@ -35,6 +35,7 @@ import type { Task, TaskRunStats } from '@/../shared/types/task';
 import { TaskStatusBadge } from './TaskStatusBadge';
 import { DispatchOriginBadge } from './DispatchOriginBadge';
 import { StatusHistoryList } from './StatusHistoryList';
+import { TaskSessionsList } from './TaskSessionsList';
 import { SummaryCard } from './SummaryCard';
 import { TaskDocBlock } from './TaskDocBlock';
 import { TaskEditPanel, type FocusDoc } from './TaskEditPanel';
@@ -508,6 +509,10 @@ export function TaskDetailOverlay({
               <hr className="my-4 border-[var(--line-subtle)]" />
 
               <StatusHistoryList task={task} defaultCollapsed />
+
+              <hr className="my-4 border-[var(--line-subtle)]" />
+
+              <TaskSessionsList task={task} />
 
               <hr className="my-4 border-[var(--line-subtle)]" />
 

@@ -1751,6 +1751,55 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
   }, []);
 
+  // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
+  // dispatches this to open a historical execution in a fresh chat tab.
+  // Semantically equivalent to clicking a row in the Launcher 历史对话 list,
+  // just routed from a non-launcher surface.
+  useEffect(() => {
+    const handler = async (
+      event: CustomEvent<{ sessionId: string; workspacePath: string }>,
+    ) => {
+      const { sessionId, workspacePath } = event.detail ?? {};
+      if (!sessionId || !workspacePath) return;
+      const project = configProjectsRef.current.find(
+        (p) => p.path === workspacePath,
+      );
+      if (!project) {
+        console.warn(
+          `[App] OPEN_SESSION_IN_NEW_TAB: no project for workspacePath=${workspacePath}`,
+        );
+        return;
+      }
+      const providerId =
+        project.providerId ?? configRef.current?.defaultProviderId ?? null;
+      const provider =
+        (providerId
+          ? appProvidersRef.current.find((p) => p.id === providerId)
+          : undefined) ?? appProvidersRef.current[0];
+      if (!provider) {
+        console.warn(
+          `[App] OPEN_SESSION_IN_NEW_TAB: no provider for project ${project.id}`,
+        );
+        return;
+      }
+      try {
+        await handleLaunchProject(project, provider, sessionId);
+      } catch (err) {
+        console.error('[App] OPEN_SESSION_IN_NEW_TAB failed:', err);
+      }
+    };
+    window.addEventListener(
+      CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB,
+      handler as unknown as EventListener,
+    );
+    return () =>
+      window.removeEventListener(
+        CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB,
+        handler as unknown as EventListener,
+      );
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
+  }, []);
+
   // Listen for JUMP_TO_TAB custom event (Session singleton constraint)
   useEffect(() => {
     const handleJumpToTab = (event: CustomEvent<{ targetTabId: string; sessionId: string }>) => {

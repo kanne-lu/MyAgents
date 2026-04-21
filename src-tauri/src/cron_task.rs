@@ -2011,6 +2011,57 @@ fn check_end_conditions_static(task: &CronTask) -> bool {
     false
 }
 
+/// Rotate the session id for a `NewSession` cron task ahead of the next execution.
+///
+/// Keeps the Rust `ManagedSidecar` registry key and Bun's actual session id in
+/// lockstep. Without this, `task.session_id` stayed as the placeholder forever
+/// and Bun generated its own id inside `switchToSession(createSession(...))` —
+/// the two diverged, the registry no longer found the live sidecar by the
+/// real session id, and opening the session from history spawned a duplicate
+/// read-only sidecar that couldn't see the in-flight execution.
+///
+/// Side effects:
+///   - Releases the CronTask's ownership of the previous session's sidecar.
+///     If that was the only owner, the sidecar stops. If a Tab had joined it
+///     (rare for new_session mode, but possible if the user opened it mid-run),
+///     the tab stays the remaining owner and the sidecar continues — benign.
+///   - Writes the new id back to `tasks[task.id].session_id` so subsequent
+///     ticks / crash-recovery / release paths see a consistent value.
+///   - Does NOT persist to `cron_tasks.json` synchronously; the periodic
+///     save path picks it up. Rotation always produces a fresh UUID so even
+///     if the process dies mid-tick the stored placeholder id never collides.
+async fn rotate_new_session_id(handle: &AppHandle, task: &CronTask) -> Result<String, String> {
+    let new_session_id = Uuid::new_v4().to_string();
+    let old_session_id = task.session_id.clone();
+
+    if let Some(sidecar_state) = handle.try_state::<ManagedSidecarManager>() {
+        let owner = SidecarOwner::CronTask(task.id.clone());
+        if let Err(e) = release_session_sidecar(&sidecar_state, &old_session_id, &owner) {
+            // Non-fatal: release failure just means the sidecar may linger
+            // until another owner releases it or the app exits.
+            ulog_warn!(
+                "[CronTask] rotate_new_session_id: release old session {} failed: {} (non-fatal)",
+                old_session_id, e
+            );
+        }
+    }
+
+    let manager = get_cron_task_manager();
+    let mut tasks_guard = manager.tasks.write().await;
+    if let Some(t) = tasks_guard.get_mut(&task.id) {
+        t.session_id = new_session_id.clone();
+        t.updated_at = Utc::now();
+    }
+    drop(tasks_guard);
+
+    ulog_info!(
+        "[CronTask] new_session rotate: task {} session_id {} → {}",
+        task.id, old_session_id, new_session_id
+    );
+
+    Ok(new_session_id)
+}
+
 /// Execute a task directly via Sidecar (without going through frontend)
 /// Returns (success, ai_exit_reason, output_text, internal_session_id) tuple
 async fn execute_task_directly(
@@ -2052,6 +2103,27 @@ async fn execute_task_directly(
     let run_mode_str = match task.run_mode {
         RunMode::SingleSession => "single_session",
         RunMode::NewSession => "new_session",
+    };
+
+    // Per-tick session-id rotation for new_session mode.
+    //
+    // Before this, `task.session_id` was a stable placeholder and Bun would
+    // create its OWN session id internally via `switchToSession(createSession(...))`.
+    // That split-brain meant the Rust `ManagedSidecar` registry was keyed by
+    // the placeholder while Bun was actually running a different session —
+    // opening the real session via history could not find the live sidecar
+    // and spawned a duplicate read-only one that loaded a stale on-disk
+    // snapshot (Bug A, v0.1.69). We now generate the real session id here,
+    // use it as BOTH the Rust registry key and the id Bun switches into,
+    // so a tab opening the session joins the live sidecar and sees
+    // execution in-flight.
+    //
+    // For single_session mode: `task.session_id` is the stable identity of
+    // the ongoing conversation; never rotated.
+    let effective_session_id = if task.run_mode == RunMode::NewSession {
+        rotate_new_session_id(handle, task).await?
+    } else {
+        task.session_id.clone()
     };
 
     // Build execution payload
@@ -2156,7 +2228,7 @@ async fn execute_task_directly(
     let payload = CronExecutePayload {
         task_id: task.id.clone(),
         prompt: prompt_to_send,
-        session_id: Some(task.session_id.clone()),
+        session_id: Some(effective_session_id.clone()),
         is_first_execution: Some(is_first_execution),
         ai_can_exit: Some(task.end_conditions.ai_can_exit),
         permission_mode: Some(task.permission_mode.clone()),

@@ -4131,11 +4131,34 @@ export async function initializeAgent(
   // 3. saveSessionMessages incremental append works correctly (messages.slice(existingCount))
   // Same pattern as switchToSession's message loading.
   // Also load for cross-runtime sessions (sessionRegistered=false but messages exist for display).
-  if (initialSessionId && getSessionMetadata(initialSessionId)) {
-    const sessionData = getSessionData(initialSessionId);
-    if (sessionData?.messages?.length) {
-      loadMessagesFromStorage(sessionData.messages);
-      console.log(`[agent] initializeAgent: loaded ${sessionData.messages.length} existing messages, messageSequence=${messageSequence}`);
+  //
+  // Bug B defence (v0.1.69): if metadata declares `stats.messageCount > 0` but the
+  // on-disk JSONL reads back empty, it means another sidecar is actively writing
+  // to this session and its disk flush hasn't landed yet. In that case `messageSequence`
+  // staying at 0 would collide with the OTHER sidecar's next assignment — a Tab
+  // that sent a follow-up message would see its own message dropped (the REST
+  // /sessions/... load had already populated seenIdsRef with the other sidecar's
+  // IDs 0..N). After the Bug A fix, this double-write scenario should not normally
+  // occur for cron sessions, but we keep the guard as a belt-and-braces defence
+  // against any future path that ends up with two sidecars briefly overlapping.
+  // Seeding messageSequence past `stats.messageCount` guarantees fresh IDs.
+  if (initialSessionId) {
+    const meta = getSessionMetadata(initialSessionId);
+    if (meta) {
+      const sessionData = getSessionData(initialSessionId);
+      const diskCount = sessionData?.messages?.length ?? 0;
+      if (diskCount > 0) {
+        loadMessagesFromStorage(sessionData!.messages);
+        console.log(`[agent] initializeAgent: loaded ${diskCount} existing messages, messageSequence=${messageSequence}`);
+      } else if (meta.stats?.messageCount && meta.stats.messageCount > 0) {
+        // Stats say N messages, disk says 0 — flush lag on concurrent sidecar.
+        // Seed past the declared count so our IDs can't collide with theirs.
+        messageSequence = meta.stats.messageCount + 1;
+        console.warn(
+          `[agent] initializeAgent: session ${initialSessionId} metadata reports ${meta.stats.messageCount} messages but disk JSONL is empty — ` +
+          `concurrent writer suspected, seeding messageSequence=${messageSequence} to avoid ID collision`,
+        );
+      }
     }
   }
 

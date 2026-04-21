@@ -95,6 +95,14 @@ export const CUSTOM_EVENTS = {
     LAUNCH_BUG_REPORT: 'launch-bug-report',
     /** Fired when a session title changes (auto-generated or user rename) — triggers refetch in history/task center */
     SESSION_TITLE_CHANGED: 'session-title-changed',
+    /**
+     * Fired to open a historical session in a new Chat tab.
+     * Payload: `{ sessionId: string; workspacePath: string }`.
+     * Used by Task Center's 任务详情 → 执行 session list so clicking a
+     * past execution opens it just like clicking an entry in the
+     * Launcher's 历史对话 list.
+     */
+    OPEN_SESSION_IN_NEW_TAB: 'open-session-in-new-tab',
     // CONFIG_CHANGED removed — ConfigProvider shares state via Context, no DOM event bridge needed
     // Note: CRON_TASK_STOPPED event removed
     // With Session-centric Sidecar (Owner model), stopping a cron task only releases
