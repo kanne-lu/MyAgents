@@ -1315,11 +1315,15 @@ async fn task_create_from_alignment_handler(
             "error": "task store not initialized"
         }));
     };
-    let source_thought = input.source_thought_id.clone();
     match task_store.create_from_alignment(input).await {
         Ok(t) => {
+            // Resolve thought→task linkage from the created task's record,
+            // not the raw input — `source_thought_id` may have been
+            // auto-inherited from alignment metadata.json and thus absent
+            // on the input. Reading from `t` covers both code paths
+            // uniformly.
             if let (Some(thought_id), Some(thoughts)) =
-                (source_thought, thought::get_thought_store())
+                (t.source_thought_id.clone(), thought::get_thought_store())
             {
                 let _ = thoughts.link_task(&thought_id, &t.id).await;
             }

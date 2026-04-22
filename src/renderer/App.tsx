@@ -1680,6 +1680,33 @@ export default function App() {
         // workspace so moving/renaming the workspace doesn't orphan them).
         const alignmentSessionId = `align-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+        // Persist the workspace/thought context to
+        // `~/.myagents/tasks/<alignmentSessionId>/metadata.json` so that
+        // when the AI later calls `myagents task create-from-alignment`
+        // it only needs to pass `--name`; the backend inherits the rest
+        // from this file. Without this, the AI had to re-type 3 long
+        // UUIDs that it already had in its prompt context — fragile
+        // (one typo → task hung on wrong workspace, silently).
+        // Fire-and-forget is safe: the prompt still carries the same
+        // context as a fallback, so even if the write fails the AI can
+        // pass the params explicitly and the flow still works.
+        if (isTauriEnvironment()) {
+          try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('cmd_task_write_alignment_metadata', {
+              alignmentSessionId,
+              workspaceId: workspace.id,
+              workspacePath: workspace.path,
+              sourceThoughtId: thoughtId,
+            });
+          } catch (err) {
+            console.warn(
+              '[App] OPEN_AI_DISCUSSION: write alignment metadata failed, AI will need to pass params explicitly:',
+              err,
+            );
+          }
+        }
+
         // Prompt stays minimal by design — operational details (how to
         // write the four docs, when to call `create-from-alignment`, what
         // each of the 4 discussion outcomes looks like, CLI syntax) ALL

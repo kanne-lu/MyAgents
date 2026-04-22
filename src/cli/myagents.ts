@@ -140,9 +140,11 @@ Examples:
   myagents task append-session <taskId> <sessionId>
   myagents task run <taskId>
   myagents task rerun <taskId>
-  myagents task create-from-alignment <alignmentSessionId> \
-    --name "新任务" --workspaceId ws-abc --workspacePath /path/to/ws \
-    --executionMode once --sourceThoughtId <thoughtId>
+  myagents task create-from-alignment <alignmentSessionId> --name "新任务"
+    # Backend auto-inherits workspaceId / workspacePath / sourceThoughtId
+    # from the alignment session's metadata (set when 「AI 讨论」 launched).
+    # Pass --run to dispatch immediately in the same call.
+    # Pass --json for machine-readable output (task_id + docs_path).
   myagents thought list
   myagents plugin list
   myagents version
@@ -289,11 +291,94 @@ function printResult(group: string, action: string, result: Record<string, unkno
     return;
   }
 
+  // Task create-from-alignment — AI-facing flow: print task_id + docs path
+  // + next-step hint so the caller doesn't have to guess the id via
+  // `ls -lt ~/.myagents/tasks/`. JSON mode above returns the full payload.
+  if (group === 'task' && action === 'create-from-alignment') {
+    printTaskCreateResult(result.data as Record<string, unknown>);
+    return;
+  }
+
+  // Task run — print the engine/model the task will execute on, plus the
+  // task_id echo so the caller has observability on what was dispatched.
+  if (group === 'task' && (action === 'run' || action === 'rerun')) {
+    printTaskDispatchResult(action, result.data as Record<string, unknown>);
+    return;
+  }
+
   // Generic success output
   const symbol = '\u2713'; // ✓
   const hint = result.hint ? ` ${result.hint}` : '';
   const id = (result.data as Record<string, unknown>)?.id ?? '';
   console.log(`${symbol} ${action} ${id}${hint}`);
+}
+
+/**
+ * Format output for `task create-from-alignment` (and eventually `task create-direct`).
+ *
+ * AI scripts need at minimum the `task_id` of the newly minted task so they
+ * can call `task run <id>` next. Also surfaces `docs_path` because the AI
+ * often wants to tell the human "I wrote the task docs to X" and having
+ * that string in the CLI output saves a re-lookup.
+ *
+ * Plaintext shape deliberately mirrors what `--json` produces so readers
+ * can mentally switch between the two without re-learning fields:
+ *
+ *   ✓ Task created
+ *     task_id:   <uuid>
+ *     name:      <string>
+ *     docs_path: ~/.myagents/tasks/<uuid>/
+ *     next:      myagents task run <uuid>
+ */
+function printTaskCreateResult(data: Record<string, unknown>): void {
+  // Handler returns { task, dispatched?, runResult? } — `task` is the full
+  // Task record; `dispatched/runResult` appear when the caller passed --run.
+  const task = (data?.task as Record<string, unknown>) ?? data;
+  const id = String(task?.id ?? '');
+  const name = String(task?.name ?? '');
+  const home = process.env.HOME ?? '';
+  const absDocs = `${home}/.myagents/tasks/${id}/`;
+  const displayDocs = home && absDocs.startsWith(home)
+    ? `~${absDocs.slice(home.length)}`
+    : absDocs;
+
+  console.log('\u2713 Task created');
+  if (id) console.log(`  task_id:   ${id}`);
+  if (name) console.log(`  name:      ${name}`);
+  console.log(`  docs_path: ${displayDocs}`);
+  console.log(`  next:      myagents task run ${id}`);
+
+  // If --run was bundled with create, the backend also dispatched; echo
+  // the dispatch summary inline so the caller sees both in one output.
+  const runResult = data?.runResult as Record<string, unknown> | undefined;
+  if (runResult) {
+    console.log('');
+    printTaskDispatchResult('run', runResult);
+  }
+}
+
+/**
+ * Format output for `task run` / `task rerun`.
+ *
+ * Answers the "what will this actually run on?" question so the AI caller
+ * can relay engine/model back to the human in chat. `runtime` and `model`
+ * are read from the updated Task record — both can be null/undefined
+ * (meaning "use agent default" / "use provider default"); we explicitly
+ * label that case rather than hiding it.
+ */
+function printTaskDispatchResult(
+  action: string,
+  data: Record<string, unknown>,
+): void {
+  const task = (data?.task as Record<string, unknown>) ?? data;
+  const id = String(task?.id ?? '');
+  const runtime = (task?.runtime as string) || 'builtin';
+  const model = (task?.model as string) || '(agent default)';
+
+  console.log(`\u2713 Task ${action === 'rerun' ? 'redispatched' : 'dispatched'}`);
+  if (id) console.log(`  task_id:  ${id}`);
+  console.log(`  runtime:  ${runtime}`);
+  console.log(`  model:    ${model}`);
 }
 
 function printMcpList(servers: Array<Record<string, unknown>>): void {
@@ -728,6 +813,40 @@ async function main(): Promise<void> {
     const body = buildRequestBody(group, action, restArgs, flags);
     const route = buildRoute(group, action, restArgs);
     result = await callApi(route, body);
+
+    // --run bundled with `task create-from-alignment`: chain immediately
+    // into /task/run using the fresh task_id. Saves the caller one round
+    // trip and removes the "which id did I just get?" parsing step.
+    // Only fires on success and only when the response actually carries
+    // a task.id (older backends without the enriched payload fall
+    // through without the run — graceful degradation).
+    if (
+      group === 'task' &&
+      action === 'create-from-alignment' &&
+      flags.run &&
+      result.success &&
+      result.data
+    ) {
+      const data = result.data as Record<string, unknown>;
+      const task = (data.task as Record<string, unknown>) ?? data;
+      const newTaskId = task?.id as string | undefined;
+      if (newTaskId) {
+        const runResult = await callApi('task/run', { id: newTaskId });
+        if (!runResult.success) {
+          // Flag the failure in the top-level result so exit code reflects
+          // it, but keep the successful create payload visible so the user
+          // can manually `task run <id>` next. Stick the run error in a
+          // distinct field to avoid clobbering the create data.
+          result.success = false;
+          result.error = `created ${newTaskId} but run failed: ${String(runResult.error ?? 'unknown error')}`;
+        } else {
+          // Bundle the run result alongside create so printTaskCreateResult
+          // can show both sections (task_id + docs_path + runtime/model).
+          (result.data as Record<string, unknown>).runResult = runResult.data;
+        }
+      }
+    }
+
     printResult(group, action, result, jsonMode);
   }
 

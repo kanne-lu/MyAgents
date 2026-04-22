@@ -448,8 +448,14 @@ pub struct TaskCreateFromAlignmentInput {
     pub executor: TaskExecutor,
     #[serde(default)]
     pub description: Option<String>,
-    pub workspace_id: String,
-    pub workspace_path: String,
+    /// Optional from v0.1.69 — when missing, read from the alignment dir's
+    /// `metadata.json` (written at the 「AI 讨论」 launch point). Lets the
+    /// AI caller pass just `--name` and inherit the rest from session
+    /// metadata instead of re-typing 3 long UUIDs.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    #[serde(default)]
+    pub workspace_path: Option<String>,
     /// Source directory `~/.myagents/tasks/<alignmentSessionId>/` — its
     /// contents are moved (renamed) to `~/.myagents/tasks/<newTaskId>/`.
     pub alignment_session_id: String,
@@ -468,6 +474,20 @@ pub struct TaskCreateFromAlignmentInput {
     pub tags: Vec<String>,
     #[serde(default)]
     pub notification: Option<NotificationConfig>,
+}
+
+/// Sidecar metadata persisted to `~/.myagents/tasks/<alignmentSessionId>/metadata.json`
+/// at the moment the 「AI 讨论」 flow creates the alignment session. Lets
+/// `create_from_alignment` inherit the workspace + thought ids without the
+/// AI caller having to re-pass them through the CLI.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlignmentSessionMetadata {
+    pub workspace_id: String,
+    pub workspace_path: String,
+    #[serde(default)]
+    pub source_thought_id: Option<String>,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1139,7 +1159,6 @@ impl TaskStore {
         &self,
         input: TaskCreateFromAlignmentInput,
     ) -> Result<Task, String> {
-        let workspace_path = canonicalize_workspace_path(&input.workspace_path)?;
         validate_task_name(&input.name)?;
         validate_safe_id(&input.alignment_session_id, "alignmentSessionId")?;
 
@@ -1147,6 +1166,42 @@ impl TaskStore {
         if !src.exists() {
             return Err(format!("alignment dir not found: {}", src.display()));
         }
+
+        // Resolve workspace_id / workspace_path: explicit args win; if missing,
+        // try to read `<alignment_dir>/metadata.json` (written at 「AI 讨论」
+        // launch time). Falling back to the sidecar file means AI callers can
+        // just pass `--name` — no need to re-type UUIDs already baked in at
+        // session creation.
+        let meta_path = src.join("metadata.json");
+        let metadata: Option<AlignmentSessionMetadata> = if meta_path.exists() {
+            fs::read_to_string(&meta_path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<AlignmentSessionMetadata>(&s).ok())
+        } else {
+            None
+        };
+
+        let workspace_id = input
+            .workspace_id
+            .clone()
+            .or_else(|| metadata.as_ref().map(|m| m.workspace_id.clone()))
+            .ok_or_else(|| {
+                "workspaceId missing — pass --workspaceId or ensure alignment metadata.json exists"
+                    .to_string()
+            })?;
+        let raw_workspace_path = input
+            .workspace_path
+            .clone()
+            .or_else(|| metadata.as_ref().map(|m| m.workspace_path.clone()))
+            .ok_or_else(|| {
+                "workspacePath missing — pass --workspacePath or ensure alignment metadata.json exists"
+                    .to_string()
+            })?;
+        let workspace_path = canonicalize_workspace_path(&raw_workspace_path)?;
+        let source_thought_id = input
+            .source_thought_id
+            .clone()
+            .or_else(|| metadata.as_ref().and_then(|m| m.source_thought_id.clone()));
 
         let now = now_ms();
         let id = Uuid::new_v4().to_string();
@@ -1157,7 +1212,7 @@ impl TaskStore {
             name: input.name,
             executor: input.executor,
             description: input.description,
-            workspace_id: input.workspace_id,
+            workspace_id,
             workspace_path: workspace_path.clone(),
             execution_mode: input.execution_mode,
             cron_task_id: None,
@@ -1172,7 +1227,7 @@ impl TaskStore {
             preselected_session_id: None,
             runtime: input.runtime,
             runtime_config: input.runtime_config,
-            source_thought_id: input.source_thought_id,
+            source_thought_id,
             session_ids: Vec::new(),
             status: TaskStatus::Todo,
             tags: input.tags,
@@ -2529,6 +2584,43 @@ pub async fn cmd_task_append_session(
     session_id: String,
 ) -> Result<Task, String> {
     state.append_session(&id, &session_id).await
+}
+
+/// Persist alignment-session sidecar metadata to
+/// `~/.myagents/tasks/<alignmentSessionId>/metadata.json`.
+///
+/// Called at the moment the frontend spawns an 「AI 讨论」 session so that
+/// `create_from_alignment` can later inherit workspace_id / workspace_path /
+/// source_thought_id from the file instead of demanding the AI caller
+/// re-pass them through the CLI. See the read side in
+/// `TaskStore::create_from_alignment`.
+///
+/// Creates the alignment dir on demand — the frontend reaches here BEFORE
+/// the AI has written any docs into that dir, so we must be the one that
+/// ensures its existence. `validate_safe_id` guards against `..` / slashes
+/// in the id per the rest of this module's path-safety pattern.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn cmd_task_write_alignment_metadata(
+    alignmentSessionId: String,
+    workspaceId: String,
+    workspacePath: String,
+    sourceThoughtId: Option<String>,
+) -> Result<(), String> {
+    validate_safe_id(&alignmentSessionId, "alignmentSessionId")?;
+    let dir = task_docs_dir(&alignmentSessionId)?;
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir alignment dir: {}", e))?;
+    let meta = AlignmentSessionMetadata {
+        workspace_id: workspaceId,
+        workspace_path: workspacePath,
+        source_thought_id: sourceThoughtId,
+        created_at: now_ms(),
+    };
+    let json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| format!("serialize alignment metadata: {}", e))?;
+    fs::write(dir.join("metadata.json"), json)
+        .map_err(|e| format!("write alignment metadata: {}", e))?;
+    Ok(())
 }
 
 #[tauri::command]
