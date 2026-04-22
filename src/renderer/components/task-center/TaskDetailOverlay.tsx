@@ -474,6 +474,12 @@ export function TaskDetailOverlay({
                   ~14-row <Meta> dl + conditional <RunStatsSection>. */}
               <SummaryCard task={task} stats={runStats} />
 
+              {/* 任务执行 — promoted to the second block (right after meta)
+                  per v0.1.69 UX feedback. Users opening a task detail are
+                  most often trying to "see what happened in the last run"
+                  before they ever care about task.md / verify.md contents. */}
+              <TaskSessionsList task={task} onBeforeOpen={onClose} />
+
               {/* task.md / verify.md / progress.md — read-only previews.
                   The overlay's top-level "编辑" button is the single
                   edit entry; per-block edit affordances were removed
@@ -509,10 +515,6 @@ export function TaskDetailOverlay({
               <hr className="my-4 border-[var(--line-subtle)]" />
 
               <StatusHistoryList task={task} defaultCollapsed />
-
-              <hr className="my-4 border-[var(--line-subtle)]" />
-
-              <TaskSessionsList task={task} onBeforeOpen={onClose} />
 
               <hr className="my-4 border-[var(--line-subtle)]" />
 

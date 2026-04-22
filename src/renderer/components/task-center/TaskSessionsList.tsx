@@ -118,11 +118,13 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
 
   return (
     <div>
-      <div className="mb-2 flex items-center gap-2">
-        <h3 className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-          任务执行
-        </h3>
-        <span className="text-[11px] tabular-nums text-[var(--ink-subtle)]">
+      {/* Title matches the `text-[14px] font-semibold text-[var(--ink)]`
+          style used by TaskDocBlock / StatusHistoryList headers, so the
+          overlay reads as a series of same-weight sections rather than
+          an eyebrow label hidden between larger doc blocks. */}
+      <div className="mb-2 flex items-baseline gap-2">
+        <h3 className="text-[14px] font-semibold text-[var(--ink)]">任务执行</h3>
+        <span className="text-[12px] tabular-nums text-[var(--ink-muted)]">
           {task.sessionIds.length}
         </span>
       </div>

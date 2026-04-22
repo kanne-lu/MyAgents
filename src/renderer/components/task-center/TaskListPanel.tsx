@@ -585,7 +585,9 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
             还没有任务。在左栏记下想法后点「派发」即可创建任务。
           </div>
         ) : (
-          (['active', 'pending', 'finished'] as Bucket[]).map((b) => {
+          // Order: 进行中 → 已完成 → 规划中. Current work and recent results
+          // lead; long-tail scheduling sits at the bottom. (v0.1.69 polish)
+          (['active', 'finished', 'pending'] as Bucket[]).map((b) => {
             const rows = buckets[b];
             if (rows.length === 0) return null;
             return view === 'card' ? (
