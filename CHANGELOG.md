@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.69] - 2026-04-22
+## [0.1.69] - 2026-04-23
 
 ### Added
 - **任务中心（Task Center）**：全新的任务管理 Tab，左栏是「想法」速记流（`#tag` 自动识别 + 按月归档），右栏是任务列表（进行中 / 规划中 / 已完成三段式 + 卡片 / 列表双视图）。点击任务卡唤起详情 Overlay，包含：
