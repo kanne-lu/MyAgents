@@ -454,14 +454,22 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             }
         }
 
-        // Build running cron task session set
-        // Use internalSessionId (actual SDK session) when available, falling back to sessionId
-        const cronSessionIds = new Set(
-            cronTasks.filter(t => t.status === 'running').map(t => t.internalSessionId || t.sessionId)
-        );
-
-        // Build background session set
-        const bgSessionIds = new Set(backgroundSessionIds);
+        // Build running cron task session sets.
+        // Use internalSessionId (actual SDK session) when available, falling back to sessionId.
+        // One-shot ('at' kind) tasks are routed into the background set instead of the cron set —
+        // the unified-primitive architecture uses CronTask for all executions, but a one-off
+        // execution is semantically a background task, not a scheduled task.
+        const cronSessionIds = new Set<string>();
+        const bgSessionIds = new Set<string>(backgroundSessionIds);
+        for (const t of cronTasks) {
+            if (t.status !== 'running') continue;
+            const sid = t.internalSessionId || t.sessionId;
+            if (t.schedule?.kind === 'at') {
+                bgSessionIds.add(sid);
+            } else {
+                cronSessionIds.add(sid);
+            }
+        }
 
         // Assign tags to each session
         for (const session of sessions) {

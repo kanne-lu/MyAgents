@@ -97,6 +97,12 @@ export default function CronTaskOverlay({
     return `已执行 ${executionCount} 次`;
   };
 
+  const titleText = schedule?.kind === 'at'
+    ? '后台执行中'
+    : schedule?.kind === 'loop'
+      ? '循环执行中'
+      : '定时运行中';
+
   return (
     <div className="absolute inset-0 z-10 flex items-center justify-between gap-4 rounded-2xl border border-[var(--heartbeat-border)] bg-[var(--paper-elevated)]/95 px-5 py-4 backdrop-blur-sm">
       {/* Left: Status Info */}
@@ -110,7 +116,7 @@ export default function CronTaskOverlay({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-[var(--ink)]">
-              定时运行中
+              {titleText}
             </span>
             {timeDisplay && (
               <span className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 font-mono text-xs ${
