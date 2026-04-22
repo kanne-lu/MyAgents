@@ -1,241 +1,163 @@
 ---
 name: task-alignment
-description: "Deep alignment conversation that turns a user's rough intent into a structured task definition with clear goals, verification criteria, and execution plan. Produces four documents in `~/.myagents/tasks/<id>/` that serve as the contract between human and AI for autonomous task execution. Use when the user describes a non-trivial task they want done — especially multi-step work, refactoring, migrations, feature builds, or any task where 'what does done look like?' isn't immediately obvious. Trigger phrases include 'help me plan this', 'let's align on this task', 'I want to do X', '/task-alignment', or when the user describes a complex goal and you sense ambiguity about scope, approach, or acceptance criteria. Also use proactively when a user jumps straight into a big task without defining what success looks like — pause and align first."
+description: "Alignment conversation starting from a 想法/idea. Co-decides with the user whether the idea should be acted on directly in the current session, or fixed into a formal Task for independent dispatch (one-off or recurring). Handles lightweight 'do it now while we talk', heavyweight 'define precisely, run later or on a schedule', and 'just help me think about this' — all on the same skill. Use when the user arrives via the 想法 panel's 'AI 讨论' button (parameter dictionary in the first message), or says 'let's think this through', 'help me plan this', 'I want to explore X', 'I have an idea', '/task-alignment'. Also use proactively when a user jumps into a complex task without defining scope or success criteria — pause, align, and help them pick the right vessel (this session vs. a task)."
 author: MyAgents
 ---
 
 # Task Alignment
 
-You are facilitating an alignment conversation. Your job is to deeply understand what the user wants to accomplish, and through dialogue, co-create a shared understanding of the goal and how to verify success.
+## Mode statement
 
-This is NOT a form to fill out. It's a conversation. You ask, you listen, you propose, the user confirms or adjusts. The documents you produce at the end are a crystallization of that conversation — not a template with blanks filled in.
+You are facilitating an alignment conversation that starts from a user's rough idea (想法). This conversation has one fundamental decision at its center:
 
-## Why this matters
+**Does this idea want to stay in this conversation, or does it want to become a Task?**
 
-When a task is handed off to autonomous execution (by you or another agent), the quality of that execution depends entirely on how well the goal and verification criteria were defined upfront. A 5-minute alignment conversation can save 30 minutes of wasted execution going in the wrong direction. The documents you produce become the contract: task.md is the north star during execution, verify.md is the acceptance test at the end.
+- **Stay here** — we talk it through, and along the way you may act on it directly (make a change, write something, run a command). Or we just discuss and nothing gets done — discussion itself is the outcome. Both are fine.
+- **Become a Task** — the work wants to be dispatched independently of this conversation: run later, run on a schedule, tracked in the 任务 panel, verified with its own acceptance gate. When we land here you write four documents and mint a task via CLI.
 
-## The two artifacts you're extracting
+**Begin every alignment by telling the user what this mode is.** Two sentences, your own words. Something like:
 
-Everything in this conversation serves one purpose: producing two distinct artifacts from a single dialogue.
+> 「我会和你把这个想法聊清楚 — 如果聊着聊着你想当场做什么，我就帮你做；如果它值得独立成一个任务（比如要周期执行、或者你想放手让 AI 跑），我会提议固化成 task。先讲讲你这个想法是怎么冒出来的？」
 
-**Goal** — the full understanding of what needs to happen. This guides every decision during execution. It answers: "What are we trying to achieve, why, within what constraints, and what's explicitly out of scope?"
+Exact wording is yours; the point is that the user arrives knowing the shape of what's coming, so they don't wonder whether clicking a button has already committed them to a heavy task-creation flow. After that opener, ask your first real question.
 
-**Verification** — the acceptance criteria. This is only used at the end to check if the work is done correctly. It answers: "What specific checks — automated and manual — confirm that the goal was met?"
+## Why alignment matters
 
-These two come from the same conversation but serve different purposes at different times. Goal is referenced throughout. Verification is executed at the finish line.
+Alignment is the contract between human and AI. Whether the idea becomes a 5-minute change right here or a 50-minute task in another session, execution quality depends on how well you pinned down two things:
 
-## Core principle: Ground in reality, don't guess
+**Goal** — what we're trying to achieve, within what constraints, with what explicitly out of scope. Consulted throughout execution.
 
-Throughout the alignment conversation, actively use your tools to confirm facts before making assumptions or asking the user things you could verify yourself:
+**Verification** — how we know we're done: automated checks, self-review items, integration scenarios. Executed at the finish line.
 
-- **Read the codebase**: Before asking "what framework are you using?" — check package.json. Before discussing how to refactor a module — read it first. Your questions should be informed by what you've already seen, not shots in the dark.
-- **Search the web**: When the discussion involves third-party APIs, libraries, migration paths, or best practices — search for current documentation and real-world approaches. If the user says "migrate to Hono," look up Hono's API to understand what the migration actually entails before discussing it.
-- **Verify assumptions**: If the user says "our tests cover this," run the tests or at least look at the test files. If they say "the API is stable," check recent git history for changes. Trust but verify.
+These come from the same conversation but serve different purposes. In the stay-here path, both live inline in the conversation. In the mint-task path, both become files.
 
-This matters because alignment quality depends on shared understanding of reality. An alignment conversation built on assumptions produces documents that will mislead the executing agent. Every fact you confirm during alignment is one fewer surprise during execution.
+## This is a conversation, not a form
 
-## How to run the conversation
+You ask, you listen, you propose, the user confirms or adjusts. The documents (when produced) are a crystallization of dialogue, not a template with blanks filled in. The answers you need don't come from a questionnaire — they come from listening to what the user actually cares about.
 
-### Step 1: Listen and assess complexity
+## Ground in reality, don't guess
 
-Read the user's initial message carefully. Before responding, judge the task complexity:
+Use your tools before asking things you can find out yourself:
 
-**Quick alignment** — when the goal is concrete, scope is small, and verification is obvious (e.g., "fix the N+1 query in getUserList"). Compress the whole process into one response: restate understanding, propose verification, ask for confirmation, generate documents.
+- **Read the codebase.** Before asking "what framework are you using?" — check `package.json`. Before discussing how to refactor a module — read it. Questions informed by what you've seen beat shots in the dark.
+- **Search the web.** For third-party APIs, libraries, migration paths — look up current docs first. "Migrating to Hono" means something specific; go see what it entails, then come back with an informed question.
+- **Verify claims.** If they say "the API is stable", check recent git history. If they say "our tests cover this", at least look at the test file. Trust, but verify.
 
-**Deep alignment** — when there's ambiguity, multiple possible approaches, broad scope, or subjective success criteria. Take as many turns as needed. The conversation ends when both you and the user are confident that the goal is clear and the verification criteria are complete — not after a fixed number of turns. If the third turn surfaces a new dimension you hadn't considered, keep going. If everything clicks in two turns, stop there.
+Alignment quality tracks shared understanding of reality. Every fact you confirm now is one fewer surprise during execution.
 
-### Step 2: Understand the landscape (deep alignment)
+## The core decision: session or task?
 
-Don't ask a laundry list of questions. Have a natural conversation. But make sure you cover these dimensions — weave them in organically:
+Somewhere in the conversation — sometimes in the first turn, sometimes after several — you and the user need to decide the path. The axis is not "big vs small work" or "hard vs easy". It is:
 
-**Context & motivation** — Why is this being done? What problem does it solve? What triggered it? Understanding the "why" helps you make better judgment calls during execution when facing decisions the goal doesn't explicitly cover.
+**Does this work want to be dispatched independently of this conversation?**
 
-**Scope & boundaries** — What's in, what's out? What files/modules/systems are involved? What must NOT be touched? Are there adjacent areas that might be affected?
+Signals pulling toward **task**:
 
-**Technical constraints** — Are there specific technologies, patterns, or approaches required? Are there things that won't work due to existing architecture?
+- User wants fire-and-forget ("你去跑，我先忙别的")
+- Runs on a schedule (cron / heartbeat / 周期执行)
+- Has a clear independent verification gate (specific checks, pass/fail)
+- Should be tracked in the 任务 panel as a persistent entity
+- Benefits from its own isolated session (long-running, might crash, state should be recoverable)
+- Heavy / multi-phase refactor where the agent should regroup and self-review across phases
 
-**Existing state** — What does the codebase/system look like right now? Actively read relevant files, check dependencies, look at test structure. Your questions should reflect what you've already seen in the code — "I see you're using express-session with Redis store, so the migration will also need to handle the Redis cleanup" is far more useful than "how is your current session stored?"
+Signals pulling toward **session**:
 
-**Edge cases & risks** — What could go wrong? What has gone wrong before in similar work? What would the user be most upset about if it broke? If the task involves third-party tools or APIs, search the web for known issues, migration guides, or best practices.
+- User wants to watch and steer in real time
+- Lots of mid-flight judgment calls anticipated
+- Small/contained enough that there's no overhead-vs-value case for formalizing
+- Pure exploration with no action expected — you're just helping them think
 
-**User emphasis** — Pay attention to what the user repeats, what they say "especially" or "make sure" about. These are the things they care most about — and the things most likely to be checked in verification.
+"Big" work can live in session when the user wants to be in the driver's seat. "Small" work can want to be a task when the user wants to hand it off. When in doubt, ask directly: 「你希望现在我们一起做，还是我固化成任务让你晚点派发？」
 
-### Step 3: Propose verification criteria
+## Quick vs deep alignment
 
-This is the most important part of the conversation. Don't just ask "how should we verify this?" — propose specific criteria and let the user react.
+Read the first message carefully. Judge complexity before responding:
 
-For software engineering tasks, think in layers:
+- **Quick alignment** — concrete goal, small scope, obvious verification ("fix the N+1 query in getUserList"). Compress: restate understanding, propose verification, confirm, move. One response is fine.
+- **Deep alignment** — ambiguity, multiple possible approaches, broad scope, subjective success criteria. Take as many turns as needed. End when the goal is clear and verification feels complete — not after a fixed turn count. If turn 3 surfaces a dimension you hadn't considered, keep going. If it clicks in turn 2, stop.
 
-1. **Automated checks** — commands that return pass/fail
+Match the user's energy. If they're terse and specific, be terse back. Goal is alignment, not process theater.
+
+## Six dimensions to weave in
+
+Don't ask a laundry list. Have a natural conversation. But make sure you cover these — organically, as the dialogue flows:
+
+**Context & motivation** — why this, why now, what triggered it. The "why" gives you judgment power when execution hits cases the goal doesn't explicitly cover.
+
+**Scope & boundaries** — what's in, what's out, what files/modules are touched, what must NOT be touched, what adjacent areas might be affected.
+
+**Technical constraints** — required patterns, architectural limits, things that won't work due to existing structure.
+
+**Existing state** — read relevant code, check dependencies, look at tests. Your questions should reflect what you've observed. "I see you're using express-session with Redis store, so the migration also needs to handle Redis cleanup" lands better than "how is your session stored?"
+
+**Edge cases & risks** — what could go wrong, what has broken before in similar work, what would upset the user most if it broke. For third-party tools, web-search known issues before asking.
+
+**User emphasis** — what they repeat, what they say "especially" or "make sure" about. These are the things they care most about — and the things most likely to be checked in verification.
+
+## Propose verification, don't ask for it
+
+This is the most important move in the conversation. Don't ask "how should we verify?" — **propose specific criteria and let the user react**.
+
+Think in three layers:
+
+1. **Automated checks** — commands that return pass/fail.
    - Type checking (`npm run typecheck`, `cargo check`)
    - Tests (`npm test`, specific test files)
-   - Lint (`npm run lint`)
-   - Custom scripts (grep for patterns that shouldn't exist, check file states)
+   - Lint, grep for patterns that shouldn't exist
 
-2. **Agent self-review** — things requiring judgment, not just a command
-   - "No hardcoded secrets in the codebase"
-   - "All deprecated code has @deprecated annotations"
-   - "The new API is consistent with existing API patterns"
+2. **Agent self-review** — needs judgment, not just a command.
+   - "No hardcoded secrets in the diff"
+   - "New API is consistent with existing patterns"
+   - "Deprecated code has `@deprecated` annotations"
 
-3. **Integration verification** — end-to-end checks
-   - "Simulate the full user flow: login → get token → access protected endpoint → refresh → re-access"
+3. **Integration verification** — end-to-end scenarios.
+   - "Simulate login → get token → access protected endpoint → refresh → re-access"
    - "Build succeeds and the app starts without errors"
 
-For non-engineering tasks (writing, research, design), verification might look different:
-- "Document covers all sections listed in the outline"
-- "Every claim has a source citation"
-- "Design mockups cover mobile, tablet, and desktop breakpoints"
+For non-engineering tasks (writing, research, design): "all sections from the outline covered", "every claim has a citation", "mobile/tablet/desktop breakpoints all designed".
 
-Present your proposed criteria clearly and ask: "Does this cover what 'done' means to you? Anything missing or unnecessary?"
+Present clearly: 「这些覆盖了你心里的 'done' 吗？有缺的或多余的？」
 
-### Step 4: Confirm and generate
+## Two conversational corrections
 
-Once you and the user are aligned, summarize what you've agreed on — the goal in a few sentences, the verification criteria as a list. Get explicit confirmation before generating documents.
+Sometimes alignment hits one of these. Neither is a "result" — both are dialogue pivots that keep the conversation honest.
 
-Then generate all four documents and present them. Tell the user:
-- The documents are saved in `~/.myagents/tasks/<id>/` — they're the contract for this task
-- `task.md` is what guides execution; `verify.md` is what checks the result
-- They can be used with `/task-implement` to carry out the work
-- If anything needs adjustment, just say so
+**The idea is actually several ideas.** One thought bundles multiple independent things. Don't force them into a single alignment. Tell the user: 「这其实是 N 件事 — 我们先对焦 A？其余的你回想法面板建新卡再聊。」Pick the sharpest slice, continue alignment on it, stop there. Keeping each task-entity focused avoids the "mega-task that never finishes" trap.
 
-## Document specifications
+**We can't decide without upstream information.** The user can't commit to scope before, e.g., running the profiler to see where the bottleneck actually is. Don't force a premature decision. Name the upstream step: 「目前缺 X，建议先做 Y 再来对齐。」If you've accumulated useful reasoning, offer to save it as a breadcrumb — write just `alignment.md` into the directory without minting a task; a later alignment can pick it up.
 
-All four documents live under `~/.myagents/tasks/<alignmentSessionId>/` — the `alignmentSessionId` comes from the parameter dictionary in the user's first message. Use the `Write` tool with absolute paths (expand `~` to `$HOME`). These docs are AI-owned end-to-end; program code never writes to them. The `create-from-alignment` CLI promotes that directory to `~/.myagents/tasks/<newTaskId>/` when you invoke it.
+Both corrections are legitimate endings. The user goes off, does something, the conversation pauses — that's fine.
 
-If the target directory already contains docs from a previous run, ask the user whether to archive the old ones (move to `{target}/archive/{timestamp}/`) or overwrite.
+## Converging: stay in session
 
-### alignment.md
+When the conversation points to "do it here, or just keep talking":
 
-The decision record. Captures the reasoning behind the goal and verification — the "why" that isn't in the other documents. When an agent encounters ambiguity during execution, this is where it looks for the user's true intent.
+- **No files written.** Alignment lives in conversation history.
 
-Structure:
-```markdown
-# Alignment Record
+- **Before you act, state the mini contract inline.** One short message before making any change:
 
-## Context
-Why this task exists. What problem it solves. What triggered it.
+  ```
+  目标：<一句话>
+  完成标准：
+  - <可判定点 1>
+  - <可判定点 2>
+  ```
 
-## Key Decisions
-Numbered list of decisions made during alignment, with reasoning.
-(e.g., "1. JWT over session tokens — because mobile clients need stateless auth")
+  This is not ceremony — it is what keeps you on-axis when execution spans many tool calls. It also gives the user a 1-second reject window if you got the target wrong.
 
-## Scope Boundaries
-What's explicitly in scope and what's explicitly excluded, with reasons.
+- **If the user just wants to think aloud, don't force a contract.** Discussion has value on its own — you're helping them see the problem more clearly. Nothing needs to "happen" afterward for the conversation to be worthwhile.
 
-## User Emphasis
-Things the user specifically called out as important or sensitive.
-These are high-priority items that execution should pay extra attention to.
+- **"Not worth doing" is a legitimate ending.** If the discussion reveals the idea isn't valuable enough to act on, say so and stop. Rejection with reasoning beats silent drift; the reasoning stays in conversation history, and the originating thought remains in the Task Center left column, unconverted. A thought that surfaces and gets rejected is still valuable.
 
-## Open Questions
-Anything that was deferred or left ambiguous. Execution should flag these
-if they become blocking rather than making assumptions.
-```
+- **Pivot is always available.** At any point either of you can decide this should become a task instead. See **Mid-session upgrade** below.
 
-### task.md
+## Converging: mint as task
 
-The north star for execution. An agent reading this document should understand exactly what to do without needing to read the alignment conversation.
+When the decision lands on "this wants independent dispatch":
 
-Structure:
-```markdown
-# Task: [concise title]
+### Entry-point check
 
-## Goal
-1-3 paragraphs describing the desired end state. Written declaratively
-("The auth module uses JWT for all client-facing endpoints") not imperatively
-("Change the auth module to use JWT").
-
-## Scope
-- **Modify**: files/modules that will be changed
-- **Read-only**: files that inform the work but shouldn't be modified
-- **Do not touch**: files/areas explicitly excluded
-
-## Technical Decisions
-Key technical choices made during alignment (architecture, patterns, libraries).
-
-## Constraints
-Non-negotiable requirements (backward compatibility, performance targets, etc.)
-
-## Non-goals
-Things that might seem related but are explicitly out of scope for this task.
-
-## Boundaries
-- Cost limit: $X (or "no limit")
-- Time limit: Xm (or "no limit")
-- Retry limit: X verification rounds (default: 3)
-- File scope enforcement: [list of allowed paths, if restricted]
-```
-
-### verify.md
-
-The acceptance test. Written as instructions that an agent (or the user) can follow to determine if the task was completed correctly. This is a reusable "skill" — similar future tasks can reference or adapt it.
-
-Structure:
-```markdown
-# Verification: [task title]
-
-## Automated Checks
-- [ ] `command here` — what it verifies
-- [ ] `another command` — what it verifies
-
-## Agent Self-Review
-- [ ] [Description of what to check and what "pass" looks like]
-- [ ] [Another review item]
-
-## Integration Verification
-- [ ] [End-to-end scenario description with expected outcome]
-
-## Reusability
-Applicable to: [describe what types of future tasks could reuse this verification]
-Adjust: [what would need to change for reuse]
-```
-
-### progress.md
-
-Starts as the execution plan. During implementation, this becomes the living status document.
-
-Structure:
-```markdown
-# Progress: [task title]
-
-## Status: Planned
-
-## Execution Plan
-Numbered list of steps derived from the goal. This is the agent's best
-estimate of how to accomplish the task — it may change during execution.
-
-1. [ ] Step description
-2. [ ] Step description
-3. [ ] ...
-N. [ ] Execute verification
-
-## Resource Estimates
-- Estimated time: ~Xm
-- Estimated cost: ~$X
-- Engines: [which AI backends are likely needed]
-
-## Change Log
-(Empty at creation. Updated during execution with key events, decisions, and re-alignments.)
-```
-
-## Adaptive behavior
-
-**If the user provides a PRD or spec document**: Read it thoroughly, then use it as the starting point for alignment. Don't re-ask things that are already well-defined in the spec — focus your questions on gaps, ambiguities, and verification criteria that the spec doesn't cover.
-
-**If `~/.myagents/tasks/<alignmentSessionId>/` already contains docs**: Ask whether this is a continuation/refinement of the previous alignment or a new one. If continuing, read the existing documents with the `Read` tool and use them as context for the conversation before rewriting.
-
-**If the user seems impatient**: Compress. Don't force a 5-turn conversation on someone who knows exactly what they want. Match their energy — if they're being terse and specific, be terse and specific back. The goal is alignment, not process theater.
-
-**If you're uncertain about something**: Apply the "ground in reality" principle — read code, search the web, run a quick command. The user's time is precious — don't ask questions you can answer yourself with your tools.
-
-## What success looks like
-
-A successful alignment produces documents that enable an agent to execute the task autonomously with minimal back-and-forth. The test: if you handed task.md and verify.md to a competent agent who wasn't part of this conversation, could they do the work and verify it correctly? If yes, the alignment was good.
-
-## Task Center integration (v0.1.69+)
-
-### Mode detection
-
-When the user's first message contains a parameter dictionary shaped like:
+The user's first message contains a parameter dictionary like:
 
 ```
 本次上下文参数：
@@ -245,49 +167,160 @@ When the user's first message contains a parameter dictionary shaped like:
 - sourceThoughtId: <uuid>
 ```
 
-…the user arrived via the "AI 讨论" button on a thought card. The four parameters are everything you need to sink the alignment into the Task Center; they're used twice (directory path for docs + CLI args for task creation).
+If present → the user arrived via the 想法 panel's "AI 讨论" button. These four values are everything you need to sink the alignment into the Task Center. **Don't re-ask for them**; they're already yours.
 
-If no such dictionary is present, the user invoked `/task-alignment` outside the Task Center flow. Explain briefly that alignment docs need to live in the Task Center so they can be dispatched and tracked, and ask them to start from the 任务 panel's 新想法 entry (which launches AI 讨论 with the full parameter dictionary). Don't write any files; there's no session to anchor them to.
+If absent → the user invoked `/task-alignment` directly (no 想法 anchor). Explain briefly that task docs need to live in the Task Center to be dispatched and tracked, and ask them to start from the 任务 panel's 新想法 entry. Don't write any files — there's no session to anchor them to.
+
+### Confirm before generating
+
+Summarize what you've agreed on — goal in a few sentences, verification as a checklist. Get explicit confirmation: 「这样理解对吗？对的话我现在生成四份文档。」After yes, generate all four.
 
 ### Where to write
 
 All four documents go to `~/.myagents/tasks/<alignmentSessionId>/`:
 
-- Use the `Write` tool with an **absolute** path.
-- Expand `~` to the real home dir — in bash use `$HOME`.
-- This directory lives outside the workspace: task docs are user-scoped application data, not project content.
+- Use the `Write` tool with an **absolute** path (expand `~` to `$HOME` in bash).
+- This directory lives outside the workspace — task docs are user-scoped application data, not project content.
 - The docs are AI-owned end-to-end; program code never writes to them.
-- The `create-from-alignment` CLI (below) promotes this exact directory by renaming it to `~/.myagents/tasks/<newTaskId>/`.
+- The `create-from-alignment` CLI below promotes this directory by renaming it to `~/.myagents/tasks/<newTaskId>/`.
+- If the directory already contains docs from a prior run, ask: archive (move to `archive/<timestamp>/`) or overwrite?
 
-### How to dialog
+### Four documents
 
-**Before writing any file**, actually have the alignment conversation — understand goals, scope, verification criteria, emphasis points. The four docs are sinks, not starting points. Ask the user questions; don't race to commit a plan in the first turn.
+**alignment.md** — the decision record. Captures the "why" that isn't in the other documents. When an executing agent encounters ambiguity, this is where it looks for the user's true intent.
 
-### Four possible outcomes
+```markdown
+# Alignment Record
 
-A good alignment ends in one of these four places. Pick the right one based on where the conversation actually lands; don't force the "create task" outcome if the discussion shows another path.
+## Context
+Why this task exists. What triggered it. What problem it solves.
 
-**① Worth doing — create the task.** Scope is clear and the user agrees it's worth the investment. After writing all four docs, invoke:
+## Key Decisions
+Numbered decisions from the conversation, with reasoning.
+(e.g., "1. JWT over session tokens — mobile clients need stateless auth")
+
+## Scope Boundaries
+Explicitly in scope, explicitly excluded, with reasons.
+
+## User Emphasis
+Things the user specifically called out as important or sensitive.
+These are high-priority items execution should pay extra attention to.
+
+## Open Questions
+Anything deferred or left ambiguous. Execution should flag these
+rather than making assumptions if they become blocking.
+```
+
+**task.md** — the north star for execution. An agent reading this document should understand exactly what to do without needing to read the alignment conversation.
+
+```markdown
+# Task: [concise title]
+
+## Goal
+1-3 paragraphs, declarative ("The auth module uses JWT for all client-facing
+endpoints") not imperative ("Change the auth module to use JWT").
+
+## Scope
+- **Modify**: files/modules that will change
+- **Read-only**: files that inform the work but aren't modified
+- **Do not touch**: files/areas explicitly excluded
+
+## Technical Decisions
+Key choices made during alignment (architecture, patterns, libraries).
+
+## Constraints
+Non-negotiables (backward compatibility, performance targets, etc.)
+
+## Non-goals
+Related-seeming things explicitly out of scope.
+
+## Boundaries
+- Cost limit: $X (or "no limit")
+- Time limit: Xm (or "no limit")
+- Retry limit: X verification rounds (default: 3)
+- File scope enforcement: [list of allowed paths, if restricted]
+```
+
+**verify.md** — the acceptance test. Written as instructions an agent (or the user) can follow to determine if the task was completed correctly. Reusable as a mini-skill for similar future tasks.
+
+```markdown
+# Verification: [task title]
+
+## Automated Checks
+- [ ] `command here` — what it verifies
+
+## Agent Self-Review
+- [ ] [Description of what to check and what "pass" looks like]
+
+## Integration Verification
+- [ ] [End-to-end scenario description with expected outcome]
+
+## Reusability
+Applicable to: [what types of future tasks could reuse this]
+Adjust: [what would need to change for reuse]
+```
+
+**progress.md** — starts as the execution plan; during implementation it becomes the living status document.
+
+```markdown
+# Progress: [task title]
+
+## Status: Planned
+
+## Execution Plan
+Numbered steps derived from the goal. Agent's best estimate of how to
+accomplish the task — may change during execution.
+
+1. [ ] Step description
+2. [ ] Step description
+N. [ ] Execute verification
+
+## Resource Estimates
+- Estimated time: ~Xm
+- Estimated cost: ~$X
+- Engines: [which AI backends are likely needed]
+
+## Change Log
+(Empty at creation. Updated during execution with key events, decisions,
+re-alignments.)
+```
+
+### Mint the task
+
+After writing all four, run:
 
 ```bash
 myagents task create-from-alignment <alignmentSessionId> --name "<短任务名>"
 ```
 
-Only two arguments are needed: the `alignmentSessionId` (first positional, from the prompt's parameter dictionary) and `--name` (pick one yourself based on the discussion). The CLI auto-inherits `workspaceId` / `workspacePath` / `sourceThoughtId` from the alignment session's metadata.json sidecar — **do not re-pass them from the prompt**; the UUIDs in the prompt are informational only and retyping them is a common source of typos that silently bind the task to the wrong workspace. The CLI renames the docs directory to `~/.myagents/tasks/<newTaskId>/`, backfills the source thought's `convertedTaskIds`, and registers the task with `dispatchOrigin=ai-aligned`. Then tell the user: 「已创建任务『XXX』，可在「任务」面板查看。需要现在派发执行吗？」If yes → `myagents task run <newTaskId>` (or pass `--run` on the create call above to chain create+dispatch atomically).
+Only two arguments: `alignmentSessionId` (from the prompt's parameter dictionary) and `--name` (you pick one based on the discussion). The CLI auto-inherits `workspaceId` / `workspacePath` / `sourceThoughtId` from the alignment session's `metadata.json` sidecar — **do not re-pass them from the prompt**. The UUIDs in the prompt are informational only; retyping them is a common source of typos that silently bind the task to the wrong workspace.
 
-**② Should be split.** The "one thought" actually bundles multiple independent tasks. Don't force them into a single alignment.md. Explain the split to the user, then:
+The CLI renames the docs directory to `~/.myagents/tasks/<newTaskId>/`, backfills the source thought's `convertedTaskIds`, and registers the task with `dispatchOrigin=ai-aligned`.
 
-- Pick the sharpest slice they want to pursue first and alignment that one via the CLI call above.
-- For the other slices, do NOT create tasks in this conversation. Tell the user they can re-trigger `/task-alignment` on the remaining ideas separately by creating new thought cards and clicking "AI 讨论" on each. This keeps each task-entity focused and avoids the "mega-task that never finishes" trap.
+Then ask: 「已创建任务『XXX』，可在任务面板查看。需要现在派发执行吗？」If yes → `myagents task run <newTaskId>` (or pass `--run` on the create call to chain create+dispatch atomically).
 
-**③ Needs upstream work first.** The idea is real but the user can't commit to scope without more information — e.g. "first I need to run the profiler to see where the bottleneck actually is" before we can plan the fix. Don't create a task prematurely. Instead:
+## Mid-session upgrade
 
-- Capture the reasoning and the upstream step in alignment.md anyway (useful context even if no task is minted yet).
-- Tell the user: 「目前讨论还缺 X，我建议先做 Y 再来对齐。需要我留下这些文档以便下次再对齐时复用吗?」
-- Leave the docs in `~/.myagents/tasks/<alignmentSessionId>/` without calling the CLI. The directory persists; a later `/task-alignment` can reference it.
+Sometimes you're in the stay-in-session path and scope grows: the user adds new requirements, you discover far more files need touching than expected, or it's clear the work will outrun the user's attention budget. When that happens, offer the upgrade:
 
-**④ Not worth doing.** The discussion revealed this isn't valuable enough right now. Don't call the CLI — leave the docs in place as a record of the "why not", explain briefly, and stop. The originating thought stays on the Task Center left column, unconverted. This is a feature, not a failure; a thought that surfaces and gets rejected is still worth capturing the rejection for.
+> 「这个已经比一开始大了（<具体依据>），要不要我把目前的对齐固化成任务，换独立 session 执行？这样你可以离开不用盯着。」
 
-### What lives where (skill vs prompt contract)
+If yes, switch to the mint path — write the four docs (alignment.md captures the in-flight reasoning from the conversation so far, progress.md's Change Log can reference what's already been done), call `create-from-alignment`. In-session work already completed is preserved in conversation history and doesn't need to be redone.
 
-The prompt deliberately stays lean — it only supplies the parameter dictionary and the raw thought text. Everything procedural (doc layout, Write tool conventions, CLI syntax, outcome handling) lives here in the skill. If you feel like the prompt "didn't tell you how to do X", check this section first — the answer is almost always already encoded as a skill rule.
+The upgrade has friction but isn't prohibitive. The right moment is when the cost of the user continuing to hold attention exceeds the cost of writing 4 docs and spawning a new session.
+
+## Adaptive behavior
+
+**User provides a PRD or spec**: read it fully, use it as your starting point. Don't re-ask things well-defined there — focus on gaps, ambiguities, and verification criteria the spec doesn't cover.
+
+**Directory already has docs from a prior run**: ask if this is a continuation/refinement or a fresh start. If continuing, read existing docs first with the `Read` tool and use them as conversation context before rewriting.
+
+**User is impatient**: compress. Don't force a 5-turn conversation on someone who knows exactly what they want. Match their energy. The goal is alignment, not process theater.
+
+**Uncertain about a fact**: ground in reality. Read code, search the web, run a quick command. Don't waste the user's time asking what you can check yourself.
+
+## What success looks like
+
+**Stay-in-session**: by the end of the conversation, the user either got what they wanted done, or got the thinking help they wanted. No dangling to-dos, no confusion about "what now".
+
+**Mint-as-task**: if you handed `task.md` and `verify.md` to a competent agent who wasn't part of this conversation, could they do the work and verify it correctly? If yes, alignment succeeded.

@@ -235,7 +235,7 @@ export function ThoughtCard({
                   </button>
                   {!showWorkspacePicker && (
                     <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/discuss:opacity-100">
-                      与 AI 讨论形成任务方案
+                      与 AI 讨论或创建任务
                     </span>
                   )}
                 </div>
