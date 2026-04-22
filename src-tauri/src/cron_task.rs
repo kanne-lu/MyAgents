@@ -2047,12 +2047,36 @@ async fn rotate_new_session_id(handle: &AppHandle, task: &CronTask) -> Result<St
     }
 
     let manager = get_cron_task_manager();
-    let mut tasks_guard = manager.tasks.write().await;
-    if let Some(t) = tasks_guard.get_mut(&task.id) {
-        t.session_id = new_session_id.clone();
-        t.updated_at = Utc::now();
+    {
+        let mut tasks_guard = manager.tasks.write().await;
+        if let Some(t) = tasks_guard.get_mut(&task.id) {
+            t.session_id = new_session_id.clone();
+            // Keep `internal_session_id` in lockstep so any consumer that
+            // falls back to `internalSessionId || sessionId` (Chat.tsx,
+            // CronTaskDetailPanel, useTaskCenterData) doesn't observe a
+            // tick-start window where they disagree. Post-rotation these
+            // are semantically the same thing: Bun's real session id.
+            t.internal_session_id = Some(new_session_id.clone());
+            t.updated_at = Utc::now();
+        }
     }
-    drop(tasks_guard);
+
+    // Persist the rotation synchronously. The previous docstring claimed a
+    // "periodic save path picks it up" — no such periodic loop exists.
+    // Without this `save_to_disk`, a Rust crash between rotate and the next
+    // mutation-triggered save would leave `cron_tasks.json` pointing at a
+    // stale session id; on restart `try_recover_single_task` would ensure
+    // a sidecar for the dead id and waste I/O before the next tick rotates
+    // again. Rotation is low-frequency (once per cron tick); the ~few KB
+    // atomic write cost is negligible.
+    if let Err(e) = manager.save_to_disk().await {
+        // Non-fatal — execution proceeds on the in-memory id. Next successful
+        // save will catch up. Log as warn so persistence issues are visible.
+        ulog_warn!(
+            "[CronTask] rotate_new_session_id: save_to_disk failed for task {}: {} (non-fatal, in-memory id in use)",
+            task.id, e
+        );
+    }
 
     ulog_info!(
         "[CronTask] new_session rotate: task {} session_id {} → {}",
@@ -2125,6 +2149,34 @@ async fn execute_task_directly(
     } else {
         task.session_id.clone()
     };
+
+    // If this cron is bound to a Task Center Task, append the session id to
+    // `task.sessionIds[]` so the "任务执行" panel in TaskDetailOverlay can
+    // surface every execution (one row per tick for new_session, one stable
+    // row for single_session). `append_session` is idempotent (dedup'd on
+    // line 1864) so the single_session case safely no-ops after the first
+    // tick.
+    //
+    // Design deliberately does NOT delegate this to the AI agent via CLI
+    // (previous PRD text suggested that). Relying on the AI to remember a
+    // `myagents task append-session` call at session end is a pit-of-
+    // not-success: it only works when the AI explicitly does it, which is
+    // unobservable until users report "my task executed but the history
+    // is empty." Doing it at the Rust dispatch point guarantees coverage
+    // for every execution, regardless of AI cooperation.
+    if let Some(ref ta_id) = task.task_id {
+        if let Some(ta_store) = crate::task::get_task_store() {
+            if let Err(e) = ta_store.append_session(ta_id, &effective_session_id).await {
+                // Non-fatal — the execution proceeds; the missing link just
+                // means this run won't appear in the task detail 任务执行
+                // list. Surface as warn so the gap is auditable.
+                ulog_warn!(
+                    "[CronTask] append_session(task={}, session={}) failed: {} — 任务执行 UI will miss this run",
+                    ta_id, effective_session_id, e
+                );
+            }
+        }
+    }
 
     // Build execution payload
     // execution_number is 1-based (first execution = 1)

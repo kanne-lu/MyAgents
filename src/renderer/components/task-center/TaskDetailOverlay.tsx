@@ -512,7 +512,7 @@ export function TaskDetailOverlay({
 
               <hr className="my-4 border-[var(--line-subtle)]" />
 
-              <TaskSessionsList task={task} />
+              <TaskSessionsList task={task} onBeforeOpen={onClose} />
 
               <hr className="my-4 border-[var(--line-subtle)]" />
 

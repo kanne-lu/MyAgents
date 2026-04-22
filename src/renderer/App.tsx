@@ -1753,49 +1753,75 @@ export default function App() {
 
   // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
   // dispatches this to open a historical execution in a fresh chat tab.
-  // Semantically equivalent to clicking a row in the Launcher 历史对话 list,
-  // just routed from a non-launcher surface.
+  //
+  // Forces a NEW tab unconditionally. An earlier version delegated to
+  // `handleLaunchProject` which falls back to the active tab in its common
+  // Scenario 4 branch — that could silently replace the user's current
+  // chat session if they clicked a row while inside another Chat tab.
+  // We pre-seed a new tab here (mirroring OPEN_AI_DISCUSSION's approach)
+  // so the user always lands in a fresh tab and their active session stays
+  // put. Failures surface as toasts, not silent console.warn — otherwise
+  // the click looks dead and the user has no signal.
   useEffect(() => {
-    const handler = async (
-      event: CustomEvent<{ sessionId: string; workspacePath: string }>,
-    ) => {
+    const handler = async (raw: Event) => {
+      const event = raw as CustomEvent<{
+        sessionId: string;
+        workspacePath: string;
+      }>;
       const { sessionId, workspacePath } = event.detail ?? {};
       if (!sessionId || !workspacePath) return;
-      const project = configProjectsRef.current.find(
+
+      const workspace = configProjectsRef.current.find(
         (p) => p.path === workspacePath,
       );
-      if (!project) {
-        console.warn(
-          `[App] OPEN_SESSION_IN_NEW_TAB: no project for workspacePath=${workspacePath}`,
-        );
+      if (!workspace) {
+        toastRef.current?.error('找不到对应的工作区，可能已被删除');
         return;
       }
+
       const providerId =
-        project.providerId ?? configRef.current?.defaultProviderId ?? null;
+        workspace.providerId ?? configRef.current?.defaultProviderId ?? null;
       const provider =
         (providerId
           ? appProvidersRef.current.find((p) => p.id === providerId)
           : undefined) ?? appProvidersRef.current[0];
       if (!provider) {
-        console.warn(
-          `[App] OPEN_SESSION_IN_NEW_TAB: no provider for project ${project.id}`,
-        );
+        toastRef.current?.error('未配置模型供应商，无法打开 session');
         return;
       }
+
+      if (tabsRef.current.length >= MAX_TABS) {
+        toastRef.current?.error(`已达 Tab 上限 (${MAX_TABS})，请先关闭一个 Tab`);
+        return;
+      }
+
+      // Pre-seed a chat tab with the target session id so the user lands
+      // directly in Chat view, not Launcher. `handleLaunchProject` below
+      // uses `activeTabIdRef.current` as its target; we've just updated
+      // that to the new tab so no existing tab gets hijacked.
+      const newTab = createNewTab();
+      const seeded = {
+        ...newTab,
+        view: 'chat' as const,
+        agentDir: workspace.path,
+        sessionId,
+      };
+      setTabs((prev) => [...prev, seeded]);
+      setActiveTabId(newTab.id);
+      activeTabIdRef.current = newTab.id;
+
       try {
-        await handleLaunchProject(project, provider, sessionId);
+        await handleLaunchProject(workspace, provider, sessionId);
       } catch (err) {
         console.error('[App] OPEN_SESSION_IN_NEW_TAB failed:', err);
+        toastRef.current?.error('打开 session 失败，请稍后重试');
       }
     };
-    window.addEventListener(
-      CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB,
-      handler as unknown as EventListener,
-    );
+    window.addEventListener(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, handler);
     return () =>
       window.removeEventListener(
         CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB,
-        handler as unknown as EventListener,
+        handler,
       );
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
   }, []);

@@ -1,18 +1,22 @@
 // TaskSessionsList — "任务执行" section inside Task Detail overlay.
 //
-// Renders the sessions on which a task has actually executed (one per cron
-// tick for new_session mode, or a single reused row for single_session).
-// Clicking a row opens that session in a fresh Chat tab via the
-// `OPEN_SESSION_IN_NEW_TAB` custom event — routed by App.tsx which reuses
-// the same `handleLaunchProject(project, provider, sessionId)` path that
-// Launcher's 历史对话 entries call through. This is why the visual
-// language deliberately mirrors that list (DESIGN.md §15.6): `rounded-lg
-// hover:bg-[var(--hover-bg)]` row with a timestamp column on the left and
-// truncated title on the right.
+// Renders the sessions on which a task has actually executed. Population is
+// driven by Rust `cron_task.rs::execute_task_directly` calling
+// `task_store.append_session` after it picks the `effective_session_id` for
+// each tick — one new entry per tick for new_session mode, one dedup'd
+// stable row for single_session mode. See the append block around
+// `cron_task.rs:2130` for the contract; `append_session` is idempotent.
 //
-// Only Task.sessionIds[] are rendered — new_session mode appends per tick,
-// single_session mode stays at length 1. For an empty list (task hasn't
-// executed yet) the whole section renders a muted empty-state line instead.
+// Clicking a row fires `OPEN_SESSION_IN_NEW_TAB`, routed by App.tsx to a
+// freshly pre-seeded Chat tab (never hijacks the active tab). Clicking
+// also closes this detail overlay so the user immediately lands in the
+// chat they asked for.
+//
+// Visual language mirrors Launcher's 历史对话 list (DESIGN.md §15.6):
+// `rounded-lg hover:bg-[var(--hover-bg)]` row with a timestamp column on
+// the left and truncated title on the right. Timestamp column is 84px
+// (vs Launcher's 56px w-14) because this list shows `MM-DD HH:mm` whereas
+// Launcher's shows `HH:mm` only.
 
 import { useEffect, useMemo, useState } from 'react';
 import { Clock } from 'lucide-react';
@@ -23,6 +27,12 @@ import type { Task } from '@/../shared/types/task';
 
 interface Props {
   task: Task;
+  /**
+   * Called right before dispatching OPEN_SESSION_IN_NEW_TAB, so the parent
+   * TaskDetailOverlay can dismiss itself — otherwise the user clicks a row
+   * and nothing visible happens until they manually close the overlay.
+   */
+  onBeforeOpen?: () => void;
 }
 
 const MAX_VISIBLE = 5;
@@ -40,7 +50,7 @@ function formatTimestamp(iso: string | number | undefined): string {
   return sameYear ? `${mm}-${dd} ${hh}:${mi}` : `${d.getFullYear()}-${mm}-${dd} ${hh}:${mi}`;
 }
 
-export function TaskSessionsList({ task }: Props) {
+export function TaskSessionsList({ task, onBeforeOpen }: Props) {
   const [sessions, setSessions] = useState<SessionMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(false);
@@ -51,18 +61,30 @@ export function TaskSessionsList({ task }: Props) {
   // `loading` to true when task changes — the existing list stays visible
   // briefly until the new fetch lands, which is less disruptive than a
   // full loading flash. The initial useState(true) covers first mount.
+  //
+  // Dep on the joined id string (stable primitive) instead of the raw
+  // `task.sessionIds` array: the array reference churns every time the
+  // parent `TaskDetailOverlay` calls `setTask(fresh)` (status-changed SSE,
+  // reloadToken bumps, etc.) even when the ids themselves haven't changed,
+  // and would otherwise re-fire the REST fetch on every overlay refresh.
+  // Per specs/tech_docs/react_stability_rules.md rule 2 (no array refs as
+  // effect deps).
+  const sessionIdsKey = task.sessionIds.join(',');
   useEffect(() => {
     let cancelled = false;
     void getSessions(task.workspacePath)
       .then((all) => {
         if (cancelled) return;
-        const idSet = new Set(task.sessionIds);
+        const idSet = new Set(sessionIdsKey.split(',').filter(Boolean));
         const matched = all.filter((s) => idSet.has(s.id));
         // Sort by lastActiveAt desc so newest executions surface first.
+        // Tie-break on session id for deterministic rendering when two
+        // executions land in the same second.
         matched.sort((a, b) => {
           const ta = new Date(a.lastActiveAt).getTime();
           const tb = new Date(b.lastActiveAt).getTime();
-          return tb - ta;
+          if (tb !== ta) return tb - ta;
+          return a.id < b.id ? 1 : -1;
         });
         setSessions(matched);
       })
@@ -78,7 +100,7 @@ export function TaskSessionsList({ task }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [task.workspacePath, task.sessionIds]);
+  }, [task.workspacePath, sessionIdsKey]);
 
   const visible = useMemo(
     () => (expanded ? sessions : sessions.slice(0, MAX_VISIBLE)),
@@ -86,6 +108,7 @@ export function TaskSessionsList({ task }: Props) {
   );
 
   const handleOpen = (sessionId: string) => {
+    onBeforeOpen?.();
     window.dispatchEvent(
       new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
         detail: { sessionId, workspacePath: task.workspacePath },
