@@ -63,7 +63,10 @@ export default function ConfirmDialog({
                     <div className="text-[14px] font-semibold text-[var(--ink)]">{title}</div>
                 </div>
                 <div className="px-5 py-4">
-                    <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">{message}</p>
+                    {/* `whitespace-pre-line` lets callers pass multi-line messages via `\n`
+                        (e.g. Runtime-switch dialog's three-line explanation). Single-line
+                        callers render identically. */}
+                    <p className="whitespace-pre-line text-[13px] leading-relaxed text-[var(--ink-muted)]">{message}</p>
                 </div>
                 <div className="flex justify-end gap-2 border-t border-[var(--line)] px-5 py-3">
                     <button

@@ -1299,7 +1299,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (updated) setSessionMeta(updated);
   }, [sessionId, setSessionMeta]);
 
-  // Handle workspace MCP toggle — owned session: PATCH snapshot only; unlocked/IM: patch agent+project (live-follow)
+  // Handle workspace MCP toggle — Tab UI edits dual-write:
+  // (1) session snapshot so THIS session uses the new tool set immediately (owned sessions only
+  //     — unlocked/IM have no snapshot);
+  // (2) project + agent so FUTURE new sessions inherit the user's latest choice (PRD
+  //     v0.1.69 §4.3 rule 2: "写 Session + 向上写 Agent"). For unlocked/IM this is also
+  //     the live-follow source, so the single write covers both roles.
   const handleWorkspaceMcpToggle = useCallback(async (serverId: string, enabled: boolean) => {
     const newEnabled = enabled
       ? [...workspaceMcpEnabled, serverId]
@@ -1309,7 +1314,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
     if (isOwnedSession) {
       void patchSnapshot({ mcpEnabledServers: newEnabled });
-    } else if (currentProject) {
+    }
+    if (currentProject) {
       // Persist to project config (patchProject updates disk AND projects React state,
       // keeping currentProject.mcpEnabledServers in sync for tab-activate sync at L672)
       void patchProject(currentProject.id, { mcpEnabledServers: newEnabled });
@@ -1664,12 +1670,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const handleProviderChange = useCallback((providerId: string, targetModel?: string) => {
     // Skip if selecting the same provider (compare against local state, not shared project)
     if (selectedProviderId === providerId) {
-      // Provider unchanged but caller passed a specific model — treat as model change
+      // Provider unchanged but caller passed a specific model — treat as model change.
+      // Same dual-write policy as handleModelChange (PRD §4.3 rule 2).
       if (targetModel) {
         setSelectedModel(targetModel);
         if (isOwnedSession) {
           void patchSnapshot({ model: targetModel });
-        } else if (currentProject) {
+        }
+        if (currentProject) {
           void patchProject(currentProject.id, { model: targetModel });
           if (currentProject?.agentId) {
             void patchAgentConfig(currentProject.agentId, { model: targetModel });
@@ -1707,10 +1715,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Suppress the deferred provider-change useEffect — we've already set the correct model
     providerInitRef.current = true;
 
-    // Write back: owned session locks to snapshot; unlocked/IM follows agent (last-writer-wins for new tabs)
+    // Write back: owned session snapshots this choice locally so the current session
+    // keeps using it; agent/project always gets written so FUTURE new sessions inherit
+    // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
     if (isOwnedSession) {
       void patchSnapshot({ providerId, model: model ?? null });
-    } else if (currentProject) {
+    }
+    if (currentProject) {
       void patchProject(currentProject.id, { providerId, model: model ?? null });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { providerId, model: model ?? undefined });
@@ -1719,7 +1730,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
   }, [selectedProviderId, currentProject?.id, patchProject, providers, currentProvider?.id, isOwnedSession, patchSnapshot]);
 
-  // Handle model change with analytics tracking and project write-back
+  // Handle model change with analytics tracking.
+  // Dual-write per PRD v0.1.69 §4.3 rule 2 "写 Session + 向上写 Agent": owned sessions
+  // snapshot the new model locally so this session persists the choice; project + agent
+  // also get written so FUTURE new sessions / Bots / Crons inherit the latest preference.
   const handleModelChange = useCallback((model: string) => {
     // Skip if selecting the same model
     if (selectedModel === model) {
@@ -1732,7 +1746,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setSelectedModel(model);
     if (isOwnedSession) {
       void patchSnapshot({ model });
-    } else if (currentProject) {
+    }
+    if (currentProject) {
       void patchProject(currentProject.id, { model });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { model });
@@ -1741,12 +1756,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id to avoid recreating on unrelated project changes
   }, [selectedModel, currentProject?.id, patchProject, isOwnedSession, patchSnapshot]);
 
-  // Handle permission mode change — owned session: snapshot; unlocked/IM: project+agent
+  // Handle permission mode change — same dual-write policy as handleModelChange.
   const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
     setPermissionMode(mode);
     if (isOwnedSession) {
       void patchSnapshot({ permissionMode: mode });
-    } else if (currentProject) {
+    }
+    if (currentProject) {
       void patchProject(currentProject.id, { permissionMode: mode });
       if (currentProject?.agentId) {
         void patchAgentConfig(currentProject.agentId, { permissionMode: mode });
@@ -1939,24 +1955,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setPendingRuntimeChange(null);
     if (!runtime || !currentAgent) return;
     try {
-      // The bottom-bar runtime selector is a per-tab fork action, NOT a workspace-
-      // level setting. We pin the new tab to the chosen runtime by stamping it on
-      // the new SessionMetadata (server-side override in POST /sessions wins over
-      // agent.runtime). We deliberately do NOT call patchAgentConfig here:
+      // Unified Tab-UI dual-write policy (matches handleModelChange /
+      // handlePermissionModeChange / etc., PRD v0.1.69 §4.3 rule 2 extended to
+      // runtime): fork a new Tab pinned to the chosen runtime AND update the
+      // workspace template. The confirm dialog's copy explicitly tells the user
+      // both halves will happen, so mutating agent.runtime is no longer a
+      // surprise-leak — it's the advertised behavior.
       //
-      //   - Patching agent.runtime mutates shared workspace state, which leaks
-      //     into every other open tab on this workspace — empty tabs would flip
-      //     their displayed runtime, and even non-empty tabs whose sessionRuntime
-      //     hadn't been hydrated yet could drift. That broke the v0.1.69
-      //     self-contained guarantee in practice.
-      //   - The new tab still opens with the right runtime: createSession passes
-      //     `runtime` into POST /sessions, which overrides the snapshot's runtime
-      //     field; sidecar.rs's resolve_session_runtime() then spawns the new
-      //     Sidecar with MYAGENTS_RUNTIME set from session metadata, not agent
-      //     config. So nothing here depends on agent.runtime being patched.
-      //   - Users who want to change the workspace default runtime should do it
-      //     in Settings → Agent → Runtime (WorkspaceBasicsSection.tsx) — that's
-      //     the right surface for a workspace-level change.
+      // Why this is safe despite the older "deliberately do NOT" comment:
+      //   - Existing Tabs with non-empty sessions hydrate currentRuntime from
+      //     SessionMetadata.runtime (session-self-contained, D1). Changing
+      //     agent.runtime doesn't flip their displayed runtime because their
+      //     session snapshot is authoritative.
+      //   - Empty Tabs and new Sidecars (Bot / Cron / new Tab) read agent.runtime
+      //     as the template — which is EXACTLY the semantic we want. The user's
+      //     intent "use this runtime from now on" should propagate.
+      //   - The fork-new-tab step is still required because switching the current
+      //     session's runtime in-place is an incompatibility hard-guard (D6).
+      if (currentAgent.id) {
+        await patchAgentConfig(currentAgent.id, { runtime });
+      }
       if (onForkSession && agentDir) {
         const { createSession } = await import('@/api/sessionClient');
         const session = await createSession(agentDir, runtime);
@@ -3005,16 +3023,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       )}
 
       {/* Runtime Switch Confirm Dialog (v0.1.59) */}
-      {pendingRuntimeChange && (
-        <ConfirmDialog
-          title="切换 Runtime"
-          message={`切换到 ${getRuntimeDisplayLabel(pendingRuntimeChange)} 将新开一个会话。当前会话保留不变。`}
-          confirmText="确认切换"
-          cancelText="取消"
-          onConfirm={confirmRuntimeChange}
-          onCancel={() => setPendingRuntimeChange(null)}
-        />
-      )}
+      {pendingRuntimeChange && (() => {
+        const label = getRuntimeDisplayLabel(pendingRuntimeChange);
+        return (
+          <ConfirmDialog
+            title="切换 Runtime"
+            message={
+              `切换到 ${label} 后：\n` +
+              `• 当前会话保持不变\n` +
+              `• 将在新 Tab 打开一个使用 ${label} 的新会话\n` +
+              `• 工作区默认 Runtime 同步更新为 ${label}（后续新开的 Tab / Bot / Cron 都将使用 ${label}）`
+            }
+            confirmText="确认切换"
+            cancelText="取消"
+            onConfirm={confirmRuntimeChange}
+            onCancel={() => setPendingRuntimeChange(null)}
+          />
+        );
+      })()}
 
       {/* Cross-Protocol Provider Switch Confirm Dialog (#68) */}
       {pendingProviderSwitch && (
