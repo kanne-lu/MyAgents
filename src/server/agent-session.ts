@@ -5,7 +5,7 @@ import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
-import { ensureDirSync } from './utils/fs-utils';
+import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { processImage, resizeToolImageContent } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
@@ -183,13 +183,23 @@ export function syncProjectUserConfig(projectDir: string): void {
     const managedSkillNames = new Set<string>();
 
     for (const entry of readdirSync(userSkillsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
+      // isDirEntry follows symlinks + Windows junctions (issue #104).
+      // Without it, junction-mounted skills never reach the project symlink
+      // bridge, so they're invisible to the SDK too (not just the UI).
+      const target = join(userSkillsDir, entry.name);
+      if (!isDirEntry(entry, target)) continue;
       if (entry.name.startsWith('.')) continue;
       if (isSkillBlockedOnPlatform(entry.name)) continue;
+      // Require SKILL.md to match scanSkills/scanSkillsDir's definition of
+      // a "valid skill". Without this guard, a junction pointing at an
+      // arbitrary directory (or a plain empty dir under ~/.myagents/skills/)
+      // would produce a project-level symlink that the SDK follows but the
+      // UI scanners skip — inviting the "runtime vs UI" divergence we're
+      // fixing.
+      if (!existsSync(join(target, 'SKILL.md'))) continue;
 
       managedSkillNames.add(entry.name);
       const linkPath = join(projectSkillsDir, entry.name);
-      const target = join(userSkillsDir, entry.name);
 
       if (disabled.includes(entry.name)) {
         // Disabled: remove symlink if we created one (never remove real dirs)

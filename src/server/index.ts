@@ -25,7 +25,7 @@ import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } f
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition } from '../renderer/config/types';
-import { ensureDirSync, ensureDir } from './utils/fs-utils';
+import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
 import {
   setCronTaskContext,
   clearCronTaskContext,
@@ -5448,7 +5448,9 @@ async function main() {
             try {
               const skillFolders = readdirSync(skillsDir, { withFileTypes: true });
               for (const folder of skillFolders) {
-                if (!folder.isDirectory()) continue;
+                // isDirEntry follows symlinks + Windows junctions (issue #104);
+                // bare `isDirectory()` alone drops junction-mounted skills.
+                if (!isDirEntry(folder, join(skillsDir, folder.name))) continue;
                 if (isSkillBlockedOnPlatform(folder.name)) continue;
                 // Skip disabled user-level skills in slash commands
                 if (scope === 'user' && skillsConfig.disabled.includes(folder.name)) continue;
@@ -5875,7 +5877,8 @@ async function main() {
             try {
               const folders = readdirSync(dir, { withFileTypes: true });
               for (const folder of folders) {
-                if (!folder.isDirectory()) continue;
+                // isDirEntry follows symlinks + Windows junctions (issue #104).
+                if (!isDirEntry(folder, join(dir, folder.name))) continue;
                 if (isSkillBlockedOnPlatform(folder.name)) continue;
                 const skillMdPath = join(dir, folder.name, 'SKILL.md');
                 if (!existsSync(skillMdPath)) continue;
@@ -5954,21 +5957,26 @@ async function main() {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
-          // Get folders in Claude Code skills directory
+          // Get folders in Claude Code skills directory (follow junctions — issue #104).
+          // Users sometimes mount their skills hub into ~/.claude/skills/ via
+          // junction too; bare `isDirectory()` would miss them asymmetrically
+          // with the myagentsFolders side.
           const claudeFolders = readdirSync(claudeSkillsDir, { withFileTypes: true })
-            .filter(entry => entry.isDirectory())
+            .filter(entry => isDirEntry(entry, join(claudeSkillsDir, entry.name)))
             .map(entry => entry.name);
 
           if (claudeFolders.length === 0) {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
-          // Get existing folders in MyAgents skills directory
+          // Get existing folders in MyAgents skills directory.
+          // isDirEntry follows junctions (issue #104) so mounted skills count
+          // as existing, preventing sync-from-claude from overwriting them.
           const myagentsFolders = new Set<string>();
           if (existsSync(userSkillsBaseDir)) {
             const entries = readdirSync(userSkillsBaseDir, { withFileTypes: true });
             for (const entry of entries) {
-              if (entry.isDirectory()) {
+              if (isDirEntry(entry, join(userSkillsBaseDir, entry.name))) {
                 myagentsFolders.add(entry.name);
               }
             }
@@ -6002,9 +6010,9 @@ async function main() {
             return jsonResponse({ success: false, synced: 0, failed: 0, error: 'Claude Code skills directory not found' }, 404);
           }
 
-          // Get folders in Claude Code skills directory
+          // Get folders in Claude Code skills directory (follow junctions — issue #104)
           const claudeFolders = readdirSync(claudeSkillsDir, { withFileTypes: true })
-            .filter(entry => entry.isDirectory())
+            .filter(entry => isDirEntry(entry, join(claudeSkillsDir, entry.name)))
             .map(entry => entry.name);
 
           if (claudeFolders.length === 0) {
@@ -6016,11 +6024,11 @@ async function main() {
             ensureDirSync(userSkillsBaseDir);
           }
 
-          // Get existing folders in MyAgents skills directory
+          // Get existing folders in MyAgents skills directory (follow junctions — issue #104)
           const myagentsFolders = new Set<string>();
           const entries = readdirSync(userSkillsBaseDir, { withFileTypes: true });
           for (const entry of entries) {
-            if (entry.isDirectory()) {
+            if (isDirEntry(entry, join(userSkillsBaseDir, entry.name))) {
               myagentsFolders.add(entry.name);
             }
           }
@@ -7351,8 +7359,13 @@ async function main() {
             return jsonResponse({ canSync: false, count: 0, folders: [] });
           }
 
+          // Follow junctions (issue #104). Missing junction-mounted agents on
+          // either side of the compare would make conflictFolders fall out
+          // of the set, so a subsequent sync-from-claude with overwrite could
+          // clobber the user's mounted tree.
           const claudeFolders = readdirSync(claudeAgentsDir, { withFileTypes: true })
-            .filter(entry => entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.'))
+            .filter(entry => isDirEntry(entry, join(claudeAgentsDir, entry.name))
+              && !entry.name.startsWith('_') && !entry.name.startsWith('.'))
             .map(entry => entry.name);
 
           if (claudeFolders.length === 0) {
@@ -7363,7 +7376,7 @@ async function main() {
           if (existsSync(userAgentsBaseDir)) {
             const entries = readdirSync(userAgentsBaseDir, { withFileTypes: true });
             for (const entry of entries) {
-              if (entry.isDirectory()) myagentsFolders.add(entry.name);
+              if (isDirEntry(entry, join(userAgentsBaseDir, entry.name))) myagentsFolders.add(entry.name);
             }
           }
 
@@ -7398,7 +7411,10 @@ async function main() {
           }
 
           const claudeFolders = readdirSync(claudeAgentsDir, { withFileTypes: true })
-            .filter(entry => entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.') && isValidFolderName(entry.name))
+            // Follow junctions (issue #104) — otherwise junction-mounted agents
+            // in ~/.claude/agents/ silently drop from the sync set.
+            .filter(entry => isDirEntry(entry, join(claudeAgentsDir, entry.name))
+              && !entry.name.startsWith('_') && !entry.name.startsWith('.') && isValidFolderName(entry.name))
             .map(entry => entry.name);
 
           // Filter to selected folders if specified

@@ -535,9 +535,9 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 | `process_cmd` (`src-tauri/src/process_cmd.rs`) | Rust | 所有 Rust 层子进程创建 | Windows GUI 弹黑色控制台窗口 |
 | `proxy_config` (`src-tauri/src/proxy_config.rs`) | Rust | 子进程代理环境变量注入 | Bun `fetch()` 读取继承的 HTTP_PROXY → localhost 通信被代理拦截 |
 | `system_binary` (`src-tauri/src/system_binary.rs`) | Rust | 系统工具查找（pgrep/taskkill 等） | Tauri GUI 从 Finder 启动不继承 shell PATH |
-| `fs-utils` (`src/server/utils/fs-utils.ts`, v0.1.69) | Bun | 目录创建 helper（`ensureDirSync` / async 版本） | Bun-on-Windows 对 `mkdirSync(dir, { recursive: true })` 返回 EEXIST（Node.js 不会）导致初始化代码路径在多处零散崩溃 |
+| `fs-utils` (`src/server/utils/fs-utils.ts`, v0.1.69+) | Bun | 目录创建 + 目录判定 helper（`ensureDirSync` / `ensureDir` / `isDirEntry`） | ① Bun-on-Windows 对 `mkdirSync(dir, { recursive: true })` 返回 EEXIST（Node.js 不会）导致初始化代码路径在多处零散崩溃 ② `Dirent.isDirectory()` 在 Windows junction / POSIX symlink-to-dir 上返回 false，导致 skills/agents 扫描漏掉 junction 挂载的目录（issue #104：UI 看不见、运行时有时可见的"三套割裂"根因） |
 
-第六个典范是 v0.1.65 的 **Session watcher**（`search/session_watcher.rs`）—— 把"每个 writer 都必须通知索引"替换成"文件系统观察结果目录"。其它 pit-of-success 应用（v0.1.69）：`session-snapshot.ts` 的两个命名 helper（`snapshotForImSession` / `snapshotForOwnedSession`）用类型分裂代替布尔参数、`legacy_upgrade.rs` 用 CAS `set_task_id(require_null=true)` 避免并发升级竞态。
+第六个典范是 v0.1.65 的 **Session watcher**（`search/session_watcher.rs`）—— 把"每个 writer 都必须通知索引"替换成"文件系统观察结果目录"。其它 pit-of-success 应用：`session-snapshot.ts` 的两个命名 helper（`snapshotForImSession` / `snapshotForOwnedSession`）用类型分裂代替布尔参数（v0.1.69）、`legacy_upgrade.rs` 用 CAS `set_task_id(require_null=true)` 避免并发升级竞态（v0.1.69）、`fs-utils::isDirEntry` 把"每个扫目录的 Dirent 检查都要手写 junction fallback"合并到一个 helper（v0.1.70+）。
 
 ## 资源管理
 

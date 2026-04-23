@@ -6,7 +6,8 @@
  * needing to remember the underlying trap.
  */
 
-import { mkdirSync } from 'fs';
+import { mkdirSync, statSync } from 'fs';
+import type { Dirent } from 'fs';
 import { mkdir } from 'fs/promises';
 
 /**
@@ -54,5 +55,45 @@ export async function ensureDir(path: string): Promise<void> {
     } catch (err) {
         if ((err as NodeJS.ErrnoException)?.code === 'EEXIST') return;
         throw err;
+    }
+}
+
+/**
+ * Does this `readdirSync` entry denote a directory we should descend into —
+ * including directory-pointing symlinks and Windows junctions?
+ *
+ * Replaces the bare `entry.isDirectory()` check. Two traps unified:
+ *
+ * 1. **Windows junction / reparse point**: `Dirent.isDirectory()` returns
+ *    `false` for junctions on some Node.js & Bun versions (the reparse bit
+ *    takes precedence over the directory bit in the dirent attrs). Users
+ *    who mount a skills hub via `mklink /J` silently vanish from scans that
+ *    rely on `isDirectory()` alone. Issue #104 and friends.
+ * 2. **POSIX symlink-to-dir**: `Dirent.isDirectory()` also returns `false`
+ *    for symlinks (which is documented), but we want to follow them in the
+ *    same places Claude Code's `ripgrep --follow` would.
+ *
+ * The cost is one `statSync()` per symlink-ish entry, which is effectively
+ * free compared to the `readFile` calls the caller is about to do.
+ *
+ * Returns `false` (not a directory we should descend into) for:
+ *   - regular files and file-typed entries
+ *   - symlinks whose target is a regular file (statSync succeeds, isDirectory=false)
+ *   - broken links, EACCES on the target, ENOENT races (statSync throws → caught)
+ * The caller still owns ENOTDIR handling on their subsequent `readdirSync(absPath)`
+ * — returning true here only promises "looks like a directory at stat time".
+ *
+ * When your caller *recurses* (e.g. `agent-loader.ts::walkMarkdown`), pair
+ * this with a `realpathSync` visited-set to stop symlink cycles from
+ * exploding into O(branch^depth) work. Non-recursive callers don't need that.
+ */
+export function isDirEntry(entry: Dirent, absPath: string): boolean {
+    if (entry.isDirectory()) return true;
+    if (!entry.isSymbolicLink()) return false;
+    try {
+        return statSync(absPath).isDirectory();
+    } catch {
+        // Broken link, EACCES, ENOENT, etc. — treat as non-directory.
+        return false;
     }
 }

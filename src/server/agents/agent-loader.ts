@@ -37,13 +37,13 @@
  * folder > flat > nested. The first scan wins; subsequent hits are dropped.
  */
 
-import { existsSync, readdirSync, readFileSync, writeFileSync, statSync, realpathSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, realpathSync } from 'fs';
 import type { Dirent } from 'fs';
 import { join, relative, sep, basename, extname } from 'path';
 import { parseAgentFrontmatter, parseFullAgentContent, toSdkAgentDefinition } from '../../shared/agentCommands';
 import type { AgentItem, AgentLayout, AgentMeta, AgentWorkspaceConfig } from '../../shared/agentTypes';
 import { isWindowsReservedName } from '../../shared/utils';
-import { ensureDirSync } from '../utils/fs-utils';
+import { ensureDirSync, isDirEntry } from '../utils/fs-utils';
 
 /**
  * Safety cap on recursion depth. Claude Code's scanner is unbounded and
@@ -137,15 +137,11 @@ function* walkMarkdown(
         if (name.startsWith('.')) continue;
         const full = join(root, name);
 
-        // Dirent.isDirectory() returns false for symlinks on some platforms,
-        // even when the symlink points to a directory. `statSync` follows
-        // symlinks, which is what Claude Code's ripgrep --follow does too.
-        let isDir = entry.isDirectory();
-        if (!isDir && entry.isSymbolicLink()) {
-            try { isDir = statSync(full).isDirectory(); } catch { /* broken link */ }
-        }
-
-        if (isDir) {
+        // Follows symlinks + Windows junctions — matches Claude Code's
+        // `ripgrep --follow`. Uses the shared fs-utils helper so scanners
+        // across the server (skills, commands, agents) handle junctions
+        // consistently.
+        if (isDirEntry(entry, full)) {
             yield* walkMarkdown(full, depth + 1, visited);
             continue;
         }
