@@ -119,6 +119,35 @@ export interface TagSegment {
 }
 
 /**
+ * Coerce an arbitrary string (e.g. an Agent workspace name) into a shape
+ * the Rust `parse_tags` side will accept as a tag body. Companion to
+ * `isTagChar` — same char classes, same boundary rules, phrased as
+ * "pressure any string into a valid tag".
+ *
+ * Rules:
+ *   - Chars passing `isTagChar` keep their form.
+ *   - Everything else (spaces, CJK punct, emoji, symbols) → `_`.
+ *   - Runs of `_` collapse to a single `_`.
+ *   - Leading / trailing `_` are stripped.
+ *
+ * Returns `""` if nothing survives — callers should treat that as "drop
+ * this entry".
+ *
+ * Kept here (next to `isTagChar` + `parseThoughtTags` Rust mirror) so the
+ * three pieces of the tag contract — what's a tag char, how to pick a
+ * cursor context, how to coerce a name — travel together and can't drift
+ * without a single-file diff flagging it.
+ */
+export function sanitizeForTag(raw: string): string {
+  const out: string[] = [];
+  for (const ch of raw) out.push(isTagChar(ch) ? ch : '_');
+  return out
+    .join('')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+/**
  * Split `content` into `{type, value}` segments, marking `#xxx` runs as tags
  * when they pass the Rust parser's boundary + char-class rules.
  */

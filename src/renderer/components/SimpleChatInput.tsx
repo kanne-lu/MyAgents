@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, PenLine, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
+import { AlertCircle, ChevronDown, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import Tip from '@/components/Tip';
@@ -18,7 +18,6 @@ import { isDebugMode } from '@/utils/debug';
 import { isProviderAvailable } from '@/config/configService';
 import RuntimeSelector from '@/components/RuntimeSelector';
 import { Popover } from '@/components/ui/Popover';
-import { taskCenterAvailable } from '@/api/taskCenter';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
 
 // ===== Module-level pure helpers (extracted from render body) =====
@@ -48,14 +47,6 @@ interface SimpleChatInputProps {
   /** Called when user sends message. Text is managed internally for performance.
    *  Return false to indicate rejection (input will NOT be cleared). */
   onSend: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode) => boolean | void | Promise<boolean | void>;
-  /**
-   * When `true`, the input is rendered as a minimal **note-taking box** instead
-   * of a chat-send box (PRD §4.2): toolbar hidden, placeholder swapped to the
-   * thought-mode copy. Submission still goes through `onSend`; the parent
-   * (Launcher BrandSection) decides whether to persist as a Thought or
-   * launch a Chat, and signals "saved" by returning `true` from `onSend`.
-   */
-  thoughtMode?: boolean;
   /**
    * Whether this input belongs to the currently active tab. Reserved for
    * features that want to ignore keystrokes on background tabs.
@@ -218,7 +209,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onInputChange,
   mode = 'chat',
   toolbarPrefix,
-  thoughtMode = false,
   // Whether this input belongs to the currently active tab. Used to gate document-level
   // listeners (Shift+Tab permission-mode cycle below) so background tabs don't also fire.
   active = true,
@@ -238,13 +228,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // without the three-site scan the prior duplicated ternary required.
   const effectiveMinLines = isLauncherMode ? LAUNCHER_MIN_LINES : 2;
   const isExternalRuntime = runtime !== 'builtin';
-
-  // PRD §4.2 — when the caller declares thought-mode, the input behaves as a
-  // note-taking box: no model / permission / MCP / cron toolbar, just the
-  // textarea + send. Thought persistence requires the Tauri runtime (Rust
-  // `cmd_thought_create`); in browser dev mode we silently fall back to the
-  // normal onSend path.
-  const thoughtModeActive = thoughtMode && taskCenterAvailable();
 
   // Compute display modes and model name based on runtime
   const displayPermissionModes = isExternalRuntime && runtimePermissionModes
@@ -1203,16 +1186,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Normal send - but NOT during IME composition (e.g., Chinese input)
     // Check both event.nativeEvent.isComposing (standard) and event.keyCode === 229 (legacy)
     //
-    // Thought mode splits the keyboard contract: plain Enter is a newline
-    // (note-taking convention — matches the TaskCenter ThoughtInput and
-    // apps like flomo / Apple Notes), and Cmd/Ctrl+Enter commits. Chat
-    // mode keeps the familiar "Enter sends" (Shift+Enter = newline).
+    // Chat-mode keyboard contract: plain Enter sends, Shift+Enter inserts
+    // a newline. (Thought mode has its own editor — ThoughtInput — with
+    // Cmd/Ctrl+Enter commit and no pass-through through this component.)
     if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) {
       const isCmdEnter = event.metaKey || event.ctrlKey;
       const isPlainEnter = !event.shiftKey && !isCmdEnter;
-      const shouldSend = thoughtModeActive
-        ? isCmdEnter
-        : isPlainEnter;
+      const shouldSend = isPlainEnter;
       if (shouldSend) {
         event.preventDefault();
         if ((inputValue.trim() || images.length > 0) && canSendMessageRef.current) {
@@ -1341,11 +1321,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
               placeholder={
-                thoughtModeActive
-                  ? '此刻有什么想法？写下来，稍后可派发为任务'
-                  : isLauncherMode
-                    ? '今天，想干点啥？'
-                    : '输入消息，使用 @ 引用文件，/ 使用技能...'
+                isLauncherMode
+                  ? '今天，想干点啥？'
+                  : '输入消息，使用 @ 引用文件，/ 使用技能...'
               }
               rows={effectiveMinLines}
               className="block w-full resize-none bg-transparent pr-8 text-base leading-relaxed text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
@@ -1456,10 +1434,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 `ml-auto` on the right group instead of `justify-between` so
                 the send button stays right-aligned even when the left strip
                 is removed from the flex flow. */}
-            <div
-              className="flex items-center gap-1 min-w-0 flex-nowrap"
-              style={thoughtModeActive ? { display: 'none' } : undefined}
-            >
+            <div className="flex items-center gap-1 min-w-0 flex-nowrap">
               {/* Optional prefix (e.g., workspace selector in launcher mode) */}
               {toolbarPrefix}
 
@@ -1779,7 +1754,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             {/* Right side - model selector + send/stop button */}
             <div className="ml-auto flex items-center gap-2 shrink-0">
               {/* v0.1.69: Unlocked indicator for legacy pre-snapshot sessions */}
-              {sessionUnlocked && !thoughtModeActive && (
+              {sessionUnlocked && (
                 <span
                   className="flex h-5 w-5 items-center justify-center rounded text-[var(--ink-muted)]/60"
                   title="该 session 未锁定，跟随 agent 默认（修改 agent 会影响此会话）"
@@ -1787,10 +1762,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <Unlock className="h-3 w-3" />
                 </span>
               )}
-              {/* Model Dropdown with Provider Selector — hidden in thought mode
-                  (PRD §4.2: thought input is a note box, not an AI chat input). */}
-              {!thoughtModeActive && (
-              <>
+              {/* Model Dropdown with Provider Selector */}
               <button
                 ref={modelBtnRef}
                 type="button"
@@ -1905,8 +1877,6 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   ));
                 })()}
               </Popover>
-              </>
-              )}
 
               {/* Button states: system task (disabled send) → stopping (disabled spinner) → AI responding (stop) → normal (send) */}
               {systemStatus ? (
@@ -1940,41 +1910,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   <Square className="h-4 w-4" />
                 </button>
               ) : (
-                // Normal state - can send. In thought mode the send
-                // button gets a two-line tooltip teaching `⌘ + Enter`,
-                // which matches the TaskCenter ThoughtInput affordance
-                // and is crucial because thought mode swaps the usual
-                // "Enter sends" contract (Enter is a newline there).
-                thoughtModeActive ? (
-                  // Thought mode: swap the paper-plane for a single-pen
-                  // icon — "send" implies dispatching to a recipient,
-                  // but saving a thought is a local memo. `PenLine`
-                  // (one clean pen + trailing stroke) reads as "记录
-                  // 想法" at a glance without the visual clutter of a
-                  // full notebook glyph. Distinct from `Pencil` (used
-                  // by the edit menu) so the two affordances don't
-                  // collapse into the same mental category.
-                  <Tip label="记录想法" shortcut="⌘ + Enter" align="end">
-                    <button
-                      type="button"
-                      onClick={handleSend}
-                      disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
-                      className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                    >
-                      <PenLine className="h-4 w-4" />
-                    </button>
-                  </Tip>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleSend}
-                    disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
-                    className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                    title={!canSendMessage ? '请前往设置页面设置模型供应商' : '发送'}
-                  >
-                    <Send className="h-4 w-4" />
-                  </button>
-                )
+                <button
+                  type="button"
+                  onClick={handleSend}
+                  disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
+                  className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
+                  title={!canSendMessage ? '请前往设置页面设置模型供应商' : '发送'}
+                >
+                  <Send className="h-4 w-4" />
+                </button>
               )}
             </div>
           </div>

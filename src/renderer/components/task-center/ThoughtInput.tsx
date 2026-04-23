@@ -11,8 +11,10 @@
 // highlight ≡ server-extracted `thought.tags[]`).
 
 import {
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -30,6 +32,13 @@ import {
 } from '@/utils/parseThoughtTags';
 import type { Thought } from '@/../shared/types/thought';
 
+export interface ThoughtInputHandle {
+  /** Programmatically focus the textarea. Mirrors SimpleChatInputHandle so
+   *  parents (e.g. Launcher BrandSection) can drive focus on mode switches
+   *  without relying on the `autoFocus` prop-flip heuristic. */
+  focus: () => void;
+}
+
 // Auto-grow bounds for the idle textarea. 14px text × 1.6 line-height
 // ≈ 22.4px/row, plus 12px top padding. We target 2 rows idle and ~8 rows
 // max (+6 rows of growth before internal scroll kicks in).
@@ -42,13 +51,20 @@ interface Props {
   autoFocus?: boolean;
   /**
    * Existing tags sorted by frequency. Populates the `#` autocomplete menu.
-   * Parent (ThoughtPanel) already aggregates this from `thoughts[].tags`; we
-   * accept it as a prop so there's one source of truth.
+   * Parent (ThoughtPanel / BrandSection) aggregates this via
+   * `useThoughtTagCandidates`; we accept it as a prop so there's one
+   * source of truth.
+   *
+   * **`count === 0` is a sentinel**, not a bug: entries with zero
+   * frequency are "known good tag options that no thought has used yet"
+   * (most commonly Agent workspace names). Keep them visible — filtering
+   * them out would hide brand-new workspaces from the picker and defeat
+   * the whole point of the discovery merge.
    */
   existingTags?: Array<[string, number]>;
 }
 
-export function ThoughtInput({
+export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function ThoughtInput({
   onCreated,
   // Guide-style placeholder — tells new users both *what* to write and
   // *how* to tag it, so the empty state doesn't look like dead space.
@@ -57,7 +73,7 @@ export function ThoughtInput({
   placeholder = '写下此刻的想法… 用 #标签 归类',
   autoFocus = false,
   existingTags = [],
-}: Props) {
+}, ref) {
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -69,6 +85,12 @@ export function ThoughtInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const overlayInnerRef = useRef<HTMLDivElement>(null);
   const cardRef = useRef<HTMLDivElement>(null);
+
+  // Imperative focus — exposed through the forwarded ref so parents can
+  // drive focus on mode/tab switches. Matches SimpleChatInputHandle.
+  useImperativeHandle(ref, () => ({
+    focus: () => textareaRef.current?.focus(),
+  }), []);
   // Pending caret position — consumed by the useLayoutEffect below after
   // React commits the new value, so `setSelectionRange` runs against the
   // up-to-date DOM instead of racing with rAF.
@@ -415,6 +437,6 @@ export function ThoughtInput({
       )}
     </div>
   );
-}
+});
 
 export default ThoughtInput;

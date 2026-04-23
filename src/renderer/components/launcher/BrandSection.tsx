@@ -15,12 +15,16 @@ import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } fro
 import WorkspaceSelector from './WorkspaceSelector';
 import ModeSegment, { type InputMode } from '@/components/task-center/ModeSegment';
 import RecentThoughtsRow from '@/components/task-center/RecentThoughtsRow';
+import { ThoughtInput, type ThoughtInputHandle } from '@/components/task-center/ThoughtInput';
 import { useToast } from '@/components/Toast';
-import { thoughtCreate, taskCenterAvailable } from '@/api/taskCenter';
+import { thoughtList, taskCenterAvailable } from '@/api/taskCenter';
+import { useConfig } from '@/hooks/useConfig';
+import { useThoughtTagCandidates } from '@/hooks/useThoughtTagCandidates';
 import { hasOverlayLayer } from '@/utils/closeLayer';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
 import { type Project, type Provider, type PermissionMode, type ProviderVerifyStatus } from '@/config/types';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode } from '../../../shared/types/runtime';
+import type { Thought } from '../../../shared/types/thought';
 
 interface BrandSectionProps {
     // Workspace
@@ -99,14 +103,61 @@ export default memo(function BrandSection({
     // Gracefully degrade in browser dev mode — ModeSegment is Tauri-only.
     const modeSegmentEnabled = taskCenterAvailable();
 
-    // Ref into SimpleChatInput — used ONLY for mount-time focus (below).
-    // Intentionally NOT used inside the ModeSegment click handler: see
-    // `utils/focusRetention.ts`. Calling `.focus()` from within a click
-    // handler (even inside `requestAnimationFrame`) races the macOS
-    // WebKit touchpad-tap event synthesis and can drop the click entirely.
-    // ModeSegment buttons instead use `retainFocusOnMouseDown` so the
-    // textarea never loses focus in the first place — no rAF, no race.
+    // Thought history — fetched once per mount (and after a just-created
+    // thought, via the explicit reload below) to feed the `#` autocomplete
+    // candidate list. Deliberately independent from `thoughtRefreshKey`:
+    // that key is used for the RecentThoughtsRow, and coupling the two
+    // would create a state dance (optimistic prepend → refreshKey bump →
+    // fetch races prepend → potential "flash and reappear" if a concurrent
+    // external change landed between).
+    //
+    // Skipped entirely in 任务 mode on mount so user's steady state (most
+    // sessions) doesn't pay a full `thoughtList()` round-trip for a `#`
+    // picker they never open. The moment the user flips to 想法, this
+    // effect re-runs and populates the list before they can open the
+    // picker.
+    const [thoughts, setThoughts] = useState<Thought[]>([]);
+    const reloadThoughts = useCallback(async () => {
+        try {
+            const list = await thoughtList({});
+            setThoughts(list);
+        } catch (err) {
+            // Keep the previous list as a cache; tag candidates stay usable
+            // (minus the very latest thought's tags). Non-critical path —
+            // don't toast.
+            console.warn('[BrandSection] thoughtList failed for tag candidates', err);
+        }
+    }, []);
+    useEffect(() => {
+        if (!modeSegmentEnabled) return;
+        if (mode !== 'thought') return;
+        let cancelled = false;
+        void (async () => {
+            if (cancelled) return;
+            await reloadThoughts();
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [modeSegmentEnabled, mode, reloadThoughts]);
+
+    const { config } = useConfig();
+    const tagCandidates = useThoughtTagCandidates(thoughts, config.agents ?? null);
+
+    // Refs for imperative focus. Both inputs stay mounted (hidden via CSS
+    // when the other mode is active) so typed-but-not-yet-sent text
+    // survives mode switches — cross-review found the prior conditional
+    // render silently dropped drafts. Focus is driven by a mode-effect
+    // below (not by the old mount-time one-shot) so the caret follows the
+    // visible editor.
+    //
+    // ModeSegment buttons use `retainFocusOnMouseDown` (see
+    // `utils/focusRetention.ts`) so the textarea never loses focus on
+    // click in the first place — no rAF, no race with macOS WebKit
+    // touchpad-tap synthesis. The effect below handles the programmatic
+    // hand-off when a keyboard chord (Tab / Cmd+Shift+T) switches modes.
     const inputRef = useRef<SimpleChatInputHandle>(null);
+    const thoughtInputRef = useRef<ThoughtInputHandle>(null);
     // Single helper for BOTH the segment click path (explicit mode) and
     // the keyboard paths (Tab / Cmd+Shift+T toggle). Without this the
     // two call sites diverged on `setMode(next)` vs `setMode((m) => …)`
@@ -119,38 +170,48 @@ export default memo(function BrandSection({
         }
     }, []);
 
-    // Mount-time focus — drops the caret in the textarea the first time
-    // the Launcher renders so the user can start typing immediately.
-    // Runs on mount only (empty deps), not inside an interaction event,
-    // so it doesn't race touchpad-tap click synthesis. Subsequent mode
-    // switches DON'T re-focus — `retainFocusOnMouseDown` on ModeSegment
-    // buttons keeps the existing focus in place so re-focusing would be
-    // a no-op anyway.
+    // Focus handoff — follows the visible input. Fires on mount (initial
+    // mode) and every mode change; `retainFocusOnMouseDown` already keeps
+    // focus on the correct textarea for mouse-driven ModeSegment clicks,
+    // so this effect's job is the keyboard-chord path (Tab / Cmd+Shift+T).
+    // Running in an effect keeps it out of the click-handler frame — no
+    // touchpad-tap race.
     useEffect(() => {
-        inputRef.current?.focus();
-    }, []);
+        if (mode === 'thought') {
+            thoughtInputRef.current?.focus();
+        } else {
+            inputRef.current?.focus();
+        }
+    }, [mode]);
 
+    // Task-mode submit is a straight pass-through to the parent's `onSend`.
+    // Thought-mode submit is owned entirely by ThoughtInput (below) — it
+    // calls `thoughtCreate` itself and fires `handleThoughtCreated`, so
+    // this handler never sees thought content anymore.
     const handleSend = useCallback(
-        async (text: string, images?: ImageAttachment[]) => {
-            if (mode === 'thought' && modeSegmentEnabled) {
-                // Thought mode: persist to ~/.myagents/thoughts/; stay in
-                // 想法 mode so the just-saved note appears in
-                // RecentThoughtsRow and the user can keep jotting.
-                try {
-                    await thoughtCreate({ content: text });
-                    toastRef.current.success('想法已记录，可在任务中心查看');
-                    setThoughtRefreshKey((k) => k + 1);
-                    return true;
-                } catch (e) {
-                    toastRef.current.error(`保存想法失败：${e}`);
-                    return false;
-                }
-            }
+        (text: string, images?: ImageAttachment[]) => {
             onSend(text, images);
-            return undefined;
         },
-        [mode, modeSegmentEnabled, onSend],
+        [onSend],
     );
+
+    // Called from ThoughtInput after a successful thoughtCreate. Mirrors the
+    // TaskCenter pattern (prepend locally so the tag-candidate count updates
+    // immediately) plus the Launcher-specific bits — refresh the Recent
+    // Thoughts strip and toast so the user sees visible confirmation on the
+    // otherwise mostly-empty launcher canvas.
+    //
+    // The thoughts list and the refreshKey are intentionally on different
+    // rhythms: thoughts is optimistically prepended (authoritative for tag
+    // candidates), and refreshKey only drives RecentThoughtsRow's own
+    // independent fetch. Previously we bumped both, which meant the tag
+    // candidate list would briefly re-fetch and could "undo" a concurrent
+    // change made from Task Center.
+    const handleThoughtCreated = useCallback((t: Thought) => {
+        setThoughts((prev) => [t, ...prev]);
+        setThoughtRefreshKey((k) => k + 1);
+        toastRef.current.success('想法已记录，可在任务中心查看');
+    }, []);
 
     const openTaskCenter = useCallback(() => {
         window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER));
@@ -263,39 +324,61 @@ export default memo(function BrandSection({
                 vertically (PRD §4.2). */}
             <div className="w-full max-w-[640px] pb-[12vh]">
                 <div className="relative w-full">
-                    <SimpleChatInput
-                        ref={inputRef}
-                        mode="launcher"
-                        thoughtMode={mode === 'thought'}
-                        onSend={handleSend}
-                        isLoading={!!isStarting}
-                        provider={provider}
-                        providers={providers}
-                        selectedModel={selectedModel}
-                        onProviderChange={onProviderChange}
-                        onModelChange={onModelChange}
-                        permissionMode={permissionMode}
-                        onPermissionModeChange={onPermissionModeChange}
-                        apiKeys={apiKeys}
-                        providerVerifyStatus={providerVerifyStatus}
-                        workspaceMcpEnabled={workspaceMcpEnabled}
-                        globalMcpEnabled={globalMcpEnabled}
-                        mcpServers={mcpServers}
-                        onWorkspaceMcpToggle={onWorkspaceMcpToggle}
-                        onRefreshProviders={onRefreshProviders}
-                        runtime={runtime}
-                        runtimeModels={runtimeModels}
-                        runtimePermissionModes={runtimePermissionModes}
-                        toolbarPrefix={
-                            <WorkspaceSelector
-                                projects={projects}
-                                selectedProject={selectedProject}
-                                defaultWorkspacePath={defaultWorkspacePath}
-                                onSelect={onSelectWorkspace}
-                                onAddFolder={onAddFolder}
+                    {/* Both inputs stay mounted so mode switches preserve
+                        in-progress drafts (including SimpleChatInput's
+                        attached images / queued messages). Visibility is
+                        a CSS-only concern — the inactive input is hidden
+                        from the layout + a11y tree via `hidden`, so it
+                        doesn't participate in flow or tab order. */}
+                    <div hidden={mode === 'thought'}>
+                        <SimpleChatInput
+                            ref={inputRef}
+                            mode="launcher"
+                            onSend={handleSend}
+                            isLoading={!!isStarting}
+                            provider={provider}
+                            providers={providers}
+                            selectedModel={selectedModel}
+                            onProviderChange={onProviderChange}
+                            onModelChange={onModelChange}
+                            permissionMode={permissionMode}
+                            onPermissionModeChange={onPermissionModeChange}
+                            apiKeys={apiKeys}
+                            providerVerifyStatus={providerVerifyStatus}
+                            workspaceMcpEnabled={workspaceMcpEnabled}
+                            globalMcpEnabled={globalMcpEnabled}
+                            mcpServers={mcpServers}
+                            onWorkspaceMcpToggle={onWorkspaceMcpToggle}
+                            onRefreshProviders={onRefreshProviders}
+                            runtime={runtime}
+                            runtimeModels={runtimeModels}
+                            runtimePermissionModes={runtimePermissionModes}
+                            toolbarPrefix={
+                                <WorkspaceSelector
+                                    projects={projects}
+                                    selectedProject={selectedProject}
+                                    defaultWorkspacePath={defaultWorkspacePath}
+                                    onSelect={onSelectWorkspace}
+                                    onAddFolder={onAddFolder}
+                                />
+                            }
+                        />
+                    </div>
+                    {modeSegmentEnabled && (
+                        // Thought editor — shares behaviour with Task Center
+                        // via the same ThoughtInput component. No autoFocus
+                        // prop: the mode-change effect above drives focus
+                        // imperatively (via thoughtInputRef), which keeps
+                        // the two inputs' focus handoff coherent when the
+                        // user flips modes with the keyboard.
+                        <div hidden={mode !== 'thought'}>
+                            <ThoughtInput
+                                ref={thoughtInputRef}
+                                existingTags={tagCandidates}
+                                onCreated={handleThoughtCreated}
                             />
-                        }
-                    />
+                        </div>
+                    )}
                     {mode === 'thought' && modeSegmentEnabled && (
                         <div className="absolute left-0 right-0 top-full mt-3">
                             <RecentThoughtsRow
