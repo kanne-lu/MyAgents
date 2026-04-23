@@ -5,7 +5,9 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
+#[cfg(windows)]
+use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
@@ -172,158 +174,180 @@ fn remove_global_port_file() {
 // Proxy configuration is now managed by the shared proxy_config module
 // See src/proxy_config.rs for implementation details
 
-/// Cleanup stale sidecar processes from previous app instances
-/// This should be called on app startup before creating the SidecarManager
-/// Cleans up:
-/// 1. Bun sidecar processes (identified by SIDECAR_MARKER)
-/// 2. SDK child processes (claude-agent-sdk/cli.js)
-/// 3. MCP child processes (~/.myagents/mcp/)
-///
-/// Note: This runs BEFORE logging is initialized, so we use eprintln! for debugging
-pub fn cleanup_stale_sidecars() {
-    // Use eprintln! because this runs before tauri_plugin_log is initialized
-    eprintln!("[sidecar] Cleaning up stale sidecar processes...");
+// ============= Stale process cleanup =============
+//
+// Two pattern sets, sharing a common `CHILD_CLEANUP_PATTERNS` base:
+//
+// * [`STARTUP_CLEANUP_PATTERNS`] additionally sweeps sidecars by
+//   [`SIDECAR_MARKER`]. Startup cleanup runs only when `acquire_lock`
+//   reports a prior instance — in that scenario the prior instance is
+//   already dead (SIGKILL'd by our lock code or crashed), so any matching
+//   sidecar must be an orphan we legitimately own.
+//
+// * [`CHILD_CLEANUP_PATTERNS`] (used by [`cleanup_child_processes`] during
+//   shutdown) deliberately **does not** sweep by `SIDECAR_MARKER`. Our
+//   own sidecars are killed via their `Child` handles in
+//   [`stop_all_sidecars`] — sweeping by marker here would potentially
+//   kill a concurrent MyAgents instance's sidecars during any
+//   hypothetical overlap window (single-instance plugin makes this
+//   extremely rare but not architecturally impossible, e.g. during an
+//   update handoff).
+//
+// All forward-slash form — the matcher in `process_cleanup` normalizes
+// `\` → `/` and lowercases both sides before comparison.
+const CHILD_CLEANUP_PATTERNS: &[crate::process_cleanup::ProcessPattern] = &[
+    // SDK subprocess spawned by Claude Agent SDK.
+    crate::process_cleanup::ProcessPattern::new("SDK", "claude-agent-sdk"),
+    // MCP servers installed under ~/.myagents/mcp/.
+    crate::process_cleanup::ProcessPattern::new("MCP", ".myagents/mcp/"),
+    // Well-known external MCP packages launched via `bun x` / `npx`.
+    crate::process_cleanup::ProcessPattern::new("MCP-ext", "@playwright/mcp"),
+    crate::process_cleanup::ProcessPattern::new("MCP-ext", "@anthropic-ai/mcp"),
+    // MCP servers running under bundled Node.js (cmd.exe intermediates on
+    // Windows can orphan these; the descendants-by-PPID walk inside
+    // `process_cleanup` catches them regardless).
+    crate::process_cleanup::ProcessPattern::new("nodejs", "/myagents/nodejs/"),
+];
 
-    // Remove stale port file from previous crashed instance
-    remove_global_port_file();
+const STARTUP_CLEANUP_PATTERNS: &[crate::process_cleanup::ProcessPattern] = &[
+    // Our own Bun sidecar, identified by the argv marker.
+    crate::process_cleanup::ProcessPattern::new("sidecar", SIDECAR_MARKER),
+    // SDK subprocess spawned by Claude Agent SDK.
+    crate::process_cleanup::ProcessPattern::new("SDK", "claude-agent-sdk"),
+    crate::process_cleanup::ProcessPattern::new("MCP", ".myagents/mcp/"),
+    crate::process_cleanup::ProcessPattern::new("MCP-ext", "@playwright/mcp"),
+    crate::process_cleanup::ProcessPattern::new("MCP-ext", "@anthropic-ai/mcp"),
+    crate::process_cleanup::ProcessPattern::new("nodejs", "/myagents/nodejs/"),
+];
 
-    #[cfg(unix)]
-    {
-        // 1. Clean up bun sidecar processes (our main sidecar)
-        let sidecar_count = kill_processes_by_pattern("sidecar", SIDECAR_MARKER, true);
+// ===== Startup cleanup synchronization =====
+//
+// `cleanup_stale_sidecars` is now hoisted off the main thread (see
+// `lib.rs::setup`). Any sidecar start path MUST wait on this barrier before
+// spawning to avoid port collisions with stale processes that are still
+// being killed. The barrier is set up once at app start and, in the vast
+// majority of cases, is already signaled by the time the first sidecar
+// spawn is requested (cleanup is ~50 ms when there's nothing to kill).
 
-        // 2. Clean up SDK child processes
-        // These are spawned by SDK and don't have our marker
-        // Pattern matches: bun .../claude-agent-sdk/cli.js
-        let sdk_count = kill_processes_by_pattern("SDK", "claude-agent-sdk/cli.js", true);
-
-        // 3. Clean up MCP child processes from our installation
-        // Pattern matches: bun ~/.myagents/mcp/.../cli.js
-        // This is specific to our MCP installation path, won't affect other apps
-        let mcp_count = kill_processes_by_pattern("MCP", ".myagents/mcp/", true);
-
-        // 4. Clean up MCP servers launched via bun x / npx (not under ~/.myagents/mcp/)
-        let mcp_ext1 = kill_processes_by_pattern("MCP-ext", "@playwright/mcp", true);
-        let mcp_ext2 = kill_processes_by_pattern("MCP-ext", "@anthropic-ai/mcp", true);
-
-        eprintln!(
-            "[sidecar] Startup cleanup complete: {} sidecar, {} SDK, {} MCP, {} MCP-ext processes cleaned",
-            sidecar_count, sdk_count, mcp_count, mcp_ext1 + mcp_ext2
-        );
-    }
-
-    #[cfg(windows)]
-    {
-        // Windows: Clean up all related processes
-        // 1. Clean up bun sidecar processes (our main sidecar)
-        kill_windows_processes_by_pattern(SIDECAR_MARKER);
-
-        // 2. Clean up SDK child processes
-        kill_windows_processes_by_pattern("claude-agent-sdk");
-
-        // 3. Clean up MCP child processes
-        kill_windows_processes_by_pattern(".myagents\\mcp\\");
-
-        // 4. Clean up MCP servers launched via bun x / npx
-        // npm package names use forward slashes even on Windows
-        kill_windows_processes_by_pattern("@playwright/mcp");
-        kill_windows_processes_by_pattern("@anthropic-ai/mcp");
-
-        // 5. Clean up bundled Node.js processes (MCP servers started via bundled npx)
-        kill_windows_processes_by_pattern("\\MyAgents\\nodejs\\");
-
-        // Verify cleanup completed (max 1 second wait)
-        let start = std::time::Instant::now();
-        let max_wait = Duration::from_secs(1);
-        loop {
-            if !has_windows_processes(SIDECAR_MARKER)
-                && !has_windows_processes("claude-agent-sdk")
-                && !has_windows_processes(".myagents\\mcp\\")
-                && !has_windows_processes("\\MyAgents\\nodejs\\")
-            {
-                ulog_info!("[sidecar] Windows cleanup verified in {:?}", start.elapsed());
-                break;
-            }
-            if start.elapsed() > max_wait {
-                ulog_warn!("[sidecar] Windows cleanup timeout after 1s, some processes may remain");
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
+pub(crate) struct StartupCleanupBarrier {
+    done: std::sync::atomic::AtomicBool,
 }
 
-/// Find PIDs by command line pattern, excluding current process
-/// Note: Uses "--" separator before pattern to handle patterns starting with "-"
-/// (e.g., "--myagents-sidecar" would otherwise be interpreted as a pgrep option)
-#[cfg(unix)]
-fn find_pids_by_pattern(pattern: &str) -> Vec<i32> {
-    let current_pid = std::process::id() as i32;
+static STARTUP_CLEANUP_BARRIER: std::sync::OnceLock<Arc<StartupCleanupBarrier>> =
+    std::sync::OnceLock::new();
 
-    Command::new("pgrep")
-        .args(["-f", "--", pattern])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter_map(|s| s.trim().parse::<i32>().ok())
-                // Exclude current process to avoid self-kill
-                .filter(|&pid| pid != current_pid)
-                .collect()
+/// Initialize the startup-cleanup barrier. Call exactly once, before any
+/// potential call to [`wait_for_startup_cleanup`]. Safe to call multiple
+/// times — subsequent calls are no-ops.
+pub fn init_startup_cleanup_barrier() -> Arc<StartupCleanupBarrier> {
+    STARTUP_CLEANUP_BARRIER
+        .get_or_init(|| {
+            Arc::new(StartupCleanupBarrier {
+                done: std::sync::atomic::AtomicBool::new(false),
+            })
         })
-        .unwrap_or_default()
+        .clone()
 }
 
-/// Kill processes by pattern with optional SIGKILL fallback
-/// - name: descriptive name for logging
-/// - pattern: command line pattern to match
-/// - force_kill: if true, use SIGKILL for processes that don't respond to SIGTERM
-/// Returns: number of processes killed
+/// Mark the startup cleanup as complete. Waiters will observe the flag
+/// via their own polling loop — no async condvar needed.
+pub fn mark_startup_cleanup_done() {
+    if let Some(b) = STARTUP_CLEANUP_BARRIER.get() {
+        b.done.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Block the current (sync) thread until the startup cleanup pass has
+/// finished, or until `timeout` elapses. Logs a warning on timeout but
+/// does not fail — callers should proceed with best-effort spawn.
 ///
-/// Note: Uses eprintln! because this may run before tauri_plugin_log is initialized
-#[cfg(unix)]
-fn kill_processes_by_pattern(name: &str, pattern: &str, force_kill: bool) -> usize {
-    let pids = find_pids_by_pattern(pattern);
-    if pids.is_empty() {
-        return 0;
+/// Implementation note: pure `AtomicBool` polling with a 25 ms sleep —
+/// deliberately **not** using `tokio::sync::Notify` + `block_on`. This
+/// function is called from `start_tab_sidecar`, which is invoked from
+/// within an async Tauri command (running on a tokio worker), where
+/// `tauri::async_runtime::block_on` would panic
+/// ("cannot start a runtime from within a runtime"). Polling is also
+/// cheap enough here: the common case is the barrier is already
+/// signaled before the first sidecar spawn is requested, so we exit on
+/// the first atomic-load without ever sleeping.
+pub fn wait_for_startup_cleanup(timeout: Duration) {
+    let Some(barrier) = STARTUP_CLEANUP_BARRIER.get() else {
+        return;
+    };
+    if barrier.done.load(std::sync::atomic::Ordering::Acquire) {
+        return;
     }
-
-    eprintln!("[sidecar] Found {} {} processes, sending SIGTERM...", pids.len(), name);
-
-    // First try SIGTERM for graceful shutdown
-    for pid in &pids {
-        unsafe {
-            libc::kill(*pid, libc::SIGTERM);
+    let start = std::time::Instant::now();
+    let poll = Duration::from_millis(25);
+    while !barrier.done.load(std::sync::atomic::Ordering::Acquire) {
+        if start.elapsed() >= timeout {
+            ulog_warn!(
+                "[sidecar] Startup cleanup barrier timed out after {:?}; proceeding anyway",
+                start.elapsed()
+            );
+            return;
         }
+        thread::sleep(poll);
     }
-
-    if !force_kill {
-        return pids.len(); // Assume all killed (can't verify without waiting)
-    }
-
-    // Wait briefly for graceful shutdown
-    thread::sleep(Duration::from_millis(300));
-
-    // Check if any processes survived, use SIGKILL if needed
-    let remaining = find_pids_by_pattern(pattern);
-    if !remaining.is_empty() {
-        eprintln!(
-            "[sidecar] {} {} processes didn't respond to SIGTERM, using SIGKILL...",
-            remaining.len(), name
+    let elapsed = start.elapsed();
+    if elapsed > Duration::from_millis(100) {
+        ulog_info!(
+            "[sidecar] Sidecar spawn waited {:?} for startup cleanup",
+            elapsed
         );
-        for pid in &remaining {
-            unsafe {
-                libc::kill(*pid, libc::SIGKILL);
-            }
-        }
+    }
+}
+
+/// Fast synchronous preamble — safe to run on the main thread before the
+/// heavy cleanup pass is spawned into a blocking worker. Removes the stale
+/// port file so a lingering CLI read doesn't see a dead port.
+pub fn cleanup_stale_sidecars_preamble() {
+    remove_global_port_file();
+}
+
+/// Heavy cleanup pass — enumerate and kill stale sidecar/SDK/MCP
+/// subprocesses left behind by a prior app instance.
+///
+/// Intended to run on a blocking tokio worker off the main thread. The
+/// entire Windows path previously took 5–15 seconds synchronously by
+/// shelling out to PowerShell+WMI six times; this native implementation
+/// typically completes in 10–200 ms.
+///
+/// When `had_prior_instance` is `false` (true first launch / post-uninstall),
+/// the scan is skipped entirely — there cannot be any orphans to kill,
+/// so the PID enumeration overhead is pure waste.
+pub fn cleanup_stale_sidecars(had_prior_instance: bool) {
+    if !had_prior_instance {
+        ulog_info!(
+            "[sidecar] True first launch (no prior lock file) — skipping stale process scan"
+        );
+        mark_startup_cleanup_done();
+        return;
     }
 
-    let final_remaining = find_pids_by_pattern(pattern);
-    let killed_count = pids.len() - final_remaining.len();
-    eprintln!("[sidecar] {} cleanup complete, killed {}/{} processes", name, killed_count, pids.len());
-    killed_count
+    let report = crate::process_cleanup::kill_stale_processes(STARTUP_CLEANUP_PATTERNS);
+    if report.total_targets() == 0 {
+        ulog_info!(
+            "[sidecar] Startup cleanup complete in {:?} (no stale processes found)",
+            report.elapsed
+        );
+    } else {
+        ulog_info!(
+            "[sidecar] Startup cleanup: killed {} (roots={}, descendants={}, residual={}) in {:?}",
+            report.killed,
+            report.matched_roots,
+            report.descendants,
+            report.residual,
+            report.elapsed
+        );
+        if report.residual > 0 {
+            ulog_warn!(
+                "[sidecar] {} processes survived termination deadline",
+                report.residual
+            );
+        }
+    }
+    mark_startup_cleanup_done();
 }
 
 
@@ -1664,6 +1688,13 @@ pub fn start_tab_sidecar<R: Runtime>(
 ) -> Result<u16, String> {
     // Ensure file descriptor limit is high enough for Bun
     ensure_high_file_descriptor_limit();
+
+    // Block briefly if startup cleanup is still running — spawning a new
+    // sidecar before stale ones are killed would race on ports. In the
+    // common case this returns immediately (cleanup finishes in ~50 ms).
+    // 15 s is a generous upper bound; the new sysinfo-based cleanup is
+    // bounded internally at ~3 s even with laggy processes.
+    wait_for_startup_cleanup(Duration::from_secs(15));
 
     let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
@@ -3250,176 +3281,73 @@ pub fn shutdown_for_update(manager: &ManagedSidecarManager) -> Result<(), String
         cleanup_child_processes();
     }
 
-    // 3. Wait for all related processes to truly exit
-    #[cfg(windows)]
-    {
-        let max_wait = Duration::from_secs(5);
-        let start = std::time::Instant::now();
-        loop {
-            let has_sidecar = has_windows_processes(SIDECAR_MARKER);
-            let has_sdk = has_windows_processes("claude-agent-sdk");
-            let has_mcp = has_windows_processes(".myagents\\mcp\\");
-            let has_node = has_windows_processes("\\MyAgents\\nodejs\\");
-
-            if !has_sidecar && !has_sdk && !has_mcp && !has_node {
-                ulog_info!("[sidecar] All processes terminated in {:?}", start.elapsed());
-                break;
-            }
-
-            if start.elapsed() > max_wait {
-                ulog_warn!("[sidecar] Update shutdown timeout, force killing remaining...");
-                kill_windows_processes_by_pattern(SIDECAR_MARKER);
-                kill_windows_processes_by_pattern("claude-agent-sdk");
-                kill_windows_processes_by_pattern(".myagents\\mcp\\");
-                kill_windows_processes_by_pattern("\\MyAgents\\nodejs\\");
-                // Brief wait to confirm termination
-                thread::sleep(Duration::from_secs(1));
-                break;
-            }
-
-            thread::sleep(Duration::from_millis(100));
+    // 3. Wait for all related processes to truly exit. Uses the same
+    //    sysinfo-backed process scan as startup cleanup — no PowerShell
+    //    subprocesses, no cmd-line-escaping edge cases, consistent
+    //    behavior across Windows and Unix.
+    let max_wait = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    loop {
+        // Update path MUST verify our own sidecars (SIDECAR_MARKER) too —
+        // NSIS can't overwrite `bun.exe` while it's in use, so we need
+        // confirmation that every MyAgents-related process is gone. Uses
+        // STARTUP patterns (superset that includes the sidecar marker).
+        if !crate::process_cleanup::has_matching_processes(STARTUP_CLEANUP_PATTERNS) {
+            ulog_info!(
+                "[sidecar] All processes terminated in {:?}",
+                start.elapsed()
+            );
+            break;
         }
-    }
 
-    // Unix: SIGKILL is reliable, just allow a brief settling period
-    #[cfg(unix)]
-    {
-        thread::sleep(Duration::from_millis(500));
+        if start.elapsed() > max_wait {
+            ulog_warn!("[sidecar] Update shutdown timeout, force killing remaining...");
+            let report = crate::process_cleanup::kill_stale_processes(STARTUP_CLEANUP_PATTERNS);
+            ulog_info!(
+                "[sidecar] Force-kill final pass: killed {}, residual {} ({:?})",
+                report.killed,
+                report.residual,
+                report.elapsed
+            );
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(100));
     }
 
     ulog_info!("[sidecar] Shutdown for update complete");
     Ok(())
 }
 
-/// Clean up SDK and MCP child processes
-/// Called on app shutdown to ensure no orphaned processes remain
-#[cfg(unix)]
+/// Clean up SDK and MCP child processes at app shutdown.
+///
+/// On Windows, SDK-spawned node/bun processes often survive a direct
+/// parent kill because `cmd.exe` intermediates (npx.cmd / bun.exe wrapper)
+/// break the process-tree linkage that `taskkill /T /F` relies on. This
+/// shutdown cleanup walks descendants by PPID via sysinfo and kills
+/// them all — orphans included — in one pass.
+///
+/// Uses [`CHILD_CLEANUP_PATTERNS`] (no `SIDECAR_MARKER`) because our own
+/// sidecars are already killed through their `Child` handles in
+/// [`stop_all_sidecars`]. Sweeping by marker here would risk killing a
+/// concurrent MyAgents instance's sidecars during any overlap window.
 fn cleanup_child_processes() {
-    // Clean up SDK child processes (with SIGKILL fallback for app shutdown)
-    kill_processes_by_pattern("SDK", "claude-agent-sdk/cli.js", true);
-
-    // Clean up MCP child processes (with SIGKILL fallback for app shutdown)
-    kill_processes_by_pattern("MCP", ".myagents/mcp/", true);
-
-    // Clean up MCP servers launched via bun x / npx (not under ~/.myagents/mcp/)
-    kill_processes_by_pattern("MCP-ext", "@playwright/mcp", true);
-    kill_processes_by_pattern("MCP-ext", "@anthropic-ai/mcp", true);
-}
-
-#[cfg(windows)]
-fn cleanup_child_processes() {
-    // Windows: Clean up SDK and MCP child processes using wmic + taskkill
-    ulog_info!("[sidecar] Cleaning up child processes on Windows...");
-
-    // Clean up SDK child processes
-    kill_windows_processes_by_pattern("claude-agent-sdk");
-
-    // Clean up MCP child processes
-    kill_windows_processes_by_pattern(".myagents\\mcp\\");
-
-    // Clean up MCP servers launched via bun x / npx (not under ~/.myagents/mcp/)
-    kill_windows_processes_by_pattern("@playwright\\mcp");
-    kill_windows_processes_by_pattern("@anthropic-ai\\mcp");
-
-    // Clean up bundled Node.js processes (MCP servers started via bundled npx)
-    // These may survive tree-kill when npx.cmd creates intermediate cmd.exe layers
-    kill_windows_processes_by_pattern("\\MyAgents\\nodejs\\");
-}
-
-#[cfg(windows)]
-fn kill_windows_processes_by_pattern(pattern: &str) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    // Use PowerShell Get-CimInstance (wmic is deprecated in Windows 10/11)
-    // Fallback to wmic for older systems
-    let ps_command = format!(
-        "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{}*' }} | Select-Object -ExpandProperty ProcessId",
-        pattern.replace("'", "''")  // Escape single quotes for PowerShell
-    );
-
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps_command])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    let pids: Vec<u32> = match output {
-        Ok(ref o) if o.status.success() => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter_map(|s| s.trim().parse::<u32>().ok())
-                .collect()
-        }
-        _ => {
-            // Fallback to wmic for older Windows versions
-            ulog_info!("[sidecar] PowerShell failed, falling back to wmic");
-            Command::new("wmic")
-                .args(["process", "where", &format!("commandline like '%{}%'", pattern), "get", "processid"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .ok()
-                .map(|o| {
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .skip(1)
-                        .filter_map(|s| s.trim().parse::<u32>().ok())
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
-    };
-
-    if pids.is_empty() {
-        return;
+    let report = crate::process_cleanup::kill_stale_processes(CHILD_CLEANUP_PATTERNS);
+    if report.total_targets() == 0 {
+        ulog_info!(
+            "[sidecar] Shutdown cleanup: nothing to kill ({:?})",
+            report.elapsed
+        );
+    } else {
+        ulog_info!(
+            "[sidecar] Shutdown cleanup: killed {} (roots={}, descendants={}, residual={}) in {:?}",
+            report.killed,
+            report.matched_roots,
+            report.descendants,
+            report.residual,
+            report.elapsed
+        );
     }
-
-    let mut killed = 0;
-    for pid in &pids {
-        let mut cmd = Command::new("taskkill");
-        // /T = kill process tree (children too), /F = force
-        cmd.args(["/T", "/F", "/PID", &pid.to_string()])
-            .creation_flags(CREATE_NO_WINDOW);
-        if cmd.output().is_ok() {
-            killed += 1;
-        }
-    }
-
-    if killed > 0 {
-        ulog_info!("[sidecar] Killed {} processes (tree) matching '{}'", killed, pattern);
-    }
-}
-
-/// Check if any Windows processes exist matching the pattern
-#[cfg(windows)]
-fn has_windows_processes(pattern: &str) -> bool {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let ps_command = format!(
-        "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{}*' }} | Select-Object -ExpandProperty ProcessId",
-        pattern.replace("'", "''")
-    );
-
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps_command])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            !String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .filter_map(|s| s.trim().parse::<u32>().ok())
-                .collect::<Vec<_>>()
-                .is_empty()
-        }
-        _ => false,
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-fn cleanup_child_processes() {
-    // No-op on other platforms
 }
 
 // ============= Legacy Compatibility Functions =============

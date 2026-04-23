@@ -11,6 +11,7 @@ pub mod local_http;
 pub mod logger;
 pub mod legacy_upgrade;
 pub mod management_api;
+pub mod process_cleanup;
 pub mod process_cmd;
 mod proxy_config;
 pub mod system_binary;
@@ -25,7 +26,8 @@ mod tray;
 mod updater;
 
 use sidecar::{
-    cleanup_stale_sidecars, create_sidecar_state, stop_all_sidecars,
+    cleanup_stale_sidecars, cleanup_stale_sidecars_preamble, init_startup_cleanup_barrier,
+    create_sidecar_state, stop_all_sidecars,
     // Session activation commands (for Session singleton tracking)
     cmd_get_session_activation, cmd_activate_session, cmd_deactivate_session,
     cmd_update_session_tab,
@@ -344,14 +346,50 @@ pub fn run() {
             // so we don't kill sidecars belonging to an instance we're about to replace.
             // The single-instance plugin handles the "user double-clicked" case via IPC;
             // this lock handles the "build script killed + macOS restarted" case via PID.
-            app_dirs::acquire_lock();
+            let lock_state = app_dirs::acquire_lock();
+            let had_prior_instance = lock_state.had_prior_instance();
 
-            // IMPORTANT: Clean up stale sidecar processes from previous app instances.
-            // This prevents "No available port found" errors caused by orphaned processes.
-            // Placed here (inside .setup()) instead of before Builder so it only runs
-            // for the primary instance. The single-instance plugin exits duplicate
-            // processes before .setup() is called, preventing accidental kills.
-            cleanup_stale_sidecars();
+            // Stale sidecar cleanup:
+            //   1. Run the fast preamble (remove stale port file) synchronously
+            //      so CLI / admin-api see a consistent state immediately.
+            //   2. Hoist the heavy scan onto a blocking worker. Previously this
+            //      ran synchronously on the main thread and blocked Tauri
+            //      `setup()` for 5–15 s on Windows (PowerShell/WMI cold
+            //      start × 6 patterns), which directly caused the
+            //      "frontend freezes on first launch" user report. The new
+            //      `process_cleanup` module uses native `sysinfo` (no
+            //      subprocess spawn) and completes in ~10–200 ms.
+            //   3. `start_tab_sidecar` waits on the barrier before
+            //      spawning, so port allocation still serializes with
+            //      cleanup — no correctness regression.
+            init_startup_cleanup_barrier();
+            cleanup_stale_sidecars_preamble();
+            tauri::async_runtime::spawn_blocking(move || {
+                // Panic-safe: if cleanup panics (sysinfo crash, etc.) we
+                // still MUST mark the barrier done, otherwise every future
+                // sidecar spawn will wait the full 15 s timeout. The outer
+                // guard fires regardless of whether the inner closure
+                // returned normally or unwound.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    cleanup_stale_sidecars(had_prior_instance);
+                }));
+                // Always mark done — cleanup_stale_sidecars normally marks
+                // internally on success, but we cover both the panic path
+                // and any early-return paths we might add in the future.
+                sidecar::mark_startup_cleanup_done();
+                if let Err(panic) = result {
+                    // Try to log something useful about the panic.
+                    let msg = panic
+                        .downcast_ref::<&'static str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "<non-string panic payload>".to_string());
+                    log::error!(
+                        "[sidecar] cleanup_stale_sidecars panicked: {} — barrier released so startup can proceed",
+                        msg
+                    );
+                }
+            });
 
             // ── Boot Banner: single-line consolidated diagnostics for AI grep ──
             {
