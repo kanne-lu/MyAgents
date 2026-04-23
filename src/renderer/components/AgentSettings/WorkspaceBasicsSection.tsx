@@ -5,8 +5,11 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { ChevronRight } from 'lucide-react';
 import { useConfig } from '@/hooks/useConfig';
+import { useAvailableProviders } from '@/hooks/useAvailableProviders';
 import { getAllMcpServers, getEnabledMcpServerIds } from '@/config/configService';
 import { patchAgentConfig } from '@/config/services/agentConfigService';
+import { isProviderAvailable } from '@/config/services/providerService';
+import { CUSTOM_EVENTS } from '@/../shared/constants';
 import { PERMISSION_MODES, type Project, type McpServerDefinition } from '@/config/types';
 import type { AgentConfig } from '../../../shared/types/agent';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
@@ -23,7 +26,11 @@ interface WorkspaceBasicsSectionProps {
 }
 
 export default function WorkspaceBasicsSection({ project, agent, agentDir }: WorkspaceBasicsSectionProps) {
-  const { config, providers, patchProject, refreshConfig } = useConfig();
+  const { config, providers, apiKeys, providerVerifyStatus, patchProject, refreshConfig } = useConfig();
+  // Only credentialed providers — the picker must not expose a provider
+  // the user can't actually use, and must match the Chat model switcher's
+  // "available" set (see useAvailableProviders for rationale).
+  const availableProviders = useAvailableProviders();
   const toast = useToast();
   // Derive canonical name from project — use as initializer key to reset input
   const canonicalName = useMemo(
@@ -170,14 +177,34 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     void saveAgentConfig({ mcpEnabledServers: newEnabled });
   }, [agent?.mcpEnabledServers, saveAgentConfig]);
 
-  // Derived display values — read from AgentConfig (source of truth), fallback to Project
+  // Derived display values — read from AgentConfig (source of truth), fallback to Project.
+  //
+  // The summary label shows the PERSISTED provider, not an availability-
+  // resolved fallback: if a saved providerId no longer has credentials
+  // (e.g. user removed the API key), we still display that name so the
+  // closed button matches what's on disk. The picker popup below surfaces
+  // only available providers — so the user can see "oh, this is stale"
+  // and pick something valid — and we annotate the summary with a small
+  // "⚠ 暂不可用" hint when the saved provider fails `isProviderAvailable`.
+  // This is cheaper than an automatic rewrite and keeps persistence as
+  // the single source of truth for what was actually saved.
   const effectiveProviderId = agent?.providerId ?? project?.providerId;
   const effectiveModel = agent?.model ?? project?.model;
   const selectedProvider = providers.find(p => p.id === effectiveProviderId);
+  const isSelectedProviderAvailable = selectedProvider
+    ? isProviderAvailable(selectedProvider, apiKeys, providerVerifyStatus)
+    : true;
   const modelName = effectiveModel
     ? (selectedProvider?.models?.find(m => m.model === effectiveModel)?.modelName || effectiveModel)
     : (selectedProvider?.primaryModel || '未设置');
   const providerName = selectedProvider?.name || '默认';
+
+  const openProviderSettings = useCallback(() => {
+    window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+      detail: { section: 'providers' },
+    }));
+    setOpenPopup(null);
+  }, []);
 
   const effectivePermissionMode = agent?.permissionMode ?? project?.permissionMode;
   const permissionMode = PERMISSION_MODES.find(m => m.value === effectivePermissionMode) || PERMISSION_MODES[0];
@@ -307,7 +334,19 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'model' ? null : 'model')}
         >
-          <span className="truncate">{providerName} / {modelName}</span>
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate">{providerName} / {modelName}</span>
+            {!isSelectedProviderAvailable && selectedProvider && (
+              // Saved provider lost credentials — warn the user inline so
+              // they don't hit a runtime error when a message fires.
+              <span
+                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)]"
+                title="该供应商未配置 API Key / 订阅登录，请点击重新选择"
+              >
+                ⚠ 暂不可用
+              </span>
+            )}
+          </span>
           <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)]" />
         </button>
 
@@ -315,24 +354,39 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
           <>
             <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenPopup(null); }} />
             <div className="absolute left-20 top-0 z-50 max-h-[300px] w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
-              {providers.map(provider => (
-                <div key={provider.id} className="mb-1">
-                  <div className="px-2 py-1 text-xs font-medium text-[var(--ink-muted)]">{provider.name}</div>
-                  {provider.models?.map(model => (
-                    <button
-                      key={`${provider.id}:${model.model}`}
-                      className={`flex w-full items-center rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
-                        effectiveProviderId === provider.id && effectiveModel === model.model
-                          ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
-                          : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
-                      }`}
-                      onClick={() => handleModelSelect(provider.id, model.model)}
-                    >
-                      {model.modelName}
-                    </button>
-                  ))}
+              {availableProviders.length === 0 ? (
+                <div className="px-3 py-3">
+                  <p className="mb-2 text-xs leading-relaxed text-[var(--ink-muted)]">
+                    还没有可用的供应商 —— 请先到「设置 → 模型供应商」添加 API Key 或完成订阅登录。
+                  </p>
+                  <button
+                    type="button"
+                    onClick={openProviderSettings}
+                    className="text-xs font-medium text-[var(--accent-warm)] hover:underline"
+                  >
+                    打开模型供应商设置 →
+                  </button>
                 </div>
-              ))}
+              ) : (
+                availableProviders.map(provider => (
+                  <div key={provider.id} className="mb-1">
+                    <div className="px-2 py-1 text-xs font-medium text-[var(--ink-muted)]">{provider.name}</div>
+                    {provider.models?.map(model => (
+                      <button
+                        key={`${provider.id}:${model.model}`}
+                        className={`flex w-full items-center rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
+                          effectiveProviderId === provider.id && effectiveModel === model.model
+                            ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
+                            : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                        }`}
+                        onClick={() => handleModelSelect(provider.id, model.model)}
+                      >
+                        {model.modelName}
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
             </div>
           </>
         )}

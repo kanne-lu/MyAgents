@@ -1,6 +1,7 @@
 // Agent basics: name, icon, provider+model, permission, enable/disable
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { useConfig } from '@/hooks/useConfig';
+import { isProviderAvailable } from '@/config/services/providerService';
 import type { AgentConfig } from '../../../../shared/types/agent';
 import type { AgentStatusData } from '@/hooks/useAgentStatuses';
 import { patchAgentConfig } from '@/config/services/agentConfigService';
@@ -12,7 +13,7 @@ interface AgentBasicsSectionProps {
 }
 
 export default function AgentBasicsSection({ agent, status, onAgentChanged }: AgentBasicsSectionProps) {
-  const { providers } = useConfig();
+  const { providers, apiKeys, providerVerifyStatus } = useConfig();
   const [name, setName] = useState(agent.name);
   const [saving, setSaving] = useState(false);
   const isMountedRef = useRef(true);
@@ -50,6 +51,12 @@ export default function AgentBasicsSection({ agent, status, onAgentChanged }: Ag
 
   const selectedProvider = providers.find(p => p.id === agent.providerId);
   const modelDisplay = agent.model || selectedProvider?.primaryModel || '未设置';
+  // Summary is read-only (no picker here) so we show the persisted value
+  // as-is, but annotate when credentials are missing so the user isn't
+  // surprised by a runtime failure. Same treatment as WorkspaceBasicsSection.
+  const isSelectedProviderAvailable = selectedProvider
+    ? isProviderAvailable(selectedProvider, apiKeys, providerVerifyStatus)
+    : true;
 
   const hasRunningChannels = status?.channels.some(ch => ch.status === 'online') ?? false;
 
@@ -72,8 +79,16 @@ export default function AgentBasicsSection({ agent, status, onAgentChanged }: Ag
       {/* Provider + Model (read-only summary) */}
       <div className="flex items-center gap-3">
         <label className="w-20 shrink-0 text-xs text-[var(--ink-muted)]">模型</label>
-        <span className="text-sm text-[var(--ink)]">
-          {selectedProvider?.name ?? '默认'} / {modelDisplay}
+        <span className="flex items-center gap-2 text-sm text-[var(--ink)]">
+          <span>{selectedProvider?.name ?? '默认'} / {modelDisplay}</span>
+          {!isSelectedProviderAvailable && selectedProvider && (
+            <span
+              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)]"
+              title="该供应商未配置 API Key / 订阅登录"
+            >
+              ⚠ 暂不可用
+            </span>
+          )}
         </span>
       </div>
 
