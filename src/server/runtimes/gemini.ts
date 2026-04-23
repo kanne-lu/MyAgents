@@ -33,6 +33,7 @@ import type {
   UnifiedEventCallback,
   ImagePayload,
 } from './types';
+import { StaleRuntimeSessionError } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { resolveGeminiWorkspaceInstructions } from './workspace-instructions';
 import { broadcast } from '../sse';
@@ -467,6 +468,12 @@ class GeminiProcess implements RuntimeProcess {
    */
   replayMode = false;
 
+  // True when the startSession catch-handler killed the process itself (stale
+  // session/load, init failure, etc.). Suppresses the synthetic "Gemini
+  // process exited with code …" session_complete emitted by proc.exited.then
+  // — the caller already owns the error surface. Mirrors codex.ts #105 fix.
+  intentionalKillDuringStartup = false;
+
   private proc: Subprocess;
 
   constructor(proc: Subprocess) {
@@ -718,6 +725,11 @@ export class GeminiRuntime implements AgentRuntime {
     //    reuse the same session id.
     proc.exited.then((code) => {
       geminiProc.exited = true;
+      // When the startup catch-handler killed the process itself (e.g. stale
+      // `session/load`), suppress the synthetic session_complete so we don't
+      // stack an "exited with code …" toast on top of the real RPC error that
+      // the caller already broadcast. Issue #105.
+      if (geminiProc.intentionalKillDuringStartup) return;
       wrappedOnEvent({
         kind: 'session_complete',
         result: code === 0 ? '' : `Gemini process exited with code ${code}`,
@@ -863,6 +875,8 @@ export class GeminiRuntime implements AgentRuntime {
         geminiProc.replayMode = false;
       }
     } catch (err) {
+      // Flag must be set BEFORE proc.kill so proc.exited.then observes it.
+      geminiProc.intentionalKillDuringStartup = true;
       try {
         // SIGKILL (9) over SIGTERM (15): the Windows launcher chain
         // (gemini.cmd → node) is slow to unwind on SIGTERM, and leaving a
@@ -875,6 +889,16 @@ export class GeminiRuntime implements AgentRuntime {
         /* ignore */
       }
       geminiProc.exited = true;
+
+      // Detect stale session/load failure so the caller can invalidate the
+      // persisted runtimeSessionId and retry fresh. Match only phrasings
+      // that unambiguously mean "the stored session is gone" — broader
+      // matches like "invalid session" could false-trigger on unrelated
+      // auth/format errors and destroy a resumable session unnecessarily.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.resumeSessionId && /session not found|no conversation found|unknown session|session does not exist/i.test(msg)) {
+        throw new StaleRuntimeSessionError(options.resumeSessionId, msg);
+      }
       throw err;
     }
 

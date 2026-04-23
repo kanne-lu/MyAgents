@@ -178,3 +178,20 @@ export interface AgentRuntime {
    */
   setModel?(process: RuntimeProcess, model: string): Promise<void>;
 }
+
+/**
+ * Runtime rejected a `thread/resume` (Codex) or `session/load` (Gemini) because
+ * the persisted runtime-side session no longer exists — the rollout was GC'd,
+ * the thread was archived, or the CLI upgraded across an on-disk format change.
+ *
+ * external-session.ts catches this specifically so it can invalidate the stale
+ * pointer (module state + persisted `meta.runtimeSessionId`) and retry fresh
+ * without losing the user's message. See issue #105.
+ */
+export class StaleRuntimeSessionError extends Error {
+  readonly isStaleRuntimeSession = true;
+  constructor(public readonly runtimeSessionId: string, message: string) {
+    super(message);
+    this.name = 'StaleRuntimeSessionError';
+  }
+}

@@ -9,6 +9,7 @@ import { broadcast } from '../sse';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
+import { StaleRuntimeSessionError } from './types';
 import type { AskUserQuestionInput } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
@@ -878,8 +879,8 @@ async function _doStartExternalSession(options: {
   // seeing the pre-start state and returning true prematurely. Reset in catch.
   isRunning = true;
 
-  try {
-    const process = await runtime.startSession(
+  const startOnce = (resumeId: string | undefined): Promise<RuntimeProcess> =>
+    runtime.startSession(
       {
         sessionId: options.sessionId,
         workspacePath: options.workspacePath,
@@ -889,10 +890,44 @@ async function _doStartExternalSession(options: {
         model: options.model,
         permissionMode: options.permissionMode,
         scenario: options.scenario,
-        resumeSessionId: options.resumeSessionId,
+        resumeSessionId: resumeId,
       },
       handleUnifiedEvent,
     );
+
+  try {
+    let process: RuntimeProcess;
+    try {
+      process = await startOnce(options.resumeSessionId);
+    } catch (err) {
+      // Stale resume recovery (issue #105): the runtime reports our persisted
+      // runtimeSessionId is dead (Codex rollout GC'd, Gemini session dropped
+      // across CLI upgrade, etc.). Invalidate both the in-memory pointer and
+      // the on-disk metadata, then retry fresh once so the user's message
+      // still lands instead of looping on the stale id forever. If the fresh
+      // retry also fails, fall through to the normal error surface.
+      if (err instanceof StaleRuntimeSessionError && options.resumeSessionId) {
+        console.warn(`[external-session] ${runtimeType} resume rejected as stale (id=${err.runtimeSessionId}): ${err.message} — invalidating and retrying fresh`);
+        lastRuntimeSessionId = '';
+        if (options.sessionId) {
+          try {
+            updateSessionMetadata(options.sessionId, { runtimeSessionId: '' });
+          } catch (metaErr) {
+            console.warn('[external-session] Failed to clear stale runtimeSessionId on disk:', metaErr);
+          }
+        }
+        // Also drop any pre-warm deferred pointer that belongs to a now-dead
+        // resume — letting it survive would re-patch the stale id onto the
+        // next metadata registration.
+        if (deferredRuntimeSessionId?.forSessionId === options.sessionId) {
+          deferredRuntimeSessionId = null;
+        }
+        process = await startOnce(undefined);
+        console.log(`[external-session] ${runtimeType} recovered via fresh start after stale resume`);
+      } else {
+        throw err;
+      }
+    }
 
     activeProcess = process;
     console.log(`[external-session] ${runtimeType} process started, pid=${activeProcess.pid}`);

@@ -12,6 +12,7 @@ import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
+import { StaleRuntimeSessionError } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
 
@@ -253,6 +254,11 @@ class CodexProcess implements RuntimeProcess {
   threadId = '';
   currentTurnId = '';
   agentMessageTextById = new Map<string, string>();
+  // True when the startSession catch-handler killed the process itself (stale
+  // resume, init failure, etc.). Suppresses the synthetic "Codex process
+  // exited with code 143" session_complete emitted by proc.exited.then — the
+  // caller already owns the error surface. Issue #105.
+  intentionalKillDuringStartup = false;
 
   constructor(proc: Subprocess) {
     this.proc = proc;
@@ -491,9 +497,14 @@ export class CodexRuntime implements AgentRuntime {
     // Start background reader (runs for lifetime of session)
     codexProc.rpc.startReading();
 
-    // Track process exit — emit session_complete if not already emitted by protocol
+    // Track process exit — emit session_complete if not already emitted by protocol.
+    // Skipped when the startup catch-handler killed the process itself (e.g. stale
+    // `thread/resume`): the caller's error surface already names the real cause,
+    // and emitting a synthetic "exited with code 143" here would layer a noisy
+    // SIGTERM echo on top. See issue #105.
     proc.exited.then((code) => {
       codexProc.exited = true;
+      if (codexProc.intentionalKillDuringStartup) return;
       wrappedOnEvent({
         kind: 'session_complete',
         result: code === 0 ? '' : `Codex process exited with code ${code}`,
@@ -588,9 +599,20 @@ export class CodexRuntime implements AgentRuntime {
         codexProc.currentTurnId = turnResult.turn.id;
       }
     } catch (err) {
-      // Clean up on startup failure
+      // Clean up on startup failure.
+      // Flag must be set BEFORE proc.kill so proc.exited.then observes it.
+      codexProc.intentionalKillDuringStartup = true;
       try { proc.kill(); } catch { /* ignore */ }
       codexProc.exited = true;
+
+      // Detect the specific "rollout was dropped" failure so the caller can
+      // invalidate the stale threadId and retry fresh instead of looping on a
+      // dead pointer forever. Codex worded this slightly differently across
+      // CLI versions (observed on v0.122.0-alpha.1) — match loosely.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (options.resumeSessionId && /no rollout found|thread not found|conversation not found/i.test(msg)) {
+        throw new StaleRuntimeSessionError(options.resumeSessionId, msg);
+      }
       throw err;
     }
 
