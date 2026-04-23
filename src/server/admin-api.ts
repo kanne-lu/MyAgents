@@ -30,7 +30,10 @@ import {
 import { existsSync , writeFileSync, unlinkSync } from 'fs';
 import { ensureDirSync } from './utils/fs-utils';
 import { resolve } from 'path';
-import { setMcpServers, getMcpServers, getAgentState, getSidecarPort } from './agent-session';
+import { setMcpServers, setAgents, getMcpServers, getAgentState, getSidecarPort, forceReloadActiveSession } from './agent-session';
+import { loadEnabledAgents } from './agents/agent-loader';
+import { getHomeDirOrNull } from './utils/platform';
+import { join } from 'path';
 import { broadcast } from './sse';
 import { getCronTaskContext, CRON_TASK_EXIT_TEXT } from './tools/cron-tools';
 import { getImMediaContext } from './tools/im-media-tool';
@@ -222,6 +225,82 @@ export function handleMcpList(): AdminResponse {
   }));
 
   return { success: true, data };
+}
+
+/**
+ * `myagents mcp show <id>` — details for a single MCP server.
+ *
+ * Mirrors handleAgentShow: parses user-facing config + workspace enable state
+ * into one consolidated payload the AI / user can inspect without dumping the
+ * whole list. Env values are redacted so an AI transcript never leaks API keys
+ * (same redaction rule the model-list endpoint already uses).
+ */
+export function handleMcpShow(payload: { id?: string }): AdminResponse {
+  const id = payload.id;
+  if (!id) {
+    return {
+      success: false,
+      error: 'Missing required argument: <mcp-id>',
+      recoveryHint: {
+        recoveryCommand: 'myagents mcp list',
+        message: 'See valid MCP server ids.',
+      },
+    };
+  }
+  const config = loadConfig();
+  const allServers = getAllMcpServers(config);
+  const server = allServers.find(s => s.id === id);
+  if (!server) {
+    return {
+      success: false,
+      error: `MCP server '${id}' not found.`,
+      recoveryHint: {
+        recoveryCommand: 'myagents mcp list',
+        message: 'See valid MCP server ids.',
+      },
+    };
+  }
+
+  const globalEnabled = new Set(getEnabledMcpServerIds(config));
+  const workspacePath = getCurrentWorkspacePath();
+  let projectEnabled: boolean | null = null;
+  if (workspacePath) {
+    const projects = loadProjects();
+    const project = projects.find(p => p.path === workspacePath);
+    projectEnabled = new Set(project?.mcpEnabledServers ?? []).has(id);
+  }
+
+  // Redact env values — mirrors what `model list` does for provider api keys.
+  const env = server.env ? Object.fromEntries(
+    Object.entries(server.env).map(([k, v]) => [k, redactSecret(v)]),
+  ) : undefined;
+
+  return {
+    success: true,
+    data: {
+      id: server.id,
+      name: server.name,
+      type: server.type,
+      description: server.description,
+      isBuiltin: !!server.isBuiltin,
+      requiresConfig: !!server.requiresConfig,
+      websiteUrl: server.websiteUrl,
+      command: server.command,
+      args: server.args,
+      url: server.url,
+      // Headers (for http/sse) and env (for stdio) — redacted values only.
+      headers: server.headers ? Object.fromEntries(
+        Object.entries(server.headers).map(([k, v]) => [k, redactSecret(v)]),
+      ) : undefined,
+      env,
+      enabled: {
+        global: globalEnabled.has(id),
+        // null = no current workspace session → project scope n/a.
+        project: projectEnabled,
+      },
+      workspacePath: workspacePath ?? null,
+    },
+  };
 }
 
 export function handleMcpAdd(payload: {
@@ -1009,17 +1088,21 @@ export function handleStatus(): AdminResponse {
 }
 
 export function handleReload(workspacePath?: string): AdminResponse {
-  // Re-read config from disk and push effective MCP to in-memory state
+  // Re-read config from disk and push effective MCP + sub-agents to in-memory state.
+  // Workspace resolution: prefer explicit arg → fall back to the session's agentDir.
+  // Without this fallback, sub-agent reload would only see global agents.
+  const effectiveWorkspace = workspacePath || getCurrentWorkspacePath();
+
   const config = loadConfig();
   const allServers = getAllMcpServers(config);
   const globalEnabled = new Set(getEnabledMcpServerIds(config));
 
   let effectiveServers: McpServerDefinition[];
 
-  if (workspacePath) {
+  if (effectiveWorkspace) {
     // Filter by project if workspace is known
     const projects = loadProjects();
-    const project = projects.find(p => p.path === workspacePath);
+    const project = projects.find(p => p.path === effectiveWorkspace);
     const projectEnabled = new Set(project?.mcpEnabledServers ?? []);
     effectiveServers = allServers.filter(s => globalEnabled.has(s.id) && projectEnabled.has(s.id));
   } else {
@@ -1027,9 +1110,46 @@ export function handleReload(workspacePath?: string): AdminResponse {
     effectiveServers = allServers.filter(s => globalEnabled.has(s.id));
   }
 
+  // Sub-agent reload: re-scan the .md files on disk so edits to frontmatter
+  // (model, description, tools) take effect without restarting the app.
+  // Mirror /api/agents/enabled's resolution — project dir (if any) + user dir.
+  //
+  // We read BOTH sources of truth (MCP from config.json + agents from .md files)
+  // before mutating any in-memory state, so a scan failure doesn't leave the
+  // caller with a half-applied reload (MCP pushed but agents stale).
+  const home = getHomeDirOrNull();
+  const userAgentsBaseDir = home ? join(home, '.myagents', 'agents') : '';
+  const projAgentsDir = effectiveWorkspace ? join(effectiveWorkspace, '.claude', 'agents') : '';
+  let agents: ReturnType<typeof loadEnabledAgents>;
+  try {
+    agents = loadEnabledAgents(projAgentsDir, userAgentsBaseDir);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[admin-api] handleReload: sub-agent re-scan failed:', err);
+    return {
+      success: false,
+      error: `Failed to reload sub-agents from disk: ${msg}`,
+    };
+  }
+
+  // Both sources loaded cleanly — now commit the in-memory state atomically
+  // (well, as atomically as two module-level setters allow) and trigger the
+  // forced restart that applies them.
   setMcpServers(effectiveServers);
+  setAgents(agents);
+  const agentCount = Object.keys(agents).length;
+
+  // Force a session restart even for snapshotted (Tab / Cron / Background)
+  // sessions — reload is an explicit request, not noise from React state
+  // sync. Without this the in-memory config is refreshed but the running
+  // SDK subprocess keeps delegating to the old sub-agent definitions (#98).
+  forceReloadActiveSession('agents');
+
   broadcast('config:changed', { section: 'all', action: 'reload' });
-  return { success: true, hint: 'Configuration reloaded. MCP tools will be available in next turn.' };
+  return {
+    success: true,
+    hint: `Configuration reloaded (MCP: ${effectiveServers.length}, sub-agents: ${agentCount}). The session will restart on the next turn to apply changes.`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,6 +1166,7 @@ const HELP_TEXTS: Record<string, string> = {
 
 Commands:
   list                     List all MCP servers
+  show <id>                Show one MCP server's config + enable state (env/headers redacted)
   add                      Add a new MCP server
   remove <id>              Remove a custom MCP server
   enable <id>              Enable an MCP server
@@ -1129,10 +1250,24 @@ Commands:
 
 Options for 'add':
   --name         Task name
-  --prompt       AI prompt (required)
-  --schedule     Cron expression (e.g. "*/30 * * * *")
+  --prompt       AI prompt (required; alias: --message)
+  --prompt-file  Read prompt body from a file (preferred for multi-line /
+                 quoted / backtick content; max 1 MB)
+  --schedule     Either a cron expression (e.g. "*/30 * * * *") OR a JSON
+                 CronSchedule object:
+                   '{"kind":"at","at":"2026-04-23T09:10:00+08:00"}'
+                   '{"kind":"every","minutes":30}'
+                   '{"kind":"cron","expr":"0 9 * * *","tz":"Asia/Shanghai"}'
+                   '{"kind":"loop"}'
+                 Non-JSON input is treated as a cron expression.
   --every        Interval in minutes (alternative to --schedule)
-  --workspace    Workspace path (required)`,
+  --workspace    Workspace path (required)
+
+Options for 'update' <id>:
+  Same flags as add (plus --model, --permissionMode). --message is also
+  accepted as an alias for --prompt here.
+
+See 'myagents cron readme' for long-form usage + exit-from-task flow.`,
 
   plugin: `myagents plugin — Manage OpenClaw channel plugins
 
@@ -1681,13 +1816,24 @@ CREATE OPTIONS (myagents cron add ...)
   --prompt <text>                 The prompt the AI runs each tick. For short
                                   prompts use this. For multi-line / complex
                                   prompts, prefer --prompt-file.
+                                  (Alias: --message.)
   --prompt-file <path>            Read prompt body from a file (recommended for
                                   anything longer than ~80 chars — avoids shell
                                   escape issues with quotes, newlines, \`\`\`).
   --every <minutes>               Run every N minutes (min 5)
-  --schedule <cron-expr>          Cron expression, e.g. "0 9 * * *"
+  --schedule <expr|json>          Either a cron expression, e.g. "0 9 * * *",
+                                  OR a JSON CronSchedule object:
+                                    '{"kind":"at","at":"2026-04-23T09:10+08:00"}'
+                                    '{"kind":"every","minutes":30}'
+                                    '{"kind":"cron","expr":"0 9 * * *","tz":"Asia/Shanghai"}'
+                                    '{"kind":"loop"}'
+                                  Non-JSON values are treated as cron expressions.
   --workspace <path>              Workspace the task runs in. Defaults to the
                                   current session workspace.
+
+UPDATE OPTIONS (myagents cron update <taskId> ...)
+  --name / --prompt / --message / --schedule / --every / --model / --permissionMode
+  (Same semantics as create. --message is an alias for --prompt.)
 
 EXAMPLES
   # Short prompt, 30 min interval

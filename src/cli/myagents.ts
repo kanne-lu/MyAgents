@@ -145,6 +145,7 @@ Global flags:
 
 Examples:
   myagents mcp list
+  myagents mcp show playwright
   myagents mcp add --id playwright --type stdio --command npx --args @playwright/mcp@latest
   myagents mcp enable playwright --scope both
   myagents mcp oauth discover notion-mcp
@@ -265,6 +266,10 @@ function printResult(group: string, action: string, result: Record<string, unkno
   // Group-specific formatting
   if (group === 'mcp' && action === 'list') {
     printMcpList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'mcp' && action === 'show') {
+    printMcpShow(result.data as Record<string, unknown>);
     return;
   }
   if (group === 'model' && action === 'list') {
@@ -612,6 +617,70 @@ function printMcpList(servers: Array<Record<string, unknown>>): void {
   }
   const enabled = servers.filter(s => s.enabled).length;
   console.log(`\n${servers.length} MCP servers (${enabled} enabled)`);
+}
+
+/**
+ * Format `myagents mcp show <id>` output.
+ *
+ * Parallels printAgentShow — prints the user-visible config + enable state
+ * (global / per-project) for a single server. Env and headers are rendered
+ * as `key = <redacted>` lines when values exist; AI callers can read the
+ * structure without ever seeing a secret.
+ */
+function printMcpShow(data: Record<string, unknown>): void {
+  if (!data) {
+    console.log('No MCP data.');
+    return;
+  }
+  console.log(`MCP Server:   ${String(data.name ?? '')}`);
+  console.log(`  id:         ${String(data.id ?? '')}`);
+  console.log(`  type:       ${String(data.type ?? '')}`);
+  if (data.description) console.log(`  description:${String(data.description)}`);
+  console.log(`  built-in:   ${data.isBuiltin ? 'yes' : 'no'}`);
+
+  const enabled = (data.enabled as { global?: boolean; project?: boolean | null }) ?? {};
+  const globalState = enabled.global ? 'enabled' : 'disabled';
+  const projectState = enabled.project === null || enabled.project === undefined
+    ? '(no active workspace)'
+    : enabled.project
+      ? 'enabled'
+      : 'disabled';
+  console.log('');
+  console.log('Enable state:');
+  console.log(`  global:     ${globalState}`);
+  console.log(`  project:    ${projectState}`);
+  if (data.workspacePath) console.log(`  workspace:  ${String(data.workspacePath)}`);
+
+  console.log('');
+  console.log('Transport:');
+  if (data.command) console.log(`  command:    ${String(data.command)}`);
+  if (Array.isArray(data.args) && (data.args as unknown[]).length > 0) {
+    console.log(`  args:       ${(data.args as unknown[]).map(String).join(' ')}`);
+  }
+  if (data.url) console.log(`  url:        ${String(data.url)}`);
+
+  const env = data.env as Record<string, string> | undefined;
+  if (env && Object.keys(env).length > 0) {
+    console.log('');
+    console.log('Env (values redacted):');
+    for (const [k, v] of Object.entries(env)) {
+      console.log(`  ${k} = ${v}`);
+    }
+  }
+  const headers = data.headers as Record<string, string> | undefined;
+  if (headers && Object.keys(headers).length > 0) {
+    console.log('');
+    console.log('Headers (values redacted):');
+    for (const [k, v] of Object.entries(headers)) {
+      console.log(`  ${k} = ${v}`);
+    }
+  }
+
+  if (data.requiresConfig) {
+    console.log('');
+    console.log('Note: this server requires configuration before it can be enabled.');
+    if (data.websiteUrl) console.log(`  See: ${String(data.websiteUrl)}`);
+  }
 }
 
 function printModelList(providers: Array<Record<string, unknown>>): void {
@@ -1126,6 +1195,9 @@ function buildRequestBody(
     if (action === 'remove' || action === 'enable' || action === 'disable' || action === 'test') {
       return { id: rest[0] || flags.id, scope: flags.scope };
     }
+    if (action === 'show') {
+      return { id: rest[0] || flags.id };
+    }
     if (action === 'oauth') {
       const oauthAction = rest[0] || 'status'; // discover | start | status | revoke
       const serverId = rest[1] || (flags.id as string);
@@ -1226,8 +1298,10 @@ function buildRequestBody(
     if (action === 'add') {
       // Resolve prompt: --prompt-file (industry standard for long text, avoids
       // shell escape hell for multiline / quoted / backtick content) takes
-      // precedence over --prompt when both are set.
-      let promptText = flags.prompt as string | undefined;
+      // precedence over --prompt when both are set. `--message` is accepted
+      // as an alias because the internal wire field is `message` and users
+      // naturally reach for it (see issue #101). --prompt wins when both set.
+      let promptText = (flags.prompt as string | undefined) ?? (flags.message as string | undefined);
       if (flags.promptFile && typeof flags.promptFile === 'string') {
         try {
           // Lazy load — keep CLI startup fast for non-cron commands.
@@ -1263,7 +1337,7 @@ function buildRequestBody(
         name: flags.name,
         message: promptText,
         workspacePath: flags.workspace,
-        schedule: flags.schedule ? { kind: 'cron', expr: flags.schedule } : undefined,
+        schedule: normalizeScheduleFlag(flags.schedule),
         intervalMinutes: flags.every ? Number(flags.every) : undefined,
       };
     }
@@ -1280,8 +1354,11 @@ function buildRequestBody(
       // Map CLI flags to Rust field names expected by update_task_fields
       const patch: Record<string, unknown> = {};
       if (flags.name !== undefined) patch.name = flags.name;
-      if (flags.prompt !== undefined) patch.prompt = flags.prompt;
-      if (flags.schedule !== undefined) patch.schedule = { kind: 'cron', expr: flags.schedule };
+      // Accept --message as an alias for --prompt (mirrors `cron add`).
+      // --prompt wins when both are set.
+      const updatePrompt = (flags.prompt as string | undefined) ?? (flags.message as string | undefined);
+      if (updatePrompt !== undefined) patch.prompt = updatePrompt;
+      if (flags.schedule !== undefined) patch.schedule = normalizeScheduleFlag(flags.schedule);
       if (flags.every !== undefined) patch.intervalMinutes = Number(flags.every);
       if (flags.model !== undefined) patch.model = flags.model;
       if (flags.permissionMode !== undefined) patch.permissionMode = flags.permissionMode;
@@ -1501,6 +1578,92 @@ function tryParseJson(value: string | undefined): unknown {
   } catch {
     return value;
   }
+}
+
+/**
+ * Normalize `--schedule` into a CronSchedule object.
+ *
+ * Accepted forms:
+ *   - Cron expression string (legacy, most common):
+ *       --schedule "*\/30 * * * *"
+ *     → { kind: 'cron', expr: "*\/30 * * * *" }
+ *
+ *   - JSON object matching CronSchedule (the internal wire shape):
+ *       --schedule '{"kind":"at","at":"2026-04-23T09:10:00+08:00"}'
+ *       --schedule '{"kind":"every","minutes":30}'
+ *       --schedule '{"kind":"cron","expr":"0 9 * * *","tz":"Asia/Shanghai"}'
+ *     → parsed object, passed through as-is
+ *
+ * Fails hard (exit 2) on a malformed JSON-looking input so callers get a
+ * clear rejection at the CLI boundary rather than an opaque axum
+ * deserialize error three hops away. We detect "looks like JSON" by the
+ * leading `{` — a real cron expression never starts with that.
+ */
+function normalizeScheduleFlag(raw: unknown): Record<string, unknown> | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string') {
+    console.error('Error: --schedule must be a cron expression string or a JSON object (e.g. \'{"kind":"at","at":"2026-04-23T09:10:00+08:00"}\')');
+    process.exit(2);
+  }
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{')) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Error: --schedule looks like JSON but failed to parse: ${msg}`);
+      console.error('  Expected shapes: {"kind":"at","at":"<ISO>"} | {"kind":"every","minutes":<n>} | {"kind":"cron","expr":"<expr>"[,"tz":"<tz>"]} | {"kind":"loop"}');
+      process.exit(2);
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      console.error('Error: --schedule JSON must be an object with a "kind" field');
+      process.exit(2);
+    }
+    const obj = parsed as Record<string, unknown>;
+    const kind = obj.kind;
+    if (kind !== 'at' && kind !== 'every' && kind !== 'cron' && kind !== 'loop') {
+      console.error(`Error: --schedule JSON has invalid "kind": ${JSON.stringify(kind)} (expected one of: at, every, cron, loop)`);
+      process.exit(2);
+    }
+    // Per-kind required-field validation so missing fields fail at the CLI
+    // boundary with a clear message instead of turning into a cryptic Rust
+    // deserialize error "Failed to parse JSON" downstream.
+    if (kind === 'at' && typeof obj.at !== 'string') {
+      console.error('Error: --schedule {"kind":"at"} requires string field "at" (ISO-8601, e.g. "2026-04-23T09:10:00+08:00")');
+      process.exit(2);
+    }
+    if (kind === 'every') {
+      if (typeof obj.minutes !== 'number' || !Number.isFinite(obj.minutes)) {
+        console.error('Error: --schedule {"kind":"every"} requires numeric field "minutes" (>= 5)');
+        process.exit(2);
+      }
+      if (!Number.isInteger(obj.minutes) || obj.minutes < 5) {
+        // Match Rust's `interval_minutes.max(5)` contract — Rust silently clamps
+        // but that's a surprise; reject up front for clarity.
+        console.error(`Error: --schedule {"kind":"every"}.minutes must be an integer >= 5 (got ${obj.minutes})`);
+        process.exit(2);
+      }
+      if (obj.startAt !== undefined && typeof obj.startAt !== 'string') {
+        console.error('Error: --schedule {"kind":"every"}.startAt must be a string (ISO-8601) when provided');
+        process.exit(2);
+      }
+    }
+    if (kind === 'cron') {
+      if (typeof obj.expr !== 'string') {
+        console.error('Error: --schedule {"kind":"cron"} requires string field "expr" (e.g. "0 9 * * *")');
+        process.exit(2);
+      }
+      if (obj.tz !== undefined && obj.tz !== null && typeof obj.tz !== 'string') {
+        console.error('Error: --schedule {"kind":"cron"}.tz must be a string (IANA tz name) when provided');
+        process.exit(2);
+      }
+    }
+    // 'loop' has no required fields.
+    return obj;
+  }
+  // Non-JSON input → treat as a standard cron expression.
+  return { kind: 'cron', expr: trimmed };
 }
 
 /** Hard cap for `--taskMdContent` (inline string). Mirrors the `--taskMdFile`

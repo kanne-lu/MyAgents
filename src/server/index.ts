@@ -36,7 +36,7 @@ import {
 import { setImCronContext } from './tools/im-cron-tool';
 import {
   handleSkillList, handleSkillInfo, handleSkillAdd, handleSkillRemove, handleSkillToggle, handleSkillSync,
-  handleMcpList, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
+  handleMcpList, handleMcpShow, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
   handleMcpOAuthDiscover, handleMcpOAuthStart, handleMcpOAuthStatus, handleMcpOAuthRevoke,
   handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
   handleAgentList, handleAgentShow, handleAgentEnable, handleAgentDisable, handleAgentSet,
@@ -1105,6 +1105,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
 
   // MCP commands
   if (route === 'mcp/list') return handleMcpList();
+  if (route === 'mcp/show') return handleMcpShow(payload as Parameters<typeof handleMcpShow>[0]);
   if (route === 'mcp/add') return handleMcpAdd(payload as Parameters<typeof handleMcpAdd>[0]);
   if (route === 'mcp/remove') return handleMcpRemove(payload as Parameters<typeof handleMcpRemove>[0]);
   if (route === 'mcp/enable') return handleMcpEnable(payload as Parameters<typeof handleMcpEnable>[0]);
