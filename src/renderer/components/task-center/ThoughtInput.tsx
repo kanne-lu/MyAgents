@@ -460,7 +460,17 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             // the `placeholder:[-webkit-text-fill-color:...]` override
             // the placeholder inherits the transparent fill and is
             // invisible. That was the silent bug in the prior rev.
-            className={`relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass}`}
+            // `block` is load-bearing: without it, the textarea is a
+            // default inline-level replaced element and contributes a
+            // baseline descender gap (~3–4px) to its parent's line box.
+            // That's invisible when the textarea owns its line (Task
+            // Center compact layout looked fine), but in the Launcher
+            // variant where the textarea is supposed to be pixel-perfect
+            // against SimpleChatInput's `block w-full` textarea, the
+            // descender was the residual height difference Codex RCA
+            // round 3 identified. `block` collapses the descender gap
+            // so the card footprint is truly textarea.height + wrappers.
+            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass}`}
             style={{
               fontFamily: 'inherit',
               WebkitTextFillColor: 'transparent',
