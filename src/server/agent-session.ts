@@ -6,7 +6,7 @@ import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SD
 import { getScriptDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
-import { processImage, resizeToolImageContent } from './utils/imageResize';
+import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
 import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
 import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
@@ -4750,10 +4750,11 @@ export async function enqueueUserMessage(
         tiles = await processImage(img);
       } catch (err) {
         // Image too large or processing failed — notify user and inform Claude
-        const errMsg = err instanceof Error ? err.message : 'Image processing failed';
-        console.warn(`[agent] processImage error for ${img.name}: ${errMsg}`);
-        broadcast('chat:message-error', `图片 "${img.name}" 处理失败：${errMsg}`);
-        contentBlocks.push({ type: 'text', text: `[Image "${img.name}" omitted: ${errMsg}]` });
+        const friendly = classifyImageError(err);
+        const raw = err instanceof Error ? err.message : String(err);
+        console.warn(`[agent] processImage error for ${img.name}: ${raw}`);
+        broadcast('chat:message-error', `图片 "${img.name}" 处理失败：${friendly}`);
+        contentBlocks.push({ type: 'text', text: `[Image "${img.name}" omitted: ${friendly}]` });
         continue;
       }
       if (tiles.length > 1) {

@@ -78,6 +78,12 @@ rm -rf "${PROJECT_DIR}/dist"
 # 创建占位符资源 (关键: 满足 tauri build 需求，但 sidecar.rs 在 debug 模式下会忽略它们)
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk"
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
+mkdir -p "${PROJECT_DIR}/src-tauri/resources/sharp-runtime"
+# sharp 在 dev 模式下从顶层 node_modules/sharp 加载（getBundledSharpEntryPoint 的 walk-up 分支）
+# 这里只是给 Tauri bundler 一个存在的目录指针，防止 resources 配置校验失败
+[ -f "${PROJECT_DIR}/src-tauri/resources/sharp-runtime/.dev-placeholder" ] || \
+    echo "dev mode: sharp loads from top-level node_modules/sharp; this dir is prod-only" \
+    > "${PROJECT_DIR}/src-tauri/resources/sharp-runtime/.dev-placeholder"
 echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/server-dist.js"
 echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/plugin-bridge-dist.js"
 

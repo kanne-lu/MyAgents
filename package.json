@@ -52,7 +52,6 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@floating-ui/react": "^0.27.19",
     "@hono/node-server": "^2.0.0",
-    "@jimp/wasm-webp": "^1.6.0",
     "@monaco-editor/react": "^4.7.0",
     "@tauri-apps/api": "~2.10",
     "@tauri-apps/plugin-autostart": "^2.5.1",
@@ -70,7 +69,6 @@
     "better-sqlite3": "^12.9.0",
     "cron-parser": "^5.5.0",
     "cronstrue": "^3.13.0",
-    "jimp": "^1.6.0",
     "js-yaml": "^4.1.1",
     "katex": "^0.16.27",
     "lucide-react": "^0.554.0",
@@ -88,6 +86,7 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0",
+    "sharp": "0.34.5",
     "socks": "^2.8.7"
   },
   "optionalDependencies": {
@@ -98,7 +97,15 @@
     "@anthropic-ai/claude-agent-sdk-linux-x64": "0.2.119",
     "@anthropic-ai/claude-agent-sdk-linux-x64-musl": "0.2.119",
     "@anthropic-ai/claude-agent-sdk-win32-arm64": "0.2.119",
-    "@anthropic-ai/claude-agent-sdk-win32-x64": "0.2.119"
+    "@anthropic-ai/claude-agent-sdk-win32-x64": "0.2.119",
+    "@img/sharp-darwin-arm64": "*",
+    "@img/sharp-darwin-x64": "*",
+    "@img/sharp-linux-arm64": "*",
+    "@img/sharp-linux-x64": "*",
+    "@img/sharp-linuxmusl-arm64": "*",
+    "@img/sharp-linuxmusl-x64": "*",
+    "@img/sharp-win32-arm64": "*",
+    "@img/sharp-win32-x64": "*"
   },
   "devDependencies": {
     "@eslint/compat": "^2.0.0",

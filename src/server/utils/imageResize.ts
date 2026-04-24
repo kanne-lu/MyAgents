@@ -1,19 +1,87 @@
-import { createJimp } from '@jimp/core';
-import { defaultFormats, defaultPlugins } from 'jimp';
-import webp from '@jimp/wasm-webp';
+/**
+ * Image resize pipeline (sharp / libvips).
+ *
+ * v0.2.1 — replaced pure-JS Jimp + @jimp/wasm-webp with `sharp` (libvips native).
+ * Jimp decoded/encoded synchronously on the Node event loop, which blocked the
+ * Sidecar's HTTP/SSE/stdio under large images (symptom: "stuck at image cropping").
+ * Sharp runs on libvips' off-thread native pool, reads metadata before decode
+ * (decompression-bomb guard via `limitInputPixels`), and supports WebP natively
+ * (Jimp's wasm-webp loader used `fetch(file://)` which Node's undici refuses,
+ * silently breaking WebP post Bun→Node migration). Upstream Claude Code uses
+ * sharp too; this module mirrors that decision.
+ *
+ * sharp is loaded lazily via absolute-path dynamic import (see `getSharp()` below)
+ * because esbuild cannot bundle its per-platform native addons; build scripts
+ * stage `node_modules/sharp` + `@img/sharp-<triple>` into
+ * `src-tauri/resources/sharp-runtime/` and `getBundledSharpEntryPoint()` resolves
+ * the runtime path (prod vs dev).
+ */
 
-// Custom Jimp instance with WebP support
-const Jimp = createJimp({
-  formats: [...defaultFormats, webp],
-  plugins: defaultPlugins,
-});
+import { createRequire } from 'module';
+import type { Sharp, SharpOptions } from 'sharp';
+import type { ImagePayload } from '../runtimes/types';
+import { getBundledSharpEntryPoint } from './runtime';
 
 /** Claude API recommends ≤1568px on both sides; larger images are auto-shrunk by the API, wasting bandwidth and TTFT. */
 const MAX_DIMENSION = 1568;
-/** Max dimension for MCP tool result images (e.g. browser screenshots). Aligned with API recommendation. */
-const MAX_TOOL_IMAGE_DIMENSION = 1568;
+/** Aspect-ratio threshold: images with longEdge/shortEdge >= this are treated as "super-long" and sliced. */
+const LONG_IMAGE_RATIO = 3;
+/** Maximum number of tiles when slicing a super-long image. */
+const MAX_TILES = 8;
+/**
+ * Pre-decode fast-reject ceiling. Anthropic's actual API limit is ~5 MB base64;
+ * anything above this we still try to resize (the resize pipeline brings it
+ * under the API limit). Only reject above 64 MB to cap worst-case decode time.
+ */
+const MAX_BASE64_LENGTH = 64 * 1024 * 1024;
+/** Post-resize target: stay under Claude API's ~5 MB base64 limit (3.75 MB raw = ~5 MB base64). */
+const API_TARGET_RAW_SIZE = 3.75 * 1024 * 1024;
+/** JPEG quality ladder used when a resize's encoded output still exceeds API_TARGET_RAW_SIZE. */
+const JPEG_FALLBACK_QUALITIES = [80, 60, 40, 20] as const;
+/** Decompression-bomb guard: max pixels libvips will decode (sharp default is 268M; we tighten to 30M). */
+const PIXEL_LIMIT = 30_000_000;
+/** Default per-image wall-clock deadline (ms). Covers worst-case 1000×50000 PNG multi-tile encode. */
+const DEFAULT_TIMEOUT_MS = 30_000;
 
-import type { ImagePayload } from '../runtimes/types';
+// ─── sharp lazy loader ──────────────────────────────────────────────────────
+// sharp is not imported statically: esbuild would bundle the JS and then fail
+// at runtime to find `@img/sharp-<triple>/sharp.node` (dynamic require with
+// a computed path, preserved as-is but needs the @img tree on-disk). Instead
+// we load sharp via createRequire + absolute path on first call and cache it.
+
+// Use sharp's real SharpOptions type surface rather than a locally-truncated
+// subset — future option additions (e.g. `animated: true` for GIF support)
+// then get type-checked instead of silently skipped.
+type SharpFactory = (input: Buffer | Uint8Array, options?: SharpOptions) => Sharp;
+
+let cachedSharp: SharpFactory | null = null;
+let sharpLoadError: Error | null = null;
+
+function loadSharp(): SharpFactory {
+  if (cachedSharp) return cachedSharp;
+  if (sharpLoadError) throw sharpLoadError;
+  const entry = getBundledSharpEntryPoint();
+  if (!entry) {
+    sharpLoadError = new Error(
+      'sharp module not found — image processing is unavailable. ' +
+      'Expected sharp-runtime/node_modules/sharp (production) or node_modules/sharp (dev).'
+    );
+    throw sharpLoadError;
+  }
+  try {
+    // createRequire resolves absolute paths; sharp's own relative requires
+    // (./libvips) and dynamic require (@img/sharp-<triple>/sharp.node) then
+    // resolve from the loaded file's node_modules tree automatically.
+    const nodeRequire = createRequire(import.meta.url);
+    cachedSharp = nodeRequire(entry) as SharpFactory;
+    return cachedSharp;
+  } catch (err) {
+    sharpLoadError = err instanceof Error ? err : new Error(String(err));
+    throw sharpLoadError;
+  }
+}
+
+// ─── Types ──────────────────────────────────────────────────────────────────
 
 /** MCP protocol image content block */
 type McpImageContent = { type: 'image'; data: string; mimeType: string };
@@ -22,117 +90,251 @@ type McpTextContent = { type: 'text'; text: string };
 /** MCP tool result content block (subset of MCP protocol types) */
 type McpContentBlock = McpImageContent | McpTextContent | { type: string; [key: string]: unknown };
 
-export async function resizeImageIfNeeded(img: ImagePayload): Promise<ImagePayload> {
-  try {
-    const buffer = Buffer.from(img.data, 'base64');
-    const image = await Jimp.fromBuffer(buffer);
-    const { width, height } = image;
+/** Output MIME types we can encode with sharp (GIF is decode-only; animated frames are flattened to PNG). */
+type EncodableMime = 'image/jpeg' | 'image/png' | 'image/webp';
 
-    if (width <= MAX_DIMENSION && height <= MAX_DIMENSION) {
-      return img; // No resize needed
-    }
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
-    // Scale proportionally to fit within MAX_DIMENSION
-    image.scaleToFit({ w: MAX_DIMENSION, h: MAX_DIMENSION });
+/** GIF→PNG (drops animation). Other unsupported encodes normalize to PNG too. */
+function pickOutputMime(inputMime: string): EncodableMime {
+  if (inputMime === 'image/jpeg' || inputMime === 'image/jpg') return 'image/jpeg';
+  if (inputMime === 'image/webp') return 'image/webp';
+  // png / gif / bmp / tiff / heic / avif / svg / unknown → png (lossless, universally API-accepted)
+  return 'image/png';
+}
 
-    // GIF loses animation after processing → output as PNG; others keep original format
-    const outputMime = img.mimeType === 'image/gif' ? 'image/png' : img.mimeType;
-    let outBuffer: Buffer;
-    if (outputMime === 'image/jpeg') {
-      outBuffer = await image.getBuffer('image/jpeg', { quality: 92 });
-    } else {
-      outBuffer = await image.getBuffer(outputMime as 'image/png' | 'image/webp' | 'image/bmp' | 'image/tiff');
-    }
-    const base64 = outBuffer.toString('base64');
-
-    console.log(`[image-resize] Resized ${img.name}: ${width}x${height} → ${image.width}x${image.height}`);
-
-    return { name: img.name, mimeType: outputMime, data: base64 };
-  } catch (err) {
-    // Unsupported format or processing failure → use original (don't block message)
-    console.warn(`[image-resize] Failed to process ${img.name}, using original:`, err);
-    return img;
+/** Encode a sharp pipeline into the target format with sensible defaults. */
+async function encodeToBuffer(pipeline: Sharp, mime: EncodableMime, jpegQuality = 92): Promise<Buffer> {
+  switch (mime) {
+    case 'image/jpeg':
+      return pipeline.jpeg({ quality: jpegQuality, mozjpeg: true }).toBuffer();
+    case 'image/webp':
+      return pipeline.webp({ quality: jpegQuality }).toBuffer();
+    case 'image/png':
+    default:
+      // compressionLevel 8 balances size vs speed (sharp default 6).
+      return pipeline.png({ compressionLevel: 8 }).toBuffer();
   }
 }
 
-/** Aspect-ratio threshold: images with longEdge/shortEdge >= this are treated as "super-long" and sliced. */
-const LONG_IMAGE_RATIO = 3;
-/** Maximum number of tiles when slicing a super-long image. */
-const MAX_TILES = 8;
+/**
+ * Encode with progressive quality fallback if the result exceeds the API target size.
+ * Strategy (mirrors upstream claude-code's imageResizer.ts):
+ *   1. First pass at default quality (92).
+ *   2. If output > API_TARGET_RAW_SIZE and format is JPEG/WebP: retry at 80 → 60 → 40 → 20.
+ *   3. If still oversized (rare — means dimensions are already capped), return the smallest attempt.
+ *
+ * @param buildPipe  Factory that returns a FRESH sharp pipeline each call (pipelines are single-use).
+ * @returns The best buffer achieved. Caller decides whether to surface size warning.
+ */
+async function encodeWithSizeBudget(
+  buildPipe: () => Sharp,
+  mime: EncodableMime,
+): Promise<{ buffer: Buffer; quality: number }> {
+  let best = await encodeToBuffer(buildPipe(), mime, 92);
+  let bestQuality = 92;
+  // PNG has no quality knob → single-pass. GIF shouldn't reach here (pickOutputMime drops it).
+  if (mime !== 'image/jpeg' && mime !== 'image/webp') {
+    return { buffer: best, quality: bestQuality };
+  }
+  if (best.length <= API_TARGET_RAW_SIZE) {
+    return { buffer: best, quality: bestQuality };
+  }
+  for (const q of JPEG_FALLBACK_QUALITIES) {
+    const attempt = await encodeToBuffer(buildPipe(), mime, q);
+    if (attempt.length <= API_TARGET_RAW_SIZE) {
+      return { buffer: attempt, quality: q };
+    }
+    // Keep the smallest we've seen so far.
+    if (attempt.length < best.length) {
+      best = attempt;
+      bestQuality = q;
+    }
+  }
+  return { buffer: best, quality: bestQuality };
+}
+
+/**
+ * Run an image op with an AbortSignal and wall-clock deadline. The op itself is already off-thread (libvips).
+ *
+ * Leak-safety: the success path (`op()` resolves first) MUST explicitly remove the abort listener —
+ * `{ once: true }` only self-removes when the listener FIRES. Without explicit cleanup, every
+ * completed resize during a long SDK turn leaves a listener attached to the turn-level AbortSignal
+ * → MaxListenersExceededWarning + unbounded memory on cron / IM sessions.
+ */
+async function withDeadline<T>(
+  op: () => Promise<T>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  if (signal?.aborted) throw new Error(`aborted before ${label}`);
+  let timer: NodeJS.Timeout | undefined;
+  let abortHandler: (() => void) | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs);
+  });
+  const abortPromise = signal
+    ? new Promise<never>((_, reject) => {
+        abortHandler = () => reject(new Error(`aborted during ${label}`));
+        signal.addEventListener('abort', abortHandler, { once: true });
+      })
+    : null;
+  try {
+    const work = op();
+    return abortPromise
+      ? await Promise.race([work, deadline, abortPromise])
+      : await Promise.race([work, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (signal && abortHandler) signal.removeEventListener('abort', abortHandler);
+  }
+}
+
+/** Build a sharp pipeline from base64 data with decompression-bomb guard. */
+function buildPipeline(buffer: Buffer): Sharp {
+  if (buffer.length === 0) {
+    // Upstream claude-code pattern: explicit empty-buffer error. Otherwise sharp throws
+    // "Input buffer contains unsupported image format" which is much harder to diagnose.
+    throw new Error('图片数据为空（0 字节）');
+  }
+  const sharp = loadSharp();
+  return sharp(buffer, {
+    limitInputPixels: PIXEL_LIMIT,
+    // failOn='error' tolerates decoder *warnings* (e.g. malformed but recoverable chunks)
+    // while still aborting on real decode errors. Sharp's default is 'warning' (strictest)
+    // which would reject many in-the-wild screenshots; we trade strictness for robustness.
+    failOn: 'error',
+  });
+}
+
+/**
+ * Map sharp / libvips error messages to user-friendly Chinese strings.
+ * Upstream claude-code has a 8-category `classifyImageError` used for analytics grouping —
+ * MyAgents only needs UX mapping, so this is intentionally small.
+ * Returns the original message unchanged if no pattern matches (surfaces to unified log).
+ *
+ * Exported for the user-upload broadcast path in agent-session.ts so users see Chinese
+ * errors regardless of which code path caught the failure.
+ */
+export function classifyImageError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (/exceeds pixel limit|pixel limit/i.test(raw)) return '图片像素过多（解压后超过 30M 像素），请压缩后重试';
+  if (/unsupported image format|Unable to determine image format/i.test(raw)) return '不支持的图片格式';
+  if (/corrupt|premature end|truncated/i.test(raw)) return '图片数据损坏或不完整';
+  if (/out of memory|Cannot allocate|ENOMEM/i.test(raw)) return '图片处理内存不足';
+  if (/timeout/i.test(raw)) return '图片处理超时';
+  if (/图片/.test(raw)) return raw; // already Chinese — pass through
+  return raw;
+}
+
+// ─── Public API ─────────────────────────────────────────────────────────────
+
+/**
+ * Resize an image to fit within MAX_DIMENSION on both sides. Returns the original
+ * payload if already within limits. Thin wrapper around processImage's single-tile
+ * path, kept for API symmetry and as the documented fallback shape (always 1 image).
+ */
+export async function resizeImageIfNeeded(
+  img: ImagePayload,
+  signal?: AbortSignal,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<ImagePayload> {
+  const [first] = await processImageInternal(img, /*allowSlice*/ false, signal, timeoutMs);
+  return first ?? img;
+}
 
 /**
  * Process a user-uploaded image for the Claude API.
- * - Normal images: resize inline (single decode) → returns 1-element array.
+ * - Normal images: resize inline → returns 1-element array.
  * - Super-long images (aspect ratio ≥ 3:1 and long edge > MAX_DIMENSION): slice into 1:2 tiles
- *   so that text remains readable after scaling, then return multiple image payloads.
+ *   along the long axis using sharp's native `extract()` (region decode, no full clone).
+ *
+ * Throws on: oversized base64, decompression bomb, unsupported/corrupt input, abort, timeout.
+ * Callers surface the error to the user rather than silently sending an oversized payload.
  */
-export async function processImage(img: ImagePayload): Promise<ImagePayload[]> {
-  // Fast-reject: prevent OOM from extremely large user uploads (same guard as resizeToolImageContent).
-  // Returning an empty array strips the image — the caller should surface an error to the user.
-  // Previously this returned [img] which avoided OOM but still sent the oversized payload to the
-  // API, resulting in an opaque API rejection error instead of a clear user-facing message.
+export async function processImage(
+  img: ImagePayload,
+  signal?: AbortSignal,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<ImagePayload[]> {
+  return processImageInternal(img, /*allowSlice*/ true, signal, timeoutMs);
+}
+
+async function processImageInternal(
+  img: ImagePayload,
+  allowSlice: boolean,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<ImagePayload[]> {
+  // Fast-reject: base64 upper bound BEFORE any decode work.
   if (img.data.length > MAX_BASE64_LENGTH) {
     const sizeMB = (img.data.length / 1024 / 1024).toFixed(1);
-    console.warn(`[image-resize] User image too large (${sizeMB} MB base64), stripping`);
     throw new Error(`图片过大（${sizeMB} MB），请压缩后重试`);
   }
 
-  try {
+  return withDeadline(async () => {
     const buffer = Buffer.from(img.data, 'base64');
-    const image = await Jimp.fromBuffer(buffer);
-    const { width, height } = image;
+    const meta = await buildPipeline(buffer).metadata();
+    const width = meta.width ?? 0;
+    const height = meta.height ?? 0;
+    if (!width || !height) {
+      throw new Error(`无法识别图片尺寸（${img.name}）`);
+    }
 
+    const outputMime = pickOutputMime(img.mimeType);
     const shortEdge = Math.min(width, height);
     const longEdge = Math.max(width, height);
     const isVertical = height > width;
 
-    // GIF loses animation after processing → output as PNG; others keep original format
-    const outputMime = img.mimeType === 'image/gif' ? 'image/png' : img.mimeType;
-
-    // Non-super-long: resize in-place (avoids double decode vs calling resizeImageIfNeeded)
-    if (longEdge / shortEdge < LONG_IMAGE_RATIO || longEdge <= MAX_DIMENSION) {
-      if (width <= MAX_DIMENSION && height <= MAX_DIMENSION) {
-        return [img]; // No resize needed
+    // ── Non-super-long path: single resize ────────────────────────────────
+    if (!allowSlice || longEdge / shortEdge < LONG_IMAGE_RATIO || longEdge <= MAX_DIMENSION) {
+      const needResize = width > MAX_DIMENSION || height > MAX_DIMENSION;
+      const needTranscode = outputMime !== img.mimeType; // e.g. gif→png, jpg→jpeg
+      if (!needResize && !needTranscode) {
+        return [img]; // original already fits and is API-acceptable
       }
-      image.scaleToFit({ w: MAX_DIMENSION, h: MAX_DIMENSION });
-      let outBuffer: Buffer;
-      if (outputMime === 'image/jpeg') {
-        outBuffer = await image.getBuffer('image/jpeg', { quality: 92 });
-      } else {
-        outBuffer = await image.getBuffer(outputMime as 'image/png' | 'image/webp' | 'image/bmp' | 'image/tiff');
-      }
-      console.log(`[image-resize] Resized ${img.name}: ${width}x${height} → ${image.width}x${image.height}`);
+      const { buffer: outBuffer, quality } = await encodeWithSizeBudget(
+        () => (needResize
+          ? buildPipeline(buffer).resize(MAX_DIMENSION, MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
+          : buildPipeline(buffer)),
+        outputMime,
+      );
+      console.log(
+        `[image-resize] Resized ${img.name}: ${width}x${height} → ${outputMime} q${quality}, ${outBuffer.length} bytes`
+      );
       return [{ name: img.name, mimeType: outputMime, data: outBuffer.toString('base64') }];
     }
 
-    // Super-long image — slice into 1:2 tiles along the long axis
-    const tileTarget = shortEdge * 2; // each tile's ideal length on the long axis
+    // ── Super-long path: 1:2 tiles via extract() ──────────────────────────
+    // Note on region decode: sharp's extract() applies region clipping in the pipeline.
+    // For JPEG/WebP/TIFF libvips can shrink-on-load + region-decode (memory-efficient);
+    // for PNG the full image must be decoded (PNG is not random-access), but the decoded
+    // buffer stays off the JS heap in libvips memory, so we still avoid Jimp's JS-heap
+    // amplification from clone(). Worst case for a 29M-pixel PNG tile is ~140MB peak.
+    const tileTarget = shortEdge * 2;
     let tileCount = Math.ceil(longEdge / tileTarget);
     tileCount = Math.min(tileCount, MAX_TILES);
     const tileSize = Math.ceil(longEdge / tileCount);
-    // 10% overlap: only extend backward (earlier start) to get exactly ~10% between adjacent tiles
+    // 10% overlap, applied only at tile start (for tiles after the first).
     const overlap = Math.round(tileSize * 0.1);
 
     const tiles: ImagePayload[] = [];
     for (let i = 0; i < tileCount; i++) {
-      // Each tile starts `overlap` pixels earlier (except the first), ends at the natural boundary
+      if (signal?.aborted) throw new Error('aborted during tile encode');
       const start = Math.max(0, i * tileSize - (i > 0 ? overlap : 0));
       const end = Math.min(longEdge, (i + 1) * tileSize);
+      const extractRegion = isVertical
+        ? { left: 0, top: start, width, height: end - start }
+        : { left: start, top: 0, width: end - start, height };
 
-      const cropX = isVertical ? 0 : start;
-      const cropY = isVertical ? start : 0;
-      const cropW = isVertical ? width : end - start;
-      const cropH = isVertical ? end - start : height;
-
-      const tile = image.clone().crop({ x: cropX, y: cropY, w: cropW, h: cropH });
-      tile.scaleToFit({ w: MAX_DIMENSION, h: MAX_DIMENSION });
-
-      let outBuffer: Buffer;
-      if (outputMime === 'image/jpeg') {
-        outBuffer = await tile.getBuffer('image/jpeg', { quality: 92 });
-      } else {
-        outBuffer = await tile.getBuffer(outputMime as 'image/png' | 'image/webp' | 'image/bmp' | 'image/tiff');
-      }
+      // Fresh pipeline per tile — sharp pipelines are single-use after toBuffer().
+      const { buffer: outBuffer } = await encodeWithSizeBudget(
+        () => buildPipeline(buffer)
+          .extract(extractRegion)
+          .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true }),
+        outputMime,
+      );
 
       tiles.push({
         name: `${img.name}_tile_${i + 1}`,
@@ -145,31 +347,23 @@ export async function processImage(img: ImagePayload): Promise<ImagePayload[]> {
       `[image-resize] Sliced ${img.name}: ${width}x${height} → ${tileCount} tiles (${isVertical ? 'vertical' : 'horizontal'})`
     );
     return tiles;
-  } catch (err) {
-    // Fallback: just resize as a single image
-    console.warn(`[image-resize] processImage failed for ${img.name}, falling back to resize:`, err);
-    const result = await resizeImageIfNeeded(img);
-    return [result];
-  }
+  }, signal, timeoutMs, `processImage(${img.name})`);
 }
-
-/**
- * Base64 size threshold for fast-reject before full image decode (~50 MB decoded).
- * base64 is ~4/3 of raw bytes; a 10000x10000 RGBA image ≈ 400 MB decoded.
- * We reject payloads > 64 MB base64 (~48 MB raw) to prevent OOM in the Bun sidecar.
- */
-const MAX_BASE64_LENGTH = 64 * 1024 * 1024;
 
 /**
  * Resize oversized images in MCP tool result content blocks.
  * Returns a shallow-copied tool_response with resized images, or null if unchanged.
  *
  * MCP tool results use the format: { content: [{ type: "image", data: "base64...", mimeType: "image/png" }, ...] }
+ *
+ * Unlike user uploads: on failure we REPLACE the image block with a text placeholder
+ * instead of throwing (the AI still gets a turn, just without the broken screenshot).
  */
 export async function resizeToolImageContent(
-  toolResponse: unknown
+  toolResponse: unknown,
+  signal?: AbortSignal,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<Record<string, unknown> | null> {
-  // Validate shape: must be object with content array
   if (
     typeof toolResponse !== 'object' ||
     toolResponse === null ||
@@ -179,17 +373,19 @@ export async function resizeToolImageContent(
   }
 
   const originalContent = (toolResponse as { content: McpContentBlock[] }).content;
-  // Shallow copy to avoid mutating SDK's input data
-  const content = [...originalContent];
+  const content = [...originalContent]; // shallow copy — don't mutate SDK input
   let modified = false;
 
   for (let i = 0; i < content.length; i++) {
+    if (signal?.aborted) {
+      // Abort mid-scan: leave remaining blocks untouched, return what we have so far.
+      break;
+    }
     const block = content[i];
     if (block.type !== 'image' || !('data' in block) || typeof block.data !== 'string') {
       continue;
     }
 
-    // Fast-reject: skip decode for extremely large payloads to prevent OOM
     if (block.data.length > MAX_BASE64_LENGTH) {
       console.warn(
         `[image-resize] Tool image block ${i} too large (${(block.data.length / 1024 / 1024).toFixed(1)} MB base64), replacing with text`
@@ -200,48 +396,46 @@ export async function resizeToolImageContent(
     }
 
     try {
-      const buffer = Buffer.from(block.data, 'base64');
-      const image = await Jimp.fromBuffer(buffer);
-      const { width, height } = image;
+      // Capture narrowed types into locals — async closure below would otherwise
+      // widen `block.data` back to `unknown` (McpContentBlock's index-signature arm).
+      const blockData: string = block.data;
+      const mimeType = ('mimeType' in block && typeof block.mimeType === 'string') ? block.mimeType : 'image/png';
+      const outputMime = pickOutputMime(mimeType);
 
-      if (width <= MAX_TOOL_IMAGE_DIMENSION && height <= MAX_TOOL_IMAGE_DIMENSION) {
-        continue;
-      }
+      const resized: { data: string; mimeType: EncodableMime } | null = await withDeadline(async () => {
+        const buffer = Buffer.from(blockData, 'base64');
+        const meta = await buildPipeline(buffer).metadata();
+        const width = meta.width ?? 0;
+        const height = meta.height ?? 0;
+        if (!width || !height) throw new Error('unknown dimensions');
 
-      image.scaleToFit({ w: MAX_TOOL_IMAGE_DIMENSION, h: MAX_TOOL_IMAGE_DIMENSION });
+        const needResize = width > MAX_DIMENSION || height > MAX_DIMENSION;
+        const needTranscode = outputMime !== mimeType;
+        if (!needResize && !needTranscode) return null; // signal "unchanged"
 
-      // Verify resize succeeded — guard against Jimp bugs where scaleToFit returns oversized result
-      if (image.width > MAX_TOOL_IMAGE_DIMENSION || image.height > MAX_TOOL_IMAGE_DIMENSION) {
-        console.warn(
-          `[image-resize] scaleToFit produced ${image.width}x${image.height}, still exceeds ${MAX_TOOL_IMAGE_DIMENSION}px limit — stripping image`
+        const { buffer: outBuffer, quality } = await encodeWithSizeBudget(
+          () => (needResize
+            ? buildPipeline(buffer).resize(MAX_DIMENSION, MAX_DIMENSION, { fit: 'inside', withoutEnlargement: true })
+            : buildPipeline(buffer)),
+          outputMime,
         );
-        content[i] = { type: 'text', text: '[Image resize failed — stripped to prevent API error]' } as McpTextContent;
+        console.log(
+          `[image-resize] Tool image resized: ${width}x${height} → ${outputMime} q${quality}, ${outBuffer.length} bytes`
+        );
+        return { data: outBuffer.toString('base64'), mimeType: outputMime };
+      }, signal, timeoutMs, `toolImage[${i}]`);
+
+      if (resized) {
+        content[i] = { ...block, data: resized.data, mimeType: resized.mimeType };
         modified = true;
-        continue;
       }
-
-      const mimeType = ('mimeType' in block && typeof block.mimeType === 'string')
-        ? block.mimeType
-        : 'image/png';
-      const outputMime = mimeType === 'image/gif' ? 'image/png' : mimeType;
-
-      let outBuffer: Buffer;
-      if (outputMime === 'image/jpeg') {
-        outBuffer = await image.getBuffer('image/jpeg', { quality: 92 });
-      } else {
-        outBuffer = await image.getBuffer(outputMime as 'image/png' | 'image/webp' | 'image/bmp' | 'image/tiff');
-      }
-
-      console.log(
-        `[image-resize] Tool image resized: ${width}x${height} → ${image.width}x${image.height}`
-      );
-
-      content[i] = { ...block, data: outBuffer.toString('base64'), mimeType: outputMime };
-      modified = true;
     } catch (err) {
-      // Resize failed — strip the oversized image to prevent Claude API 400 error
-      console.warn(`[image-resize] Failed to resize tool image block ${i}, stripping:`, err);
-      content[i] = { type: 'text', text: '[Image could not be processed — stripped to prevent API error]' } as McpTextContent;
+      // Resize failed — strip the oversized/corrupt image to prevent Claude API 400 error.
+      // Surface classified Chinese message to the user; raw cause goes to the unified log.
+      const friendly = classifyImageError(err);
+      const raw = err instanceof Error ? err.message : String(err);
+      console.warn(`[image-resize] Failed to resize tool image block ${i}, stripping: ${raw}`);
+      content[i] = { type: 'text', text: `[图片处理失败：${friendly}]` } as McpTextContent;
       modified = true;
     }
   }

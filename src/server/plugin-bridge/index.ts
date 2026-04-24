@@ -310,20 +310,21 @@ async function loadPlugin() {
     );
   }
   console.log(`[plugin-bridge] Using entry: ${resolvedEntry}`);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- plugin shape varies wildly
-  const pluginModule: any = await import(pathToFileURL(resolvedEntry).href);
+  const pluginModule: Record<string, unknown> = await import(pathToFileURL(resolvedEntry).href);
 
   // Plugins can export their registration in several patterns:
   //   1. default export = { register(api) { ... } }  (OpenClaw standard)
   //   2. default export = function(api) { ... }       (simple)
   //   3. module.default.default                       (double-wrapped ESM)
-  const exported = pluginModule.default || pluginModule;
-  if (typeof exported === 'object' && typeof exported.register === 'function') {
-    await exported.register(compatApi);
+  const exported = (pluginModule.default ?? pluginModule) as Record<string, unknown>;
+  const register = exported.register;
+  const nestedRegister = (exported.default as Record<string, unknown> | undefined)?.register;
+  if (typeof exported === 'object' && typeof register === 'function') {
+    await (register as (api: unknown) => unknown)(compatApi);
   } else if (typeof exported === 'function') {
-    await exported(compatApi);
-  } else if (typeof exported === 'object' && typeof exported.default?.register === 'function') {
-    await exported.default.register(compatApi);
+    await (exported as unknown as (api: unknown) => unknown)(compatApi);
+  } else if (typeof exported === 'object' && typeof nestedRegister === 'function') {
+    await (nestedRegister as (api: unknown) => unknown)(compatApi);
   }
 
   capturedPlugin = compatApi.getCapturedPlugin();

@@ -123,6 +123,59 @@ echo ""
 rm -rf src-tauri/resources/claude-agent-sdk
 mkdir -p src-tauri/resources/claude-agent-sdk
 
+# 预装 sharp 图像处理（替代 jimp，libvips 原生）
+# Linux 单架构构建：只装当前 host 架构的 @img/sharp-linux-* + libvips
+echo -e "${BLUE}[3.5/6] 预装 sharp 图像处理（libvips 原生）...${NC}"
+SHARP_DIR="${PROJECT_DIR}/src-tauri/resources/sharp-runtime"
+rm -rf "${SHARP_DIR}"
+mkdir -p "${SHARP_DIR}"
+cat > "${SHARP_DIR}/package.json" <<'SHARP_PKG'
+{
+  "name": "sharp-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": { "sharp": "0.34.5" }
+}
+SHARP_PKG
+(cd "${SHARP_DIR}" && npm install --no-audit --no-fund --no-save --ignore-scripts)
+if [ $? -ne 0 ]; then
+    echo -e "${RED}✗ sharp 主包预装失败${NC}"
+    exit 1
+fi
+# 按 host 架构显式补齐 Linux 变体（glibc + musl 都装，让 sharp 自己按运行时 libc 选择）
+# AppImage 可能运行在 Alpine (musl) 或 Debian/Ubuntu (glibc) 宿主上 —— sharp 的 loader
+# 通过 detect-libc 运行时判断 libc family，对应加载 @img/sharp-linux 或 sharp-linuxmusl。
+# 删掉 musl 变体（像之前版本那样）会让 Alpine 用户永久坏掉：loadSharp() throw，sharpLoadError 缓存，
+# 每次上传图片都同样报错。多装一份 ~20MB 换来的是"所有 Linux 发行版都能用"。
+LINUX_ARCH_SUFFIX=$([[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]] && echo "arm64" || echo "x64")
+(cd "${SHARP_DIR}" && npm install --no-save --force --no-audit --no-fund --ignore-scripts \
+    "@img/sharp-linux-${LINUX_ARCH_SUFFIX}@0.34.5" \
+    "@img/sharp-libvips-linux-${LINUX_ARCH_SUFFIX}@1.2.4" \
+    "@img/sharp-linuxmusl-${LINUX_ARCH_SUFFIX}@0.34.5" \
+    "@img/sharp-libvips-linuxmusl-${LINUX_ARCH_SUFFIX}@1.2.4")
+if [ $? -ne 0 ]; then
+    echo -e "${RED}✗ sharp Linux 平台包安装失败${NC}"
+    exit 1
+fi
+# 验证 glibc 原生二进制存在（主目标）
+SHARP_NODE="${SHARP_DIR}/node_modules/@img/sharp-linux-${LINUX_ARCH_SUFFIX}/lib/sharp-linux-${LINUX_ARCH_SUFFIX}.node"
+if [ ! -f "$SHARP_NODE" ]; then
+    echo -e "${RED}✗ sharp-linux-${LINUX_ARCH_SUFFIX}.node 缺失${NC}"
+    exit 1
+fi
+# 验证 musl 原生二进制存在（Alpine/Void 用户）
+SHARP_MUSL_NODE="${SHARP_DIR}/node_modules/@img/sharp-linuxmusl-${LINUX_ARCH_SUFFIX}/lib/sharp-linuxmusl-${LINUX_ARCH_SUFFIX}.node"
+if [ ! -f "$SHARP_MUSL_NODE" ]; then
+    echo -e "${YELLOW}⚠ sharp-linuxmusl-${LINUX_ARCH_SUFFIX}.node 缺失，musl 系统（Alpine 等）将无法处理图片${NC}"
+    # 不 exit — Debian/Ubuntu 是主流场景，musl 是少数，缺了降级为警告而不是阻断构建
+fi
+# 删除其它平台的 @img/sharp-* 包（节省空间，避免 AppImage 膨胀）
+find "${SHARP_DIR}/node_modules/@img" -maxdepth 1 -type d \
+    \( -name "sharp-darwin*" -o -name "sharp-win32*" -o -name "sharp-libvips-darwin*" -o -name "sharp-libvips-win32*" -o -name "sharp-wasm32" \) \
+    -exec rm -rf {} + 2>/dev/null || true
+echo -e "${GREEN}✓ sharp 预装完成 (linux-${LINUX_ARCH_SUFFIX} glibc+musl)${NC}"
+echo ""
+
 # 前端
 echo -e "${BLUE}[4/6] 构建前端...${NC}"
 npm run build:web
