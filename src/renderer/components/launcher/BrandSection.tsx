@@ -96,6 +96,13 @@ export default memo(function BrandSection({
         toastRef.current = toast;
     }, [toast]);
     const [mode, setMode] = useState<InputMode>('task');
+    // Lifted "expand" state — shared between SimpleChatInput and
+    // ThoughtInput. The user's intent ("I want more writing room") is
+    // mode-agnostic: expanding in 对话 should persist into 想法 and vice
+    // versa. Combined with grid-overlap layout this makes the card
+    // footprint identical in both modes even when expanded (expanded
+    // textarea = 12 lines × 26 = 312 px, both sides match).
+    const [inputExpanded, setInputExpanded] = useState(false);
     // Bumped after each successful thoughtCreate so the Recent Thoughts strip
     // re-fetches and the just-saved note slides in as the first chip.
     const [thoughtRefreshKey, setThoughtRefreshKey] = useState(0);
@@ -362,6 +369,8 @@ export default memo(function BrandSection({
                                 mode="launcher"
                                 onSend={handleSend}
                                 isLoading={!!isStarting}
+                                isExpanded={inputExpanded}
+                                onExpandedChange={setInputExpanded}
                                 provider={provider}
                                 providers={providers}
                                 selectedModel={selectedModel}
@@ -401,8 +410,17 @@ export default memo(function BrandSection({
                                     existingTags={tagCandidates}
                                     onCreated={handleThoughtCreated}
                                     variant="launcher"
+                                    // Expanded follows the lifted state —
+                                    // collapsed = 3 lines (matches
+                                    // SimpleChatInput MAX_LINES_COLLAPSED),
+                                    // expanded = 12 lines (matches
+                                    // MAX_LINES_EXPANDED). So whichever
+                                    // mode the user is in, the card
+                                    // footprint matches exactly.
                                     minLines={3}
-                                    maxLines={3}
+                                    maxLines={inputExpanded ? 12 : 3}
+                                    isExpanded={inputExpanded}
+                                    onExpandedChange={setInputExpanded}
                                 />
                             </div>
                         )}

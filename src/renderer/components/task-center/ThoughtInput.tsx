@@ -20,7 +20,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Hash, PenLine } from 'lucide-react';
+import { ChevronDown, ChevronUp, Hash, PenLine } from 'lucide-react';
 import { thoughtCreate } from '@/api/taskCenter';
 import Tip from '@/components/Tip';
 import { Popover } from '@/components/ui/Popover';
@@ -148,6 +148,17 @@ interface Props {
    * the Chat input (same radius / shadow / text size / padding).
    */
   variant?: ThoughtInputVariant;
+  /**
+   * Controlled expand/collapse state — when supplied, renders a
+   * `ChevronUp`/`ChevronDown` toggle pinned to the textarea's top-right
+   * (matching SimpleChatInput's launcher-variant affordance). Launcher
+   * lifts the expand state to its parent so this input and the Chat
+   * input share it: expanding in one mode persists into the other.
+   * Omit entirely for Task Center and other surfaces that don't want
+   * the expand affordance.
+   */
+  isExpanded?: boolean;
+  onExpandedChange?: (next: boolean) => void;
 }
 
 export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function ThoughtInput({
@@ -162,7 +173,10 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   minLines = 2,
   maxLines = 8,
   variant = 'compact',
+  isExpanded,
+  onExpandedChange,
 }, ref) {
+  const showExpandToggle = isExpanded !== undefined && onExpandedChange !== undefined;
   const theme = VARIANTS[variant];
   // Layout invariant: effective max >= min. Caller-supplied maxLines
   // below minLines would produce a weird "negative growth room" state;
@@ -470,7 +484,12 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             // descender was the residual height difference Codex RCA
             // round 3 identified. `block` collapses the descender gap
             // so the card footprint is truly textarea.height + wrappers.
-            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass}`}
+            //
+            // `pr-10` when an expand toggle is rendered reserves the
+            // click area so content can't overlap the toggle button
+            // (matches SimpleChatInput's `pr-8` but one size larger to
+            // accommodate the toggle's larger hit box).
+            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass} ${showExpandToggle ? 'pr-10' : ''}`}
             style={{
               fontFamily: 'inherit',
               WebkitTextFillColor: 'transparent',
@@ -479,6 +498,21 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
               maxHeight: `${textareaMaxHeightPx}px`,
             }}
           />
+          {showExpandToggle && (
+            // Absolute-positioned toggle in the textarea's top-right —
+            // mirrors SimpleChatInput's expand button exactly
+            // (`absolute right-2 top-1.5`, `p-2`, ChevronUp/ChevronDown).
+            // Sharing position + icons makes the two inputs feel like
+            // the same affordance swapped under the hood.
+            <button
+              type="button"
+              onClick={() => onExpandedChange?.(!isExpanded)}
+              className="absolute right-2 top-1.5 rounded-lg p-2 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+              title={isExpanded ? '收起' : '展开'}
+            >
+              {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+            </button>
+          )}
         </div>
         </div>
 

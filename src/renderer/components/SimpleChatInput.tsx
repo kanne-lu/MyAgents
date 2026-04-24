@@ -122,6 +122,18 @@ interface SimpleChatInputProps {
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
   toolbarPrefix?: React.ReactNode;
+  /**
+   * Controlled expand/collapse state. When provided, the component stops
+   * managing its own `isExpanded` useState and reflects this value —
+   * `onExpandedChange` fires on toggle. Used by Launcher to share the
+   * expand state between SimpleChatInput and ThoughtInput so the user's
+   * "I want more room" intent survives 任务 ↔ 想法 mode toggles.
+   *
+   * Undefined = uncontrolled (component owns the state internally). Chat
+   * tabs use uncontrolled.
+   */
+  isExpanded?: boolean;
+  onExpandedChange?: (next: boolean) => void;
   // Agent Runtime (v0.1.59)
   runtime?: RuntimeType;
   runtimeDetections?: RuntimeDetections;
@@ -220,6 +232,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   queuedMessages = [],
   onCancelQueued,
   onForceExecuteQueued,
+  isExpanded: controlledExpanded,
+  onExpandedChange,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
   // Launcher-vs-Chat minimum row count, referenced by both the auto-resize
@@ -285,7 +299,25 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const modeBtnRef = useRef<HTMLButtonElement>(null);
   const toolBtnRef = useRef<HTMLButtonElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
-  const [isExpanded, setIsExpanded] = useState(false);
+  // Expand/collapse — uncontrolled by default, controlled when caller
+  // supplies `isExpanded` (e.g. Launcher lifts the state so SimpleChatInput
+  // and ThoughtInput share the user's "I want more room" intent across
+  // mode switches). The `setIsExpanded` helper below normalizes the two
+  // paths so the rest of the component can just call it.
+  const [internalExpanded, setInternalExpanded] = useState(false);
+  const isExpandedControlled = controlledExpanded !== undefined;
+  const isExpanded = isExpandedControlled ? controlledExpanded : internalExpanded;
+  const setIsExpanded = useCallback(
+    (next: boolean | ((prev: boolean) => boolean)) => {
+      const resolved = typeof next === 'function' ? next(isExpanded) : next;
+      if (isExpandedControlled) {
+        onExpandedChange?.(resolved);
+      } else {
+        setInternalExpanded(resolved);
+      }
+    },
+    [isExpanded, isExpandedControlled, onExpandedChange],
+  );
   // Tracks the last committed `isExpanded` so the auto-resize effect can
   // distinguish a typing-driven resize from an expand/collapse toggle —
   // they need different transition baselines (see the effect below).
