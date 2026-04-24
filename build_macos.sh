@@ -229,21 +229,12 @@ if grep -qE 'var __dirname = "/Users/[^"]+' ./src-tauri/resources/server-dist.js
 fi
 echo -e "${GREEN}  ✓ 服务端代码验证通过 (无硬编码路径)${NC}"
 
-# 复制 SDK 依赖
-echo -e "  ${CYAN}复制 SDK 依赖...${NC}"
-SDK_SRC="node_modules/@anthropic-ai/claude-agent-sdk"
+# SDK native binary 按架构在 per-target loop 里拷贝（见下方 Tauri 构建循环）。
+# SDK 0.2.113+ 不再 ship cli.js/sdk.mjs/vendor，改为 per-platform native binary。
+# 目录保留清理，具体 claude[.exe] 文件在 loop 内按 $TARGET 对应架构拷贝 + codesign。
 SDK_DEST="src-tauri/resources/claude-agent-sdk"
 rm -rf "${SDK_DEST}"
 mkdir -p "${SDK_DEST}"
-cp "${SDK_SRC}/cli.js" "${SDK_DEST}/"
-cp "${SDK_SRC}/sdk.mjs" "${SDK_DEST}/"
-# SDK ≤0.2.84 shipped resvg.wasm at package root; 0.2.107 removed it.
-# Copy any .wasm that's still there without failing on an empty glob, so
-# this line keeps working across SDK upgrades in either direction.
-for wasm in "${SDK_SRC}"/*.wasm; do
-    [ -f "$wasm" ] && cp "$wasm" "${SDK_DEST}/"
-done
-cp -R "${SDK_SRC}/vendor" "${SDK_DEST}/"
 
 # 预装 agent-browser CLI（使用预生成的 lockfile 避免耗时的依赖解析）
 echo -e "  ${CYAN}预装 agent-browser CLI...${NC}"
@@ -454,6 +445,36 @@ for TARGET in "${BUILD_TARGETS[@]}"; do
             echo -e "    ${RED}✗ node 签名失败${NC}"
             exit 1
         fi
+    fi
+
+    # ---- 拷贝并签名 Claude Agent SDK native binary ----
+    # SDK 0.2.113+ 通过 per-platform optional deps 分发 `bun build --compile` 产物。
+    # 每个 target 架构拷对应的 binary；binary 内嵌 Bun runtime，需 allow-jit entitlements
+    # （与 Node 一致，已在 Entitlements.plist 声明）。
+    if [[ "$NODE_TARGET_ARCH" == "arm64" ]]; then
+        SDK_TRIPLE="darwin-arm64"
+    else
+        SDK_TRIPLE="darwin-x64"
+    fi
+    CLAUDE_SRC="${PROJECT_DIR}/node_modules/@anthropic-ai/claude-agent-sdk-${SDK_TRIPLE}/claude"
+    CLAUDE_DEST="${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk/claude"
+    echo -e "  ${CYAN}拷贝 Claude native binary (${SDK_TRIPLE})...${NC}"
+    if [ ! -f "$CLAUDE_SRC" ]; then
+        echo -e "    ${RED}✗ Claude native binary 不存在: $CLAUDE_SRC${NC}"
+        echo -e "    ${YELLOW}  请运行 \`npm install\` 以安装 @anthropic-ai/claude-agent-sdk-${SDK_TRIPLE}${NC}"
+        exit 1
+    fi
+    rm -f "$CLAUDE_DEST"
+    cp "$CLAUDE_SRC" "$CLAUDE_DEST"
+    chmod +x "$CLAUDE_DEST"
+    xattr -d com.apple.quarantine "$CLAUDE_DEST" 2>/dev/null || true
+    if codesign --force --options runtime --timestamp \
+        --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
+        --sign "$APPLE_SIGNING_IDENTITY" "$CLAUDE_DEST"; then
+        echo -e "    ${GREEN}✓ claude (${SDK_TRIPLE}) 签名成功${NC}"
+    else
+        echo -e "    ${RED}✗ claude 签名失败${NC}"
+        exit 1
     fi
 
     bun run tauri:build -- --target "$TARGET"

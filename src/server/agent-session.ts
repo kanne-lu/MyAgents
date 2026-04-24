@@ -2566,48 +2566,69 @@ function resetAbortFlag(): void {
   shouldAbortSession = false;
 }
 
+/**
+ * Resolve the Claude Code native binary spawned by the SDK subprocess.
+ *
+ * SDK 0.2.113+ distributes a single-file `claude` binary (bun build --compile)
+ * via per-platform optional packages, replacing the bundled `cli.js` model.
+ * The binary self-executes (no external JS runtime required).
+ *
+ * Resolution order:
+ *   1. App bundle: `<resources>/claude-agent-sdk/claude[.exe]`
+ *      (build scripts copy from node_modules/@anthropic-ai/claude-agent-sdk-{triple}/claude)
+ *   2. node_modules: per-platform optional package installed by npm
+ *      (`@anthropic-ai/claude-agent-sdk-<triple>/claude[.exe]`)
+ */
 export function resolveClaudeCodeCli(): string {
   const t0 = Date.now();
-  // Check bundled path FIRST to avoid bun's auto-install behavior.
-  // In production builds, require.resolve() can't find the SDK in node_modules
-  // (it doesn't exist in the app bundle). Bun then attempts to auto-install
-  // the package from npm, which blocks the event loop for 10+ minutes.
-  // By checking the bundled path first, we skip the costly require.resolve entirely.
-  const cwd = process.cwd();
-  const bundledPath = join(cwd, 'claude-agent-sdk', 'cli.js');
-  if (existsSync(bundledPath)) {
-    console.log(`[sdk] CLI resolved via bundled path in ${Date.now() - t0}ms: ${bundledPath}`);
-    return bundledPath;
-  }
-  console.warn(`[sdk] Bundled SDK not found at ${bundledPath} (cwd=${cwd}), falling back to require.resolve`);
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const triple = getPlatformTriple();
 
-  // Development: resolve from node_modules
-  // SDK 0.2.80+ has `exports` in package.json that does NOT export `./cli.js`,
-  // so require.resolve('@anthropic-ai/claude-agent-sdk/cli.js') fails with
-  // ERR_PACKAGE_PATH_NOT_EXPORTED. Instead, resolve the package root via the
-  // main export, then derive cli.js from the package directory.
+  // 1. Production: bundled native binary under resources/claude-agent-sdk/
+  //    (Legacy directory name preserved from cli.js era; only contents changed.)
+  const cwd = process.cwd();
+  const bundledNative = join(cwd, 'claude-agent-sdk', `claude${ext}`);
+  if (existsSync(bundledNative)) {
+    console.log(`[sdk] Claude native binary resolved via bundled path in ${Date.now() - t0}ms: ${bundledNative}`);
+    return bundledNative;
+  }
+
+  // 2. Development / fallback: locate per-platform optional package in node_modules
   try {
-    const sdkMain = requireModule.resolve('@anthropic-ai/claude-agent-sdk');
-    // dirname(sdkMain) gives us the package root — assumes main export is in root dir.
-    // This is the standard Node.js ecosystem pattern for exports-locked packages.
-    const sdkDir = dirname(sdkMain);
-    const cliPath = join(sdkDir, 'cli.js');
-    if (!existsSync(cliPath)) {
-      throw new Error(`cli.js not found at ${cliPath} (resolved SDK root: ${sdkDir})`);
+    const platformPkg = `@anthropic-ai/claude-agent-sdk-${triple}`;
+    const manifestPath = requireModule.resolve(`${platformPkg}/package.json`);
+    const candidate = join(dirname(manifestPath), `claude${ext}`);
+    if (existsSync(candidate)) {
+      console.log(`[sdk] Claude native binary resolved via node_modules in ${Date.now() - t0}ms: ${candidate}`);
+      return candidate;
     }
-    if (cliPath.includes('app.asar')) {
-      const unpackedPath = cliPath.replace('app.asar', 'app.asar.unpacked');
-      if (existsSync(unpackedPath)) {
-        console.log(`[sdk] CLI resolved via asar.unpacked in ${Date.now() - t0}ms: ${unpackedPath}`);
-        return unpackedPath;
-      }
-    }
-    console.log(`[sdk] CLI resolved via require.resolve in ${Date.now() - t0}ms: ${cliPath}`);
-    return cliPath;
+    throw new Error(`Binary missing at ${candidate} (package dir exists but claude executable is absent)`);
   } catch (error) {
-    console.error(`[sdk] CLI resolve FAILED in ${Date.now() - t0}ms. Bundled: ${bundledPath}, cwd: ${cwd}`, error);
+    console.error(
+      `[sdk] Claude native binary resolve FAILED in ${Date.now() - t0}ms. ` +
+        `Bundled: ${bundledNative}, triple: ${triple}. ` +
+        `Run \`npm install\` to restore optional platform package.`,
+      error,
+    );
     throw error;
   }
+}
+
+/**
+ * Compute the SDK platform triple matching `@anthropic-ai/claude-agent-sdk-<triple>` package names.
+ * On Linux, distinguishes glibc (default) from musl (Alpine et al.) via process.report.
+ */
+function getPlatformTriple(): string {
+  const { platform, arch } = process;
+  if (platform === 'darwin') return arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64';
+  if (platform === 'win32') return arch === 'arm64' ? 'win32-arm64' : 'win32-x64';
+  if (platform === 'linux') {
+    const report = process.report?.getReport?.() as { header?: { glibcVersionRuntime?: string } } | undefined;
+    const isMusl = !report?.header?.glibcVersionRuntime;
+    const base = arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
+    return isMusl ? `${base}-musl` : base;
+  }
+  throw new Error(`Unsupported platform for Claude Agent SDK: ${platform}-${arch}`);
 }
 
 /**

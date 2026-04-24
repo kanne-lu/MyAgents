@@ -517,30 +517,23 @@ try {
     }
     Write-Host "    OK - Plugin Bridge 打包完成" -ForegroundColor Green
 
-    # 复制 SDK 依赖
-    Write-Host "  复制 SDK 依赖..." -ForegroundColor Cyan
-    $sdkSrc = Join-Path $ProjectDir "node_modules\@anthropic-ai\claude-agent-sdk"
+    # 拷贝 Claude Agent SDK native binary（0.2.113+ 取代 cli.js 分发模式）
+    # Windows 默认构建 x64；arm64 需另行处理（本脚本目前仅 x64）
+    Write-Host "  拷贝 Claude native binary (win32-x64)..." -ForegroundColor Cyan
+    $sdkTriple = "win32-x64"
+    $claudeSrc = Join-Path $ProjectDir "node_modules\@anthropic-ai\claude-agent-sdk-${sdkTriple}\claude.exe"
     $sdkDest = Join-Path $ProjectDir "src-tauri\resources\claude-agent-sdk"
 
-    if (-not (Test-Path $sdkSrc)) {
-        throw "SDK 目录不存在: $sdkSrc"
+    if (-not (Test-Path $claudeSrc)) {
+        throw "Claude native binary 不存在: $claudeSrc — 请运行 npm install 安装 @anthropic-ai/claude-agent-sdk-$sdkTriple"
     }
 
     if (Test-Path $sdkDest) {
         Remove-Item -Recurse -Force $sdkDest
     }
     New-Item -ItemType Directory -Path $sdkDest -Force | Out-Null
-
-    Copy-Item "$sdkSrc\cli.js" $sdkDest -Force
-    Copy-Item "$sdkSrc\sdk.mjs" $sdkDest -Force
-    # SDK <=0.2.84 shipped resvg.wasm at package root; 0.2.107 removed it.
-    # Copy any .wasm still present without failing on an empty glob.
-    $wasmFiles = Get-ChildItem -Path "$sdkSrc\*.wasm" -ErrorAction SilentlyContinue
-    if ($wasmFiles) {
-        Copy-Item $wasmFiles.FullName $sdkDest -Force
-    }
-    Copy-Item "$sdkSrc\vendor" $sdkDest -Recurse -Force
-    Write-Host "    OK - SDK 依赖复制完成" -ForegroundColor Green
+    Copy-Item $claudeSrc (Join-Path $sdkDest "claude.exe") -Force
+    Write-Host "    OK - Claude native binary 就绪 ($sdkTriple)" -ForegroundColor Green
 
     # 预装 agent-browser CLI（使用预生成的 lockfile 避免耗时的依赖解析）
     Write-Host "  预装 agent-browser CLI..." -ForegroundColor Cyan

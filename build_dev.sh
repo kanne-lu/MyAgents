@@ -129,6 +129,34 @@ if [ ! -f "${NODEJS_DIR}/bin/node" ] && [ ! -f "${NODEJS_DIR}/node.exe" ]; then
     "${PROJECT_DIR}/scripts/download_nodejs.sh"
 fi
 
+# 拷贝 Claude Agent SDK native binary（按本机架构，debug app 运行时需要）
+# 0.2.113+ 取代原 cli.js 分发模式
+HOST_ARCH=$(uname -m)
+if [[ "$HOST_ARCH" == "arm64" ]]; then
+    SDK_TRIPLE="darwin-arm64"
+else
+    SDK_TRIPLE="darwin-x64"
+fi
+CLAUDE_SRC="${PROJECT_DIR}/node_modules/@anthropic-ai/claude-agent-sdk-${SDK_TRIPLE}/claude"
+CLAUDE_DEST="${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk/claude"
+if [ ! -f "$CLAUDE_SRC" ]; then
+    echo -e "${RED}✗ Claude native binary 不存在: $CLAUDE_SRC${NC}"
+    echo -e "${YELLOW}  请运行 npm install 安装 @anthropic-ai/claude-agent-sdk-${SDK_TRIPLE}${NC}"
+    exit 1
+fi
+echo -e "  ${CYAN}拷贝 Claude native binary (${SDK_TRIPLE})...${NC}"
+rm -f "$CLAUDE_DEST"
+cp "$CLAUDE_SRC" "$CLAUDE_DEST"
+chmod +x "$CLAUDE_DEST"
+xattr -d com.apple.quarantine "$CLAUDE_DEST" 2>/dev/null || true
+# Debug 构建下，如设置了签名身份则签名；否则 ad-hoc
+if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+    codesign --force --options runtime --timestamp \
+        --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
+        --sign "$APPLE_SIGNING_IDENTITY" "$CLAUDE_DEST" 2>/dev/null || true
+fi
+echo -e "  ${GREEN}✓ claude (${SDK_TRIPLE}) 已就绪${NC}"
+
 # 确保签名 Bun 可执行文件 (与 build_macos.sh 相同逻辑)
 if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
     echo -e "  ${CYAN}签名 Bun 可执行文件...${NC}"
