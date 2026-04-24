@@ -4189,6 +4189,12 @@ export async function initializeAgent(
   hasInitialPrompt = Boolean(initialPrompt && initialPrompt.trim());
   systemInitInfo = null;
 
+  // Memoize session metadata for the whole initialization pass. Previously this
+  // function called getSessionMetadata(initialSessionId) three times (at resume
+  // decision, message load, and MCP self-resolve); each call scans sessions.json
+  // and a large JSONL can cost ~30-100ms. Read once, reuse.
+  const initMeta = initialSessionId ? getSessionMetadata(initialSessionId) : null;
+
   if (initialSessionId) {
     // Use caller-specified session_id (IM / Tab opening existing session / CronTask)
     sessionId = initialSessionId as typeof sessionId;
@@ -4198,7 +4204,7 @@ export async function initializeAgent(
     // is only written after system_init succeeds. If the previous Bun process crashed
     // before system_init, metadata exists (with unifiedSession:true) but sdkSessionId
     // is absent — yet the SDK session directory already exists on disk.
-    const meta = getSessionMetadata(initialSessionId);
+    const meta = initMeta;
     if (meta) {
       // Cross-runtime guard: if session was created by a DIFFERENT runtime than the current one,
       // attempting to resume would fail (SDK: "No conversation found", CC/Codex: unknown session ID).
@@ -4245,7 +4251,7 @@ export async function initializeAgent(
   // (SessionStore.ts calculateSessionStats), whereas messageSequence indexes
   // every persisted message — so the seed would under-count and still collide.
   // Removed rather than fixed: the disk-first write order is the real guard.
-  if (initialSessionId && getSessionMetadata(initialSessionId)) {
+  if (initialSessionId && initMeta) {
     const sessionData = getSessionData(initialSessionId);
     if (sessionData?.messages?.length) {
       loadMessagesFromStorage(sessionData.messages);
@@ -4275,8 +4281,16 @@ export async function initializeAgent(
       // (`meta.model`, `meta.providerId/EnvJson`, `meta.mcpEnabledServers`) over the
       // agent's current values. For IM sessions (which deliberately don't snapshot
       // these fields), this is a no-op — the agent fallback handles them.
-      const sessionMetaForResolve = sessionId ? getSessionMetadata(sessionId) : null;
-      const resolved = resolveWorkspaceConfig(agentDir, sessionMetaForResolve);
+      //
+      // Pass `includeMcp: hasInitialPrompt` — Tab sessions (no initial prompt)
+      // deliberately skip MCP self-resolve below anyway (the frontend's
+      // /api/mcp/set is authoritative), so asking resolveWorkspaceConfig to
+      // compute an MCP list that will be discarded is pure waste. Cuts the
+      // expensive getAllMcpServers/getEffectiveMcpServers disk walk out of
+      // the Tab-open critical path.
+      const resolved = resolveWorkspaceConfig(agentDir, initMeta, {
+        includeMcp: hasInitialPrompt,
+      });
       // Only self-resolve MCP for sessions with initialPrompt (IM/Cron).
       // Tab sessions must NOT self-resolve: the frontend's /api/mcp/set is the
       // authoritative source, and self-resolve produces slightly different field
@@ -5672,9 +5686,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       hooks: {
         PostToolUse: [{
           hooks: [
-            async (input: HookInput, _toolUseId: string | undefined, _options: { signal: AbortSignal }): Promise<HookJSONOutput> => {
+            async (input: HookInput, _toolUseId: string | undefined, options: { signal: AbortSignal }): Promise<HookJSONOutput> => {
               const postInput = input as PostToolUseHookInput;
-              const resized = await resizeToolImageContent(postInput.tool_response);
+              // Propagate SDK's turn-level AbortSignal so resize aborts when the turn does.
+              // Without this, a Jimp/sharp stall here blocks the SDK main loop's stdio drain.
+              const resized = await resizeToolImageContent(postInput.tool_response, options?.signal);
               if (resized) {
                 console.log(`[image-resize] PostToolUse hook resized images for tool: ${postInput.tool_name}`);
                 return {

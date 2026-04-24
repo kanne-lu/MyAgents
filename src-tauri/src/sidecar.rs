@@ -82,12 +82,14 @@ fn ensure_high_file_descriptor_limit() {
 
 // Configuration constants
 const BASE_PORT: u16 = 31415;
-// Health check: 600 attempts × 500ms ≈ 5 min upper bound.
-// In practice localhost TCP fails instantly (~1ms), so real wall-time ≈ 600 × 500ms = 5 min.
-// The generous limit accommodates Windows Defender first-run scanning of bun.exe,
-// which can hold the process for 20-30s before any code executes.
+// Health check: exponential backoff 50ms → 500ms, capped. Wall-clock ceiling ≈ 5 min.
+// Node cold start is ~2s (tsx boot + module load), so the first 5 attempts at
+// 50/100/200/400/500ms (cumulative 1.25s) usually arrive before listen — cheap,
+// no-ops. Attempts 6+ poll at 500ms to accommodate Windows Defender first-run
+// scanning (20-30s hold) without burning CPU.
 const HEALTH_CHECK_MAX_ATTEMPTS: u32 = 600;
-const HEALTH_CHECK_DELAY_MS: u64 = 500;
+const HEALTH_CHECK_DELAY_CAP_MS: u64 = 500;
+const HEALTH_CHECK_DELAY_START_MS: u64 = 50;
 const HEALTH_CHECK_TIMEOUT_MS: u64 = 100;
 // HTTP health check for existing sidecar.
 // 2000ms accommodates Windows systems under startup load (Defender, proxy, Plugin Bridge init).
@@ -1502,12 +1504,20 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
 /// Checked every 20 iterations (~10s) to detect early crashes (e.g., AVX2 0xC0000005 on Windows
 /// VMs where Windows Defender delays the crash by 20-30s, bypassing the 50ms early exit check).
 fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Result<(), String> {
-    let delay = Duration::from_millis(HEALTH_CHECK_DELAY_MS);
+    // Exponential backoff: 50, 100, 200, 400, 500, 500, 500, ... (cap).
+    // See HEALTH_CHECK_DELAY_* constants for rationale.
+    let delay_for = |attempt: u32| -> Duration {
+        let ms = HEALTH_CHECK_DELAY_START_MS
+            .saturating_mul(1u64 << attempt.saturating_sub(1).min(10))
+            .min(HEALTH_CHECK_DELAY_CAP_MS);
+        Duration::from_millis(ms)
+    };
 
     for attempt in 1..=HEALTH_CHECK_MAX_ATTEMPTS {
-        // Every 20 attempts (~10s), check if process is still alive.
-        // This catches crashes that happen after the 50ms early exit check
-        // (e.g., Windows Defender scans bun.exe for 20-30s before it executes and crashes).
+        // Alive check: every 20 attempts in the slow-poll regime is ~10s. But
+        // the early fast regime compresses 20 attempts to ~1.6s, still safe.
+        // Catches crashes that happen after our initial try_wait (e.g. Windows
+        // Defender holds node.exe for 20-30s then lets a crash happen).
         if attempt % 20 == 0 {
             if let Some(ref check) = alive_check {
                 if !check() {
@@ -1529,7 +1539,7 @@ fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Res
             }
             Err(_) => {
                 if attempt < HEALTH_CHECK_MAX_ATTEMPTS {
-                    thread::sleep(delay);
+                    thread::sleep(delay_for(attempt));
                 }
             }
         }
@@ -1744,11 +1754,12 @@ pub fn start_tab_sidecar<R: Runtime>(
         });
     }
 
-    // Brief wait to let stdout/stderr threads capture initial output
-    // Reduced from 500ms to 50ms for faster startup
-    thread::sleep(Duration::from_millis(50));
+    // Check if the process already exited. `try_wait()` is a non-blocking
+    // poll — if the OS hasn't reaped the child yet, returns Ok(None). We no
+    // longer pre-sleep 50ms here; the health-loop's alive_check (every 20
+    // attempts) catches any crash that escapes this initial probe.
     if let Ok(Some(status)) = child.try_wait() {
-        // Process exited immediately, wait a bit for stderr thread to capture output
+        // Crash detected — give the stderr reader a brief window to flush.
         thread::sleep(Duration::from_millis(100));
         ulog_error!("[sidecar] Process exited immediately with status: {:?}", status);
         #[cfg(target_os = "windows")]
@@ -2674,8 +2685,8 @@ fn create_new_session_sidecar<R: Runtime>(
         });
     }
 
-    // Brief wait to check if process exits immediately
-    thread::sleep(Duration::from_millis(50));
+    // Check if the process already exited (non-blocking poll). No pre-sleep;
+    // the health-loop's alive_check catches any crash this probe misses.
     if let Ok(Some(status)) = child.try_wait() {
         thread::sleep(Duration::from_millis(100));
         ulog_error!("[sidecar] SessionSidecar exited immediately with status: {:?}", status);

@@ -1473,34 +1473,6 @@ async function main() {
   initLogger(getClients);
   startupBeacon('initLogger done — switching to console.log');
 
-  // Clean up old logs (30+ days)
-  cleanupOldLogs();        // Agent session logs
-  cleanupOldUnifiedLogs(); // Unified console logs
-
-  // Recovery: clean up stale Playwright MCP profile locks left by v0.1.30 bug
-  // (node→bun shim in global PATH caused Chrome CDP WebSocket timeout)
-  cleanupStalePlaywrightProfile();
-
-  // One-time migration: extract cookies from old Chromium profile to storage-state JSON
-  // (v0.1.51: switched from persistent profile to isolated mode for browser concurrency)
-  await migrateProfileToStorageState();
-
-  // Seed bundled skills to ~/.myagents/skills/ on first launch
-  seedBundledSkills();
-  console.log('[startup] seedBundledSkills done');
-
-  // Generate agent-browser CLI wrapper in ~/.myagents/bin/
-  if (!isSkillBlockedOnPlatform('agent-browser')) {
-    setupAgentBrowserWrapper();
-    console.log('[startup] setupAgentBrowserWrapper done');
-  } else {
-    console.log('[startup] Skipping agent-browser on this platform (blocked)');
-  }
-
-  // Initialize SOCKS5→HTTP bridge if Rust injected socks5:// proxy env vars.
-  // Must run BEFORE initializeAgent() which triggers pre-warm → SDK subprocess spawn.
-  await initSocksBridgeFromEnv();
-
   // Store sidecar port BEFORE initializeAgent() so that:
   //   1. pre-warm's buildClaudeSessionEnv() reads the correct sidecarPort
   //      (OpenAI bridge loopback URL + MYAGENTS_PORT injection both need it).
@@ -1511,14 +1483,27 @@ async function main() {
   //      debounce outlasting the few µs between these two calls.
   setSidecarPort(port);
 
-  await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
-  console.log('[startup] initializeAgent done');
-
-  // For external runtime sessions being resumed: restore module state so sendExternalMessage
-  // uses --resume instead of --session-id. Must happen after initializeAgent sets up the session.
-  if (shouldUseExternalRuntime() && initialSessionId) {
-    restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
-  }
+  // ── Deferred init gate ──────────────────────────────────────────────────
+  // Everything heavy (migrations, skill seed, agent-browser wrapper, socks
+  // bridge, initializeAgent, external runtime restore) moves to AFTER
+  // honoServe() binds, so Rust's TCP health check unblocks in < 100ms
+  // instead of waiting ~2s for this work to complete. Routes that need
+  // agent state `await deferredInit` at the top of the fetch handler.
+  //
+  // /health is exempt so the sidecar becomes "healthy" from Rust's
+  // perspective the moment the HTTP server accepts TCP connections —
+  // letting the frontend render the Tab UI while deferred init still runs.
+  let resolveDeferredInit!: () => void;
+  let rejectDeferredInit!: (e: unknown) => void;
+  const deferredInitPromise: Promise<void> = new Promise((res, rej) => {
+    resolveDeferredInit = res;
+    rejectDeferredInit = rej;
+  });
+  // Route handlers that need agent state call `await awaitDeferredInit()`.
+  // Exposed on globalThis so the hono fetch handler (below) can reach it
+  // without changing signatures.
+  (globalThis as { __myagentsDeferredInit?: Promise<void> }).__myagentsDeferredInit =
+    deferredInitPromise;
 
   // Create OpenAI bridge handler (lazy: only processes requests when bridge config is active)
   const bridgeHandler = createBridgeHandler({
@@ -1589,10 +1574,22 @@ async function main() {
       }
 
       // 🩺 Health check endpoint - used by Rust sidecar manager
-      // Must be as simple as possible to verify HTTP handler is responsive
+      // Must be as simple as possible to verify HTTP handler is responsive.
+      // Deliberately BEFORE awaitDeferredInit(): Rust needs to flip the sidecar
+      // to "healthy" while we're still doing deferred init in the background.
       if (pathname === '/health' && request.method === 'GET') {
         return jsonResponse({ status: 'ok', timestamp: Date.now() });
       }
+
+      // ── Deferred init gate ────────────────────────────────────────────────
+      // All other routes depend on agent state (currentAgentDir, MCP servers,
+      // session metadata, bridge handler). Wait for deferred init to complete
+      // before processing. This is fast once init is done (resolved Promise
+      // awaits are sub-µs); only the very first request-while-initializing
+      // pays any cost. In steady state the await is a no-op.
+      const init = (globalThis as { __myagentsDeferredInit?: Promise<void> })
+        .__myagentsDeferredInit;
+      if (init) await init;
 
       // Browser dev-mode fallback for attachment files.
       // Production uses the Tauri `myagents://attachment/<path>` custom protocol
@@ -8750,14 +8747,62 @@ description: >
 
   console.log(`Web UI server listening on http://localhost:${port}`);
 
-  // ── Sidecar Boot Banner: single-line for AI grep ──
-  {
-    const model = getSessionModel() || '?';
-    const mcpList = getMcpServers();
-    const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
-    const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
-    console.log(`[boot] pid=${process.pid} port=${port} node=${process.versions.node} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames}`);
-  }
+  // ── Deferred heavy init ─────────────────────────────────────────────────
+  // Runs AFTER honoServe has bound the port. Rust's TCP health check now
+  // passes within ~50ms instead of waiting ~2s for all this work to finish.
+  // Routes (except /health) `await __myagentsDeferredInit` before running,
+  // so correctness is preserved: anything that needs agent state (MCP,
+  // model, file watcher, bridge) waits for this block to finish.
+  //
+  // Order within this block still matters:
+  //   1. migrations/cleanup — best-effort, can interleave
+  //   2. socks bridge BEFORE initializeAgent (pre-warm spawns SDK which
+  //      reads HTTP_PROXY env vars set by initSocksBridgeFromEnv)
+  //   3. initializeAgent — the big one
+  //   4. external runtime restore
+  //   5. boot banner — prints with fully resolved state
+  (async () => {
+    try {
+      cleanupOldLogs();
+      cleanupOldUnifiedLogs();
+      cleanupStalePlaywrightProfile();
+      await migrateProfileToStorageState();
+      seedBundledSkills();
+      console.log('[startup] seedBundledSkills done');
+
+      if (!isSkillBlockedOnPlatform('agent-browser')) {
+        setupAgentBrowserWrapper();
+        console.log('[startup] setupAgentBrowserWrapper done');
+      } else {
+        console.log('[startup] Skipping agent-browser on this platform (blocked)');
+      }
+
+      await initSocksBridgeFromEnv();
+
+      await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
+      console.log('[startup] initializeAgent done');
+
+      if (shouldUseExternalRuntime() && initialSessionId) {
+        restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
+      }
+
+      // ── Sidecar Boot Banner: single-line for AI grep ──
+      {
+        const model = getSessionModel() || '?';
+        const mcpList = getMcpServers();
+        const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
+        const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
+        console.log(`[boot] pid=${process.pid} port=${port} node=${process.versions.node} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames}`);
+      }
+
+      resolveDeferredInit();
+    } catch (err) {
+      console.error('[startup] Deferred init failed:', err);
+      rejectDeferredInit(err);
+      // Don't re-throw — the server stays up. Routes awaiting deferredInit
+      // will see the rejection and can return a 503.
+    }
+  })();
 
   // Kick off interactive-shell PATH detection in the background.
   // `warmupShellPath()` uses async `execFile` so it never blocks the event loop

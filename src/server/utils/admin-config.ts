@@ -432,8 +432,14 @@ export interface WorkspaceResolvedConfig {
 export function resolveWorkspaceConfig(
   agentDir: string,
   sessionMeta?: SessionMetadata | null,
+  options?: { includeMcp?: boolean },
 ): WorkspaceResolvedConfig {
   const config = loadConfig();
+  // MCP resolution is the expensive part here (walks all agents, intersects
+  // enable sets, builds McpServerDefinition from disk). Desktop Tab sessions
+  // don't need it — the frontend's /api/mcp/set is authoritative — so callers
+  // can short-circuit via `{ includeMcp: false }` to skip it entirely.
+  const includeMcp = options?.includeMcp !== false;
 
   // Normalize path separators for cross-platform matching
   const normalizedDir = agentDir.replace(/\\/g, '/');
@@ -449,15 +455,17 @@ export function resolveWorkspaceConfig(
   // server list, intersect with the global-enabled set so users disabling a server
   // globally still wins (security stays at the global lever, locked sessions just
   // pin their feature surface).
-  let mcpServers: McpServerDefinition[];
-  if (sessionMeta?.mcpEnabledServers) {
-    const allServers = getAllMcpServers(config);
-    const globalEnabled = new Set(getEnabledMcpServerIds(config));
-    const sessionEnabled = new Set(sessionMeta.mcpEnabledServers);
-    mcpServers = allServers.filter(s => globalEnabled.has(s.id) && sessionEnabled.has(s.id));
-  } else {
-    // Lazy fallback for legacy / IM sessions — uses project ∩ global as before.
-    mcpServers = getEffectiveMcpServers(agentDir);
+  let mcpServers: McpServerDefinition[] = [];
+  if (includeMcp) {
+    if (sessionMeta?.mcpEnabledServers) {
+      const allServers = getAllMcpServers(config);
+      const globalEnabled = new Set(getEnabledMcpServerIds(config));
+      const sessionEnabled = new Set(sessionMeta.mcpEnabledServers);
+      mcpServers = allServers.filter(s => globalEnabled.has(s.id) && sessionEnabled.has(s.id));
+    } else {
+      // Lazy fallback for legacy / IM sessions — uses project ∩ global as before.
+      mcpServers = getEffectiveMcpServers(agentDir);
+    }
   }
 
   // --- Resolve Provider ---
