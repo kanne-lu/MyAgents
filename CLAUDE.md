@@ -135,6 +135,21 @@ npm run typecheck && npm run lint  # 代码质量检查
 - 新增配置同步端点时，确保 `currentXxx` 变量在 pre-warm 前已设置
 - **MCP 配置权威来源分离**：Tab 会话的 MCP 由前端 `/api/mcp/set` 配置（`initializeAgent` 中 MUST NOT self-resolve MCP），IM/Cron 会话的 MCP 由 self-resolve 从磁盘读取。混用会导致 fingerprint 差异 → abort → 30s 重启循环
 
+### Builtin MCP 懒加载架构（v0.2.0+）
+
+6 个 in-process 内置 MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）采用**两层 META/INSTANCE 懒加载**：
+
+- **META 层**（`src/server/tools/builtin-mcp-meta.ts`）：每个 MCP 登记一个 `{ id, load: async () => ... }` 工厂，**模块加载时只存函数引用**，不 eval 任何 tool 代码
+- **INSTANCE 层**（`src/server/tools/builtin-mcp-registry.ts::getBuiltinMcpInstance(id)`）：按需触发 factory，`@anthropic-ai/claude-agent-sdk`（~900KB）+ `zod/v4`（~470KB）+ per-tool schema 构造全部在此发生；**首次 call 付 100-400ms，后续缓存命中 0ms**。Promise 失败自动 evict，防止 poisoned cache
+- **Settings UI 的 MCP 列表**从**静态** `PRESET_MCP_SERVERS`（`src/renderer/config/types.ts`）读取，**不依赖** INSTANCE 层。关闭某个 builtin = 不传给 SDK ≠ 不创建
+
+**新增一个 builtin MCP 的正确流程**：
+1. 新建 `src/server/tools/xxx-tool.ts`，导出 `async function createXxxServer()`（SDK/zod 的 value import **必须**在 factory 内部 `await import(...)`，顶层只能 light 依赖 + `import type`）
+2. 在 `src/server/tools/builtin-mcp-meta.ts` 加一个 `registerBuiltinMcpMeta({ id, load: async () => { const m = await import('./xxx-tool'); return { server: await m.createXxxServer() }; } })`
+3. 用户可开关的 MCP（Settings 可见）：另导出 `configureXxx` + `validateXxx`（纯 JS，不 import SDK/zod），在 META 的 load() 里一并返回
+
+**结构性防御**：`.eslintrc` 的 `@typescript-eslint/no-restricted-imports` 规则禁止 `src/server/tools/*.ts` 顶层 value-import SDK/zod（`allowTypeImports: true` 保留 type-only 零成本）。破坏这条规则 → lint 立即报错。
+
 ### Multi-Agent Runtime (v0.1.60)
 
 除 builtin（Claude Agent SDK）外，支持 Claude Code CLI（NDJSON/stdio）和 Codex CLI（JSON-RPC 2.0/stdio）作为外部 Runtime。功能门控：`config.multiAgentRuntime`（默认关闭）。
@@ -255,11 +270,13 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 
 - 整体架构（全局核心规范，必读）：@specs/ARCHITECTURE.md
 - 设计系统（全局核心规范，前端必读）：@specs/DESIGN.md
+- Node.js 打包架构（v0.2.0+ 单一 runtime、PATH 注入、SDK native binary、native addon ABI）：@specs/tech_docs/bundled_node.md
 - 自配置 CLI（myagents 命令、Admin API、版本门控）：@specs/tech_docs/cli_architecture.md
 - React 稳定性规范（Context/useEffect/memo 等 5 条规则）：@specs/tech_docs/react_stability_rules.md
 - IM Bot 集成：@specs/tech_docs/im_integration_architecture.md
-- Plugin Bridge（OpenClaw 插件加载、SDK shim、消息流转）：@specs/tech_docs/plugin_bridge_architecture.md
+- Plugin Bridge（OpenClaw 入口协议、CJS+ESM 混用插件 runtime 补丁、SDK shim ESM、消息流转）：@specs/tech_docs/plugin_bridge_architecture.md
 - Session ID 架构：@specs/tech_docs/session_id_architecture.md
 - 代理配置：@specs/tech_docs/proxy_config.md
 - Windows 平台适配：@specs/tech_docs/windows_platform_guide.md
-- Multi-Agent Runtime（CC/Codex 协议、会话管理、门控链路）：@specs/tech_docs/multi_agent_runtime.md
+- Linux 平台适配（v0.2.0+ AppImage/deb）：@specs/tech_docs/linux_platform_guide.md
+- Multi-Agent Runtime（CC/Codex/Gemini 协议、会话管理、门控链路）：@specs/tech_docs/multi_agent_runtime.md

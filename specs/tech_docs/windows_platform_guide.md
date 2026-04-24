@@ -66,19 +66,19 @@ export function getPlatformPaths() {
 
 ## 🔧 进程管理
 
-### Bun 运行时路径
+### Node.js 运行时路径（v0.2.0+）
 
-**Windows 查找顺序**（`src/server/utils/runtime.ts`）：
-1. 环境变量 `BUN_EXECUTABLE`
-2. Tauri resources 目录 `/binaries/bun.exe`
-3. 用户安装路径 `%USERPROFILE%\.bun\bin\bun.exe`
-4. 系统 PATH（`bun.exe` 或 `bun`）
+**Windows 查找顺序**（`src/server/utils/runtime.ts::getBundledNodePath()`）：
+1. Bundled Node.js（`Contents\resources\nodejs\node.exe`，构建时从 nodejs.org 下载）
+2. 用户系统 Node.js（通过 `getSystemNodeDirs()` 扫描 `Program Files\nodejs` / `%USERPROFILE%\AppData\Roaming\npm` 等）
+3. 系统 PATH（`node.exe` / `npm.cmd` / `npx.cmd`）
 
-**macOS 查找顺序**：
-1. 环境变量 `BUN_EXECUTABLE`
-2. Tauri resources 目录 `/binaries/bun`
-3. 用户安装路径 `~/.bun/bin/bun`
-4. 系统 PATH
+**macOS / Linux 查找顺序**：
+1. Bundled Node.js（`Contents/Resources/nodejs/bin/node`）
+2. 系统 Node.js（`/opt/homebrew/bin/node` / `/usr/local/bin/node` / nvm / fnm / volta / asdf / mise）
+3. 系统 PATH
+
+**PATH 注入策略**：SDK 子进程（AI Bash 工具）实际看到的 PATH 优先**系统**，其次 bundled —— 用户自己维护的 Node 往往比我们 bundle 的版本新，npm 也更可靠（见 `buildClaudeSessionEnv`）。详见 `bundled_node.md`。
 
 ### 进程清理
 
@@ -185,8 +185,7 @@ let client = proxy_config::build_client_with_proxy(builder)?;
 
 **正确的清理脚本**（`build_windows.ps1`）：
 ```powershell
-# 杀死残留进程
-Get-Process | Where-Object { $_.ProcessName -eq "bun" } | Stop-Process -Force
+# 杀死残留 MyAgents 进程（v0.2.0+ Bun 已移除，不再需要杀 bun.exe）
 Get-Process | Where-Object { $_.ProcessName -eq "MyAgents" } | Stop-Process -Force
 
 # 清理构建产物
@@ -254,12 +253,12 @@ Tauri GUI 应用从 Finder/Explorer 启动时不继承 shell PATH（无 homebrew
    └─ 失败 →
 2. 内置 npm（bundled Node.js + npm-cli.js）
    └─ NODE_OPTIONS=--no-experimental-require-module（Windows Node.js v24 CJS/ESM 修复）
-   └─ 失败 →
-3. Bun fallback（bun add）
 ```
 
+v0.2.0+ 已移除 Bun fallback —— 生产构建与 setup 脚本统一依赖 bundled Node.js + npm。
+
 安装后流程：
-1. `npm/bun install` → 安装插件及其依赖
+1. `npm install` → 安装插件及其依赖
 2. **依赖修复**：`npm install --ignore-scripts --omit=peer`
 3. **SDK Shim 安装**（最后一步，last-write-wins）：覆盖 `node_modules/openclaw/` 为自定义 shim
 4. **Bridge 启动前 shim 完整性检查**：解析 `package.json` version 字段，检测损坏自动修复
@@ -289,7 +288,7 @@ $env:CLAUDE_CODE_GIT_BASH_PATH="C:\Program Files\Git\bin\bash.exe"
 2. **常见原因**：`requires git-bash` 表示缺少 Git
 3. **解决方案**：安装 Git for Windows 或设置 `CLAUDE_CODE_GIT_BASH_PATH`
 
-**详见**：[bundled_bun.md](./bundled_bun.md) 中的 Windows Git 依赖说明
+**详见**：[bundled_node.md](./bundled_node.md) 中的 Windows Git 依赖说明
 
 ---
 

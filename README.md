@@ -74,9 +74,8 @@ MyAgents 是一款开源桌面端 AI Agent，同时具备「Claude Code」的强
 
 #### 开发者
 
-- macOS 13.0+ / Windows 10+
-- [Node.js](https://nodejs.org) (v18+)
-- [Bun](https://bun.sh) - 开发时需要，最终用户无需安装
+- macOS 13.0+ / Windows 10+ / Linux（Ubuntu 20.04+ AppImage/deb）
+- [Node.js](https://nodejs.org) (v20+) - 开发时需要；生产构建内置 Node.js v24，最终用户无需安装
 - [Rust](https://rustup.rs)
 
 ### 快速开始（开发者）
@@ -108,16 +107,16 @@ cd MyAgents
 |------|------|
 | 桌面框架 | Tauri v2 (Rust) + 多 Webview |
 | 前端 | React 19 + TypeScript + TailwindCSS + xterm.js |
-| Agent Runtime | Bun + Claude Agent SDK（默认）/ Claude Code CLI / OpenAI Codex CLI |
-| 社区生态 | Node.js（MCP Server / npm 包，应用内置） |
+| Agent Runtime | Node.js v24 + Claude Agent SDK（默认）/ Claude Code CLI / OpenAI Codex CLI / Gemini CLI |
+| 社区生态 | Node.js（MCP Server / npm 包 / `myagents` CLI，统一 runtime，应用内置） |
 | 通信 | Rust HTTP/SSE Proxy（reqwest，统一 localhost no-proxy） |
 | 终端 | portable-pty（PTY 进程）+ xterm.js（前端渲染） |
 | 搜索 | Tantivy + tantivy-jieba（中文分词） |
-| 插件 | OpenClaw Plugin Bridge（独立 Bun 进程加载社区 Channel 插件） |
+| 插件 | OpenClaw Plugin Bridge（独立 Node.js 进程加载社区 Channel 插件） |
 
 ### 架构
 
-**Session-Centric 多实例 Sidecar 架构** — 每个会话拥有独立的 Agent 进程，严格 1:1 隔离；多 Owner 共享机制让 Tab、定时任务、Agent Channel 安全复用同一 Sidecar；Rust 代理层统一接管所有流量，零 CORS 问题；**双运行时**内置 Bun（跑 Agent Runtime）+ Node.js（跑 MCP Server / 社区 npm 生态），Windows 还附带静默安装 Git for Windows，用户无需安装任何依赖。
+**Session-Centric 多实例 Sidecar 架构** — 每个会话拥有独立的 Agent 进程，严格 1:1 隔离；多 Owner 共享机制让 Tab、定时任务、Agent Channel 安全复用同一 Sidecar；Rust 代理层统一接管所有流量，零 CORS 问题；**单一 runtime** 内置 Node.js v24（跑 Sidecar / Plugin Bridge / MCP / 社区 npm 生态 / `myagents` CLI），Windows 还附带静默安装 Git for Windows，用户无需安装任何依赖。
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -137,8 +136,8 @@ cd MyAgents
 │  │  Owner Tab/Cron/Agent  │  │          │  │     (OpenClaw)      │ │
 │  └────┬─────────────┬─────┘  └──────────┘  └──────────┬──────────┘ │
 │       ▼             ▼                                 ▼            │
-│  Bun Sidecar  (Claude Agent SDK / Claude Code CLI / Codex CLI)     │
-│  + Node.js    (MCP Server / 社区 npm 生态)                         │
+│  Node.js Sidecar  (Claude Agent SDK / CC / Codex / Gemini CLI)     │
+│    + MCP Server / 社区 npm 生态 / myagents CLI（统一 runtime）     │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -209,9 +208,8 @@ As of early 2026, AI capability is advancing rapidly — software developers wer
 
 #### Developers
 
-- macOS 13.0+ / Windows 10+
-- [Node.js](https://nodejs.org) (v18+)
-- [Bun](https://bun.sh) - Required for development only
+- macOS 13.0+ / Windows 10+ / Linux (Ubuntu 20.04+ AppImage/deb)
+- [Node.js](https://nodejs.org) (v20+) — required at build time; Node.js v24 is bundled into production builds so end users install nothing
 - [Rust](https://rustup.rs)
 
 ### Quick Start (Developers)
@@ -243,16 +241,16 @@ cd MyAgents
 |-------|------------|
 | Desktop Framework | Tauri v2 (Rust) + multi-Webview |
 | Frontend | React 19 + TypeScript + TailwindCSS + xterm.js |
-| Agent Runtime | Bun + Claude Agent SDK (default) / Claude Code CLI / OpenAI Codex CLI |
-| Community Ecosystem | Node.js (MCP servers / npm packages, bundled in app) |
+| Agent Runtime | Node.js v24 + Claude Agent SDK (default) / Claude Code CLI / OpenAI Codex CLI / Gemini CLI |
+| Community Ecosystem | Node.js (MCP servers / npm packages / `myagents` CLI — single runtime, bundled in app) |
 | Communication | Rust HTTP/SSE Proxy (reqwest, unified localhost no-proxy) |
 | Terminal | portable-pty (PTY process) + xterm.js (frontend renderer) |
 | Search | Tantivy + tantivy-jieba (Chinese tokenizer) |
-| Plugin | OpenClaw Plugin Bridge (separate Bun process loading community Channel plugins) |
+| Plugin | OpenClaw Plugin Bridge (separate Node.js process loading community Channel plugins) |
 
 ### Architecture
 
-**Session-Centric multi-instance Sidecar architecture** — each session owns an isolated Agent process with strict 1:1 mapping; a multi-owner mechanism lets Tabs, scheduled tasks, and Agent Channels safely share the same Sidecar; the Rust proxy layer handles all traffic with zero CORS issues. **Dual runtime**: Bun (Agent Runtime / Sidecar) + Node.js (MCP servers / community npm) are both bundled, plus Git for Windows is silently installed on Windows — users install nothing.
+**Session-Centric multi-instance Sidecar architecture** — each session owns an isolated Agent process with strict 1:1 mapping; a multi-owner mechanism lets Tabs, scheduled tasks, and Agent Channels safely share the same Sidecar; the Rust proxy layer handles all traffic with zero CORS issues. **Single runtime**: Node.js v24 is bundled for everything (Sidecar / Plugin Bridge / MCP / community npm ecosystem / `myagents` CLI), plus Git for Windows is silently installed on Windows — users install nothing.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -272,8 +270,8 @@ cd MyAgents
 │  │  Owner Tab/Cron/Agent  │  │          │  │     (OpenClaw)      │ │
 │  └────┬─────────────┬─────┘  └──────────┘  └──────────┬──────────┘ │
 │       ▼             ▼                                 ▼            │
-│  Bun Sidecar  (Claude Agent SDK / Claude Code CLI / Codex CLI)     │
-│  + Node.js    (MCP servers / community npm ecosystem)              │
+│  Node.js Sidecar  (Claude Agent SDK / CC / Codex / Gemini CLI)     │
+│    + MCP servers / community npm ecosystem / myagents CLI          │
 └────────────────────────────────────────────────────────────────────┘
 ```
 

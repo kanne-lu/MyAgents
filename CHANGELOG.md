@@ -36,6 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **单一 JS runtime 原则**：CLAUDE.md / ARCHITECTURE.md 的"双运行时策略"节改写为"单一 Node.js runtime"。SDK 子进程内部的 Bun 是 SDK team 静态链接实现细节，我们不感知。
 - **Entitlements 注释刷新**：`allow-jit` 等 entitlement 适用于任何 JS 引擎（Node V8 / SDK 内嵌 Bun），不再是 "for Bun" 专属。
 
+### Performance (post-migration perf sweep)
+
+Sidecar 冷启动从 v0.2.0-rc 的 5-7s 降到 ~2-3s，Tab 打开的用户感知明显提速。
+
+- **Rust TCP health check**：固定 500ms 轮询 → 指数退避 50→500ms（前 5 次累计 1.25s 覆盖常见冷启动窗口）；删除 spawn 后 50ms guard sleep。节省 200-550ms/次。
+- **Node `main()` 重排序**：HTTP listen 提前到 `initializeAgent` / migration / skill seed / agent-browser wrapper 之前，Rust health check 几十 ms 就通过；重活移入 IIFE，通过 `globalThis.__myagentsDeferredInit` gate 等待所有非 `/health` route。节省 400-1200ms TCP accept 阻塞。
+- **异步 shell PATH 检测**：`execSync('/bin/zsh -i -l')` → `execFile` 异步；原来 3-5s 阻塞事件循环、让 TCP accept 饿死 → 背景完成，fallback PATH 立即可用。
+- **Tab MCP 快路径**：`resolveWorkspaceConfig({ includeMcp: false })` 对 Tab session 跳过 MCP 磁盘扫描（Tab 由前端 `/api/mcp/set` 下发，self-resolve 白做）；`getSessionMetadata` 从 3 次合并成 1 次 memo。
+- **重组件懒加载（Tier 2）**：`admin-api`（~2900 行）、`openai-bridge`（~2660 行）、`adm-zip` 改为 route 内 `await import()` 懒加载。只有实际使用者付代价。
+- **内置 MCP 懒加载（Tier 3）**：6 个 in-process MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）改为 META + 实例缓存两层设计（`src/server/tools/builtin-mcp-meta.ts` + `builtin-mcp-registry.ts`）。SDK + zod + schema 构造从模块加载挪到首次使用，冷启动少付 ~500-1000ms；失败自动 evict 防 poisoned cache；ESLint `@typescript-eslint/no-restricted-imports` 规则结构性禁止 tool 文件顶层 value-import SDK/zod。
+- **Plugin Bridge 入口解析重写**：按 OpenClaw 上游规范读 `package.json["openclaw"].extensions`，不再信任 `main` / `exports`（社区插件常 `main: "dist/index.js"` 但发布包不带 `dist/`）。
+- **CJS + ESM 混用插件运行时补丁**：`@larksuite/openclaw-lark` 等用 TS 编译到 CJS 但引用了 `import.meta.url` 的插件，通过 `module.registerHooks()` 同步 loader 运行时改写入 `__filename`。Bun 原本静默容忍，Node 严格拒绝，此补丁让 4 个主流 bot 插件（飞书/QQ/企业微信/微信）在 Node 下重新可用。
+- **better-sqlite3 ABI 自动 rebuild**：`setup.sh` / `build_dev.sh` 检测到系统 npm 与 bundled Node.js ABI 不匹配时自动 `npm rebuild`，避免 `ERR_DLOPEN_FAILED`。
+- **Windows 构建脚本 bun→npm**：`build_dev_win.ps1` / `build_windows.ps1` / `rebuild_clean.ps1` 全部切到 `npm`；`setup_windows.ps1` 与构建脚本工具链统一，新 Windows 开发者不再遇到「setup 装 npm，build 要 bun」的割裂。
+- **agent-browser-cli lockfile 迁移**：`bun.lock` → `package-lock.json`，macOS + Windows 构建改用 `npm ci --ignore-scripts`。
+
 ---
 
 ## [0.1.70] - 2026-04-24
