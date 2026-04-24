@@ -41,7 +41,9 @@
     "targets": [
       "dmg",
       "app",
-      "nsis"
+      "nsis",
+      "appimage",
+      "deb"
     ],
     "createUpdaterArtifacts": "v1Compatible",
     "icon": [

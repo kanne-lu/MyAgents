@@ -225,6 +225,73 @@ EOF
     log_ok "macOS ${arch}: Node.js v${NODE_VERSION} ready"
 }
 
+# Download and extract Node.js for Linux (glibc; Alpine users install Node.js manually)
+download_linux() {
+    local arch="$1"  # x64 or arm64
+    local node_arch
+    if [[ "$arch" == "arm64" || "$arch" == "aarch64" ]]; then
+        node_arch="arm64"
+    else
+        node_arch="x64"
+    fi
+
+    local tarball="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"
+    local url="${NODE_BASE_URL}/${tarball}"
+    local node_bin="${RESOURCES_DIR}/bin/node"
+
+    if check_existing "$node_bin" ""; then
+        log_ok "Linux ${node_arch}: Already at v${NODE_VERSION}, checking npm..."
+        upgrade_npm "${RESOURCES_DIR}/lib/node_modules" "${RESOURCES_DIR}/bin/node"
+        return 0
+    fi
+
+    log_info "Downloading Node.js v${NODE_VERSION} for Linux ${node_arch}..."
+
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap "rm -rf '$tmp_dir'" RETURN
+
+    curl -sL "$url" -o "${tmp_dir}/${tarball}"
+
+    log_info "Extracting..."
+    mkdir -p "$RESOURCES_DIR"
+    tar xf "${tmp_dir}/${tarball}" -C "$tmp_dir"
+
+    local extracted_dir="${tmp_dir}/node-v${NODE_VERSION}-linux-${node_arch}"
+    rm -rf "$RESOURCES_DIR"
+    mkdir -p "$RESOURCES_DIR"
+    cp -R "${extracted_dir}/bin" "$RESOURCES_DIR/"
+    cp -R "${extracted_dir}/lib" "$RESOURCES_DIR/"
+
+    # Same npm/npx symlink resolution as macOS
+    for cmd in npm npx; do
+        local link_target
+        link_target=$(readlink "${RESOURCES_DIR}/bin/${cmd}" 2>/dev/null || echo "")
+        if [[ -n "$link_target" ]]; then
+            local cli_name
+            if [[ "$cmd" == "npm" ]]; then cli_name="npm-cli"; else cli_name="npx-cli"; fi
+            rm -f "${RESOURCES_DIR}/bin/${cmd}"
+            cat > "${RESOURCES_DIR}/bin/${cmd}" <<EOF
+#!/bin/sh
+basedir=\$(cd "\$(dirname "\$0")" && pwd)
+exec "\$basedir/node" "\$basedir/../lib/node_modules/npm/bin/${cli_name}.js" "\$@"
+EOF
+            chmod +x "${RESOURCES_DIR}/bin/${cmd}"
+        fi
+    done
+
+    rm -rf "${RESOURCES_DIR}/bin/corepack"
+    rm -rf "${RESOURCES_DIR}/include"
+    rm -rf "${RESOURCES_DIR}/share"
+    rm -rf "${RESOURCES_DIR}/lib/node_modules/corepack"
+
+    chmod +x "${RESOURCES_DIR}/bin/node"
+
+    upgrade_npm "${RESOURCES_DIR}/lib/node_modules" "${RESOURCES_DIR}/bin/node"
+
+    log_ok "Linux ${node_arch}: Node.js v${NODE_VERSION} ready"
+}
+
 # Download Node.js for Windows (used in CI/CD cross-build)
 download_windows() {
     local arch="$1"  # x64 or arm64
@@ -318,7 +385,11 @@ else
             download_macos "x64"
         fi
     elif [[ "$PLATFORM" == "Linux" ]]; then
-        log_warn "Linux support: download manually from ${NODE_BASE_URL}"
+        if [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then
+            download_linux "arm64"
+        else
+            download_linux "x64"
+        fi
     else
         log_error "Unsupported platform: $PLATFORM"
         exit 1
