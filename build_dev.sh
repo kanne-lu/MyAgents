@@ -81,6 +81,21 @@ mkdir -p "${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
 echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/server-dist.js"
 echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/plugin-bridge-dist.js"
 
+# Rebuild native addons against bundled Node ABI (fixes ERR_DLOPEN_FAILED
+# when system npm used a different Node.js version for initial install).
+NODE_BIN="${PROJECT_DIR}/src-tauri/resources/nodejs/bin/node"
+if [ -x "$NODE_BIN" ]; then
+    EXPECTED_ABI=$("$NODE_BIN" -p "process.versions.modules" 2>/dev/null)
+    NATIVE_NODE="${PROJECT_DIR}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    if [ -f "$NATIVE_NODE" ]; then
+        # Check actual ABI by test-loading with bundled Node (cheap fail-fast)
+        if ! "$NODE_BIN" -e "require('better-sqlite3')" 2>/dev/null; then
+            echo -e "${CYAN}[预备] Rebuilding native addons for Node ABI ${EXPECTED_ABI}...${NC}"
+            PATH="${PROJECT_DIR}/src-tauri/resources/nodejs/bin:$PATH" npm rebuild better-sqlite3
+        fi
+    fi
+fi
+
 # 清理 debug 构建产物（确保 resources 被重新复制）
 rm -rf "${PROJECT_DIR}/src-tauri/target/debug/bundle"
 rm -rf "${PROJECT_DIR}/src-tauri/target/debug/MyAgents.app"

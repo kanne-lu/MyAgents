@@ -65,13 +65,7 @@ if ($PKG_VERSION -ne $TAURI_VERSION -or $PKG_VERSION -ne $CARGO_VERSION) {
 # 杀死残留进程（避免"旧代码"问题）
 Write-ColorOutput "[准备] 杀死残留进程..." "Blue"
 
-$bunProcesses = Get-Process | Where-Object { $_.ProcessName -eq "bun" }
 $appProcesses = Get-Process | Where-Object { $_.ProcessName -eq "MyAgents" }
-
-if ($bunProcesses) {
-    $bunProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Host "  清理了 $($bunProcesses.Count) 个 Bun 进程" -ForegroundColor Gray
-}
 
 if ($appProcesses) {
     $appProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -82,9 +76,8 @@ if ($appProcesses) {
 $maxWait = 20  # 20 * 100ms = 2s
 $waited = 0
 while ($waited -lt $maxWait) {
-    $remainingBun = Get-Process -Name "bun" -ErrorAction SilentlyContinue
     $remainingApp = Get-Process -Name "MyAgents" -ErrorAction SilentlyContinue
-    if (-not $remainingBun -and -not $remainingApp) {
+    if (-not $remainingApp) {
         break
     }
     Start-Sleep -Milliseconds 100
@@ -152,7 +145,7 @@ Write-Host ""
 # TypeScript 检查
 Write-ColorOutput "[1/3] TypeScript 类型检查..." "Blue"
 Set-Location $PROJECT_DIR
-$typecheckResult = & bun run typecheck
+$typecheckResult = & npm run typecheck
 if ($LASTEXITCODE -ne 0) {
     Write-ColorOutput "✗ TypeScript 检查失败，请修复后重试" "Red"
     exit 1
@@ -164,7 +157,7 @@ Write-Host ""
 Write-ColorOutput "[2/3] 构建前端..." "Blue"
 $env:VITE_DEBUG_MODE = "true"
 Write-ColorOutput "  VITE_DEBUG_MODE=$env:VITE_DEBUG_MODE" "Yellow"
-& bun run build:web
+& npm run build:web
 if ($LASTEXITCODE -ne 0) {
     Write-ColorOutput "✗ 前端构建失败" "Red"
     exit 1
@@ -197,7 +190,7 @@ Write-ColorOutput "这可能需要几分钟..." "Yellow"
 
 # 使用 --target 指定架构，确保构建正确的版本
 try {
-    & bun run tauri:build -- --debug --bundles nsis --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
+    & npm run tauri:build -- --debug --bundles nsis --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
     if ($LASTEXITCODE -ne 0 -and $env:TAURI_SIGNING_PRIVATE_KEY) {
         throw "Tauri build failed"
     }

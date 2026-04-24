@@ -123,7 +123,6 @@ try {
     $depOk = $true
     if (-not (Test-Command "rustc --version" "https://rustup.rs")) { $depOk = $false }
     if (-not (Test-Command "npm --version" "https://nodejs.org")) { $depOk = $false }
-    if (-not (Test-Command "bun --version" "https://bun.sh")) { $depOk = $false }
 
     # 检查 Rust Windows 目标
     $installedTargets = & rustup target list --installed 2>$null
@@ -137,17 +136,6 @@ try {
 
     if (-not $depOk) {
         throw "请先安装缺失的依赖"
-    }
-
-    # 检查构建必需文件
-    $bunBinaryPath = "src-tauri\binaries\bun-x86_64-pc-windows-msvc.exe"
-    Write-Host "  检查 bundled bun... " -NoNewline
-    if (Test-Path $bunBinaryPath) {
-        Write-Host "OK" -ForegroundColor Green
-    } else {
-        Write-Host "MISSING" -ForegroundColor Red
-        Write-Host "    请先运行 .\setup_windows.ps1 下载 Bun 二进制" -ForegroundColor Yellow
-        $depOk = $false
     }
 
     # 每次构建都拉取最新 cuse release — 与 macOS 构建保持一致
@@ -290,7 +278,7 @@ try {
         $depOk = $false
     }
 
-    # VC++ Runtime DLL (app-local deployment for bun.exe)
+    # VC++ Runtime DLL (app-local deployment for bundled Node.js + native modules)
     $resDir = "src-tauri\resources"
     $vcDlls = @("vcruntime140.dll", "vcruntime140_1.dll")
     Write-Host "  检查 VC++ Runtime DLL... " -NoNewline
@@ -415,13 +403,7 @@ try {
     Write-Host "[准备] 清理旧构建..." -ForegroundColor Blue
 
     # 杀死残留进程（避免文件锁定）
-    $bunProcesses = Get-Process | Where-Object { $_.ProcessName -eq "bun" }
     $appProcesses = Get-Process | Where-Object { $_.ProcessName -eq "MyAgents" }
-
-    if ($bunProcesses) {
-        $bunProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
-        Write-Host "  清理了 $($bunProcesses.Count) 个 Bun 进程" -ForegroundColor Gray
-    }
 
     if ($appProcesses) {
         $appProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -432,9 +414,8 @@ try {
     $maxWait = 20  # 20 * 100ms = 2s
     $waited = 0
     while ($waited -lt $maxWait) {
-        $remainingBun = Get-Process -Name "bun" -ErrorAction SilentlyContinue
         $remainingApp = Get-Process -Name "MyAgents" -ErrorAction SilentlyContinue
-        if (-not $remainingBun -and -not $remainingApp) {
+        if (-not $remainingApp) {
             break
         }
         Start-Sleep -Milliseconds 100
@@ -473,7 +454,7 @@ try {
     # ========================================
     if (-not $SkipTypeCheck) {
         Write-Host "[4/7] TypeScript 类型检查..." -ForegroundColor Blue
-        & bun run typecheck
+        & npm run typecheck
         if ($LASTEXITCODE -ne 0) {
             throw "TypeScript 检查失败，请修复后重试"
         }
@@ -579,11 +560,11 @@ try {
         Remove-Item -Recurse -Force $agentBrowserDir
     }
     New-Item -ItemType Directory -Path $agentBrowserDir -Force | Out-Null
-    # 复制预生成的 package.json + bun.lock（跳过依赖解析，秒级安装）
+    # 复制预生成的 package.json + package-lock.json（跳过依赖解析，秒级安装）
     Copy-Item (Join-Path $lockfileDir "package.json") $agentBrowserDir -Force
-    Copy-Item (Join-Path $lockfileDir "bun.lock") $agentBrowserDir -Force
+    Copy-Item (Join-Path $lockfileDir "package-lock.json") $agentBrowserDir -Force
     Push-Location $agentBrowserDir
-    & bun install --frozen-lockfile --ignore-scripts
+    & npm ci --ignore-scripts
     Pop-Location
     if ($LASTEXITCODE -ne 0) {
         throw "agent-browser 预装失败"
@@ -607,7 +588,7 @@ try {
     # 构建前端 (增加内存限制避免 OOM)
     Write-Host "  构建前端..." -ForegroundColor Cyan
     $env:NODE_OPTIONS = "--max-old-space-size=4096"
-    & bun run build:web
+    & npm run build:web
     if ($LASTEXITCODE -ne 0) {
         throw "前端构建失败"
     }
@@ -621,7 +602,7 @@ try {
     Write-Host "[6/7] 构建 Tauri 应用 (Release)..." -ForegroundColor Blue
     Write-Host "  这可能需要几分钟，请耐心等待..." -ForegroundColor Yellow
 
-    & bun run tauri:build -- --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
+    & npm run tauri:build -- --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
     if ($LASTEXITCODE -ne 0) {
         throw "Tauri 构建失败"
     }
@@ -650,15 +631,6 @@ try {
             New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
 
             Copy-Item $exePath $portableDir -Force
-
-            $bunExe = Join-Path $targetDir "bun-x86_64-pc-windows-msvc.exe"
-            if (Test-Path $bunExe) {
-                Copy-Item $bunExe $portableDir -Force
-                # Create bun.exe alias for SDK subprocess compatibility
-                # (SDK uses which("bun") which only matches bun.exe, not the triple-suffixed name)
-                $bunAlias = Join-Path $portableDir "bun.exe"
-                Copy-Item $bunExe $bunAlias -Force
-            }
 
             # Copy VC++ Runtime DLLs for portable version (app-local deployment)
             foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll")) {

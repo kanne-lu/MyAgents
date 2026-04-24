@@ -269,10 +269,10 @@ fi
 echo -e "  版本: ${CODE_VERSION}"
 rm -rf "${AGENT_BROWSER_DIR}"
 mkdir -p "${AGENT_BROWSER_DIR}"
-# 复制预生成的 package.json + bun.lock（跳过依赖解析，秒级安装）
+# 复制预生成的 package.json + package-lock.json（跳过依赖解析，秒级安装）
 cp "${LOCKFILE_DIR}/package.json" "${AGENT_BROWSER_DIR}/"
-cp "${LOCKFILE_DIR}/bun.lock" "${AGENT_BROWSER_DIR}/"
-(cd "${AGENT_BROWSER_DIR}" && bun install --frozen-lockfile --ignore-scripts)
+cp "${LOCKFILE_DIR}/package-lock.json" "${AGENT_BROWSER_DIR}/"
+(cd "${AGENT_BROWSER_DIR}" && npm ci --ignore-scripts)
 if [ $? -ne 0 ]; then
     echo -e "${RED}✗ agent-browser 预装失败${NC}"
     exit 1

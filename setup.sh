@@ -61,6 +61,14 @@ echo ""
 # 安装依赖（使用 npm — v0.2.0 起不再依赖 Bun）
 echo -e "${BLUE}[3/5] 安装依赖${NC}"
 npm install
+# Rebuild native addons (e.g. better-sqlite3) against bundled Node.js ABI —
+# system `node` may differ in NODE_MODULE_VERSION and produce binaries that
+# crash in our runtime with ERR_DLOPEN_FAILED.
+NODE_BIN="${PROJECT_DIR}/src-tauri/resources/nodejs/bin/node"
+if [ -x "$NODE_BIN" ]; then
+    echo -e "  ${CYAN}Rebuilding native addons against bundled Node...${NC}"
+    PATH="${PROJECT_DIR}/src-tauri/resources/nodejs/bin:$PATH" npm rebuild
+fi
 echo -e "${GREEN}✓ 依赖安装完成${NC}"
 echo ""
 

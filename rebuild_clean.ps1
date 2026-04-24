@@ -116,11 +116,6 @@ Write-Host ""
 Write-Host "[4/6] 杀死残留进程..." -ForegroundColor Blue
 
 $killed = 0
-Get-Process | Where-Object { $_.ProcessName -eq "bun" } | ForEach-Object {
-    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-    $killed++
-}
-
 Get-Process | Where-Object { $_.ProcessName -eq "MyAgents" } | ForEach-Object {
     Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     $killed++

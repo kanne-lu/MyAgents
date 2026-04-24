@@ -10,6 +10,7 @@ When bumping `AGENT_BROWSER_VERSION` in `src/server/index.ts`:
 ```bash
 cd src/server/agent-browser-lockfile
 # Update version in package.json
-bun install --ignore-scripts
-# Commit both package.json and bun.lock
+rm -rf node_modules
+npm install --ignore-scripts --package-lock-only
+# Commit both package.json and package-lock.json
 ```
