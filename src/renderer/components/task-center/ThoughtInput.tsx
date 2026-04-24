@@ -126,6 +126,23 @@ interface Props {
    */
   minLines?: number;
   /**
+   * Maximum row count the textarea can auto-grow to before internal
+   * scroll kicks in. Defaults to 8 for the compact Task Center stream.
+   *
+   * Launcher 想法 mode **MUST** pass `maxLines === minLines` (3) so the
+   * textarea height is frozen at the starting value. SimpleChatInput's
+   * launcher variant is hard-capped at `MAX_LINES_COLLAPSED = 3`; if
+   * ThoughtInput were allowed to auto-grow past that, any thought
+   * draft crossing 3 lines would make the 想法 card taller than the
+   * 对话 card and — because both inputs stay mounted via `hidden` and
+   * the textarea's `style.height` survives across mode switches —
+   * toggling modes would visibly jump the MyAgents title / slogan
+   * (reported after 0.1.70). Layout-freezing the ceiling is the
+   * structural guarantee; the user can still scroll longer drafts
+   * internally via the textarea's own `overflow-y-auto`.
+   */
+  maxLines?: number;
+  /**
    * Visual variant — `compact` for the Task Center thought stream (default),
    * `launcher` for Launcher 想法 mode where the input must visually match
    * the Chat input (same radius / shadow / text size / padding).
@@ -143,11 +160,16 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   autoFocus = false,
   existingTags = [],
   minLines = 2,
+  maxLines = 8,
   variant = 'compact',
 }, ref) {
   const theme = VARIANTS[variant];
+  // Layout invariant: effective max >= min. Caller-supplied maxLines
+  // below minLines would produce a weird "negative growth room" state;
+  // clamp up so the textarea always has at least its starting height.
+  const effectiveMaxLines = Math.max(maxLines, minLines);
   const textareaMinHeightPx = theme.verticalPaddingPx + theme.pxPerLine * minLines;
-  const textareaMaxHeightPx = theme.verticalPaddingPx + theme.pxPerLine * 8;
+  const textareaMaxHeightPx = theme.verticalPaddingPx + theme.pxPerLine * effectiveMaxLines;
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

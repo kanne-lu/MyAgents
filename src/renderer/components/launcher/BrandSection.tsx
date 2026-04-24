@@ -388,7 +388,20 @@ export default memo(function BrandSection({
                                 existingTags={tagCandidates}
                                 onCreated={handleThoughtCreated}
                                 variant="launcher"
+                                // Layout-freeze at 3 lines to mirror
+                                // SimpleChatInput's MAX_LINES_COLLAPSED.
+                                // Both inputs stay mounted (draft
+                                // preservation), so an auto-growing
+                                // ThoughtInput whose style.height
+                                // survived a mode switch would appear
+                                // bigger than the SimpleChatInput card
+                                // on the next toggle (Codex RCA: the
+                                // only remaining "微动" source after
+                                // padding/shadow alignment). Longer
+                                // drafts scroll internally via the
+                                // textarea's own overflow-y-auto.
                                 minLines={3}
+                                maxLines={3}
                             />
                         </div>
                     )}
