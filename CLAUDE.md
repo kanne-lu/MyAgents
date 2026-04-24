@@ -8,15 +8,15 @@
 |------|------|
 | 桌面框架 | Tauri v2 (Rust) |
 | 前端 | React 19 + TypeScript + Vite + TailwindCSS |
-| 后端 | Bun + Claude Agent SDK (多实例 Sidecar) |
+| 后端 | Node.js v24 + Claude Agent SDK (多实例 Sidecar) |
 | 通信 | Rust HTTP/SSE Proxy (reqwest via `local_http` 模块) |
-| 运行时 | 双运行时：Bun（Agent Runtime / Sidecar）+ Node.js（MCP Server / 社区工具），均内置于应用包 |
+| 运行时 | 单一 Node.js v24（Sidecar / Plugin Bridge / MCP Server / CLI），内置于应用包 |
 
 ## 项目结构
 
 - `src/renderer/` — React 前端（api/、context/、hooks/、components/、pages/）
-- `src/server/` — Bun 后端 Sidecar
-- `src/server/plugin-bridge/` — OpenClaw Plugin Bridge（独立 Bun 进程，加载社区 Channel 插件）
+- `src/server/` — Node.js 后端 Sidecar（esbuild 打包成 `server-dist.js`，开发态经 `tsx/esm` loader 直跑 TS）
+- `src/server/plugin-bridge/` — OpenClaw Plugin Bridge（独立 Node 进程，加载社区 Channel 插件）
 - `src/cli/` — 自配置 CLI（`myagents` 命令，同步到 `~/.myagents/bin/`，详见下方说明）
 - `src/shared/` — 前后端共享类型
 - `src-tauri/` — Tauri Rust 层
@@ -37,13 +37,13 @@
 **开发约束**：
 - 修改 `bundled-agents/myagents_helper/` 的 CLAUDE.md 或 Skills 后，MUST bump `ADMIN_AGENT_VERSION`（`src-tauri/src/commands.rs`），否则用户端小助理不会更新。
 - 修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` 后，MUST bump `CLI_VERSION`（`src-tauri/src/commands.rs`），否则用户端 CLI 不会更新。
-- 修改 `bundled-skills/` 中 **system skill**（目前：`task-alignment` / `task-implement`，清单见 `SYSTEM_SKILLS` 常量）后，MUST bump `SYSTEM_SKILLS_VERSION`（`src-tauri/src/commands.rs`），否则用户端 skill 不会强制更新。新增 system skill 时：(1) 放入 `bundled-skills/<name>/`；(2) 把 `<name>` 加到 Rust `SYSTEM_SKILLS` 和 Bun `src/server/index.ts::SYSTEM_SKILLS` 两个清单（保持同步）；(3) bump 版本号。三个版本门控独立运作。
+- 修改 `bundled-skills/` 中 **system skill**（目前：`task-alignment` / `task-implement`，清单见 `SYSTEM_SKILLS` 常量）后，MUST bump `SYSTEM_SKILLS_VERSION`（`src-tauri/src/commands.rs`），否则用户端 skill 不会强制更新。新增 system skill 时：(1) 放入 `bundled-skills/<name>/`；(2) 把 `<name>` 加到 Rust `SYSTEM_SKILLS` 和 Node `src/server/index.ts::SYSTEM_SKILLS` 两个清单（保持同步）；(3) bump 版本号。三个版本门控独立运作。
 - **Utility skill vs system skill 区分**：`bundled-skills/` 里的 skill 分两类 —— **system skill**（清单里的）随版本强制更新，用户自定义会被覆盖；**utility skill**（其它）首次 seed 后就归用户所有，bump 不再动用户副本。新增 skill 默认是 utility；只有和 app 流程强耦合的才升级为 system。
 
 ## 开发命令
 
 ```bash
-bun install                 # 依赖安装
+npm install                 # 依赖安装（v0.2.0+ 统一 npm，不再使用 Bun）
 ./start_dev.sh              # 浏览器开发模式 (快速迭代)
 npm run tauri:dev           # Tauri 开发模式 (完整桌面体验)
 ./build_dev.sh              # Debug 构建 (含 DevTools)
@@ -80,11 +80,11 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 ### Tab-scoped 隔离
 
-每个 Chat Tab 拥有独立的 Bun Sidecar 进程（Tab/CronTask/BackgroundCompletion/Agent 四种 Owner 共享 SidecarManager）。MUST 在 Tab 内使用 `useTabState()` 返回的 `apiGet`/`apiPost`，**禁止**在 Tab 内使用全局 `apiPostJson`/`apiGetJson`（会发到 Global Sidecar）。
+每个 Chat Tab 拥有独立的 Node.js Sidecar 进程（Tab/CronTask/BackgroundCompletion/Agent 四种 Owner 共享 SidecarManager）。MUST 在 Tab 内使用 `useTabState()` 返回的 `apiGet`/`apiPost`，**禁止**在 Tab 内使用全局 `apiPostJson`/`apiGetJson`（会发到 Global Sidecar）。
 
 ### Rust 代理层
 
-所有前端 HTTP/SSE 流量 MUST 通过 Rust 代理层（`invoke` → Rust → reqwest → Bun Sidecar），**禁止**从 WebView 直接发起 HTTP 请求。
+所有前端 HTTP/SSE 流量 MUST 通过 Rust 代理层（`invoke` → Rust → reqwest → Node.js Sidecar），**禁止**从 WebView 直接发起 HTTP 请求。
 
 ### local_http 模块（致命陷阱）
 
@@ -92,30 +92,32 @@ npm run typecheck && npm run lint  # 代码质量检查
 
 ### process_cmd 模块（Windows 控制台窗口陷阱）
 
-所有 Rust 层子进程 MUST 通过 `crate::process_cmd::new()` 创建，**禁止**裸 `std::process::Command::new()`。内置 Windows `CREATE_NO_WINDOW` 标志，防止 GUI 应用启动子进程（bun.exe Sidecar / Plugin Bridge / bun init 等）时弹出黑色控制台窗口。遵循与 `local_http` 相同的 "pit of success" 模式。例外：`#[cfg(windows)]` 守卫内的系统工具命令（taskkill/powershell/wmic）已内联处理；`commands.rs` 的 OS opener（open/explorer/xdg-open）和 Unix pgrep 是用户可见的系统命令，无需隐藏；`terminal.rs` 的 PTY 进程由 `portable-pty` 的 `CommandBuilder` + `slave.spawn_command()` 管理，不走 `std::process::Command`。
+所有 Rust 层子进程 MUST 通过 `crate::process_cmd::new()` 创建，**禁止**裸 `std::process::Command::new()`。内置 Windows `CREATE_NO_WINDOW` 标志，防止 GUI 应用启动子进程（node.exe Sidecar / Plugin Bridge / npm install 等）时弹出黑色控制台窗口。遵循与 `local_http` 相同的 "pit of success" 模式。例外：`#[cfg(windows)]` 守卫内的系统工具命令（taskkill/powershell/wmic）已内联处理；`commands.rs` 的 OS opener（open/explorer/xdg-open）和 Unix pgrep 是用户可见的系统命令，无需隐藏；`terminal.rs` 的 PTY 进程由 `portable-pty` 的 `CommandBuilder` + `slave.spawn_command()` 管理，不走 `std::process::Command`。`cli.rs` 的 Node CLI spawn 也不走 `process_cmd`（CLI 模式 NEEDS 控制台显示 stdout/stderr）。
 
-### proxy_config 子进程代理策略（Bun fetch 陷阱）
+### proxy_config 子进程代理策略（node fetch 陷阱）
 
-所有可能发起 HTTP 请求的 Rust 层子进程（Bun Sidecar、Plugin Bridge、npm install 等）MUST 在 spawn 前调用 `crate::proxy_config::apply_to_subprocess(&mut cmd)`。该函数确保：用户配置代理时注入 `HTTP_PROXY` + `NO_PROXY`；未配置时继承系统网络行为但**始终注入 `NO_PROXY`** 保护 localhost。**禁止**手动 `cmd.env("HTTP_PROXY", ...)` 或 `cmd.env_remove("HTTP_PROXY")`。Bun 的 `fetch()` 会读取 `HTTP_PROXY` 环境变量，没有 `NO_PROXY` 的话，Sidecar 内部的 localhost 通信（admin-api、cron-tool、bridge-tools 等）会被系统代理拦截 → 502。
+所有可能发起 HTTP 请求的 Rust 层子进程（Node Sidecar、Plugin Bridge、npm install 等）MUST 在 spawn 前调用 `crate::proxy_config::apply_to_subprocess(&mut cmd)`。该函数确保：用户配置代理时注入 `HTTP_PROXY` + `NO_PROXY`；未配置时继承系统网络行为但**始终注入 `NO_PROXY`** 保护 localhost。**禁止**手动 `cmd.env("HTTP_PROXY", ...)` 或 `cmd.env_remove("HTTP_PROXY")`。Node.js 20+ 的 `fetch()`（undici）会读取 `HTTP_PROXY` 环境变量，没有 `NO_PROXY` 的话，Sidecar 内部的 localhost 通信（admin-api、cron-tool、bridge-tools 等）会被系统代理拦截 → 502。
 
-### 零外部依赖与双运行时
+### 零外部依赖与单一运行时（v0.2.0+）
 
-应用内置三个运行时依赖，用户无需自行安装任何东西：
+应用内置所有运行时依赖，用户无需自行安装任何东西：
 
 | 依赖 | 用途 | 打包位置 |
 |------|------|---------|
-| **Bun** | Agent Runtime — 运行 Claude Agent SDK（`executable: 'bun'`），Sidecar 主进程、Plugin Bridge | `src-tauri/binaries/bun-*` |
-| **Node.js** | 功能层 — MCP Server 执行（`npx`）、社区 npm 包、AI Bash 环境中的 `node`/`npx`/`npm` | `src-tauri/resources/nodejs/`（v0.1.44+，含 node + npm/npx） |
+| **Node.js v24** | 统一 JS runtime — Sidecar / Plugin Bridge / MCP Server (`npx`) / 社区 npm 包 / `myagents` CLI / AI Bash `node`/`npx`/`npm` | `src-tauri/resources/nodejs/`（含 node + npm + npx） |
+| **Claude Agent SDK native binary** | Claude Code 主循环 — SDK 0.2.113+ 以 `bun build --compile` 产物分发，内嵌 SDK team 自己 pin 的 Bun；独立进程，我们不感知 | `src-tauri/resources/claude-agent-sdk/claude[.exe]`（构建时从 `@anthropic-ai/claude-agent-sdk-<triple>` 拷贝） |
 | **Git** | SDK 依赖 — Claude Code 需要 `git`（代码操作）+ `bash`（工具执行），Windows 无自带 → NSIS 静默安装 Git for Windows | `src-tauri/nsis/Git-Installer.exe`（仅 Windows） |
 | **cuse** (v0.1.67+) | 预置 Computer-Use MCP 原生二进制（截图/点击/输入/滚动，仅 macOS/Windows） | `src-tauri/binaries/cuse-*-<triple>[.exe]`，构建时 `scripts/download_cuse.sh`/`.ps1` 从 `hAcKlyc/MyAgents-Cuse` GitHub Release 拉取 latest |
 
-**分层原则**：Bun 跑我们自己的代码（启动快、行为可控），Node.js 跑社区生态代码（MCP Server / npm 包，设计目标是 Node.js，Bun 兼容性存在系统性缺陷）。原生二进制 MCP（cuse 等）作为第三类，用于性能或 OS API 敏感场景，通过 `PRESET_MCP_SERVERS` 的 `command: '__bundled_xxx__'` 哨兵注册、`platforms?:` 字段做平台门控、`build_macos.sh` 的 `src-tauri/binaries/*-apple-darwin` 通配符自动继承应用签名与 TCC 权限。
+**单一 runtime 原则**：所有 MyAgents 自己的代码统一跑在 Node.js 上（Sidecar、Plugin Bridge、CLI）。SDK 子进程内部的 runtime 是 SDK 团队的实现细节（静态链接 Bun），通过 stdio NDJSON 与我们通信，我们不感知、不共享状态。原生二进制 MCP（cuse 等）作为独立类，通过 `PRESET_MCP_SERVERS` 的 `command: '__bundled_xxx__'` 哨兵注册、`platforms?:` 字段做平台门控、`build_macos.sh` 的 `src-tauri/binaries/*-apple-darwin` 通配符自动继承应用签名与 TCC 权限。
 
-**PATH 注入**：`buildClaudeSessionEnv()` 构造 SDK 子进程的 PATH，决定 AI Bash 工具能找到哪些命令。优先级：`bundledBunDir` → `systemNodeDirs`（用户安装的 Node.js） → `bundledNodeDir` → `~/.myagents/bin` → 系统路径。Node.js 系统优先（用户维护、npm 更可靠），Bun 内置优先（跑我们自己的代码）。
+**PATH 注入**：`buildClaudeSessionEnv()` 构造 SDK 子进程的 PATH，决定 AI Bash 工具能找到哪些命令。优先级：`systemNodeDirs`（用户安装的 Node.js） → `bundledNodeDir` → `~/.myagents/bin` → 系统路径。Node.js 系统优先（用户维护、npm 更可靠），bundled Node 作为 fallback。
 
-**运行时发现**：`src/server/utils/runtime.ts` 提供 `getBundledRuntimePath()`（Bun）、`getBundledNodePath()`（Node.js）。
+**运行时发现**：`src/server/utils/runtime.ts` 提供 `getBundledNodePath()`（Node.js）。
 
-详见：@specs/prd/prd_0.1.44_dual_runtime.md
+**SDK native binary resolver**：`src/server/agent-session.ts::resolveClaudeCodeCli()` 按 platform triple 定位 `claude[.exe]`，支持 glibc/musl Linux 检测（via `process.report.getReport().header.glibcVersionRuntime`）。生产优先用 `<resources>/claude-agent-sdk/claude`，开发 fallback 到 `node_modules/@anthropic-ai/claude-agent-sdk-<triple>/claude`。
+
+**历史背景**：v0.1.x 采用 Bun + Node.js 双运行时（详见 [prd_0.1.44_dual_runtime.md](./specs/prd/prd_0.1.44_dual_runtime.md)，已 superseded）。v0.2.0 统一到 Node.js — 动因：SDK 0.2.113+ 放弃 cli.js 改用 native binary 后，"Bun 跑 cli.js" 职能消失，剩下的 Sidecar/Bridge 用 Node 等价替代可消除双 runtime 复杂度 + Plugin Bridge 的 Bun-on-Node-http 兼容性坑。详见 [prd_0.2.0_node_runtime_migration.md](./specs/prd/prd_0.2.0_node_runtime_migration.md)（本 PRD 在 gitignore 中，只在本地）。
 
 ### 持久 Session 架构
 
@@ -138,7 +140,7 @@ npm run typecheck && npm run lint  # 代码质量检查
 除 builtin（Claude Agent SDK）外，支持 Claude Code CLI（NDJSON/stdio）和 Codex CLI（JSON-RPC 2.0/stdio）作为外部 Runtime。功能门控：`config.multiAgentRuntime`（默认关闭）。
 
 - **抽象层**：`src/server/runtimes/` — `AgentRuntime` 接口 + `UnifiedEvent` 统一事件 + `external-session.ts` 会话管理
-- **门控链路**：Rust `sidecar.rs` 注入 `MYAGENTS_RUNTIME` 环境变量 → Bun `factory.ts` 读取 → `shouldUseExternalRuntime()` 分流。前端 `Chat.tsx` 的 `currentRuntime` 在定义处门控（`multiAgentRuntimeEnabled ? agent.runtime : 'builtin'`），下游派生自动安全
+- **门控链路**：Rust `sidecar.rs` 注入 `MYAGENTS_RUNTIME` 环境变量 → Node `factory.ts` 读取 → `shouldUseExternalRuntime()` 分流。前端 `Chat.tsx` 的 `currentRuntime` 在定义处门控（`multiAgentRuntimeEnabled ? agent.runtime : 'builtin'`），下游派生自动安全
 - **Config 变更**：Model/Permission 变更 → `setExternalModel()`/`setExternalPermissionMode()` → 停进程 → 下次消息以新配置 resume
 - **跨 Runtime Session 保护**：`initializeAgent` 检测 `meta.runtime !== 'builtin'` → 跳过 SDK resume → 前端弹确认框引导新开会话
 - **`schedulePreWarm()` 已内置 external runtime 跳过守卫**（agent-session.ts:1145），外部 runtime 不走 SDK pre-warm
@@ -180,8 +182,8 @@ Rust `SearchEngine` 单例（Tantivy + jieba），提供 Session 历史与工作
 
 ### Plugin Bridge（OpenClaw 插件）
 
-- Bridge 是独立 Bun 进程，MUST 与 Sidecar 保持同等待遇：环境变量注入（`proxy_config`、`NO_PROXY`）、日志宏（`ulog_*` 不是 `log::*`）、config 查询范围（`imBotConfigs` + `agents[].channels[]`）
-- Bun 对 Node.js `http` 模块兼容性不完整，使用 axios 的 npm 包可能静默挂起。新接入插件 MUST 验证其 HTTP 调用在 Bun 下正常（不能只验证 import 成功）
+- Bridge 是独立 Node.js 进程，MUST 与 Sidecar 保持同等待遇：环境变量注入（`proxy_config`、`NO_PROXY`）、日志宏（`ulog_*` 不是 `log::*`）、config 查询范围（`imBotConfigs` + `agents[].channels[]`）
+- v0.2.0+ 统一 Node.js 后，之前 Bun http 兼容性坑已清（axios 等不再静默挂起）。社区 OpenClaw 插件天然是 Node.js 标准
 - 兼容层验证 MUST 跑完整消息收发链路（不能只验证 `register()` 成功）
 - **SDK Shim 全量覆盖**：shim 覆盖 OpenClaw 全部 `plugin-sdk/*` 导出（手写 + 自动生成 stub）。手写模块受 `_handwritten.json` 清单保护
 - **Shim 修改 MUST bump 版本**：源码 shim 经 build → app bundle → Bridge 启动时 `install_sdk_shim()` 拷贝到插件 `node_modules/openclaw/`。**版本不变则跳过拷贝**。三处同步 bump：`sdk-shim/package.json` version、`compat-runtime.ts` SHIM_COMPAT_VERSION、`bridge.rs` SHIM_COMPAT_VERSION
@@ -205,9 +207,9 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 
 | 禁止 | 后果 | 正确做法 |
 |------|------|----------|
-| 依赖用户系统安装的运行时 | 用户未安装 → 功能不可用 | 使用内置 Bun 或内置 Node.js（`runtime.ts`） |
+| 依赖用户系统安装的运行时 | 用户未安装 → 功能不可用 | 使用内置 Node.js（`runtime.ts::getBundledNodePath()`） |
 | 新增 SSE 事件不注册白名单 | 前端静默丢弃该事件 | 在 `SseConnection.ts` 的 `JSON_EVENTS` 注册 |
-| Sidecar 用 `__dirname` / `readFileSync` | bun build 硬编码路径，生产环境出错 | 内联常量或 `getScriptDir()` |
+| Sidecar 用 `__dirname` / `readFileSync` | esbuild 硬编码路径，生产环境出错 | 内联常量或 `fileURLToPath(import.meta.url)` / `getScriptDir()` |
 | 日志日期用 UTC `toISOString` | 与本地日期文件名不匹配 | 统一用 `localDate()`（`src/shared/logTime.ts`） |
 | Rust 日志用 `log::info!` | 不进统一日志 | MUST 用 `ulog_info!` / `ulog_error!` |
 | 裸 `which::which()` 查找系统工具 | Finder 启动时 PATH 缺少 homebrew 等路径 | `crate::system_binary::find()` |
@@ -224,7 +226,7 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 
 ## 日志与排查
 
-日志来自三层（React/Bun Sidecar/Rust），汇入统一日志 `~/.myagents/logs/unified-{YYYY-MM-DD}.log`。用户报告问题时 MUST 主动读取日志，不等用户粘贴。
+日志来自三层（React/Node.js Sidecar/Rust），汇入统一日志 `~/.myagents/logs/unified-{YYYY-MM-DD}.log`。用户报告问题时 MUST 主动读取日志，不等用户粘贴。
 
 - **IM Bot 问题**：搜 `[feishu]` `[im]` `[telegram]` `[dingtalk]` `[bridge]` `[openclaw]`
 - **AI/Agent 异常**：搜 `[agent]` `pre-warm` `timeout`

@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.0] - 2026-04-24
+
+### Breaking
+- **运行时统一为 Node.js v24**：MyAgents 自己的 Sidecar、Plugin Bridge、`myagents` CLI 全部切到 bundled Node.js v24；Bun 从应用包中彻底移除（`src-tauri/binaries/bun-*` 删除，体积减少 ~120 MB）。用户侧无需操作；开发者 `npm install` 代替 `bun install`。
+- **Claude Agent SDK 升级到 0.2.119**：新版 SDK 不再 bundle `cli.js`，改为 per-platform native binary（`bun build --compile` 产物，SDK team 自带 Bun runtime）。`resources/claude-agent-sdk/cli.js` 替换为 `claude[.exe]`（macOS arm64 约 213 MB）。
+- **开发依赖收敛**：`@types/bun` 移除，`tsconfig.json` types 只保留 `node`；新增 `esbuild` / `tsx` / `@hono/node-server` / `better-sqlite3` / `vitest` 等 npm 依赖。
+
+### Added
+- **`subprocess.ts` / `file-response.ts` 两个新的 pit-of-success helper**：`Bun.spawn` / `Bun.file(p) + new Response(file)` 的 Node 对应，封装了 Node 与 Bun 在 stdio 流语义 / exit 时序 / 背压处理上的差异，调用点保持原状。
+- **SDK native binary 跨平台支持**：构建脚本按目标架构从 `@anthropic-ai/claude-agent-sdk-<triple>` 自动拷贝 + codesign（macOS）。`package.json optionalDependencies` 声明全部 8 个平台，跨架构 DMG 构建可用。
+- **多文件上传改为流式**：`/agent/upload-files` 现直接 `Readable.fromWeb(file.stream()) → createWriteStream` pipeline，大视频 / 图片上传不再占满 Node heap。
+
+### Improved
+- **Plugin Bridge 兼容性跃升**：切到 Node.js 后，之前社区 OpenClaw 插件在 Bun 下用 axios 静默挂起的地雷消失，新插件接入不再需要逐个验证 HTTP 行为。
+- **Sidecar 长 session 稳定性**：V8 GC 对 "大量短命对象 + 少量长命对象" 场景成熟度优于 JSC，30 min+ 对话的 RSS 单调增长受到抑制。
+- **zip / PowerShell 日志导出不再卡死**：修复了 Bun→Node 迁移中 `stdout/stderr: 'pipe'` 默认值导致的 64 KB 管道死锁（大日志集触发）。
+- **测试框架从 `bun:test` 迁到 `vitest`**：7 个测试文件无语义变更；`npm run test` / `npm run test:watch` 替代 `bun test`。
+
+### Fixed
+- **SDK 升级 → `resolveClaudeCodeCli()` 重写**：按 platform triple 在 `node_modules/@anthropic-ai/claude-agent-sdk-<triple>/claude` 和 `resources/claude-agent-sdk/claude` 两处定位，支持 Linux glibc/musl 检测。
+- **`options.executable: 'bun'` 清理**：5 处 SDK query option 移除（native binary 路径下该选项为 no-op）。
+- **`bun:sqlite` → `better-sqlite3`**：唯一的一次性 Chromium Cookie 迁移逻辑换用成熟 npm 包。
+- **中止 stdio 竞态**：`subprocess.ts` 的 `exited` Promise 在 Node `'close'` 事件（stdio drained）而非 `'exit'` resolve，匹配 Bun.spawn 原语义。Codex / Gemini adapter 不再有 stdout reader 被抢跑的风险。
+- **Spawn 错误不再被吞**：ENOENT / "bad CPU type" 等现在带完整 error 信息暴露给调用方，不再显示孤单的 "exit code -1"。
+
+### Architecture
+- **单一 JS runtime 原则**：CLAUDE.md / ARCHITECTURE.md 的"双运行时策略"节改写为"单一 Node.js runtime"。SDK 子进程内部的 Bun 是 SDK team 静态链接实现细节，我们不感知。
+- **Entitlements 注释刷新**：`allow-jit` 等 entitlement 适用于任何 JS 引擎（Node V8 / SDK 内嵌 Bun），不再是 "for Bun" 专属。
+
+---
+
 ## [0.1.70] - 2026-04-24
 
 ### Added
