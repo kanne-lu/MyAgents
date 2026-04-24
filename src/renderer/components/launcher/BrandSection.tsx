@@ -327,28 +327,35 @@ export default memo(function BrandSection({
                 vertically (PRD §4.2). */}
             <div className="w-full max-w-[640px] pb-[12vh]">
                 <div className="relative w-full">
-                    {/* Structural layout-freeze: both inputs stay mounted
-                        AND stack in a single grid cell. The cell's height
-                        = max(SimpleChatInput, ThoughtInput), which is a
-                        pure CSS invariant — no amount of internal pixel
-                        drift between the two components can change the
-                        outer frame. Visibility swap via `visibility` so
-                        the hidden one stops taking clicks / focus but
-                        still contributes to the cell's measured height.
-                        `inert` (React 19) blocks keyboard focus on the
-                        non-visible subtree.
-                        (Previous attempts aligned padding, font, radius,
-                        shadow, and growth caps byte-for-byte and still
-                        showed a visual delta — this sidesteps the whole
-                        measurement problem by making "same outer height"
-                        a structural guarantee rather than an arithmetic
-                        one.) */}
-                    <div className="grid grid-cols-1 grid-rows-1">
+                    {/* STRUCTURAL STABILITY — not pixel matching.
+                     *
+                     * Previous attempts tried to pixel-align the two inputs
+                     * (padding, shadow, font, growth policy) so their
+                     * rendered heights would match. That's brittle: any
+                     * future change to either input (a new toolbar button,
+                     * a different placeholder, a browser WebKit quirk in
+                     * scrollHeight measurement) reintroduces a delta and
+                     * the MyAgents title above re-centers.
+                     *
+                     * Structural guarantee instead: both inputs render as
+                     * siblings in the SAME CSS grid cell (`*:col-start-1
+                     * *:row-start-1`). The cell's height is `max(heights)`
+                     * regardless of which is visible. We switch display
+                     * with `invisible` + `pointer-events-none` + `inert`
+                     * — all three occupy the cell, only one is visible and
+                     * interactive. Toggle 对话 ↔ 想法 is now a pure
+                     * visibility flip; the container height never changes,
+                     * so the flex-1 justify-center parent can't re-center.
+                     *
+                     * Side benefit: drafts on BOTH inputs survive mode
+                     * switches (SimpleChatInput's text + images, ThoughtInput's
+                     * text + caret position) because nothing unmounts.
+                     */}
+                    <div className="grid *:col-start-1 *:row-start-1">
                         <div
-                            className="col-start-1 row-start-1 transition-none"
-                            style={{ visibility: mode === 'thought' ? 'hidden' : 'visible' }}
-                            inert={mode === 'thought'}
+                            className={mode === 'thought' ? 'invisible pointer-events-none' : ''}
                             aria-hidden={mode === 'thought'}
+                            inert={mode === 'thought'}
                         >
                             <SimpleChatInput
                                 ref={inputRef}
@@ -385,10 +392,9 @@ export default memo(function BrandSection({
                         </div>
                         {modeSegmentEnabled && (
                             <div
-                                className="col-start-1 row-start-1 transition-none"
-                                style={{ visibility: mode === 'thought' ? 'visible' : 'hidden' }}
-                                inert={mode !== 'thought'}
+                                className={mode === 'thought' ? '' : 'invisible pointer-events-none'}
                                 aria-hidden={mode !== 'thought'}
+                                inert={mode !== 'thought'}
                             >
                                 <ThoughtInput
                                     ref={thoughtInputRef}
