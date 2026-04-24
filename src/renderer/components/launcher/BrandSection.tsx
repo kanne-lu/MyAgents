@@ -327,84 +327,80 @@ export default memo(function BrandSection({
                 vertically (PRD §4.2). */}
             <div className="w-full max-w-[640px] pb-[12vh]">
                 <div className="relative w-full">
-                    {/* Both inputs stay mounted so mode switches preserve
-                        in-progress drafts (including SimpleChatInput's
-                        attached images / queued messages). Visibility is
-                        a CSS-only concern — the inactive input is hidden
-                        from the layout + a11y tree via `hidden`, so it
-                        doesn't participate in flow or tab order. */}
-                    <div hidden={mode === 'thought'}>
-                        <SimpleChatInput
-                            ref={inputRef}
-                            mode="launcher"
-                            onSend={handleSend}
-                            isLoading={!!isStarting}
-                            provider={provider}
-                            providers={providers}
-                            selectedModel={selectedModel}
-                            onProviderChange={onProviderChange}
-                            onModelChange={onModelChange}
-                            permissionMode={permissionMode}
-                            onPermissionModeChange={onPermissionModeChange}
-                            apiKeys={apiKeys}
-                            providerVerifyStatus={providerVerifyStatus}
-                            workspaceMcpEnabled={workspaceMcpEnabled}
-                            globalMcpEnabled={globalMcpEnabled}
-                            mcpServers={mcpServers}
-                            onWorkspaceMcpToggle={onWorkspaceMcpToggle}
-                            onRefreshProviders={onRefreshProviders}
-                            runtime={runtime}
-                            runtimeModels={runtimeModels}
-                            runtimePermissionModes={runtimePermissionModes}
-                            toolbarPrefix={
-                                <WorkspaceSelector
-                                    projects={projects}
-                                    selectedProject={selectedProject}
-                                    defaultWorkspacePath={defaultWorkspacePath}
-                                    onSelect={onSelectWorkspace}
-                                    onAddFolder={onAddFolder}
-                                />
-                            }
-                        />
-                    </div>
-                    {modeSegmentEnabled && (
-                        // Thought editor — shares behaviour with Task Center
-                        // via the same ThoughtInput component. No autoFocus
-                        // prop: the mode-change effect above drives focus
-                        // imperatively (via thoughtInputRef), which keeps
-                        // the two inputs' focus handoff coherent when the
-                        // user flips modes with the keyboard.
-                        <div hidden={mode !== 'thought'}>
-                            {/* minLines matches SimpleChatInput's
-                                LAUNCHER_MIN_LINES so the two inputs occupy
-                                the same vertical footprint; without this,
-                                switching 任务 ↔ 想法 changed card height
-                                and the `flex-1 justify-center` parent
-                                re-centered the MyAgents title / slogan,
-                                producing the visible jump users reported
-                                after 0.1.70. */}
-                            <ThoughtInput
-                                ref={thoughtInputRef}
-                                existingTags={tagCandidates}
-                                onCreated={handleThoughtCreated}
-                                variant="launcher"
-                                // Layout-freeze at 3 lines to mirror
-                                // SimpleChatInput's MAX_LINES_COLLAPSED.
-                                // Both inputs stay mounted (draft
-                                // preservation), so an auto-growing
-                                // ThoughtInput whose style.height
-                                // survived a mode switch would appear
-                                // bigger than the SimpleChatInput card
-                                // on the next toggle (Codex RCA: the
-                                // only remaining "微动" source after
-                                // padding/shadow alignment). Longer
-                                // drafts scroll internally via the
-                                // textarea's own overflow-y-auto.
-                                minLines={3}
-                                maxLines={3}
+                    {/* Structural layout-freeze: both inputs stay mounted
+                        AND stack in a single grid cell. The cell's height
+                        = max(SimpleChatInput, ThoughtInput), which is a
+                        pure CSS invariant — no amount of internal pixel
+                        drift between the two components can change the
+                        outer frame. Visibility swap via `visibility` so
+                        the hidden one stops taking clicks / focus but
+                        still contributes to the cell's measured height.
+                        `inert` (React 19) blocks keyboard focus on the
+                        non-visible subtree.
+                        (Previous attempts aligned padding, font, radius,
+                        shadow, and growth caps byte-for-byte and still
+                        showed a visual delta — this sidesteps the whole
+                        measurement problem by making "same outer height"
+                        a structural guarantee rather than an arithmetic
+                        one.) */}
+                    <div className="grid grid-cols-1 grid-rows-1">
+                        <div
+                            className="col-start-1 row-start-1 transition-none"
+                            style={{ visibility: mode === 'thought' ? 'hidden' : 'visible' }}
+                            inert={mode === 'thought'}
+                            aria-hidden={mode === 'thought'}
+                        >
+                            <SimpleChatInput
+                                ref={inputRef}
+                                mode="launcher"
+                                onSend={handleSend}
+                                isLoading={!!isStarting}
+                                provider={provider}
+                                providers={providers}
+                                selectedModel={selectedModel}
+                                onProviderChange={onProviderChange}
+                                onModelChange={onModelChange}
+                                permissionMode={permissionMode}
+                                onPermissionModeChange={onPermissionModeChange}
+                                apiKeys={apiKeys}
+                                providerVerifyStatus={providerVerifyStatus}
+                                workspaceMcpEnabled={workspaceMcpEnabled}
+                                globalMcpEnabled={globalMcpEnabled}
+                                mcpServers={mcpServers}
+                                onWorkspaceMcpToggle={onWorkspaceMcpToggle}
+                                onRefreshProviders={onRefreshProviders}
+                                runtime={runtime}
+                                runtimeModels={runtimeModels}
+                                runtimePermissionModes={runtimePermissionModes}
+                                toolbarPrefix={
+                                    <WorkspaceSelector
+                                        projects={projects}
+                                        selectedProject={selectedProject}
+                                        defaultWorkspacePath={defaultWorkspacePath}
+                                        onSelect={onSelectWorkspace}
+                                        onAddFolder={onAddFolder}
+                                    />
+                                }
                             />
                         </div>
-                    )}
+                        {modeSegmentEnabled && (
+                            <div
+                                className="col-start-1 row-start-1 transition-none"
+                                style={{ visibility: mode === 'thought' ? 'visible' : 'hidden' }}
+                                inert={mode !== 'thought'}
+                                aria-hidden={mode !== 'thought'}
+                            >
+                                <ThoughtInput
+                                    ref={thoughtInputRef}
+                                    existingTags={tagCandidates}
+                                    onCreated={handleThoughtCreated}
+                                    variant="launcher"
+                                    minLines={3}
+                                    maxLines={3}
+                                />
+                            </div>
+                        )}
+                    </div>
                     {mode === 'thought' && modeSegmentEnabled && (
                         <div className="absolute left-0 right-0 top-full mt-3">
                             <RecentThoughtsRow
