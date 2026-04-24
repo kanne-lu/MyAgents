@@ -62,7 +62,8 @@ async function streamUploadToFile(file: File, destination: string): Promise<void
 }
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
-import AdmZip from 'adm-zip';
+// adm-zip lazy-loaded at its one call site below (/api/skill/upload with zip
+// content) — saves ~30ms of module-init cost when users never upload skills.
 import {
   BUILTIN_SLASH_COMMANDS,
   parseSkillFrontmatter,
@@ -94,26 +95,12 @@ import {
   CRON_TASK_EXIT_REASON_PATTERN,
 } from './tools/cron-tools';
 import { setImCronContext } from './tools/im-cron-tool';
-import {
-  handleSkillList, handleSkillInfo, handleSkillAdd, handleSkillRemove, handleSkillToggle, handleSkillSync,
-  handleMcpList, handleMcpShow, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
-  handleMcpOAuthDiscover, handleMcpOAuthStart, handleMcpOAuthStatus, handleMcpOAuthRevoke,
-  handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
-  handleAgentList, handleAgentShow, handleAgentEnable, handleAgentDisable, handleAgentSet,
-  handleAgentChannelList, handleAgentChannelAdd, handleAgentChannelRemove,
-  handleRuntimeList, handleRuntimeDescribe,
-  handleConfigGet, handleConfigSet, handleStatus, handleReload, handleHelp,
-  handleVersion,
-  handleCronList, handleCronCreate, handleCronStop, handleCronStart, handleCronDelete, handleCronUpdate, handleCronRuns, handleCronStatus,
-  handleCronExit, handleImSendMedia, handleReadme,
-  handlePluginList, handlePluginInstall, handlePluginUninstall,
-  handleAgentRuntimeStatus,
-  handleTaskList, handleTaskGet, handleTaskCreateDirect, handleTaskCreateFromAlignment,
-  handleTaskUpdateStatus, handleTaskAppendSession,
-  handleTaskArchive, handleTaskDelete, handleTaskRun, handleTaskRerun,
-  handleTaskReadDoc, handleTaskWriteDoc,
-  handleThoughtList, handleThoughtCreate,
-} from './admin-api';
+// admin-api module (~2900 lines, depends on zod + full config/session/cron surface)
+// is lazy-loaded on first /api/admin/* hit to shave ~150ms off sidecar cold
+// start. All handlers are only used inside routeAdminApi() below.
+type AdminApiModule = typeof import('./admin-api');
+let _adminApi: Promise<AdminApiModule> | null = null;
+const getAdminApi = (): Promise<AdminApiModule> => (_adminApi ??= import('./admin-api'));
 import { setImMediaContext } from './tools/im-media-tool';
 import { setImBridgeToolsContext } from './tools/im-bridge-tools';
 import { getBuiltinMcp } from './tools/builtin-mcp-registry';
@@ -233,7 +220,10 @@ import { cleanupOldLogs } from './AgentLogger';
 import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
 import { broadcast, createSseClient, getClients } from './sse';
 import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
-import { createBridgeHandler } from './openai-bridge';
+// openai-bridge is lazy-loaded via ensureBridgeHandler() below — only users on
+// OpenAI-protocol providers (DeepSeek/Moonshot/etc.) ever hit /v1/messages, so
+// most sessions never need to pay the 2.6k-line module's init cost.
+import type { BridgeHandler } from './openai-bridge/handler';
 import { registerBridgeSeedFn } from './bridge-cache';
 import { generateTitle, generateTitleExternal } from './title-generator';
 import {
@@ -1165,105 +1155,108 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   // Strip the prefix for matching
   const route = pathname.replace('/api/admin/', '');
 
+  // Lazy-load admin-api (~150ms on first hit, cached thereafter)
+  const api = await getAdminApi();
+
   // MCP commands
-  if (route === 'mcp/list') return handleMcpList();
-  if (route === 'mcp/show') return handleMcpShow(payload as Parameters<typeof handleMcpShow>[0]);
-  if (route === 'mcp/add') return handleMcpAdd(payload as Parameters<typeof handleMcpAdd>[0]);
-  if (route === 'mcp/remove') return handleMcpRemove(payload as Parameters<typeof handleMcpRemove>[0]);
-  if (route === 'mcp/enable') return handleMcpEnable(payload as Parameters<typeof handleMcpEnable>[0]);
-  if (route === 'mcp/disable') return handleMcpDisable(payload as Parameters<typeof handleMcpDisable>[0]);
-  if (route === 'mcp/env') return handleMcpEnv(payload as Parameters<typeof handleMcpEnv>[0]);
-  if (route === 'mcp/test') return await handleMcpTest(payload as Parameters<typeof handleMcpTest>[0]);
-  if (route === 'mcp/oauth/discover') return await handleMcpOAuthDiscover(payload as Parameters<typeof handleMcpOAuthDiscover>[0]);
-  if (route === 'mcp/oauth/start') return await handleMcpOAuthStart(payload as Parameters<typeof handleMcpOAuthStart>[0]);
-  if (route === 'mcp/oauth/status') return await handleMcpOAuthStatus(payload as Parameters<typeof handleMcpOAuthStatus>[0]);
-  if (route === 'mcp/oauth/revoke') return await handleMcpOAuthRevoke(payload as Parameters<typeof handleMcpOAuthRevoke>[0]);
+  if (route === 'mcp/list') return api.handleMcpList();
+  if (route === 'mcp/show') return api.handleMcpShow(payload as Parameters<typeof api.handleMcpShow>[0]);
+  if (route === 'mcp/add') return api.handleMcpAdd(payload as Parameters<typeof api.handleMcpAdd>[0]);
+  if (route === 'mcp/remove') return api.handleMcpRemove(payload as Parameters<typeof api.handleMcpRemove>[0]);
+  if (route === 'mcp/enable') return api.handleMcpEnable(payload as Parameters<typeof api.handleMcpEnable>[0]);
+  if (route === 'mcp/disable') return api.handleMcpDisable(payload as Parameters<typeof api.handleMcpDisable>[0]);
+  if (route === 'mcp/env') return api.handleMcpEnv(payload as Parameters<typeof api.handleMcpEnv>[0]);
+  if (route === 'mcp/test') return await api.handleMcpTest(payload as Parameters<typeof api.handleMcpTest>[0]);
+  if (route === 'mcp/oauth/discover') return await api.handleMcpOAuthDiscover(payload as Parameters<typeof api.handleMcpOAuthDiscover>[0]);
+  if (route === 'mcp/oauth/start') return await api.handleMcpOAuthStart(payload as Parameters<typeof api.handleMcpOAuthStart>[0]);
+  if (route === 'mcp/oauth/status') return await api.handleMcpOAuthStatus(payload as Parameters<typeof api.handleMcpOAuthStatus>[0]);
+  if (route === 'mcp/oauth/revoke') return await api.handleMcpOAuthRevoke(payload as Parameters<typeof api.handleMcpOAuthRevoke>[0]);
 
   // Model commands
-  if (route === 'model/list') return handleModelList();
-  if (route === 'model/add') return handleModelAdd(payload as Parameters<typeof handleModelAdd>[0]);
-  if (route === 'model/remove') return handleModelRemove(payload as Parameters<typeof handleModelRemove>[0]);
-  if (route === 'model/set-key') return handleModelSetKey(payload as Parameters<typeof handleModelSetKey>[0]);
-  if (route === 'model/set-default') return handleModelSetDefault(payload as Parameters<typeof handleModelSetDefault>[0]);
-  if (route === 'model/verify') return await handleModelVerify(payload as Parameters<typeof handleModelVerify>[0]);
+  if (route === 'model/list') return api.handleModelList();
+  if (route === 'model/add') return api.handleModelAdd(payload as Parameters<typeof api.handleModelAdd>[0]);
+  if (route === 'model/remove') return api.handleModelRemove(payload as Parameters<typeof api.handleModelRemove>[0]);
+  if (route === 'model/set-key') return api.handleModelSetKey(payload as Parameters<typeof api.handleModelSetKey>[0]);
+  if (route === 'model/set-default') return api.handleModelSetDefault(payload as Parameters<typeof api.handleModelSetDefault>[0]);
+  if (route === 'model/verify') return await api.handleModelVerify(payload as Parameters<typeof api.handleModelVerify>[0]);
 
   // Agent commands
-  if (route === 'agent/list') return handleAgentList();
-  if (route === 'agent/show') return handleAgentShow(payload as Parameters<typeof handleAgentShow>[0]);
-  if (route === 'agent/enable') return handleAgentEnable(payload as Parameters<typeof handleAgentEnable>[0]);
-  if (route === 'agent/disable') return handleAgentDisable(payload as Parameters<typeof handleAgentDisable>[0]);
-  if (route === 'agent/set') return handleAgentSet(payload as Parameters<typeof handleAgentSet>[0]);
-  if (route === 'agent/channel/list') return handleAgentChannelList(payload as Parameters<typeof handleAgentChannelList>[0]);
-  if (route === 'agent/channel/add') return handleAgentChannelAdd(payload as Parameters<typeof handleAgentChannelAdd>[0]);
-  if (route === 'agent/channel/remove') return handleAgentChannelRemove(payload as Parameters<typeof handleAgentChannelRemove>[0]);
-  if (route === 'runtime/list') return await handleRuntimeList();
-  if (route === 'runtime/describe') return await handleRuntimeDescribe(payload as Parameters<typeof handleRuntimeDescribe>[0]);
+  if (route === 'agent/list') return api.handleAgentList();
+  if (route === 'agent/show') return api.handleAgentShow(payload as Parameters<typeof api.handleAgentShow>[0]);
+  if (route === 'agent/enable') return api.handleAgentEnable(payload as Parameters<typeof api.handleAgentEnable>[0]);
+  if (route === 'agent/disable') return api.handleAgentDisable(payload as Parameters<typeof api.handleAgentDisable>[0]);
+  if (route === 'agent/set') return api.handleAgentSet(payload as Parameters<typeof api.handleAgentSet>[0]);
+  if (route === 'agent/channel/list') return api.handleAgentChannelList(payload as Parameters<typeof api.handleAgentChannelList>[0]);
+  if (route === 'agent/channel/add') return api.handleAgentChannelAdd(payload as Parameters<typeof api.handleAgentChannelAdd>[0]);
+  if (route === 'agent/channel/remove') return api.handleAgentChannelRemove(payload as Parameters<typeof api.handleAgentChannelRemove>[0]);
+  if (route === 'runtime/list') return await api.handleRuntimeList();
+  if (route === 'runtime/describe') return await api.handleRuntimeDescribe(payload as Parameters<typeof api.handleRuntimeDescribe>[0]);
 
   // Agent runtime status
-  if (route === 'agent/runtime-status') return await handleAgentRuntimeStatus();
+  if (route === 'agent/runtime-status') return await api.handleAgentRuntimeStatus();
 
   // Cron task commands
-  if (route === 'cron/list') return await handleCronList(payload as Parameters<typeof handleCronList>[0]);
-  if (route === 'cron/add') return await handleCronCreate(payload);
-  if (route === 'cron/start') return await handleCronStart(payload as Parameters<typeof handleCronStart>[0]);
-  if (route === 'cron/stop') return await handleCronStop(payload as Parameters<typeof handleCronStop>[0]);
-  if (route === 'cron/remove') return await handleCronDelete(payload as Parameters<typeof handleCronDelete>[0]);
-  if (route === 'cron/update') return await handleCronUpdate(payload as Parameters<typeof handleCronUpdate>[0]);
-  if (route === 'cron/runs') return await handleCronRuns(payload as Parameters<typeof handleCronRuns>[0]);
-  if (route === 'cron/status') return await handleCronStatus(payload as Parameters<typeof handleCronStatus>[0]);
-  if (route === 'cron/exit') return handleCronExit(payload as Parameters<typeof handleCronExit>[0]);
+  if (route === 'cron/list') return await api.handleCronList(payload as Parameters<typeof api.handleCronList>[0]);
+  if (route === 'cron/add') return await api.handleCronCreate(payload);
+  if (route === 'cron/start') return await api.handleCronStart(payload as Parameters<typeof api.handleCronStart>[0]);
+  if (route === 'cron/stop') return await api.handleCronStop(payload as Parameters<typeof api.handleCronStop>[0]);
+  if (route === 'cron/remove') return await api.handleCronDelete(payload as Parameters<typeof api.handleCronDelete>[0]);
+  if (route === 'cron/update') return await api.handleCronUpdate(payload as Parameters<typeof api.handleCronUpdate>[0]);
+  if (route === 'cron/runs') return await api.handleCronRuns(payload as Parameters<typeof api.handleCronRuns>[0]);
+  if (route === 'cron/status') return await api.handleCronStatus(payload as Parameters<typeof api.handleCronStatus>[0]);
+  if (route === 'cron/exit') return api.handleCronExit(payload as Parameters<typeof api.handleCronExit>[0]);
 
   // IM runtime commands (session-scoped — only work inside an IM Bot / Agent Channel Sidecar)
-  if (route === 'im/send-media') return await handleImSendMedia(payload as Parameters<typeof handleImSendMedia>[0]);
+  if (route === 'im/send-media') return await api.handleImSendMedia(payload as Parameters<typeof api.handleImSendMedia>[0]);
 
   // Tool readme — progressive-disclosure helpers for external runtimes
   if (route === 'readme/cron' || route === 'readme/im' || route === 'readme/widget') {
     const topic = route.split('/')[1];
-    return handleReadme({
+    return api.handleReadme({
       topic,
       modules: Array.isArray(payload.modules) ? (payload.modules as string[]) : undefined,
     });
   }
 
   // Plugin commands
-  if (route === 'plugin/list') return await handlePluginList();
-  if (route === 'plugin/install') return await handlePluginInstall(payload as Parameters<typeof handlePluginInstall>[0]);
-  if (route === 'plugin/remove') return await handlePluginUninstall(payload as Parameters<typeof handlePluginUninstall>[0]);
+  if (route === 'plugin/list') return await api.handlePluginList();
+  if (route === 'plugin/install') return await api.handlePluginInstall(payload as Parameters<typeof api.handlePluginInstall>[0]);
+  if (route === 'plugin/remove') return await api.handlePluginUninstall(payload as Parameters<typeof api.handlePluginUninstall>[0]);
 
   // Skill commands
-  if (route === 'skill/list') return await handleSkillList();
-  if (route === 'skill/info') return await handleSkillInfo(payload as Parameters<typeof handleSkillInfo>[0]);
-  if (route === 'skill/add') return await handleSkillAdd(payload as Parameters<typeof handleSkillAdd>[0]);
-  if (route === 'skill/remove') return await handleSkillRemove(payload as Parameters<typeof handleSkillRemove>[0]);
-  if (route === 'skill/enable') return await handleSkillToggle({ name: String(payload.name ?? ''), enabled: true });
-  if (route === 'skill/disable') return await handleSkillToggle({ name: String(payload.name ?? ''), enabled: false });
-  if (route === 'skill/sync') return await handleSkillSync();
+  if (route === 'skill/list') return await api.handleSkillList();
+  if (route === 'skill/info') return await api.handleSkillInfo(payload as Parameters<typeof api.handleSkillInfo>[0]);
+  if (route === 'skill/add') return await api.handleSkillAdd(payload as Parameters<typeof api.handleSkillAdd>[0]);
+  if (route === 'skill/remove') return await api.handleSkillRemove(payload as Parameters<typeof api.handleSkillRemove>[0]);
+  if (route === 'skill/enable') return await api.handleSkillToggle({ name: String(payload.name ?? ''), enabled: true });
+  if (route === 'skill/disable') return await api.handleSkillToggle({ name: String(payload.name ?? ''), enabled: false });
+  if (route === 'skill/sync') return await api.handleSkillSync();
 
   // Config commands
-  if (route === 'config/get') return handleConfigGet(payload as Parameters<typeof handleConfigGet>[0]);
-  if (route === 'config/set') return handleConfigSet(payload as Parameters<typeof handleConfigSet>[0]);
+  if (route === 'config/get') return api.handleConfigGet(payload as Parameters<typeof api.handleConfigGet>[0]);
+  if (route === 'config/set') return api.handleConfigSet(payload as Parameters<typeof api.handleConfigSet>[0]);
 
   // Task Center — thoughts + tasks (v0.1.69)
-  if (route === 'task/list') return await handleTaskList(payload as Parameters<typeof handleTaskList>[0]);
-  if (route === 'task/get') return await handleTaskGet(payload as Parameters<typeof handleTaskGet>[0]);
-  if (route === 'task/create-direct') return await handleTaskCreateDirect(payload);
-  if (route === 'task/create-from-alignment') return await handleTaskCreateFromAlignment(payload);
-  if (route === 'task/run') return await handleTaskRun(payload as Parameters<typeof handleTaskRun>[0]);
-  if (route === 'task/rerun') return await handleTaskRerun(payload as Parameters<typeof handleTaskRerun>[0]);
-  if (route === 'task/update-status') return await handleTaskUpdateStatus(payload);
-  if (route === 'task/append-session') return await handleTaskAppendSession(payload as Parameters<typeof handleTaskAppendSession>[0]);
-  if (route === 'task/archive') return await handleTaskArchive(payload as Parameters<typeof handleTaskArchive>[0]);
-  if (route === 'task/delete') return await handleTaskDelete(payload as Parameters<typeof handleTaskDelete>[0]);
-  if (route === 'task/read-doc') return await handleTaskReadDoc(payload as Parameters<typeof handleTaskReadDoc>[0]);
-  if (route === 'task/write-doc') return await handleTaskWriteDoc(payload as Parameters<typeof handleTaskWriteDoc>[0]);
-  if (route === 'thought/list') return await handleThoughtList(payload as Parameters<typeof handleThoughtList>[0]);
-  if (route === 'thought/create') return await handleThoughtCreate(payload as Parameters<typeof handleThoughtCreate>[0]);
+  if (route === 'task/list') return await api.handleTaskList(payload as Parameters<typeof api.handleTaskList>[0]);
+  if (route === 'task/get') return await api.handleTaskGet(payload as Parameters<typeof api.handleTaskGet>[0]);
+  if (route === 'task/create-direct') return await api.handleTaskCreateDirect(payload);
+  if (route === 'task/create-from-alignment') return await api.handleTaskCreateFromAlignment(payload);
+  if (route === 'task/run') return await api.handleTaskRun(payload as Parameters<typeof api.handleTaskRun>[0]);
+  if (route === 'task/rerun') return await api.handleTaskRerun(payload as Parameters<typeof api.handleTaskRerun>[0]);
+  if (route === 'task/update-status') return await api.handleTaskUpdateStatus(payload);
+  if (route === 'task/append-session') return await api.handleTaskAppendSession(payload as Parameters<typeof api.handleTaskAppendSession>[0]);
+  if (route === 'task/archive') return await api.handleTaskArchive(payload as Parameters<typeof api.handleTaskArchive>[0]);
+  if (route === 'task/delete') return await api.handleTaskDelete(payload as Parameters<typeof api.handleTaskDelete>[0]);
+  if (route === 'task/read-doc') return await api.handleTaskReadDoc(payload as Parameters<typeof api.handleTaskReadDoc>[0]);
+  if (route === 'task/write-doc') return await api.handleTaskWriteDoc(payload as Parameters<typeof api.handleTaskWriteDoc>[0]);
+  if (route === 'thought/list') return await api.handleThoughtList(payload as Parameters<typeof api.handleThoughtList>[0]);
+  if (route === 'thought/create') return await api.handleThoughtCreate(payload as Parameters<typeof api.handleThoughtCreate>[0]);
 
   // System commands
-  if (route === 'status') return handleStatus();
-  if (route === 'reload') return handleReload(payload.workspacePath as string | undefined);
-  if (route === 'version') return handleVersion();
-  if (route === 'help') return handleHelp(payload as Parameters<typeof handleHelp>[0]);
+  if (route === 'status') return api.handleStatus();
+  if (route === 'reload') return api.handleReload(payload.workspacePath as string | undefined);
+  if (route === 'version') return api.handleVersion();
+  if (route === 'help') return api.handleHelp(payload as Parameters<typeof api.handleHelp>[0]);
 
   return { success: false, error: `Unknown admin route: ${pathname}` };
 }
@@ -1505,41 +1498,53 @@ async function main() {
   (globalThis as { __myagentsDeferredInit?: Promise<void> }).__myagentsDeferredInit =
     deferredInitPromise;
 
-  // Create OpenAI bridge handler (lazy: only processes requests when bridge config is active)
-  const bridgeHandler = createBridgeHandler({
-    workspacePath: agentDir || undefined,
-    getUpstreamConfig: () => {
-      const config = getOpenAiBridgeConfig();
-      if (!config) throw new Error('Bridge not active');
-      return {
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey,
-        model: config.model, // undefined when aliases exist (modelMapping handles it)
-        maxOutputTokens: config.maxOutputTokens,
-        maxOutputTokensParamName: config.maxOutputTokensParamName,
-        upstreamFormat: config.upstreamFormat,
-      };
-    },
-    // Dynamic model mapping: when aliases exist, map any Claude model ID to the provider's model.
-    // Called per-request, so it always reflects the latest provider config.
-    modelMapping: (requestModel: string) => {
-      const config = getOpenAiBridgeConfig();
-      if (!config?.modelAliases) return undefined; // No aliases → fall through to modelOverride
-      const aliases = config.modelAliases;
-      // Map SDK-resolved model names to provider models
-      if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
-      if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
-      if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
-      // Safety fallback: if this is a Claude model name that wasn't matched by any alias
-      // (e.g., partial alias config — only sonnet configured, not opus/haiku),
-      // fall back to currentModel to prevent raw "claude-*" from leaking to upstream.
-      if (requestModel.startsWith('claude-')) return getSessionModel() || undefined;
-      // Non-Claude models pass through as-is (e.g., the main model "deepseek-chat")
-      return undefined;
-    },
-    logger: (msg) => console.log(msg),
-  });
-  registerBridgeSeedFn((entries) => bridgeHandler.seedThoughtSignatures(entries));
+  // ── OpenAI bridge: lazy ─────────────────────────────────────────────────
+  // Only users on OpenAI-protocol providers hit /v1/messages. Importing
+  // ./openai-bridge (~2600 lines, includes translate/utils/types subtrees)
+  // at startup costs ~120ms for zero benefit on Anthropic-native setups.
+  //
+  // Strategy: keep the factory behind ensureBridgeHandler(). First /v1/messages
+  // that sees an active bridgeConfig loads the module, builds the handler,
+  // and wires registerBridgeSeedFn (bridge-cache buffers signatures until
+  // registration, so seed ordering is preserved — see bridge-cache.ts).
+  let bridgeHandlerPromise: Promise<BridgeHandler> | null = null;
+  const ensureBridgeHandler = (): Promise<BridgeHandler> => {
+    if (!bridgeHandlerPromise) {
+      bridgeHandlerPromise = import('./openai-bridge').then(({ createBridgeHandler }) => {
+        const handler = createBridgeHandler({
+          workspacePath: agentDir || undefined,
+          getUpstreamConfig: () => {
+            const config = getOpenAiBridgeConfig();
+            if (!config) throw new Error('Bridge not active');
+            return {
+              baseUrl: config.baseUrl,
+              apiKey: config.apiKey,
+              model: config.model,
+              maxOutputTokens: config.maxOutputTokens,
+              maxOutputTokensParamName: config.maxOutputTokensParamName,
+              upstreamFormat: config.upstreamFormat,
+            };
+          },
+          modelMapping: (requestModel: string) => {
+            const config = getOpenAiBridgeConfig();
+            if (!config?.modelAliases) return undefined;
+            const aliases = config.modelAliases;
+            if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
+            if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
+            if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
+            if (requestModel.startsWith('claude-')) return getSessionModel() || undefined;
+            return undefined;
+          },
+          logger: (msg) => console.log(msg),
+        });
+        // Register seed callback now that the handler exists. bridge-cache
+        // flushes any entries buffered during pre-registration.
+        registerBridgeSeedFn((entries) => handler.seedThoughtSignatures(entries));
+        return handler;
+      });
+    }
+    return bridgeHandlerPromise;
+  };
 
   console.log(`[startup] HTTP server binding to 127.0.0.1:${port}...`);
 
@@ -6497,6 +6502,7 @@ async function main() {
           if (ext === '.zip' || ext === '.skill') {
             // Handle zip/skill files - extract to skills directory
             try {
+              const { default: AdmZip } = await import('adm-zip');
               const zip = new AdmZip(fileBuffer);
               const entries = zip.getEntries();
 
@@ -8705,7 +8711,8 @@ description: >
             console.log(`[bridge] Incoming request: model=${body.model ?? '(none)'}, bridge_model_override=${bridgeConfig.model ?? '(none)'}`);
           } catch { /* ignore parse errors for diagnostic */ }
           try {
-            return await bridgeHandler(request);
+            const handler = await ensureBridgeHandler();
+            return await handler(request);
           } catch (error) {
             console.error('[bridge] Handler error:', error);
             return jsonResponse(
