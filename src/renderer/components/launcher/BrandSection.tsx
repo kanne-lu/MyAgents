@@ -375,10 +375,20 @@ export default memo(function BrandSection({
                         // the two inputs' focus handoff coherent when the
                         // user flips modes with the keyboard.
                         <div hidden={mode !== 'thought'}>
+                            {/* minLines matches SimpleChatInput's
+                                LAUNCHER_MIN_LINES so the two inputs occupy
+                                the same vertical footprint; without this,
+                                switching 任务 ↔ 想法 changed card height
+                                and the `flex-1 justify-center` parent
+                                re-centered the MyAgents title / slogan,
+                                producing the visible jump users reported
+                                after 0.1.70. */}
                             <ThoughtInput
                                 ref={thoughtInputRef}
                                 existingTags={tagCandidates}
                                 onCreated={handleThoughtCreated}
+                                variant="launcher"
+                                minLines={3}
                             />
                         </div>
                     )}

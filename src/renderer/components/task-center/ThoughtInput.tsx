@@ -39,11 +39,38 @@ export interface ThoughtInputHandle {
   focus: () => void;
 }
 
-// Auto-grow bounds for the idle textarea. 14px text × 1.6 line-height
-// ≈ 22.4px/row, plus 12px top padding. We target 2 rows idle and ~8 rows
-// max (+6 rows of growth before internal scroll kicks in).
-const TEXTAREA_MIN_HEIGHT_PX = 12 + 22 * 2;   // ≈ 56
-const TEXTAREA_MAX_HEIGHT_PX = 12 + 22 * 8;   // ≈ 188
+// Visual variants. The `compact` variant is the Task Center thought stream
+// card (14px text, tighter padding, no shadow). The `launcher` variant
+// mirrors SimpleChatInput's launcher-mode card exactly — 16px text,
+// `rounded-2xl`, `shadow-md`, `px-4` padding — so that when BrandSection
+// toggles 任务 ↔ 想法 the user sees the same input frame, just with a
+// different inner behaviour. Without this, the two inputs look visibly
+// different (font size, radius, shadow) and the page feels like it swaps
+// controls instead of changing modes.
+type ThoughtInputVariant = 'compact' | 'launcher';
+
+const VARIANTS: Record<ThoughtInputVariant, {
+  pxPerLine: number;
+  verticalPaddingPx: number;
+  textareaClass: string;
+  cardClass: string;
+  wrapperPaddingClass: string;
+}> = {
+  compact: {
+    pxPerLine: 22,           // 14px × 1.6 line-height ≈ 22.4
+    verticalPaddingPx: 12,
+    textareaClass: 'text-[14px] leading-relaxed',
+    cardClass: 'rounded-[var(--radius-lg)]',
+    wrapperPaddingClass: 'px-3 pt-3',
+  },
+  launcher: {
+    pxPerLine: 26,           // 16px × 1.625 leading-relaxed = 26 (matches SimpleChatInput LINE_HEIGHT)
+    verticalPaddingPx: 14,
+    textareaClass: 'text-base leading-relaxed',
+    cardClass: 'rounded-2xl shadow-md',
+    wrapperPaddingClass: 'px-4 pt-3',
+  },
+};
 
 interface Props {
   onCreated?: (t: Thought) => void;
@@ -62,6 +89,19 @@ interface Props {
    * the whole point of the discovery merge.
    */
   existingTags?: Array<[string, number]>;
+  /**
+   * Initial minimum row count for the textarea. Defaults to 2 (compact
+   * Task Center list). Launcher 想法 mode passes 3 to match SimpleChatInput's
+   * `LAUNCHER_MIN_LINES`, so the two inputs occupy the same vertical
+   * footprint and mode switches don't reflow the page.
+   */
+  minLines?: number;
+  /**
+   * Visual variant — `compact` for the Task Center thought stream (default),
+   * `launcher` for Launcher 想法 mode where the input must visually match
+   * the Chat input (same radius / shadow / text size / padding).
+   */
+  variant?: ThoughtInputVariant;
 }
 
 export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function ThoughtInput({
@@ -73,7 +113,12 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   placeholder = '写下此刻的想法… 用 #标签 归类',
   autoFocus = false,
   existingTags = [],
+  minLines = 2,
+  variant = 'compact',
 }, ref) {
+  const theme = VARIANTS[variant];
+  const textareaMinHeightPx = theme.verticalPaddingPx + theme.pxPerLine * minLines;
+  const textareaMaxHeightPx = theme.verticalPaddingPx + theme.pxPerLine * 8;
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -157,9 +202,9 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     // triggers a recompute (otherwise the textarea is stuck at its tallest
     // historical height).
     ta.style.height = '0px';
-    const next = Math.min(ta.scrollHeight, TEXTAREA_MAX_HEIGHT_PX);
-    ta.style.height = `${Math.max(next, TEXTAREA_MIN_HEIGHT_PX)}px`;
-  }, [value]);
+    const next = Math.min(ta.scrollHeight, textareaMaxHeightPx);
+    ta.style.height = `${Math.max(next, textareaMinHeightPx)}px`;
+  }, [value, textareaMinHeightPx, textareaMaxHeightPx]);
 
   // Consume any pending caret position after React flushes `setValue` to
   // the DOM — safer than `requestAnimationFrame`, which can run before
@@ -290,7 +335,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     <div className="w-full">
       <div
         ref={cardRef}
-        className="relative flex flex-col rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors focus-within:border-[var(--line-strong)]"
+        className={`relative flex flex-col border border-[var(--line)] bg-[var(--paper-elevated)] transition-colors focus-within:border-[var(--line-strong)] ${theme.cardClass}`}
       >
         {/* Mirror layer: same text as the textarea but with coloured `#tag`
             runs. Must match the textarea's font metrics so the highlighted
@@ -308,7 +353,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
           >
             <div
               ref={overlayInnerRef}
-              className="px-3 pt-3 text-[14px] leading-relaxed text-[var(--ink)]"
+              className={`${theme.wrapperPaddingClass} ${theme.textareaClass} text-[var(--ink)]`}
               style={{
                 fontFamily: 'inherit',
                 whiteSpace: 'pre-wrap',
@@ -357,13 +402,13 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             // the `placeholder:[-webkit-text-fill-color:...]` override
             // the placeholder inherits the transparent fill and is
             // invisible. That was the silent bug in the prior rev.
-            className="relative w-full resize-none overflow-y-auto bg-transparent px-3 pt-3 text-[14px] leading-relaxed text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none"
+            className={`relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-subtle)] placeholder:[-webkit-text-fill-color:var(--ink-subtle)] focus:outline-none ${theme.wrapperPaddingClass} ${theme.textareaClass}`}
             style={{
               fontFamily: 'inherit',
               WebkitTextFillColor: 'transparent',
               overflowWrap: 'break-word',
-              minHeight: `${TEXTAREA_MIN_HEIGHT_PX}px`,
-              maxHeight: `${TEXTAREA_MAX_HEIGHT_PX}px`,
+              minHeight: `${textareaMinHeightPx}px`,
+              maxHeight: `${textareaMaxHeightPx}px`,
             }}
           />
         </div>
