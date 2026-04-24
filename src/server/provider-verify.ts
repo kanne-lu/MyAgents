@@ -138,7 +138,6 @@ async function verifyViaSdk(
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         pathToClaudeCodeExecutable: cliPath,
-        executable: 'bun',
         env,
         thinking: thinkingConfig,
         stderr: (message: string) => {
@@ -349,7 +348,6 @@ export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; 
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
       pathToClaudeCodeExecutable: cliPath,
-      executable: 'bun',
       env,
       persistSession: false,
       mcpServers: {},

@@ -1,7 +1,40 @@
 // Shared environment utilities for external runtime subprocesses (v0.1.60)
 
+import { statSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
+
 import { getShellEnv, getShellPath } from '../utils/shell';
-import { which } from 'bun';
+
+/**
+ * Lightweight PATH-based command lookup. Replaces Bun's built-in which().
+ *
+ * On Windows, honours PATHEXT (.EXE, .CMD, .BAT, etc.) so .cmd shims from
+ * npm-global installs are found — matches Bun.which() behaviour via libuv.
+ */
+function which(command: string, opts?: { PATH?: string }): string | null {
+  const pathStr = opts?.PATH ?? process.env.PATH ?? '';
+  if (!pathStr) return null;
+  const exts = process.platform === 'win32'
+    ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').map((e) => e.toLowerCase())
+    : [''];
+  // Absolute path bypass: if caller passed an absolute executable, just verify it.
+  if (command.includes('/') || (process.platform === 'win32' && command.includes('\\'))) {
+    try {
+      if (statSync(command).isFile()) return command;
+    } catch { /* not found */ }
+    return null;
+  }
+  for (const dir of pathStr.split(delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const candidate = join(dir, command + ext);
+      try {
+        if (statSync(candidate).isFile()) return candidate;
+      } catch { /* skip */ }
+    }
+  }
+  return null;
+}
 
 
 

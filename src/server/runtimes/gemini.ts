@@ -8,7 +8,7 @@
 // Session: session/new (fresh) / session/load (resume by sessionId)
 // Authentication: entirely delegated to the user's local gemini CLI state (we do NOT manage API keys)
 
-import { spawn, type Subprocess } from 'bun';
+import { spawn, type Subprocess, type SubprocessStdin } from '../utils/subprocess';
 import {
   writeFileSync,
   existsSync,
@@ -280,13 +280,13 @@ class JsonRpcClient {
   private onNotification: ((method: string, params: unknown) => void) | null = null;
   private onServerRequest: ((id: number, method: string, params: unknown) => void) | null = null;
   private encoder = new TextEncoder();
-  private sink: { write(data: Uint8Array): number; flush(): void };
+  private sink: SubprocessStdin;
   private reading = false;
 
   constructor(private proc: Subprocess) {
     const stdin = proc.stdin;
-    if (!stdin || typeof stdin === 'number') throw new Error('stdin not available');
-    this.sink = stdin as { write(data: Uint8Array): number; flush(): void };
+    if (!stdin) throw new Error('stdin not available');
+    this.sink = stdin;
   }
 
   setNotificationHandler(h: (method: string, params: unknown) => void): void {
@@ -405,12 +405,8 @@ class JsonRpcClient {
   }
 
   private write(msg: unknown): void {
-    try {
-      this.sink.write(this.encoder.encode(JSON.stringify(msg) + '\n'));
-      this.sink.flush();
-    } catch {
-      /* stdin may be closed */
-    }
+    // Fire-and-forget; Node stdin buffer + Promise completion handle back-pressure.
+    void this.sink.write(this.encoder.encode(JSON.stringify(msg) + '\n')).catch(() => { /* stdin may be closed */ });
   }
 
   destroy(): void {
@@ -503,13 +499,8 @@ class GeminiProcess implements RuntimeProcess {
 
   closeStdin(): void {
     const stdin = this.proc.stdin;
-    if (!stdin || typeof stdin === 'number') return;
-    try {
-      const sink = stdin as { end(): void };
-      sink.end();
-    } catch {
-      /* ignore */
-    }
+    if (!stdin) return;
+    void stdin.end().catch(() => { /* ignore */ });
   }
 }
 

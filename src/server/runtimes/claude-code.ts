@@ -6,7 +6,7 @@
 // System prompt: --append-system-prompt (or --bare + --append-system-prompt for IM)
 // Session: --session-id / --resume
 
-import { spawn, type Subprocess } from 'bun';
+import { spawn, type Subprocess } from '../utils/subprocess';
 import { writeFileSync , existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
@@ -112,11 +112,8 @@ class ClaudeCodeProcess implements RuntimeProcess {
   async writeLine(line: string): Promise<void> {
     if (this.exited) throw new Error('Process has exited');
     const stdin = this.proc.stdin;
-    if (!stdin || typeof stdin === 'number') throw new Error('stdin not available');
-    // Bun's FileSink has .write() and .flush()
-    const sink = stdin as { write(data: Uint8Array): number; flush(): void };
-    sink.write(this.encoder.encode(line + '\n'));
-    sink.flush();
+    if (!stdin) throw new Error('stdin not available');
+    await stdin.write(this.encoder.encode(line + '\n'));
   }
 
   kill(signal?: number): void {
@@ -135,11 +132,9 @@ class ClaudeCodeProcess implements RuntimeProcess {
   /** Close stdin to signal the process to finish */
   closeStdin(): void {
     const stdin = this.proc.stdin;
-    if (!stdin || typeof stdin === 'number') return;
-    try {
-      const sink = stdin as { end(): void };
-      sink.end();
-    } catch { /* ignore */ }
+    if (!stdin) return;
+    // Fire-and-forget; errors (e.g. already closed) are benign.
+    void stdin.end().catch(() => { /* ignore */ });
   }
 }
 
@@ -353,6 +348,9 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       console.log(`[claude-code] Initial message sent via stdin (${options.initialMessage.length} chars, ${options.initialImages?.length ?? 0} images)`);
     }
 
+    if (!proc.stdout || !proc.stderr) {
+      throw new Error('Claude Code process: stdout/stderr pipes unavailable');
+    }
     // Read stderr for logging
     this.readStderr(proc.stderr);
 

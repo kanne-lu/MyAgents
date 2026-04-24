@@ -5512,7 +5512,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       allowDangerouslySkipPermissions: true,
       model: currentModel, // Use currently selected model
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
-      executable: 'bun' as const,
       env,
       stderr: (message: string) => {
         // Always log stderr to help diagnose subprocess issues (especially on older Windows)

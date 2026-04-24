@@ -123,7 +123,6 @@ export async function generateTitle(
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         pathToClaudeCodeExecutable: cliPath,
-        executable: 'bun',
         env,
         systemPrompt: SYSTEM_PROMPT,
         includePartialMessages: false,

@@ -1,5 +1,6 @@
 import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
-import { copyFile as copyFileAsync, readdir as readdirAsync, rename, rm, stat } from 'fs/promises';
+import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, rename, rm, stat, writeFile } from 'fs/promises';
+import { spawn as subprocessSpawn } from './utils/subprocess';
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import AdmZip from 'adm-zip';
@@ -816,7 +817,7 @@ function ensureChromiumInstalled(cliPath: string): void {
 
   console.log('[agent-browser] Ensuring Chromium is installed via bundled playwright-core...');
   const bunPath = getBundledRuntimePath();
-  const chromiumProc = Bun.spawn([bunPath, playwrightCli, 'install', 'chromium'], {
+  const chromiumProc = subprocessSpawn([bunPath, playwrightCli, 'install', 'chromium'], {
     cwd: nodeModulesDir,
     stdout: 'ignore',
     stderr: 'pipe',
@@ -879,7 +880,7 @@ function autoInstallAgentBrowser(): void {
 
   console.log(`[agent-browser] Auto-installing ${pkg} to ${installDir} using ${pm.type}...`);
 
-  const proc = Bun.spawn([pm.command, ...finalArgs], {
+  const proc = subprocessSpawn([pm.command, ...finalArgs], {
     cwd: installDir,
     stdout: 'ignore',
     stderr: 'pipe',
@@ -1966,9 +1967,17 @@ async function main() {
           // Read incremental data (cap at 1MB)
           const MAX_READ = 1024 * 1024;
           const readEnd = Math.min(offset + MAX_READ, fileSize);
-          const file = Bun.file(resolvedOutputFile);
-          const slice = file.slice(offset, readEnd);
-          const text = await slice.text();
+          const { open } = await import('node:fs/promises');
+          const fh = await open(resolvedOutputFile, 'r');
+          let text: string;
+          try {
+            const length = readEnd - offset;
+            const buf = Buffer.alloc(length);
+            await fh.read(buf, 0, length, offset);
+            text = buf.toString('utf8');
+          } finally {
+            await fh.close();
+          }
 
           // Parse JSONL lines
           let toolCount = 0;
@@ -3246,26 +3255,26 @@ async function main() {
 
           // Escape glob special characters in user query to prevent pattern injection
           const safeQuery = query.replace(/[*?[\]{}()\\]/g, '\\$&');
-          // Use glob to search files
-          const glob = new Bun.Glob(`**/*${safeQuery}*`);
+          // Use glob to search files (node:fs/promises glob, Node 22+)
           const results: { path: string; name: string; type: 'file' | 'dir' }[] = [];
-
-          for await (const file of glob.scan({
+          const globIter = nodeGlob(`**/*${safeQuery}*`, {
             cwd: currentAgentDir,
-            onlyFiles: false,
-            dot: false, // Ignore hidden files
-          })) {
-            // Skip node_modules, .git, etc.
-            if (file.includes('node_modules/') || file.includes('.git/')) {
-              continue;
-            }
+            exclude: (entry) => {
+              // Ignore dotfiles and skip node_modules/.git fast
+              const basePart = entry.split(sep).pop() ?? '';
+              if (basePart.startsWith('.')) return true;
+              return entry.includes(`node_modules${sep}`) || entry.includes(`.git${sep}`);
+            },
+          });
 
-            const fullPath = join(currentAgentDir, file);
+          for await (const file of globIter) {
+            const relFile = file as string;
+            const fullPath = join(currentAgentDir, relFile);
             try {
               const stats = await stat(fullPath);
               results.push({
-                path: file,
-                name: basename(file),
+                path: relFile,
+                name: basename(relFile),
                 type: stats.isDirectory() ? 'dir' : 'file',
               });
 
@@ -3419,7 +3428,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Content too large.' }, 413);
           }
 
-          await Bun.write(resolvedPath, content);
+          await writeFile(resolvedPath, content);
           return jsonResponse({ success: true });
         } catch (error) {
           return jsonResponse(
@@ -3449,7 +3458,7 @@ async function main() {
           for (const file of files) {
             const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
             const destination = join(resolvedTarget, safeName);
-            await Bun.write(destination, file);
+            await writeFile(destination, Buffer.from(await file.arrayBuffer()));
             saved.push(relative(currentAgentDir, destination));
           }
           return jsonResponse({ success: true, files: saved });
@@ -3489,7 +3498,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'File already exists.' }, 409);
           }
 
-          await Bun.write(filePath, '');
+          await writeFile(filePath, '');
           return jsonResponse({ success: true, path: relative(currentAgentDir, filePath) });
         } catch (error) {
           return jsonResponse(
@@ -3701,12 +3710,12 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            Bun.spawn(['open', '-R', resolved]);
+            subprocessSpawn(['open', '-R', resolved]);
           } else if (isWin) {
-            Bun.spawn(['explorer', '/select,', resolved]);
+            subprocessSpawn(['explorer', '/select,', resolved]);
           } else {
             // Linux: open parent directory
-            Bun.spawn(['xdg-open', dirname(resolved)]);
+            subprocessSpawn(['xdg-open', dirname(resolved)]);
           }
 
           return jsonResponse({ success: true });
@@ -3742,13 +3751,13 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            Bun.spawn(['open', resolved]);
+            subprocessSpawn(['open', resolved]);
           } else if (isWin) {
             // Use PowerShell Start-Process to avoid cmd /c shell interpretation
             // which could treat & | > in filenames as command operators
-            Bun.spawn(['powershell', '-NoProfile', '-Command', `Start-Process -FilePath '${resolved.replace(/'/g, "''")}'`]);
+            subprocessSpawn(['powershell', '-NoProfile', '-Command', `Start-Process -FilePath '${resolved.replace(/'/g, "''")}'`]);
           } else {
-            Bun.spawn(['xdg-open', resolved]);
+            subprocessSpawn(['xdg-open', resolved]);
           }
 
           return jsonResponse({ success: true });
@@ -3792,11 +3801,11 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            Bun.spawn(['open', '-R', resolvedPath]);
+            subprocessSpawn(['open', '-R', resolvedPath]);
           } else if (isWin) {
-            Bun.spawn(['explorer', '/select,', resolvedPath]);
+            subprocessSpawn(['explorer', '/select,', resolvedPath]);
           } else {
-            Bun.spawn(['xdg-open', dirname(resolvedPath)]);
+            subprocessSpawn(['xdg-open', dirname(resolvedPath)]);
           }
 
           return jsonResponse({ success: true });
@@ -3833,7 +3842,7 @@ async function main() {
           for (const file of files) {
             const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
             const destination = join(resolvedTarget, safeName);
-            await Bun.write(destination, file);
+            await writeFile(destination, Buffer.from(await file.arrayBuffer()));
             saved.push(relative(currentAgentDir, destination));
           }
 
@@ -3893,7 +3902,7 @@ async function main() {
 
             // Decode base64 and write file
             const buffer = Buffer.from(file.content, 'base64');
-            await Bun.write(destination, buffer);
+            await writeFile(destination, buffer);
 
             saved.push(relative(currentAgentDir, destination));
           }
@@ -3968,8 +3977,7 @@ async function main() {
               if (entry.isDirectory()) {
                 await copyDirectory(srcPath, destPath);
               } else {
-                const file = Bun.file(srcPath);
-                await Bun.write(destPath, file);
+                await copyFileAsync(srcPath, destPath);
               }
             }
           };
@@ -4005,8 +4013,7 @@ async function main() {
               // Copy file
               const { name: uniqueName, renamed } = getUniqueName(resolvedTarget, sourceName);
               const destPath = join(resolvedTarget, uniqueName);
-              const file = Bun.file(sourcePath);
-              await Bun.write(destPath, file);
+              await copyFileAsync(sourcePath, destPath);
               copiedFiles.push({
                 sourcePath,
                 targetPath: relative(currentAgentDir, destPath),
@@ -4402,13 +4409,13 @@ async function main() {
 
           if (isWin) {
             // PowerShell Compress-Archive
-            const proc = Bun.spawn(['powershell', '-Command',
+            const proc = subprocessSpawn(['powershell', '-Command',
               `Compress-Archive -Path '${filePaths.join("','")}' -DestinationPath '${zipPath}' -Force`
             ]);
             await proc.exited;
           } else {
             // macOS/Linux: zip command
-            const proc = Bun.spawn(['zip', '-j', zipPath, ...filePaths]);
+            const proc = subprocessSpawn(['zip', '-j', zipPath, ...filePaths]);
             await proc.exited;
           }
 
@@ -8710,7 +8717,7 @@ description: >
     const mcpList = getMcpServers();
     const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
     const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
-    console.log(`[boot] pid=${process.pid} port=${port} bun=${Bun.version} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames}`);
+    console.log(`[boot] pid=${process.pid} port=${port} node=${process.versions.node} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames}`);
   }
 
   // Verify PATH detection

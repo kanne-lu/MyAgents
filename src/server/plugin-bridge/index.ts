@@ -19,7 +19,37 @@ import { createCompatRuntime } from './compat-runtime';
 import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
+import { readFile } from 'node:fs/promises';
 import { parseArgs } from 'util';
+
+/**
+ * Shape subset of package.json fields this module reads. Bun.file(p).json()
+ * previously returned `any`; we keep ad-hoc shape so callers can do
+ * pkg.dependencies / pkg.version / pkg.main without narrowing.
+ */
+type PkgJsonLike = {
+  name?: string;
+  version?: string;
+  main?: string;
+  module?: string;
+  exports?: unknown;
+  type?: string;
+  keywords?: string[];
+  openclaw?: unknown;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+} & Record<string, unknown>;
+
+async function readJsonFile(path: string, fallback?: PkgJsonLike): Promise<PkgJsonLike> {
+  try {
+    const raw = await readFile(path, 'utf8');
+    return JSON.parse(raw) as PkgJsonLike;
+  } catch {
+    if (fallback !== undefined) return fallback;
+    throw new Error(`Failed to read JSON: ${path}`);
+  }
+}
 
 // Parse CLI arguments
 const { values: args } = parseArgs({
@@ -78,7 +108,7 @@ let pluginWithTicket: ((ticket: Record<string, unknown>, fn: () => Promise<unkno
 async function loadPlugin() {
   // Find the plugin entry point FIRST — we need the module name to infer the channel brand
   const pkgJsonPath = `${pluginDir}/package.json`;
-  const pkgJson = await Bun.file(pkgJsonPath).json().catch(() => ({}));
+  const pkgJson = await readJsonFile(pkgJsonPath, {});
 
   // Find installed packages (look in node_modules for packages with openclaw metadata)
   const deps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
@@ -87,7 +117,7 @@ async function loadPlugin() {
   for (const depName of Object.keys(deps || {})) {
     if (depName === 'openclaw') continue; // Skip the shim
     try {
-      const depPkg = await Bun.file(`${pluginDir}/node_modules/${depName}/package.json`).json();
+      const depPkg = await readJsonFile(`${pluginDir}/node_modules/${depName}/package.json`, {});
       if (depPkg.openclaw || depPkg.keywords?.includes('openclaw')) {
         entryModule = depName;
         pluginName = depPkg.name || depName;
@@ -169,7 +199,7 @@ async function loadPlugin() {
   // avoids this CJS→ESM incompatibility.
   let importPath = `${pluginDir}/node_modules/${entryModule}`;
   try {
-    const pluginPkg = await Bun.file(`${pluginDir}/node_modules/${entryModule}/package.json`).json();
+    const pluginPkg = await readJsonFile(`${pluginDir}/node_modules/${entryModule}/package.json`, {});
     if (pluginPkg.module) {
       importPath = `${pluginDir}/node_modules/${entryModule}/${pluginPkg.module}`;
       console.log(`[plugin-bridge] Using ESM entry: ${pluginPkg.module}`);

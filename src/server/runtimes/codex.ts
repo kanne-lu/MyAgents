@@ -6,7 +6,7 @@
 // System prompt: thread/start → developerInstructions
 // Session: thread/start (new) / thread/resume (continuing)
 
-import { spawn, type Subprocess } from 'bun';
+import { spawn, type Subprocess, type SubprocessStdin } from '../utils/subprocess';
 import { writeFileSync , existsSync, readdirSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
@@ -94,15 +94,15 @@ class JsonRpcClient {
   private onNotification: ((method: string, params: unknown) => void) | null = null;
   private onServerRequest: ((id: number, method: string, params: unknown) => void) | null = null;
   private encoder = new TextEncoder();
-  private sink: { write(data: Uint8Array): number; flush(): void };
+  private sink: SubprocessStdin;
   private reading = false;
 
   constructor(
     private proc: Subprocess,
   ) {
     const stdin = proc.stdin;
-    if (!stdin || typeof stdin === 'number') throw new Error('stdin not available');
-    this.sink = stdin as { write(data: Uint8Array): number; flush(): void };
+    if (!stdin) throw new Error('stdin not available');
+    this.sink = stdin;
   }
 
   /** Register notification handler (server → client, no id) */
@@ -225,12 +225,10 @@ class JsonRpcClient {
   }
 
   private write(msg: unknown): void {
-    try {
-      this.sink.write(this.encoder.encode(JSON.stringify(msg) + '\n'));
-      this.sink.flush();
-    } catch {
-      // Process stdin may be closed
-    }
+    // Fire-and-forget. sink.write() returns a Promise; back-pressure is
+    // absorbed by Node's internal buffer. Rejection (e.g. stdin closed)
+    // is swallowed — JSON-RPC layer detects liveness via process exit.
+    void this.sink.write(this.encoder.encode(JSON.stringify(msg) + '\n')).catch(() => { /* stdin may be closed */ });
   }
 
   /** Clean up: reject all pending requests */
@@ -288,11 +286,8 @@ class CodexProcess implements RuntimeProcess {
   /** Close stdin to signal the process to finish */
   closeStdin(): void {
     const stdin = this.proc.stdin;
-    if (!stdin || typeof stdin === 'number') return;
-    try {
-      const sink = stdin as { end(): void };
-      sink.end();
-    } catch { /* ignore */ }
+    if (!stdin) return;
+    void stdin.end().catch(() => { /* ignore */ });
   }
 }
 

@@ -195,7 +195,6 @@ export async function runTestQuery(options: TestQueryOptions): Promise<TestQuery
       model: provider.model,
       settingSources,
       pathToClaudeCodeExecutable: cliPath,
-      executable: 'bun',
       env,
       cwd,
       permissionMode: 'bypassPermissions',
