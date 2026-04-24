@@ -178,7 +178,7 @@ async function mapAllowlistResolutionInputs(params) {
   return results;
 }
 
-module.exports = {
+export {
   // channels/allowlist-match
   compileAllowlist,
   formatAllowlistMatchMeta,

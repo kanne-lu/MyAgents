@@ -1,5 +1,5 @@
 // AUTO-GENERATED STUB — do not edit manually.
-// Regenerate: bun scripts/generate-sdk-shims.ts
+// Regenerate: npm run generate:sdk-shims
 // Source: openclaw/src/plugin-sdk/runtime.ts
 
 const _warned = new Set();
@@ -7,90 +7,52 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
-function createLoggerBackedRuntime() { _w('createLoggerBackedRuntime'); return undefined; }
-function resolveRuntimeEnv() { _w('resolveRuntimeEnv'); return undefined; }
-function resolveRuntimeEnvWithUnavailableExit() { _w('resolveRuntimeEnvWithUnavailableExit'); return undefined; }
-function createNonExitingRuntime() { _w('createNonExitingRuntime'); return undefined; }
-function defaultRuntime() { _w('defaultRuntime'); return undefined; }
-function danger() { _w('danger'); return undefined; }
-function info() { _w('info'); return undefined; }
-function isVerbose() { _w('isVerbose'); return false; }
-function isYes() { _w('isYes'); return false; }
-function logVerbose() { _w('logVerbose'); return undefined; }
-function logVerboseConsole() { _w('logVerboseConsole'); return undefined; }
-function setVerbose() { _w('setVerbose'); return undefined; }
-function setYes() { _w('setYes'); return undefined; }
-function shouldLogVerbose() { _w('shouldLogVerbose'); return false; }
-function success() { _w('success'); return undefined; }
-function warn() { _w('warn'); return undefined; }
-function waitForAbortSignal() { _w('waitForAbortSignal'); return undefined; }
-function registerUnhandledRejectionHandler() { _w('registerUnhandledRejectionHandler'); return undefined; }
-function enableConsoleCapture() { _w('enableConsoleCapture'); return undefined; }
-function getConsoleSettings() { _w('getConsoleSettings'); return undefined; }
-function getResolvedConsoleSettings() { _w('getResolvedConsoleSettings'); return undefined; }
-function routeLogsToStderr() { _w('routeLogsToStderr'); return undefined; }
-function setConsoleSubsystemFilter() { _w('setConsoleSubsystemFilter'); return undefined; }
-function setConsoleConfigLoaderForTests() { _w('setConsoleConfigLoaderForTests'); return undefined; }
-function setConsoleTimestampPrefix() { _w('setConsoleTimestampPrefix'); return undefined; }
-function shouldLogSubsystemToConsole() { _w('shouldLogSubsystemToConsole'); return false; }
-const ALLOWED_LOG_LEVELS = undefined;
-function levelToMinLevel() { _w('levelToMinLevel'); return undefined; }
-function normalizeLogLevel() { _w('normalizeLogLevel'); return ""; }
-const DEFAULT_LOG_DIR = undefined;
-const DEFAULT_LOG_FILE = undefined;
-function getChildLogger() { _w('getChildLogger'); return undefined; }
-function getLogger() { _w('getLogger'); return undefined; }
-function getResolvedLoggerSettings() { _w('getResolvedLoggerSettings'); return undefined; }
-function isFileLogLevelEnabled() { _w('isFileLogLevelEnabled'); return false; }
-function resetLogger() { _w('resetLogger'); return undefined; }
-function setLoggerOverride() { _w('setLoggerOverride'); return undefined; }
-function toPinoLikeLogger() { _w('toPinoLikeLogger'); return undefined; }
-function createSubsystemLogger() { _w('createSubsystemLogger'); return undefined; }
-function createSubsystemRuntime() { _w('createSubsystemRuntime'); return undefined; }
-function runtimeForLogger() { _w('runtimeForLogger'); return undefined; }
-function stripRedundantSubsystemPrefixForConsole() { _w('stripRedundantSubsystemPrefixForConsole'); return ""; }
-
-module.exports = {
-  createLoggerBackedRuntime,
-  resolveRuntimeEnv,
-  resolveRuntimeEnvWithUnavailableExit,
-  createNonExitingRuntime,
-  defaultRuntime,
-  danger,
-  info,
-  isVerbose,
-  isYes,
-  logVerbose,
-  logVerboseConsole,
-  setVerbose,
-  setYes,
-  shouldLogVerbose,
-  success,
-  warn,
-  waitForAbortSignal,
-  registerUnhandledRejectionHandler,
-  enableConsoleCapture,
-  getConsoleSettings,
-  getResolvedConsoleSettings,
-  routeLogsToStderr,
-  setConsoleSubsystemFilter,
-  setConsoleConfigLoaderForTests,
-  setConsoleTimestampPrefix,
-  shouldLogSubsystemToConsole,
-  ALLOWED_LOG_LEVELS,
-  levelToMinLevel,
-  normalizeLogLevel,
-  DEFAULT_LOG_DIR,
-  DEFAULT_LOG_FILE,
-  getChildLogger,
-  getLogger,
-  getResolvedLoggerSettings,
-  isFileLogLevelEnabled,
-  resetLogger,
-  setLoggerOverride,
-  toPinoLikeLogger,
-  createSubsystemLogger,
-  createSubsystemRuntime,
-  runtimeForLogger,
-  stripRedundantSubsystemPrefixForConsole,
-};
+export function createNonExitingRuntime() { _w('createNonExitingRuntime'); return undefined; }
+export function defaultRuntime() { _w('defaultRuntime'); return undefined; }
+export function resolveCommandSecretRefsViaGateway() { _w('resolveCommandSecretRefsViaGateway'); return undefined; }
+export function getChannelsCommandSecretTargetIds() { _w('getChannelsCommandSecretTargetIds'); return undefined; }
+export function createLoggerBackedRuntime() { _w('createLoggerBackedRuntime'); return undefined; }
+export function resolveRuntimeEnv() { _w('resolveRuntimeEnv'); return undefined; }
+export function resolveRuntimeEnvWithUnavailableExit() { _w('resolveRuntimeEnvWithUnavailableExit'); return undefined; }
+export function danger() { _w('danger'); return undefined; }
+export function info() { _w('info'); return undefined; }
+export function isVerbose() { _w('isVerbose'); return false; }
+export function isYes() { _w('isYes'); return false; }
+export function logVerbose() { _w('logVerbose'); return undefined; }
+export function logVerboseConsole() { _w('logVerboseConsole'); return undefined; }
+export function setVerbose() { _w('setVerbose'); return undefined; }
+export function setYes() { _w('setYes'); return undefined; }
+export function shouldLogVerbose() { _w('shouldLogVerbose'); return false; }
+export function success() { _w('success'); return undefined; }
+export function warn() { _w('warn'); return undefined; }
+export function waitForAbortSignal() { _w('waitForAbortSignal'); return undefined; }
+export function createBackupArchive() { _w('createBackupArchive'); return undefined; }
+export function detectPluginInstallPathIssue() { _w('detectPluginInstallPathIssue'); return undefined; }
+export function formatPluginInstallPathIssue() { _w('formatPluginInstallPathIssue'); return ""; }
+export function collectProviderDangerousNameMatchingScopes() { _w('collectProviderDangerousNameMatchingScopes'); return []; }
+export function registerUnhandledRejectionHandler() { _w('registerUnhandledRejectionHandler'); return undefined; }
+export const removePluginFromConfig = undefined;
+export function enableConsoleCapture() { _w('enableConsoleCapture'); return undefined; }
+export function getConsoleSettings() { _w('getConsoleSettings'); return undefined; }
+export function getResolvedConsoleSettings() { _w('getResolvedConsoleSettings'); return undefined; }
+export function routeLogsToStderr() { _w('routeLogsToStderr'); return undefined; }
+export function setConsoleSubsystemFilter() { _w('setConsoleSubsystemFilter'); return undefined; }
+export function setConsoleConfigLoaderForTests() { _w('setConsoleConfigLoaderForTests'); return undefined; }
+export function setConsoleTimestampPrefix() { _w('setConsoleTimestampPrefix'); return undefined; }
+export function shouldLogSubsystemToConsole() { _w('shouldLogSubsystemToConsole'); return false; }
+export const ALLOWED_LOG_LEVELS = undefined;
+export function levelToMinLevel() { _w('levelToMinLevel'); return undefined; }
+export function normalizeLogLevel() { _w('normalizeLogLevel'); return ""; }
+export const DEFAULT_LOG_DIR = undefined;
+export const DEFAULT_LOG_FILE = undefined;
+export function getChildLogger() { _w('getChildLogger'); return undefined; }
+export function getLogger() { _w('getLogger'); return undefined; }
+export function getResolvedLoggerSettings() { _w('getResolvedLoggerSettings'); return undefined; }
+export function isFileLogLevelEnabled() { _w('isFileLogLevelEnabled'); return false; }
+export function resetLogger() { _w('resetLogger'); return undefined; }
+export function setLoggerOverride() { _w('setLoggerOverride'); return undefined; }
+export function toPinoLikeLogger() { _w('toPinoLikeLogger'); return undefined; }
+export function createSubsystemLogger() { _w('createSubsystemLogger'); return undefined; }
+export function createSubsystemRuntime() { _w('createSubsystemRuntime'); return undefined; }
+export function runtimeForLogger() { _w('runtimeForLogger'); return undefined; }
+export function stripRedundantSubsystemPrefixForConsole() { _w('stripRedundantSubsystemPrefixForConsole'); return ""; }

@@ -155,7 +155,7 @@ function normalizeProviderId(id) {
   return typeof id === "string" ? id.trim().toLowerCase() : "";
 }
 
-module.exports = {
+export {
   // tools/common
   OWNER_ONLY_TOOL_ERROR,
   ToolInputError,

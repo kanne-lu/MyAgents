@@ -51,7 +51,7 @@ function createRawChannelSendResultAdapter(params) {
   };
 }
 
-module.exports = {
+export {
   attachChannelToResult,
   attachChannelToResults,
   createEmptyChannelResult,

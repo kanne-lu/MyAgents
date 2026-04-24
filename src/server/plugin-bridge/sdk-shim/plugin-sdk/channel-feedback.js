@@ -114,7 +114,7 @@ function createStatusReactionController(params) {
   };
 }
 
-module.exports = {
+export {
   removeAckReactionAfterReply,
   shouldAckReaction,
   shouldAckReactionForWhatsApp,

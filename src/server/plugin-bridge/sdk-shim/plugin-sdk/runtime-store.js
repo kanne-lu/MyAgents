@@ -28,6 +28,6 @@ function createPluginRuntimeStore(errorMessage) {
   };
 }
 
-module.exports = {
+export {
   createPluginRuntimeStore,
 };

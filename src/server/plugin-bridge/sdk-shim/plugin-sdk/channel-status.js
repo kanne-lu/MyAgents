@@ -102,7 +102,7 @@ function collectStatusIssuesFromLastError(channel, accounts) {
 // Exports aligned with openclaw/src/plugin-sdk/channel-status.ts re-exports.
 // Functions like createDefaultChannelRuntimeState, buildBaseChannelStatusSummary,
 // collectStatusIssuesFromLastError live in status-helpers, not channel-status.
-module.exports = {
+export {
   PAIRING_APPROVED_MESSAGE,
   projectCredentialSnapshotFields,
   resolveConfiguredFromCredentialStatuses,

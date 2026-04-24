@@ -266,13 +266,13 @@ function renderStub(moduleName: string, symbols: ExportSymbol[]): string {
   const lines: string[] = [];
 
   lines.push(`// AUTO-GENERATED STUB — do not edit manually.`);
-  lines.push(`// Regenerate: bun scripts/generate-sdk-shims.ts`);
+  lines.push(`// Regenerate: npm run generate:sdk-shims`);
   lines.push(`// Source: openclaw/src/plugin-sdk/${moduleName}.ts`);
   lines.push(``);
 
   if (symbols.length === 0) {
     lines.push(`// Type-only module or no extractable runtime exports.`);
-    lines.push(`module.exports = {};`);
+    lines.push(`export {};`);
     lines.push(``);
     return lines.join("\n");
   }
@@ -286,44 +286,36 @@ function renderStub(moduleName: string, symbols: ExportSymbol[]): string {
   lines.push(`}`);
   lines.push(``);
 
-  // Render each symbol
+  // Render each symbol with `export` prefix (ESM — package is "type": "module")
   for (const sym of symbols) {
     switch (sym.kind) {
       case "function": {
         const ret = inferReturnValue(sym.name);
         lines.push(
-          `function ${sym.name}() { _w('${sym.name}'); return ${ret}; }`,
+          `export function ${sym.name}() { _w('${sym.name}'); return ${ret}; }`,
         );
         break;
       }
       case "async-function": {
         const ret = inferReturnValue(sym.name);
         lines.push(
-          `async function ${sym.name}() { _w('${sym.name}'); return ${ret}; }`,
+          `export async function ${sym.name}() { _w('${sym.name}'); return ${ret}; }`,
         );
         break;
       }
       case "class":
         lines.push(
-          `class ${sym.name} { constructor() { _w('${sym.name}'); } }`,
+          `export class ${sym.name} { constructor() { _w('${sym.name}'); } }`,
         );
         break;
       case "const":
-        lines.push(`const ${sym.name} = undefined;`);
+        lines.push(`export const ${sym.name} = undefined;`);
         break;
       case "enum":
-        lines.push(`const ${sym.name} = Object.freeze({});`);
+        lines.push(`export const ${sym.name} = Object.freeze({});`);
         break;
     }
   }
-
-  // module.exports
-  lines.push(``);
-  lines.push(`module.exports = {`);
-  for (const sym of symbols) {
-    lines.push(`  ${sym.name},`);
-  }
-  lines.push(`};`);
   lines.push(``);
 
   return lines.join("\n");

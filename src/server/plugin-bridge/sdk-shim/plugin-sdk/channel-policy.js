@@ -59,7 +59,7 @@ function createRestrictSendersChannelSecurity(_params) {
   };
 }
 
-module.exports = {
+export {
   composeAccountWarningCollectors,
   composeWarningCollectors,
   createAllowlistProviderGroupPolicyWarningCollector,

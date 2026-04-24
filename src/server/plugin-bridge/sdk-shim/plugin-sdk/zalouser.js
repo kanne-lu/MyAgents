@@ -4,6 +4,10 @@
 // In Bridge mode, most of these are unused. Provide minimal stubs to prevent
 // "Cannot find module" errors.
 
+import { tmpdir as _tmpdir } from 'node:os';
+import { join as _pathJoin } from 'node:path';
+import { mkdirSync as _mkdirSync } from 'node:fs';
+
 const DEFAULT_ACCOUNT_ID = 'default';
 
 function normalizeAccountId(id) {
@@ -118,11 +122,8 @@ const MarkdownConfigSchema = {};
 // --- tmp dir ---
 
 function resolvePreferredOpenClawTmpDir() {
-  const os = require('node:os');
-  const path = require('node:path');
-  const { mkdirSync } = require('node:fs');
-  const dir = path.join(os.tmpdir(), 'openclaw');
-  mkdirSync(dir, { recursive: true });
+  const dir = _pathJoin(_tmpdir(), 'openclaw');
+  _mkdirSync(dir, { recursive: true });
   return dir;
 }
 
@@ -213,7 +214,7 @@ function chunkTextForOutbound(text, _limit) {
 const zalouserSetupAdapter = null;
 const zalouserSetupWizard = null;
 
-module.exports = {
+export {
   mergeAllowlist,
   summarizeMapping,
   resolveMentionGatingWithBypass,

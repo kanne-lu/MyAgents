@@ -1,5 +1,5 @@
 // AUTO-GENERATED STUB — do not edit manually.
-// Regenerate: bun scripts/generate-sdk-shims.ts
+// Regenerate: npm run generate:sdk-shims
 // Source: openclaw/src/plugin-sdk/nextcloud-talk.ts
 
 const _warned = new Set();
@@ -7,130 +7,74 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/nextcloud-talk.' + fn + '() not implemented in Bridge mode'); }
 }
 
-function logInboundDrop() { _w('logInboundDrop'); return undefined; }
-function resolveMentionGatingWithBypass() { _w('resolveMentionGatingWithBypass'); return undefined; }
-function buildChannelKeyCandidates() { _w('buildChannelKeyCandidates'); return undefined; }
-function normalizeChannelSlug() { _w('normalizeChannelSlug'); return ""; }
-function resolveChannelEntryMatchWithFallback() { _w('resolveChannelEntryMatchWithFallback'); return undefined; }
-function resolveNestedAllowlistDecision() { _w('resolveNestedAllowlistDecision'); return undefined; }
-function deleteAccountFromConfigSection() { _w('deleteAccountFromConfigSection'); return undefined; }
-function clearAccountEntryFields() { _w('clearAccountEntryFields'); return undefined; }
-function setAccountEnabledInConfigSection() { _w('setAccountEnabledInConfigSection'); return undefined; }
-const buildChannelConfigSchema = undefined;
-function formatPairingApproveHint() { _w('formatPairingApproveHint'); return ""; }
-function buildSingleChannelSecretPromptState() { _w('buildSingleChannelSecretPromptState'); return undefined; }
-function addWildcardAllowFrom() { _w('addWildcardAllowFrom'); return undefined; }
-function mergeAllowFromEntries() { _w('mergeAllowFromEntries'); return undefined; }
-function promptSingleChannelSecretInput() { _w('promptSingleChannelSecretInput'); return undefined; }
-function runSingleChannelSecretStep() { _w('runSingleChannelSecretStep'); return undefined; }
-function setTopLevelChannelDmPolicyWithAllowFrom() { _w('setTopLevelChannelDmPolicyWithAllowFrom'); return undefined; }
-function applyAccountNameToChannelSection() { _w('applyAccountNameToChannelSection'); return undefined; }
-const patchScopedAccountConfig = undefined;
-function createAccountListHelpers() { _w('createAccountListHelpers'); return undefined; }
-function createChannelReplyPipeline() { _w('createChannelReplyPipeline'); return undefined; }
-function mapAllowFromEntries() { _w('mapAllowFromEntries'); return undefined; }
-function evaluateMatchedGroupAccessForPolicy() { _w('evaluateMatchedGroupAccessForPolicy'); return undefined; }
-const GROUP_POLICY_BLOCKED_LABEL = undefined;
-function resolveAllowlistProviderRuntimeGroupPolicy() { _w('resolveAllowlistProviderRuntimeGroupPolicy'); return undefined; }
-function resolveDefaultGroupPolicy() { _w('resolveDefaultGroupPolicy'); return undefined; }
-function warnMissingProviderGroupPolicyFallbackOnce() { _w('warnMissingProviderGroupPolicyFallbackOnce'); return undefined; }
-const buildSecretInputSchema = undefined;
-function hasConfiguredSecretInput() { _w('hasConfiguredSecretInput'); return false; }
-function normalizeResolvedSecretInputString() { _w('normalizeResolvedSecretInputString'); return ""; }
-function normalizeSecretInputString() { _w('normalizeSecretInputString'); return ""; }
-const ToolPolicySchema = undefined;
-const BlockStreamingCoalesceSchema = undefined;
-const DmConfigSchema = undefined;
-const DmPolicySchema = undefined;
-const GroupPolicySchema = undefined;
-const MarkdownConfigSchema = undefined;
-function ReplyRuntimeConfigSchemaShape() { _w('ReplyRuntimeConfigSchemaShape'); return undefined; }
-function requireOpenAllowFrom() { _w('requireOpenAllowFrom'); return undefined; }
-function isRequestBodyLimitError() { _w('isRequestBodyLimitError'); return false; }
-function readRequestBodyWithLimit() { _w('readRequestBodyWithLimit'); return undefined; }
-function requestBodyErrorToText() { _w('requestBodyErrorToText'); return undefined; }
-function waitForAbortSignal() { _w('waitForAbortSignal'); return undefined; }
-function fetchWithSsrFGuard() { _w('fetchWithSsrFGuard'); return undefined; }
-const emptyPluginConfigSchema = undefined;
-const DEFAULT_ACCOUNT_ID = undefined;
-function normalizeAccountId() { _w('normalizeAccountId'); return ""; }
-function readStoreAllowFromForDmPolicy() { _w('readStoreAllowFromForDmPolicy'); return undefined; }
-function resolveDmGroupAccessWithCommandGate() { _w('resolveDmGroupAccessWithCommandGate'); return undefined; }
-function formatDocsLink() { _w('formatDocsLink'); return ""; }
-function listConfiguredAccountIds() { _w('listConfiguredAccountIds'); return []; }
-function resolveAccountWithDefaultFallback() { _w('resolveAccountWithDefaultFallback'); return undefined; }
-function createChannelPairingController() { _w('createChannelPairingController'); return undefined; }
-function createPersistentDedupe() { _w('createPersistentDedupe'); return undefined; }
-function createNormalizedOutboundDeliverer() { _w('createNormalizedOutboundDeliverer'); return undefined; }
-function deliverFormattedTextWithAttachments() { _w('deliverFormattedTextWithAttachments'); return undefined; }
-function formatTextWithAttachmentLinks() { _w('formatTextWithAttachmentLinks'); return ""; }
-function resolveOutboundMediaUrls() { _w('resolveOutboundMediaUrls'); return undefined; }
-function dispatchInboundReplyWithBase() { _w('dispatchInboundReplyWithBase'); return undefined; }
-function createLoggerBackedRuntime() { _w('createLoggerBackedRuntime'); return undefined; }
-function buildBaseChannelStatusSummary() { _w('buildBaseChannelStatusSummary'); return undefined; }
-function buildRuntimeAccountStatusSnapshot() { _w('buildRuntimeAccountStatusSnapshot'); return undefined; }
-
-module.exports = {
-  logInboundDrop,
-  resolveMentionGatingWithBypass,
-  buildChannelKeyCandidates,
-  normalizeChannelSlug,
-  resolveChannelEntryMatchWithFallback,
-  resolveNestedAllowlistDecision,
-  deleteAccountFromConfigSection,
-  clearAccountEntryFields,
-  setAccountEnabledInConfigSection,
-  buildChannelConfigSchema,
-  formatPairingApproveHint,
-  buildSingleChannelSecretPromptState,
-  addWildcardAllowFrom,
-  mergeAllowFromEntries,
-  promptSingleChannelSecretInput,
-  runSingleChannelSecretStep,
-  setTopLevelChannelDmPolicyWithAllowFrom,
-  applyAccountNameToChannelSection,
-  patchScopedAccountConfig,
-  createAccountListHelpers,
-  createChannelReplyPipeline,
-  mapAllowFromEntries,
-  evaluateMatchedGroupAccessForPolicy,
-  GROUP_POLICY_BLOCKED_LABEL,
-  resolveAllowlistProviderRuntimeGroupPolicy,
-  resolveDefaultGroupPolicy,
-  warnMissingProviderGroupPolicyFallbackOnce,
-  buildSecretInputSchema,
-  hasConfiguredSecretInput,
-  normalizeResolvedSecretInputString,
-  normalizeSecretInputString,
-  ToolPolicySchema,
-  BlockStreamingCoalesceSchema,
-  DmConfigSchema,
-  DmPolicySchema,
-  GroupPolicySchema,
-  MarkdownConfigSchema,
-  ReplyRuntimeConfigSchemaShape,
-  requireOpenAllowFrom,
-  isRequestBodyLimitError,
-  readRequestBodyWithLimit,
-  requestBodyErrorToText,
-  waitForAbortSignal,
-  fetchWithSsrFGuard,
-  emptyPluginConfigSchema,
-  DEFAULT_ACCOUNT_ID,
-  normalizeAccountId,
-  readStoreAllowFromForDmPolicy,
-  resolveDmGroupAccessWithCommandGate,
-  formatDocsLink,
-  listConfiguredAccountIds,
-  resolveAccountWithDefaultFallback,
-  createChannelPairingController,
-  createPersistentDedupe,
-  createNormalizedOutboundDeliverer,
-  deliverFormattedTextWithAttachments,
-  formatTextWithAttachmentLinks,
-  resolveOutboundMediaUrls,
-  dispatchInboundReplyWithBase,
-  createLoggerBackedRuntime,
-  buildBaseChannelStatusSummary,
-  buildRuntimeAccountStatusSnapshot,
-};
+export function logInboundDrop() { _w('logInboundDrop'); return undefined; }
+export function createAuthRateLimiter() { _w('createAuthRateLimiter'); return undefined; }
+export function resolveMentionGating() { _w('resolveMentionGating'); return undefined; }
+export function resolveMentionGatingWithBypass() { _w('resolveMentionGatingWithBypass'); return undefined; }
+export function resolveInboundMentionDecision() { _w('resolveInboundMentionDecision'); return undefined; }
+export function buildChannelKeyCandidates() { _w('buildChannelKeyCandidates'); return undefined; }
+export function normalizeChannelSlug() { _w('normalizeChannelSlug'); return ""; }
+export function resolveChannelEntryMatchWithFallback() { _w('resolveChannelEntryMatchWithFallback'); return undefined; }
+export function resolveNestedAllowlistDecision() { _w('resolveNestedAllowlistDecision'); return undefined; }
+export function deleteAccountFromConfigSection() { _w('deleteAccountFromConfigSection'); return undefined; }
+export function clearAccountEntryFields() { _w('clearAccountEntryFields'); return undefined; }
+export function setAccountEnabledInConfigSection() { _w('setAccountEnabledInConfigSection'); return undefined; }
+export const buildChannelConfigSchema = undefined;
+export function formatPairingApproveHint() { _w('formatPairingApproveHint'); return ""; }
+export function buildSingleChannelSecretPromptState() { _w('buildSingleChannelSecretPromptState'); return undefined; }
+export function addWildcardAllowFrom() { _w('addWildcardAllowFrom'); return undefined; }
+export function mergeAllowFromEntries() { _w('mergeAllowFromEntries'); return undefined; }
+export function promptSingleChannelSecretInput() { _w('promptSingleChannelSecretInput'); return undefined; }
+export function runSingleChannelSecretStep() { _w('runSingleChannelSecretStep'); return undefined; }
+export function setTopLevelChannelDmPolicyWithAllowFrom() { _w('setTopLevelChannelDmPolicyWithAllowFrom'); return undefined; }
+export function applyAccountNameToChannelSection() { _w('applyAccountNameToChannelSection'); return undefined; }
+export function createSetupInputPresenceValidator() { _w('createSetupInputPresenceValidator'); return undefined; }
+export const patchScopedAccountConfig = undefined;
+export function createAccountListHelpers() { _w('createAccountListHelpers'); return undefined; }
+export function createChannelReplyPipeline() { _w('createChannelReplyPipeline'); return undefined; }
+export function mapAllowFromEntries() { _w('mapAllowFromEntries'); return undefined; }
+export function evaluateMatchedGroupAccessForPolicy() { _w('evaluateMatchedGroupAccessForPolicy'); return undefined; }
+export const GROUP_POLICY_BLOCKED_LABEL = undefined;
+export function resolveAllowlistProviderRuntimeGroupPolicy() { _w('resolveAllowlistProviderRuntimeGroupPolicy'); return undefined; }
+export function resolveDefaultGroupPolicy() { _w('resolveDefaultGroupPolicy'); return undefined; }
+export function warnMissingProviderGroupPolicyFallbackOnce() { _w('warnMissingProviderGroupPolicyFallbackOnce'); return undefined; }
+export const buildSecretInputSchema = undefined;
+export function hasConfiguredSecretInput() { _w('hasConfiguredSecretInput'); return false; }
+export function normalizeResolvedSecretInputString() { _w('normalizeResolvedSecretInputString'); return ""; }
+export function normalizeSecretInputString() { _w('normalizeSecretInputString'); return ""; }
+export const ToolPolicySchema = undefined;
+export const BlockStreamingCoalesceSchema = undefined;
+export const DmConfigSchema = undefined;
+export const DmPolicySchema = undefined;
+export const GroupPolicySchema = undefined;
+export const MarkdownConfigSchema = undefined;
+export function ReplyRuntimeConfigSchemaShape() { _w('ReplyRuntimeConfigSchemaShape'); return undefined; }
+export function requireOpenAllowFrom() { _w('requireOpenAllowFrom'); return undefined; }
+export const WEBHOOK_RATE_LIMIT_DEFAULTS = undefined;
+export function isRequestBodyLimitError() { _w('isRequestBodyLimitError'); return false; }
+export function readRequestBodyWithLimit() { _w('readRequestBodyWithLimit'); return undefined; }
+export function requestBodyErrorToText() { _w('requestBodyErrorToText'); return undefined; }
+export function waitForAbortSignal() { _w('waitForAbortSignal'); return undefined; }
+export function fetchWithSsrFGuard() { _w('fetchWithSsrFGuard'); return undefined; }
+export const emptyPluginConfigSchema = undefined;
+export const DEFAULT_ACCOUNT_ID = undefined;
+export function normalizeAccountId() { _w('normalizeAccountId'); return ""; }
+export function readStoreAllowFromForDmPolicy() { _w('readStoreAllowFromForDmPolicy'); return undefined; }
+export function resolveDmGroupAccessWithCommandGate() { _w('resolveDmGroupAccessWithCommandGate'); return undefined; }
+export function formatDocsLink() { _w('formatDocsLink'); return ""; }
+export function listConfiguredAccountIds() { _w('listConfiguredAccountIds'); return []; }
+export function resolveAccountWithDefaultFallback() { _w('resolveAccountWithDefaultFallback'); return undefined; }
+export function createChannelPairingController() { _w('createChannelPairingController'); return undefined; }
+export function createPersistentDedupe() { _w('createPersistentDedupe'); return undefined; }
+export function createNormalizedOutboundDeliverer() { _w('createNormalizedOutboundDeliverer'); return undefined; }
+export function deliverFormattedTextWithAttachments() { _w('deliverFormattedTextWithAttachments'); return undefined; }
+export function formatTextWithAttachmentLinks() { _w('formatTextWithAttachmentLinks'); return ""; }
+export function resolveOutboundMediaUrls() { _w('resolveOutboundMediaUrls'); return undefined; }
+export function dispatchInboundReplyWithBase() { _w('dispatchInboundReplyWithBase'); return undefined; }
+export function createLoggerBackedRuntime() { _w('createLoggerBackedRuntime'); return undefined; }
+export function buildBaseChannelStatusSummary() { _w('buildBaseChannelStatusSummary'); return undefined; }
+export function buildRuntimeAccountStatusSnapshot() { _w('buildRuntimeAccountStatusSnapshot'); return undefined; }
+export function createTopLevelChannelDmPolicy() { _w('createTopLevelChannelDmPolicy'); return undefined; }
+export function promptParsedAllowFromForAccount() { _w('promptParsedAllowFromForAccount'); return undefined; }
+export function resolveSetupAccountId() { _w('resolveSetupAccountId'); return undefined; }
+export function setSetupChannelEnabled() { _w('setSetupChannelEnabled'); return undefined; }
