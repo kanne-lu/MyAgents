@@ -890,6 +890,17 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     );
 
     let mut cmd = crate::process_cmd::new(&node_path);
+    // In debug mode bridge_script points at the TS source file; inject tsx's
+    // ESM loader so Node can transpile + resolve extensionless relative imports
+    // (e.g. `./compat-api` → `./compat-api.ts`). Release builds load the
+    // esbuild-bundled `.js` and skip the loader. Mirror of sidecar.rs's spawn.
+    if bridge_script
+        .extension()
+        .and_then(|s| s.to_str())
+        == Some("ts")
+    {
+        cmd.arg("--import").arg("tsx/esm");
+    }
     cmd.arg(bridge_script.to_string_lossy().as_ref())
         // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
         // can find and kill orphaned bridge processes after a crash
