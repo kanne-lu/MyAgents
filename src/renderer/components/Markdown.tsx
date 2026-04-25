@@ -60,16 +60,6 @@ const REHYPE_PLUGINS: ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [
   rehypeKatex,
 ];
 
-// Pattern 3 §3.2.1 — streaming mode plugin lists.
-// Drops the heavy plugins: remarkMath (KaTeX parser), rehypeKatex (KaTeX
-// renderer), rehypeRaw (raw-HTML parsing) and rehypeSanitize (HAST tree walk).
-// remarkGfm stays so tables / task lists / strikethrough still parse during
-// streaming — gfm is cheap and dropping it would cause visible layout swaps
-// on the streaming → final upgrade.
-const REMARK_PLUGINS_STREAMING_DEFAULT = [remarkGfm];
-const REMARK_PLUGINS_STREAMING_WITH_BREAKS = [remarkGfm, remarkBreaks];
-const REHYPE_PLUGINS_STREAMING: ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [];
-
 // Custom link component that opens links in embedded browser panel (if available)
 // or falls back to system browser. Supports text selection for copying.
 // Strips react-markdown's hast `node` prop so it doesn't get spread onto the DOM <a>.
@@ -111,30 +101,6 @@ const MarkdownLink = memo(function MarkdownLink({
     </a>
   );
 });
-
-/**
- * Pattern 3 §3.2.1 — streaming-mode code renderer.
- *
- * No Prism syntax highlighting (heaviest single cost during streaming —
- * `react-syntax-highlighter` re-tokenises the entire accumulated code block
- * on each delta) and no Mermaid (also heavy, and a partially-emitted
- * Mermaid graph throws). Plain `<pre><code>` retains monospace font and
- * preserves the eventual layout so the streaming → final swap is invisible.
- */
-const StreamingCodeComponent: Components['code'] = ({ className, children, node: _node, ...props }) => {
-  const match = /language-(\w+)/.exec(className || '');
-  const isFenced = !!match;
-  if (!isFenced) {
-    // Inline code — keep the lightweight chip styling (InlineCode is cheap).
-    return <InlineCode {...props}>{children}</InlineCode>;
-  }
-  return (
-    <pre className="my-3 overflow-x-auto rounded-md bg-[var(--paper-inset)] p-3 text-sm font-mono text-[var(--ink)]">
-      <code className={className}>{children}</code>
-    </pre>
-  );
-};
-const StreamingPreComponent: Components['pre'] = ({ children }) => <>{children}</>;
 
 // Custom code component - handles both inline and block code
 const CodeComponent: Components['code'] = ({ className, children, node: _node, ...props }) => {
@@ -319,24 +285,6 @@ interface MarkdownProps {
   raw?: boolean;
   /** Document base directory path (relative to agentDir) for resolving relative image paths */
   basePath?: string;
-  /**
-   * Pattern 3 §3.2.1 — render mode.
-   *
-   * - `'final'` (default): full pipeline. Runs `remark-gfm` + `remark-math` +
-   *   `rehype-raw` + `rehype-sanitize` + `rehype-katex`, plus Prism syntax
-   *   highlight inside fenced code via `CodeBlock`, and Mermaid for `mermaid`
-   *   blocks. This is the legacy / backward-compatible behaviour.
-   * - `'streaming'`: lightweight rendering used while a message is still being
-   *   produced. Skips KaTeX, Mermaid, raw-HTML+sanitize, and Prism. Code
-   *   fences render as plain `<pre><code>`. Same `ReactMarkdown` paragraph /
-   *   list / table structure is preserved so the streaming → final swap on
-   *   `chat:message-complete` does not reflow visible layout.
-   *
-   * The caller (Message.tsx) chooses the mode based on
-   * `isAssistantStreaming`; per-frame chunk batching itself happens upstream
-   * in TabProvider's RAF loop. See PRD §Pattern 3.
-   */
-  mode?: 'streaming' | 'final';
 }
 
 /**
@@ -471,7 +419,7 @@ function convertFrontmatter(content: string): string {
   return yamlBlock + content.slice(match[0].length);
 }
 
-const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath, mode = 'final' }: MarkdownProps) {
+const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath }: MarkdownProps) {
   // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages
   // In raw mode, convert YAML frontmatter to a fenced code block for proper rendering
   const processedContent = raw ? convertFrontmatter(children) : preprocessMarkdownContent(children);
@@ -480,37 +428,23 @@ const Markdown = memo(function Markdown({ children, compact = false, preserveNew
   const tabApi = useTabApiOptional();
   const tabId = tabApi?.tabId ?? '';
 
-  const isStreaming = mode === 'streaming';
-
   // Merge img handler when basePath is provided (for resolving relative image paths)
   // Use == null to allow empty string basePath (root-level files)
-  // Pattern 3 §3.2.1 — in streaming mode swap heavy code/mermaid renderers for
-  // a plain <pre><code>. All other components stay identical so the eventual
-  // streaming → final swap on `chat:message-complete` is structurally invisible
-  // (only the code blocks gain syntax colours and KaTeX/Mermaid hydrate).
   const components = useMemo(() => {
-    const base: Components = isStreaming
-      ? { ...markdownComponents, code: StreamingCodeComponent, pre: StreamingPreComponent }
-      : markdownComponents;
-    if (basePath == null) return base;
+    if (basePath == null) return markdownComponents;
     return {
-      ...base,
+      ...markdownComponents,
       img: (props: React.ImgHTMLAttributes<HTMLImageElement>) => (
         <MarkdownImage src={props.src} alt={props.alt} basePath={basePath} tabId={tabId} />
       ),
     };
-  }, [basePath, tabId, isStreaming]);
-
-  const remarkPlugins = isStreaming
-    ? (preserveNewlines ? REMARK_PLUGINS_STREAMING_WITH_BREAKS : REMARK_PLUGINS_STREAMING_DEFAULT)
-    : (preserveNewlines ? REMARK_PLUGINS_WITH_BREAKS : REMARK_PLUGINS_DEFAULT);
-  const rehypePlugins = isStreaming ? REHYPE_PLUGINS_STREAMING : REHYPE_PLUGINS;
+  }, [basePath, tabId]);
 
   return (
     <div className={`break-words ${compact ? 'text-sm' : 'text-base'}`}>
       <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={rehypePlugins}
+        remarkPlugins={preserveNewlines ? REMARK_PLUGINS_WITH_BREAKS : REMARK_PLUGINS_DEFAULT}
+        rehypePlugins={REHYPE_PLUGINS}
         components={components}
       >
         {processedContent}
