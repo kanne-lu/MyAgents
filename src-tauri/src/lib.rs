@@ -4,6 +4,7 @@
 pub mod app_dirs;
 pub mod attachment_protocol;
 pub mod cli;
+pub mod config_io;
 mod commands;
 pub mod cron_task;
 pub mod im;
@@ -287,6 +288,7 @@ pub fn run() {
             commands::cmd_delete_workspace_file,
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
+            config_io::cmd_fsync_path,
             // Full-text search commands
             search::cmd_search_sessions,
             search::cmd_search_workspace_files,

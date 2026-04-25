@@ -8,7 +8,8 @@ import {
     remove,
     rename,
 } from '@tauri-apps/plugin-fs';
-import { homeDir, join } from '@tauri-apps/api/path';
+import { homeDir, join, dirname } from '@tauri-apps/api/path';
+import { invoke } from '@tauri-apps/api/core';
 import { isBrowserDevMode } from '@/utils/browserMock';
 import { stripBom } from '../../../shared/utils';
 
@@ -29,7 +30,19 @@ export function createAsyncLock() {
 }
 
 export const withProjectsLock = createAsyncLock();
-export const withConfigLock = createAsyncLock();
+const withConfigProcessLock = createAsyncLock();
+
+const CONFIG_LOCK_TIMEOUT_MS = 5000;
+const CONFIG_LOCK_POLL_MS = 50;
+
+export class ConfigBusyError extends Error {
+    readonly code = 'CONFIG_BUSY';
+
+    constructor(message = 'Config busy: could not acquire config.json.lock within 5000ms; retry') {
+        super(message);
+        this.name = 'ConfigBusyError';
+    }
+}
 
 // ============= Constants =============
 
@@ -37,6 +50,15 @@ export const CONFIG_DIR_NAME = '.myagents';
 export const CONFIG_FILE = 'config.json';
 export const PROJECTS_FILE = 'projects.json';
 export const PROVIDERS_DIR = 'providers';
+
+export async function withConfigLock<T>(fn: () => Promise<T>): Promise<T> {
+    return withConfigProcessLock(async () => {
+        await ensureConfigDir();
+        const dir = await getConfigDir();
+        const configPath = await join(dir, CONFIG_FILE);
+        return withFileLock(configPath, fn);
+    });
+}
 
 // ============= Safe File I/O Utilities =============
 
@@ -59,6 +81,7 @@ export async function safeWriteJson(filePath: string, data: unknown): Promise<vo
 
     // 1. Write new data to .tmp
     await writeTextFile(tmpPath, content);
+    await fsyncPath(tmpPath, false);
 
     // 2. Backup current file → .bak (best-effort, copy preserves main)
     try {
@@ -74,6 +97,7 @@ export async function safeWriteJson(filePath: string, data: unknown): Promise<vo
 
     // 3. Atomic overwrite: .tmp → target (main file is never absent)
     await rename(tmpPath, filePath);
+    await fsyncPath(await dirname(filePath), true);
 }
 
 /**
@@ -138,4 +162,51 @@ export async function ensureConfigDir(): Promise<void> {
     if (!(await exists(providersDir))) {
         await mkdir(providersDir, { recursive: true });
     }
+}
+
+async function withFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+    const lockDir = filePath + '.lock';
+    await acquireFileLock(lockDir);
+    try {
+        return await fn();
+    } finally {
+        await releaseFileLock(lockDir);
+    }
+}
+
+async function acquireFileLock(lockDir: string): Promise<void> {
+    const start = Date.now();
+    while (true) {
+        try {
+            await mkdir(lockDir);
+            try {
+                await writeTextFile(await join(lockDir, 'owner'), `renderer:${Date.now()}\n`);
+            } catch {
+                // Owner file is diagnostic only.
+            }
+            return;
+        } catch {
+            if (Date.now() - start >= CONFIG_LOCK_TIMEOUT_MS) {
+                throw new ConfigBusyError();
+            }
+            await delay(CONFIG_LOCK_POLL_MS);
+        }
+    }
+}
+
+async function releaseFileLock(lockDir: string): Promise<void> {
+    try {
+        await remove(lockDir, { recursive: true });
+    } catch {
+        // Best-effort unlock. Timeout errors on future acquisitions make this visible.
+    }
+}
+
+async function fsyncPath(path: string, directory: boolean): Promise<void> {
+    if (isBrowserDevMode()) return;
+    await invoke('cmd_fsync_path', { path, directory });
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }

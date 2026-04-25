@@ -6,7 +6,19 @@
  * Atomicity is guaranteed by write-to-tmp → rename pattern.
  */
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync, renameSync , readdirSync } from 'fs';
+import {
+  readFileSync,
+  writeFileSync,
+  copyFileSync,
+  existsSync,
+  renameSync,
+  readdirSync,
+  mkdirSync,
+  rmSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+} from 'fs';
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
@@ -30,6 +42,18 @@ function getConfigPath(): string {
 
 function getProjectsPath(): string {
   return resolve(getConfigDir(), 'projects.json');
+}
+
+const CONFIG_LOCK_TIMEOUT_MS = 5000;
+const CONFIG_LOCK_POLL_MS = 50;
+
+export class ConfigBusyError extends Error {
+  readonly code = 'CONFIG_BUSY';
+
+  constructor(message = 'Config busy: could not acquire config.json.lock within 5000ms; retry') {
+    super(message);
+    this.name = 'ConfigBusyError';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,10 +140,10 @@ export function loadConfig(): AdminAppConfig {
 }
 
 /**
- * Atomic read-modify-write on config.json.
- * Pattern: read → modify → write .tmp → backup .bak → rename .tmp → target
+ * Cross-process serialized read-modify-write on config.json.
+ * Pattern: lock → read fresh → modify → write .tmp → fsync → backup .bak → rename → fsync dir.
  */
-export function atomicModifyConfig(
+export function withConfigLock(
   modifier: (config: AdminAppConfig) => AdminAppConfig
 ): AdminAppConfig {
   const configPath = getConfigPath();
@@ -130,19 +154,89 @@ export function atomicModifyConfig(
     ensureDirSync(configDir);
   }
 
-  const config = loadConfig();
-  const modified = modifier(config);
+  const lockDir = configPath + '.lock';
+  acquireConfigLock(lockDir);
+  try {
+    const config = loadConfig();
+    const before = JSON.stringify(config);
+    const modified = modifier(config);
 
-  const tmpPath = configPath + '.tmp';
-  const bakPath = configPath + '.bak';
+    if (JSON.stringify(modified) === before) {
+      return modified;
+    }
 
-  writeFileSync(tmpPath, JSON.stringify(modified, null, 2), 'utf-8');
-  if (existsSync(configPath)) {
-    try { copyFileSync(configPath, bakPath); } catch { /* best-effort backup */ }
+    const tmpPath = configPath + '.tmp';
+    const bakPath = configPath + '.bak';
+
+    writeFileSynced(tmpPath, JSON.stringify(modified, null, 2));
+    if (existsSync(configPath)) {
+      try { copyFileSync(configPath, bakPath); } catch { /* best-effort backup */ }
+    }
+    renameSync(tmpPath, configPath);
+    fsyncDir(configDir);
+
+    return modified;
+  } finally {
+    releaseConfigLock(lockDir);
   }
-  renameSync(tmpPath, configPath);
+}
 
-  return modified;
+export function atomicModifyConfig(
+  modifier: (config: AdminAppConfig) => AdminAppConfig
+): AdminAppConfig {
+  return withConfigLock(modifier);
+}
+
+function acquireConfigLock(lockDir: string): void {
+  const start = Date.now();
+  while (true) {
+    try {
+      mkdirSync(lockDir);
+      try {
+        writeFileSync(resolve(lockDir, 'owner'), `node:${process.pid}\n`, 'utf-8');
+      } catch { /* owner is diagnostic only */ }
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
+      }
+      if (Date.now() - start >= CONFIG_LOCK_TIMEOUT_MS) {
+        throw new ConfigBusyError();
+      }
+      sleepSync(CONFIG_LOCK_POLL_MS);
+    }
+  }
+}
+
+function releaseConfigLock(lockDir: string): void {
+  try {
+    rmSync(lockDir, { recursive: true, force: true });
+  } catch { /* best-effort unlock */ }
+}
+
+function writeFileSynced(path: string, content: string): void {
+  const fd = openSync(path, 'w', 0o600);
+  try {
+    writeFileSync(fd, content, 'utf-8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function fsyncDir(dir: string): void {
+  if (process.platform === 'win32') return;
+  let fd: number | null = null;
+  try {
+    fd = openSync(dir, 'r');
+    fsyncSync(fd);
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // ---------------------------------------------------------------------------

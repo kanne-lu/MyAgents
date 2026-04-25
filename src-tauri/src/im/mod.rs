@@ -25,6 +25,7 @@ use reqwest::Client;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Runtime};
 use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
+use crate::config_io::with_config_lock;
 use tokio::sync::{watch, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 
@@ -4323,67 +4324,52 @@ fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
 fn persist_agent_config_patch(agent_id: &str, patch: &AgentConfigPatch) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
 
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
+    with_config_lock(&config_path, true, |config| {
+        let agents = config.get_mut("agents")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| "[agent] No agents[] in config.json".to_string())?;
+        let agent = agents.iter_mut()
+            .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(agent_id))
+            .ok_or_else(|| format!("[agent] Agent {} not found in config.json", agent_id))?;
 
-    let agents = config.get_mut("agents")
-        .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| "[agent] No agents[] in config.json".to_string())?;
-    let agent = agents.iter_mut()
-        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(agent_id))
-        .ok_or_else(|| format!("[agent] Agent {} not found in config.json", agent_id))?;
+        // Apply patch fields
+        macro_rules! apply_field {
+            ($field:ident, $key:expr) => {
+                if let Some(ref val) = patch.$field {
+                    agent[$key] = serde_json::json!(val);
+                }
+            };
+        }
+        apply_field!(name, "name");
+        apply_field!(icon, "icon");
+        apply_field!(enabled, "enabled");
+        apply_field!(provider_id, "providerId");
+        apply_field!(model, "model");
+        apply_field!(provider_env_json, "providerEnvJson");
+        apply_field!(permission_mode, "permissionMode");
+        apply_field!(mcp_enabled_servers, "mcpEnabledServers");
+        apply_field!(runtime, "runtime");
+        apply_field!(setup_completed, "setupCompleted");
 
-    // Apply patch fields
-    macro_rules! apply_field {
-        ($field:ident, $key:expr) => {
-            if let Some(ref val) = patch.$field {
-                agent[$key] = serde_json::json!(val);
-            }
-        };
-    }
-    apply_field!(name, "name");
-    apply_field!(icon, "icon");
-    apply_field!(enabled, "enabled");
-    apply_field!(provider_id, "providerId");
-    apply_field!(model, "model");
-    apply_field!(provider_env_json, "providerEnvJson");
-    apply_field!(permission_mode, "permissionMode");
-    apply_field!(mcp_enabled_servers, "mcpEnabledServers");
-    apply_field!(runtime, "runtime");
-    apply_field!(setup_completed, "setupCompleted");
+        if let Some(ref runtime_config) = patch.runtime_config {
+            agent["runtimeConfig"] = runtime_config.clone();
+        }
 
-    if let Some(ref runtime_config) = patch.runtime_config {
-        agent["runtimeConfig"] = runtime_config.clone();
-    }
+        if let Some(ref channels) = patch.channels {
+            agent["channels"] = serde_json::to_value(channels)
+                .map_err(|e| format!("[agent] Failed to serialize channels: {}", e))?;
+        }
 
-    if let Some(ref channels) = patch.channels {
-        agent["channels"] = serde_json::to_value(channels)
-            .map_err(|e| format!("[agent] Failed to serialize channels: {}", e))?;
-    }
-
-    if let Some(ref hb_json) = patch.heartbeat_config_json {
-        if !hb_json.is_empty() && hb_json != "null" {
-            if let Ok(hb) = serde_json::from_str::<serde_json::Value>(hb_json) {
-                agent["heartbeat"] = hb;
+        if let Some(ref hb_json) = patch.heartbeat_config_json {
+            if !hb_json.is_empty() && hb_json != "null" {
+                if let Ok(hb) = serde_json::from_str::<serde_json::Value>(hb_json) {
+                    agent["heartbeat"] = hb;
+                }
             }
         }
-    }
-
-    // Atomic write: tmp → bak → rename
-    let serialized = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
-    std::fs::write(&tmp_path, &serialized)
-        .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
-    if config_path.exists() {
-        let _ = std::fs::copy(&config_path, &bak_path);
-    }
-    std::fs::rename(&tmp_path, &config_path)
-        .map_err(|e| format!("[agent] Failed to rename tmp → config: {}", e))?;
+        Ok(())
+    })?;
 
     ulog_info!("[agent] Persisted config patch for agent {}", agent_id);
     Ok(())
@@ -5226,17 +5212,11 @@ pub async fn cmd_im_conversations(
 // ===== Unified Config Commands (v0.1.26) =====
 
 /// Persist a partial patch to a single bot's entry in `~/.myagents/config.json`.
-/// Uses atomic write (.tmp.rust → .bak → rename). `None` = no change, `Some("")` = clear.
+/// Uses the shared config lock. `None` = no change, `Some("")` = clear.
 fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
-
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
+    with_config_lock(&config_path, true, |config| {
 
     // Find the bot/channel entry: search legacy imBotConfigs first, then agents[].channels[] (v0.1.42)
     // Use JSON Pointer path to locate the entry, then get a mutable reference.
@@ -5402,20 +5382,8 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
         }
     }
 
-    // Atomic write
-    let new_content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
-    std::fs::write(&tmp_path, &new_content)
-        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
-    if config_path.exists() {
-        let _ = std::fs::rename(&config_path, &bak_path);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-        if bak_path.exists() && !config_path.exists() {
-            let _ = std::fs::rename(&bak_path, &config_path);
-        }
-        return Err(format!("[im] Cannot rename tmp config: {}", e));
-    }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -5636,42 +5604,22 @@ async fn update_bot_config_internal<R: Runtime>(
 fn add_bot_config_to_disk(bot_config: &serde_json::Value) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
-
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
-
-    // Ensure imBotConfigs array exists
-    if config.get("imBotConfigs").is_none() {
-        config["imBotConfigs"] = serde_json::json!([]);
-    }
-    let bots = config.get_mut("imBotConfigs").unwrap().as_array_mut().unwrap();
-
-    // Upsert: if bot with same id exists, replace it; otherwise append
-    let bot_id = bot_config.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if let Some(pos) = bots.iter().position(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
-        bots[pos] = bot_config.clone();
-    } else {
-        bots.push(bot_config.clone());
-    }
-
-    // Atomic write
-    let new_content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
-    std::fs::write(&tmp_path, &new_content)
-        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
-    if config_path.exists() {
-        let _ = std::fs::rename(&config_path, &bak_path);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-        if bak_path.exists() && !config_path.exists() {
-            let _ = std::fs::rename(&bak_path, &config_path);
+    with_config_lock(&config_path, true, |config| {
+        // Ensure imBotConfigs array exists
+        if config.get("imBotConfigs").is_none() {
+            config["imBotConfigs"] = serde_json::json!([]);
         }
-        return Err(format!("[im] Cannot rename tmp config: {}", e));
-    }
+        let bots = config.get_mut("imBotConfigs").unwrap().as_array_mut().unwrap();
+
+        // Upsert: if bot with same id exists, replace it; otherwise append
+        let bot_id = bot_config.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(pos) = bots.iter().position(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
+            bots[pos] = bot_config.clone();
+        } else {
+            bots.push(bot_config.clone());
+        }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -5680,31 +5628,12 @@ fn add_bot_config_to_disk(bot_config: &serde_json::Value) -> Result<(), String> 
 fn remove_bot_config_from_disk(bot_id: &str) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
-
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
-
-    if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
-        bots.retain(|b| b.get("id").and_then(|v| v.as_str()) != Some(bot_id));
-    }
-
-    let new_content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
-    std::fs::write(&tmp_path, &new_content)
-        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
-    if config_path.exists() {
-        let _ = std::fs::rename(&config_path, &bak_path);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-        if bak_path.exists() && !config_path.exists() {
-            let _ = std::fs::rename(&bak_path, &config_path);
+    with_config_lock(&config_path, true, |config| {
+        if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
+            bots.retain(|b| b.get("id").and_then(|v| v.as_str()) != Some(bot_id));
         }
-        return Err(format!("[im] Cannot rename tmp config: {}", e));
-    }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -6867,33 +6796,19 @@ pub async fn cmd_create_agent(
     tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
         let config_path = home.join(".myagents").join("config.json");
-        let tmp_path = config_path.with_extension("json.tmp.rust");
-        let bak_path = config_path.with_extension("json.bak");
 
-        let content = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
-        let mut app_config: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
-
-        let agents = app_config.get_mut("agents")
-            .and_then(|v| v.as_array_mut());
-        let agent_value = serde_json::to_value(&config)
-            .map_err(|e| format!("[agent] Failed to serialize agent: {}", e))?;
-        if let Some(arr) = agents {
-            arr.push(agent_value);
-        } else {
-            app_config["agents"] = serde_json::json!([agent_value]);
-        }
-
-        let serialized = serde_json::to_string_pretty(&app_config)
-            .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
-        std::fs::write(&tmp_path, &serialized)
-            .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
-        if config_path.exists() {
-            let _ = std::fs::copy(&config_path, &bak_path);
-        }
-        std::fs::rename(&tmp_path, &config_path)
-            .map_err(|e| format!("[agent] Failed to rename: {}", e))?;
+        with_config_lock(&config_path, true, |app_config| {
+            let agents = app_config.get_mut("agents")
+                .and_then(|v| v.as_array_mut());
+            let agent_value = serde_json::to_value(&config)
+                .map_err(|e| format!("[agent] Failed to serialize agent: {}", e))?;
+            if let Some(arr) = agents {
+                arr.push(agent_value);
+            } else {
+                app_config["agents"] = serde_json::json!([agent_value]);
+            }
+            Ok(())
+        })?;
 
         Ok::<(), String>(())
     }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
@@ -6930,27 +6845,13 @@ pub async fn cmd_delete_agent(
     tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
         let config_path = home.join(".myagents").join("config.json");
-        let tmp_path = config_path.with_extension("json.tmp.rust");
-        let bak_path = config_path.with_extension("json.bak");
 
-        let content = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
-        let mut app_config: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
-
-        if let Some(agents) = app_config.get_mut("agents").and_then(|v| v.as_array_mut()) {
-            agents.retain(|a| a.get("id").and_then(|v| v.as_str()) != Some(&aid));
-        }
-
-        let serialized = serde_json::to_string_pretty(&app_config)
-            .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
-        std::fs::write(&tmp_path, &serialized)
-            .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
-        if config_path.exists() {
-            let _ = std::fs::copy(&config_path, &bak_path);
-        }
-        std::fs::rename(&tmp_path, &config_path)
-            .map_err(|e| format!("[agent] Failed to rename: {}", e))?;
+        with_config_lock(&config_path, true, |app_config| {
+            if let Some(agents) = app_config.get_mut("agents").and_then(|v| v.as_array_mut()) {
+                agents.retain(|a| a.get("id").and_then(|v| v.as_str()) != Some(&aid));
+            }
+            Ok(())
+        })?;
 
         // Clean up agent data directory (~/.myagents/agents/{agentId}/)
         let agent_data_dir = home.join(".myagents").join("agents").join(&aid);

@@ -116,7 +116,11 @@ export async function atomicModifyConfig(
     }
     return withConfigLock(async () => {
         const latest = await loadAppConfig();
+        const before = JSON.stringify(latest);
         const modified = modifier(latest);
+        if (JSON.stringify(modified) === before) {
+            return modified;
+        }
         await _writeAppConfigLocked(modified);
         return modified;
     });
