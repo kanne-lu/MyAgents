@@ -3151,10 +3151,17 @@ async function main() {
           const isActiveBuiltin = sessionId === getSessionId();
           const isActiveExternal = shouldUseExternalRuntime() && sessionId === getExternalSessionId();
           if (isActiveBuiltin || isActiveExternal) {
+            // CRITICAL: include `runtime` so the frontend's TabProvider doesn't
+            // fall back to `'builtin'` (line 2645: `runtime || 'builtin'`). For
+            // a pre-warmed external session whose metadata hasn't been persisted
+            // yet, omitting runtime makes `currentRuntime` resolve to 'builtin',
+            // which then triggers the unified model-push effect to send the
+            // builtin preset model — killing the just-prewarmed external process.
             return jsonResponse({
               success: true,
               session: {
                 id: sessionId,
+                runtime: isActiveExternal ? getActiveRuntimeType() : 'builtin',
                 messages: [],
                 liveStreamingMessage: null,
                 liveSessionState: isActiveExternal ? getExternalSessionState() : undefined,
@@ -3364,20 +3371,29 @@ async function main() {
           return jsonResponse({ success: false, error: 'sessionId is required.' }, 400);
         }
 
-        // Stop external runtime subprocess before switching to a DIFFERENT session.
-        // Reopening the same running external session must attach, not interrupt the turn.
-        if (shouldUseExternalRuntime() && isExternalSessionActive() && payload.sessionId !== getExternalSessionId()) {
-          await stopExternalSession();
+        // External runtime path: builtin's `switchToSession` looks up the session
+        // in builtin SessionStore, but external sessions are persisted lazily
+        // (only on first user message — pre-warm doesn't write metadata). Falling
+        // through to builtin would always 404 for a freshly-prewarmed external
+        // session and pollute the log with misleading "session not found" errors.
+        // Handle external runtime directly without consulting builtin's store.
+        if (shouldUseExternalRuntime()) {
+          // Switching to a DIFFERENT live external session — tear down current first.
+          // Reopening the same running session must attach, not interrupt.
+          if (isExternalSessionActive() && payload.sessionId !== getExternalSessionId()) {
+            await stopExternalSession();
+          }
+          // Idempotent — sets up resume state (runtimeSessionId / threadId / lastModel
+          // etc.) for the next user message. Safe for already-active sessions
+          // (sessionId === lastSessionId short-circuits the state reset inside).
+          restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
+          console.log(`[sessions] Switched to external session: ${payload.sessionId}`);
+          return jsonResponse({ success: true, sessionId: payload.sessionId });
         }
 
         const success = await switchToSession(payload.sessionId);
         if (!success) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
-        }
-
-        // Restore external runtime state for the target session (enables --resume on next message)
-        if (shouldUseExternalRuntime()) {
-          restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
         }
 
         console.log(`[sessions] Switched to session: ${payload.sessionId}`);

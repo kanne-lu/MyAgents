@@ -507,6 +507,12 @@ export async function setExternalModel(model: string): Promise<void> {
   if (startingPromise) {
     await startingPromise;
   }
+  // Idempotent short-circuit: same model means nothing to do. Defense-in-depth
+  // against frontend pushing the same value twice (e.g. mid-render dedupe ref
+  // reset) — without this, the fallback `stopExternalSession()` path would
+  // needlessly kill the running process and we'd pay a cold restart on the
+  // next user message.
+  if (model === lastModel) return;
   lastModel = model;
   console.log(`[external-session] Model set to "${model}"`);
 
