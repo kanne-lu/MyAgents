@@ -171,19 +171,39 @@ function asNumberOrUndef(v: unknown): number | undefined {
 
 // ============= Conversion =============
 
+/**
+ * Synthesize an `inputModalities` array from a DiscoveredModel's boolean
+ * capability flags. Returns `undefined` when BOTH flags are undefined — the
+ * discovery API didn't say either way, so we MUST stay in the optimistic
+ * "default-allow" state instead of fabricating `['text']` (which would lock
+ * the model to text-only and silently filter user images even on
+ * vision-capable providers like GPT-4V whose discovery payload may not
+ * surface `supportsImage`). When at least one flag is set we emit the full
+ * array (always seeding `text` since every chat model accepts text).
+ *
+ * Shared by `toModelEntity` (persisted form) and `DiscoveredModelRow`
+ * (preview UI) so they can't drift.
+ */
+export function synthesizeModalitiesFromDiscovered(d: DiscoveredModel): string[] | undefined {
+  // No capability information at all → leave undefined (optimistic).
+  if (d.supportsImage === undefined && d.supportsVideo === undefined) {
+    return undefined;
+  }
+  const mods: string[] = ['text'];
+  if (d.supportsImage) mods.push('image');
+  if (d.supportsVideo) mods.push('video');
+  return mods;
+}
+
 /** Convert a discovered model to a persistable ModelEntity */
 export function toModelEntity(d: DiscoveredModel, provider: Provider): ModelEntity {
-  const modalities: string[] = ['text'];
-  if (d.supportsImage) modalities.push('image');
-  if (d.supportsVideo) modalities.push('video');
-
   return {
     model: d.id,
     modelName: d.displayName ?? d.id,
     modelSeries: provider.vendor.toLowerCase(),
     contextLength: d.contextLength,
     maxOutputTokens: d.maxOutputTokens,
-    inputModalities: modalities,
+    inputModalities: synthesizeModalitiesFromDiscovered(d),
     source: 'discovered',
   };
 }

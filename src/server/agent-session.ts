@@ -6,7 +6,7 @@ import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SD
 import { getScriptDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
-import { lookupModelContextLength } from './utils/model-capabilities';
+import { lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 // Context helpers only — tool server singletons are no longer exported from
 // these modules. The actual SDK server objects are created on-demand via
@@ -386,6 +386,53 @@ export type MessageWire = {
 };
 
 const requireModule = createRequire(import.meta.url);
+
+/**
+ * Strip image content blocks from a queued user message when the resolved
+ * model has lost `image` modality support since enqueue time. Defensive
+ * second pass — `enqueueUserMessage` is the primary filter (ran against the
+ * model at the time of enqueue); this re-checks against the model active at
+ * yield time so a mid-turn model switch can't leak baked image blocks into
+ * a text-only model's request.
+ *
+ * Returns the input untouched in the common case (no drift). Only allocates
+ * when re-stripping is required.
+ */
+function stripUnsupportedModalityBlocks(
+  message: SDKUserMessage['message'],
+  modelAtYield: string | undefined,
+): SDKUserMessage['message'] {
+  const content = message.content;
+  if (!Array.isArray(content)) return message;
+  // Fast-path: no image block → nothing to strip.
+  let hasImageBlock = false;
+  for (const block of content) {
+    if (block && typeof block === 'object' && (block as { type?: string }).type === 'image') {
+      hasImageBlock = true;
+      break;
+    }
+  }
+  if (!hasImageBlock) return message;
+  if (modelSupportsModality(modelAtYield, 'image')) return message;
+
+  // Drift detected: filter out image blocks; if nothing usable remains,
+  // append a synthetic placeholder so the SDK still receives a non-empty
+  // user turn. Mirrors the synthetic-note path in enqueueUserMessage.
+  const kept = content.filter(b => !(b && typeof b === 'object' && (b as { type?: string }).type === 'image'));
+  const droppedCount = content.length - kept.length;
+  if (kept.length === 0) {
+    kept.push({ type: 'text', text: `[${droppedCount} image attachment(s) omitted — current model does not support image input]` });
+  }
+  console.log(`[agent] modality re-strip at dequeue: dropped ${droppedCount} image block(s) for model=${modelAtYield ?? '(unknown)'} (model changed since enqueue)`);
+  broadcast('chat:attachments-filtered', {
+    reason: 'modality',
+    kind: 'image',
+    count: droppedCount,
+    model: modelAtYield ?? null,
+    phase: 'dequeue',
+  });
+  return { ...message, content: kept };
+}
 
 let agentDir = '';
 let hasInitialPrompt = false;
@@ -4870,9 +4917,28 @@ export async function enqueueUserMessage(
     | { type: 'image'; source: { type: 'base64'; media_type: ImageMediaType; data: string } }
   > = [];
 
+  // Modality gate. The full image array is still saved to disk above
+  // (`savedAttachments`) so the UI message bubble shows what the user sent.
+  // What we drop here is just the SDK content blocks for unsupported
+  // modalities — the model never sees them. Defaults to allow when the model
+  // is unknown (custom provider with no `inputModalities` set), per spec.
+  // This is the authoritative filter point: IM Bot / Cron / Agent Channel
+  // also flow through `enqueueUserMessage`, so frontend toasts are an
+  // ergonomic enhancement, not the security boundary.
+  //
+  // We resolve against the message's intended model: caller-provided `model`
+  // if any (this is the model that will actually run the turn — applied via
+  // `applySessionConfig` further down on the non-busy path; on the queued/
+  // busy path it's intentionally inherited rather than applied per existing
+  // provider-env semantics, and `stripUnsupportedModalityBlocks` re-checks
+  // at dequeue to catch any drift), otherwise the session's current model.
+  const modelForFilter = model ?? currentModel;
+  const imagesAllowed = modelSupportsModality(modelForFilter, 'image');
+  const filteredImageCount = hasImages && !imagesAllowed ? images!.length : 0;
+
   // Add images first so Claude can see them before the text query
   // Images are resized/sliced server-side to stay within API limits (≤1568px, long images → 1:2 tiles)
-  if (hasImages) {
+  if (hasImages && imagesAllowed) {
     for (const img of images) {
       let tiles: Awaited<ReturnType<typeof processImage>>;
       try {
@@ -4906,6 +4972,21 @@ export async function enqueueUserMessage(
         });
       }
     }
+  } else if (filteredImageCount > 0) {
+    // Models without image support: surface a synthetic note in the SDK
+    // payload so the model isn't confused by the user appearing to "send
+    // nothing". Same shape as the per-image error path above.
+    console.log(`[agent] modality filter: dropping ${filteredImageCount} image(s) for model=${modelForFilter ?? '(unknown)'} (text-only)`);
+    contentBlocks.push({
+      type: 'text',
+      text: `[${filteredImageCount} image attachment(s) omitted — current model does not support image input]`,
+    });
+    broadcast('chat:attachments-filtered', {
+      reason: 'modality',
+      kind: 'image',
+      count: filteredImageCount,
+      model: modelForFilter ?? null,
+    });
   }
 
   // Add text content if present
@@ -7235,10 +7316,22 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       // to true during the restart. Reset it so delta/block-end events are forwarded.
       imCallbackNulledDuringTurn = false;
     }
+
+    // Modality re-check at dequeue. The earlier filter in enqueueUserMessage
+    // ran against the model active at enqueue time. If the user switched to a
+    // text-only model in the gap before this dequeue (rare but real — e.g.
+    // pasted image + text on Claude, then realized DeepSeek was the
+    // intended target, switched, AI was still mid-turn so message stayed
+    // queued), the baked content blocks would carry image blocks the new
+    // model can't accept. Strip last-minute against `currentModel`. This is
+    // defensive — the enqueue-time filter is still authoritative for the
+    // common case; we only rewrite content here when modality drifted.
+    const yieldedMessage = stripUnsupportedModalityBlocks(item.message, currentModel);
+
     console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, midTurn=${isMidTurnInjection}`);
     yield {
       type: 'user' as const,
-      message: item.message,
+      message: yieldedMessage,
       parent_tool_use_id: null,
       session_id: getSessionId()
     };

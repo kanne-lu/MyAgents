@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, use
 
 import Tip from '@/components/Tip';
 import { useToast } from '@/components/Toast';
+import { ModalityBadges } from '@/components/ModalityBadges';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useTabApiOptional, type SessionState } from '@/context/TabContext';
 import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVerifyStatus, getModelDisplayName } from '@/config/types';
@@ -16,6 +17,7 @@ import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 import { isProviderAvailable } from '@/config/configService';
+import { modelSupportsModality } from '@/config/services/providerService';
 import RuntimeSelector from '@/components/RuntimeSelector';
 import { Popover } from '@/components/ui/Popover';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
@@ -31,6 +33,21 @@ function isProviderWarning(
   if (p.type === 'subscription') return false;
   return !!apiKeys[p.id] && verifyStatus[p.id]?.status === 'invalid';
 }
+
+/**
+ * Resolve the human-friendly label for the current model — display name from
+ * the provider's model list if known, else the raw ID, else a generic
+ * fallback. Used by modality toasts so the message names the actual model
+ * the user picked.
+ */
+function getCurrentModelLabel(
+  provider: Provider | null | undefined,
+  modelId: string | undefined,
+): string {
+  if (!modelId) return '当前模型';
+  return provider ? getModelDisplayName(provider, modelId) : modelId;
+}
+
 
 // Image attachment type
 export interface ImageAttachment {
@@ -572,6 +589,30 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       }
     }
 
+    // Modality warning at the input boundary. Sidecar still strips images on
+    // send (authoritative) — this is purely UX so the user knows the moment
+    // they paste/drop. We still queue the images into the UI: the user can
+    // see them in the message bubble post-send, can switch to a multimodal
+    // model and re-send, etc. One toast per batch (paste of 5 images = 1
+    // toast, not 5).
+    //
+    // Skip the toast for external runtimes (Claude Code CLI / Codex / Gemini
+    // CLI). The Sidecar modality gate lives only in the builtin
+    // `enqueueUserMessage` path; external runtimes go through
+    // `external-session.ts` which has no filter. Showing "will be filtered"
+    // there is a false promise (no filter actually runs) AND a false warning
+    // for runtimes whose models DO accept images (Gemini 2.5 / 3 are
+    // multimodal). Coverage of external runtimes is deliberate V1 scope-skip.
+    if (
+      imageFiles.length > 0 &&
+      !isExternalRuntime &&
+      !modelSupportsModality(provider, currentModelId, 'image')
+    ) {
+      toastRef.current.warning(
+        `${getCurrentModelLabel(provider, currentModelId)} 不支持图片输入，发送时会自动过滤，仅文本送达`,
+      );
+    }
+
     // Handle image files with the original addImage logic (no API needed)
     for (const file of imageFiles) {
       addImage(file);
@@ -644,7 +685,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         toastRef.current.error(err instanceof Error ? err.message : '文件上传失败');
       }
     }
-  }, [apiPost, addImage, inputValue, textareaRef, undoStack, fileToBase64, onWorkspaceRefresh]);
+  }, [apiPost, addImage, inputValue, textareaRef, undoStack, fileToBase64, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime]);
 
   // Process file paths from Tauri drag-drop (uses /api/files/copy)
   const processDroppedFilePaths = useCallback(async (paths: string[]) => {
@@ -670,6 +711,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       } else {
         otherPaths.push(path);
       }
+    }
+
+    // Modality warning at input boundary (mirrors processDroppedFiles).
+    // Sidecar still strips on send; this is purely UX. External runtimes are
+    // skipped — see processDroppedFiles for the rationale.
+    if (
+      imagePaths.length > 0 &&
+      !isExternalRuntime &&
+      !modelSupportsModality(provider, currentModelId, 'image')
+    ) {
+      toastRef.current.warning(
+        `${getCurrentModelLabel(provider, currentModelId)} 不支持图片输入，发送时会自动过滤，仅文本送达`,
+      );
     }
 
     // Handle image files - read via backend API and add as image attachments
@@ -782,7 +836,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         toastRef.current.error(err instanceof Error ? err.message : '文件复制失败');
       }
     }
-  }, [apiPost, addImage, inputValue, textareaRef, undoStack, onWorkspaceRefresh]);
+  }, [apiPost, addImage, inputValue, textareaRef, undoStack, onWorkspaceRefresh, provider, currentModelId, isExternalRuntime]);
 
   // Insert @references at cursor position or end of input
   // Uses inputValueRef for stable callback (avoids rebuilding on every input change)
@@ -1058,6 +1112,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     if (sendingRef.current) return;
     sendingRef.current = true;
 
+    // Send-time modality reminder: paste-time toast may have scrolled past or
+    // the user may have just switched the model AFTER pasting an image. Sidecar
+    // is still the authoritative filter — this is just one final heads-up.
+    // Skipped for external runtimes (filter only lives in builtin path).
+    if (
+      images.length > 0 &&
+      !isExternalRuntime &&
+      !modelSupportsModality(provider, currentModelId, 'image')
+    ) {
+      toastRef.current.warning(
+        `${getCurrentModelLabel(provider, currentModelId)} 不支持图片，已自动过滤 ${images.length} 张图片，仅文本已送达`,
+      );
+    }
+
     try {
       // Delegate thought-mode persistence to the caller (Launcher
       // BrandSection owns `thoughtCreate` + refresh-key bump). The
@@ -1074,7 +1142,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     } finally {
       sendingRef.current = false;
     }
-  }, [onSend, images, inputValue]);
+  }, [onSend, images, inputValue, provider, currentModelId, isExternalRuntime]);
 
   // Handle keyboard navigation in file search and slash menu
   const handleKeyDown = useCallback(async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1895,13 +1963,14 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               }
                               setShowModelMenu(false);
                             }}
-                            className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                            className={`flex w-full items-center rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
                               isSelected
                                 ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
                                 : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                             }`}
                           >
-                            {model.modelName}
+                            <span className="truncate">{model.modelName}</span>
+                            <ModalityBadges modalities={model.inputModalities} className="ml-2" />
                           </button>
                         );
                       })}

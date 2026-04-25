@@ -59,8 +59,19 @@ import { PRESET_PROVIDERS } from '../../renderer/config/types';
 export interface ModelCapability {
   contextLength?: number;
   maxOutputTokens?: number;
+  /**
+   * Input modalities the model accepts. Currently consumed by the
+   * attachment-filter path in agent-session.ts (only the 'image' value is
+   * acted on this release). Stored as the full list (`text`, `image`,
+   * `video`, `audio`) so the same data drives the future video/audio
+   * filters and the modality badges in the model picker without re-research.
+   */
+  inputModalities?: string[];
   source: 'preset' | 'custom' | 'discovered';
 }
+
+/** Modality kinds we recognize. Mirrors OpenAI / OpenRouter convention. */
+export type ModalityKind = 'text' | 'image' | 'video' | 'audio';
 
 // Safety caps for malicious / runaway inputs. A rogue ~/.myagents/providers/
 // directory with thousands of files would otherwise freeze the event loop
@@ -80,14 +91,33 @@ function coercePositiveFinite(v: unknown): number | undefined {
   return Math.floor(n);
 }
 
-/** Best-effort extract {contextLength, maxOutputTokens} from a JSON-ish model entry. */
+/** Coerce a JSON-ish input_modalities array to a string[] of known kinds.
+ *  - Non-array → undefined (treated as "no info" → optimistic default-allow)
+ *  - Empty array → undefined (same: no info; users meaning "nothing accepted"
+ *    should write `['text']` explicitly, since text-only IS the meaningful
+ *    minimum and matches how every other source represents it)
+ *  - Lowercased + dedup'd; non-string / oversize items dropped silently
+ *    (defends against accidental Infinity / very long fragments in custom JSON) */
+function coerceModalities(v: unknown): string[] | undefined {
+  if (!Array.isArray(v) || v.length === 0) return undefined;
+  const seen = new Set<string>();
+  for (const item of v) {
+    if (typeof item === 'string' && item.length > 0 && item.length <= 16) {
+      seen.add(item.toLowerCase());
+    }
+  }
+  return seen.size > 0 ? [...seen] : undefined;
+}
+
+/** Best-effort extract {contextLength, maxOutputTokens, inputModalities} from a JSON-ish model entry. */
 function readCapability(entry: unknown, source: ModelCapability['source']): ModelCapability | null {
   if (!entry || typeof entry !== 'object') return null;
   const e = entry as Record<string, unknown>;
   const ctx = coercePositiveFinite(e.contextLength);
   const out = coercePositiveFinite(e.maxOutputTokens);
-  if (!ctx && !out) return null;
-  return { contextLength: ctx, maxOutputTokens: out, source };
+  const mods = coerceModalities(e.inputModalities);
+  if (!ctx && !out && !mods) return null;
+  return { contextLength: ctx, maxOutputTokens: out, inputModalities: mods, source };
 }
 
 function ingestProviderList(
@@ -211,8 +241,30 @@ export function lookupModelContextLength(modelId: string | undefined | null): nu
   return buildRegistry().get(modelId)?.contextLength;
 }
 
-/** Full capability record (contextLength + maxOutputTokens). Exported for future use. */
+/** Full capability record (contextLength + maxOutputTokens + inputModalities). */
 export function lookupModelCapability(modelId: string | undefined | null): ModelCapability | undefined {
   if (!modelId) return undefined;
   return buildRegistry().get(modelId);
+}
+
+/**
+ * Whether the model accepts a given input modality.
+ *
+ * Returns `true` for unknown / unregistered models — the optimistic default
+ * preserves behavior for user-defined custom providers and brand-new models
+ * that haven't propagated to any data source yet, per product requirement
+ * "未知和自定义的就是默认支持" (default-allow). Only an explicit registry
+ * entry whose `inputModalities` lacks the kind returns `false`.
+ *
+ * `text` is always permitted regardless of registry contents (a model with
+ * no listed modalities at all wouldn't be usable).
+ */
+export function modelSupportsModality(
+  modelId: string | undefined | null,
+  kind: ModalityKind,
+): boolean {
+  if (kind === 'text') return true;
+  const cap = lookupModelCapability(modelId);
+  if (!cap || !cap.inputModalities) return true; // unknown → optimistic
+  return cap.inputModalities.includes(kind);
 }

@@ -282,3 +282,38 @@ export function resolveProvider(
     }
     return getFirstAvailableProvider(providers, apiKeys, verifyStatus);
 }
+
+/**
+ * Look up the input modalities of a model on a given provider. Mirrors the
+ * Sidecar-side `lookupModelCapability` semantics for the modality field —
+ * the provider passed in is already merge-with-discovery (see
+ * `mergePresetCustomModels`), so a simple linear scan is authoritative.
+ *
+ * Returns `undefined` when the model isn't registered or has no
+ * `inputModalities` recorded — callers MUST treat that as "default-allow"
+ * (optimistic) so unknown / brand-new / user-defined models aren't blocked.
+ */
+export function lookupModelInputModalities(
+    provider: Provider | null | undefined,
+    modelId: string | undefined | null,
+): string[] | undefined {
+    if (!provider || !modelId) return undefined;
+    const entry = provider.models?.find(m => m.model === modelId);
+    return entry?.inputModalities;
+}
+
+/**
+ * Whether a given (provider, model) accepts the modality. Symmetric with
+ * Sidecar `modelSupportsModality`: text always allowed; unknown
+ * inputModalities defaults to true (optimistic).
+ */
+export function modelSupportsModality(
+    provider: Provider | null | undefined,
+    modelId: string | undefined | null,
+    kind: 'text' | 'image' | 'video' | 'audio',
+): boolean {
+    if (kind === 'text') return true;
+    const mods = lookupModelInputModalities(provider, modelId);
+    if (!mods) return true; // unknown → optimistic default-allow
+    return mods.includes(kind);
+}

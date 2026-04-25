@@ -968,6 +968,22 @@ export interface ExternalSendContext {
  * 1. No previous session → start a new one (first message)
  * 2. Previous process exited → resume with --resume (CC -p mode multi-turn)
  * 3. Process still running → send via stdin (shouldn't happen in -p mode)
+ *
+ * Modality scope (V1): the model-input-modality filter (see
+ * `agent-session.ts::enqueueUserMessage` + `model-capabilities.ts::modelSupportsModality`)
+ * lives only on the builtin Claude Agent SDK path. External runtimes (Claude
+ * Code CLI / Codex / Gemini CLI) pass `images` through unfiltered here.
+ * Rationale:
+ *   - Each external runtime has its own modality contract (Codex blocks
+ *     images, Gemini accepts image+video+audio, CC CLI accepts images).
+ *   - External runtime models aren't in MyAgents' PRESET_PROVIDERS registry,
+ *     so `lookupModelCapability` would return undefined → optimistic
+ *     default-allow → effectively no filter, just runtime overhead.
+ *   - The frontend toast in `SimpleChatInput` is gated behind
+ *     `!isExternalRuntime` to keep UX honest (no false "will be filtered"
+ *     promises on runtimes that pass images through).
+ * If you ever wire modality lookups for external-runtime models, add the
+ * filter here and lift the frontend gate.
  */
 export async function sendExternalMessage(
   text: string,
