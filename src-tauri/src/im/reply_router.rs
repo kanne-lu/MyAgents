@@ -236,7 +236,17 @@ impl ReplyRouter {
             }
 
             "block-end" => {
-                let final_text = data.and_then(|v| v.as_str()).map(|s| s.to_string())
+                // Producer (agent-session.ts) emits `block-end` with `data: ''`
+                // (no payload — the SDK's content_block_stop carries no text).
+                // Empty `data` means "use the slot's accumulated text"; the
+                // legacy `unwrap_or_else` fallback only fired on `None`, so
+                // `Some("")` slipped through as `final_text = ""` → trim empty
+                // → abort_stream (which renders `[Aborted]` on Feishu lark
+                // streaming sessions). Treat empty string as "not provided".
+                let final_text = data
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
                     .unwrap_or_else(|| slot.block_text.clone());
                 if final_text.trim().is_empty() {
                     if let Some(ref did) = slot.draft_id {
@@ -420,7 +430,14 @@ impl ReplyRouter {
             }
 
             "block-end" => {
-                let final_text = data.and_then(|v| v.as_str()).map(|s| s.to_string())
+                // Same fallback semantics as the edit-based path: producer
+                // emits `block-end` with empty `data` — fall back to the slot
+                // accumulator. Without this filter, every block-end aborted
+                // the active stream → Feishu lark card showed `[Aborted]`.
+                let final_text = data
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
                     .unwrap_or_else(|| slot.block_text.clone());
                 if !final_text.trim().is_empty() {
                     if let Some(ref sid) = slot.stream_id {
