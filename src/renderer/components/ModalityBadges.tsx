@@ -10,9 +10,11 @@ import Tip from '@/components/Tip';
  * was an explicit product call (see PRD note: "只展示图片吧，就是图片音频
  * 这种有这种额外模态的时候，你给他就打上标签").
  *
- * **Modality rendering scope (V1):** only `image` is rendered. The
- * `video` and `audio` cases are wired to lucide icons + tooltips and live
- * behind `RENDER_VIDEO_AUDIO_BADGES = false` — flip when supported.
+ * **Modality rendering scope (V1):** only `image` is rendered. Video and
+ * audio are wired (lucide icons + tooltips) but each lives behind its own
+ * feature flag — `RENDER_VIDEO_BADGES` and `RENDER_AUDIO_BADGES` — so they
+ * can be lit up independently as Anthropic adds the corresponding block
+ * types (the two are likely to land on different timelines).
  *
  * Why audio/video aren't rendered today, even when the model claims to
  * support them:
@@ -25,15 +27,25 @@ import Tip from '@/components/Tip';
  *     the user-INPUT path. Image is the only non-text input modality the
  *     entire stack can carry today.
  *   - The OpenAI bridge translates SDK content blocks → OpenAI format; if
- *     the SDK can't emit an audio block, the bridge has nothing to forward,
- *     so even Gemini / Doubao models that natively accept video can't
- *     receive it through our chain.
+ *     the SDK can't emit an audio/video block, the bridge has nothing to
+ *     forward — so even Gemini / Doubao models that natively accept those
+ *     can't receive them through our chain.
+ *
  * Showing badges for capabilities the chain can't deliver is a false
  * promise. The data is intentionally still populated on each preset model
- * (see `PRESET_PROVIDERS`) so flipping `RENDER_VIDEO_AUDIO_BADGES = true`
- * once SDK gains the block types lights everything up without re-research.
+ * (see `PRESET_PROVIDERS`) so flipping a flag once SDK gains the
+ * corresponding block type is a one-line change with no re-research.
+ *
+ * To enable when SDK support arrives:
+ *   1. Verify `ContentBlockParam` in
+ *      `@anthropic-ai/sdk/resources/messages/messages.d.ts` lists the new
+ *      block (look for `VideoBlockParam` / `AudioBlockParam` or similar).
+ *   2. Wire the new block in `agent-session.ts::enqueueUserMessage` content
+ *      construction + `stripUnsupportedModalityBlocks` re-strip path.
+ *   3. Flip the flag below.
  */
-const RENDER_VIDEO_AUDIO_BADGES = false;
+const RENDER_VIDEO_BADGES = false;
+const RENDER_AUDIO_BADGES = false;
 
 export function ModalityBadges({
   modalities,
@@ -49,10 +61,8 @@ export function ModalityBadges({
   if (!modalities || modalities.length === 0) return null;
   const items: Array<{ key: string; label: string; Icon: typeof ImageIcon }> = [];
   if (modalities.includes('image')) items.push({ key: 'image', label: '图片', Icon: ImageIcon });
-  if (RENDER_VIDEO_AUDIO_BADGES) {
-    if (modalities.includes('video')) items.push({ key: 'video', label: '视频', Icon: Video });
-    if (modalities.includes('audio')) items.push({ key: 'audio', label: '音频', Icon: AudioLines });
-  }
+  if (RENDER_VIDEO_BADGES && modalities.includes('video')) items.push({ key: 'video', label: '视频', Icon: Video });
+  if (RENDER_AUDIO_BADGES && modalities.includes('audio')) items.push({ key: 'audio', label: '音频', Icon: AudioLines });
   if (items.length === 0) return null;
   return (
     <span className={`inline-flex items-center gap-1 text-[var(--ink-muted)]/70 ${className}`}>
