@@ -50,6 +50,7 @@ import {
     isProviderAvailable,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
+import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
 import { useAutostart } from '@/hooks/useAutostart';
 import { getBuildVersions } from '@/utils/debug';
 import {
@@ -315,6 +316,7 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
     const [qrCodeLoading, setQrCodeLoading] = useState(false);
     const [logExporting, setLogExporting] = useState(false);
     const [showBugReport, setShowBugReport] = useState(false);
+    const helperAgentDefaults = useHelperAgentModelDefaults();
 
     // Load QR code when entering about section
     useEffect(() => {
@@ -5544,6 +5546,9 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
                     providers={providers}
                     apiKeys={apiKeys}
                     providerVerifyStatus={providerVerifyStatus}
+                    initialProviderId={helperAgentDefaults.initialProviderId}
+                    initialModel={helperAgentDefaults.initialModel}
+                    onModelChange={helperAgentDefaults.onModelChange}
                 />
             )}
 
