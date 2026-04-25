@@ -55,5 +55,12 @@ tantivy-jieba = "0.11"
 notify-debouncer-full = "0.6"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
+# Pattern 5: stale-lock recovery needs `kill(pid, 0)` for liveness probing on Unix.
+# The `signal` feature pulls in just `nix::sys::signal::kill` + `nix::unistd::Pid`,
+# nothing else. Windows liveness uses the `sysinfo` crate (already in deps) instead
+# (no nix on Windows).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["signal"] }
+
 [dev-dependencies]
 tempfile = "3.10"

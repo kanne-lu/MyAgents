@@ -303,10 +303,10 @@ export function handleMcpShow(payload: { id?: string }): AdminResponse {
   };
 }
 
-export function handleMcpAdd(payload: {
+export async function handleMcpAdd(payload: {
   server: Partial<McpServerDefinition>;
   dryRun?: boolean;
-}): AdminResponse {
+}): Promise<AdminResponse> {
   const { dryRun } = payload;
   const s = payload.server;
 
@@ -349,7 +349,7 @@ export function handleMcpAdd(payload: {
     return { success: true, dryRun: true, preview: server };
   }
 
-  atomicModifyConfig(c => ({
+  await atomicModifyConfig(c => ({
     ...c,
     mcpServers: [...(c.mcpServers || []).filter(x => x.id !== server.id), server],
   }));
@@ -362,7 +362,7 @@ export function handleMcpAdd(payload: {
   };
 }
 
-export function handleMcpRemove(payload: { id: string }): AdminResponse {
+export async function handleMcpRemove(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
@@ -374,7 +374,7 @@ export function handleMcpRemove(payload: { id: string }): AdminResponse {
     return { success: false, error: `Cannot remove built-in MCP server '${id}'. Only custom servers can be removed.` };
   }
 
-  atomicModifyConfig(c => {
+  await atomicModifyConfig(c => {
     const servers = (c.mcpServers || []).filter(s => s.id !== id);
     const enabled = (c.mcpEnabledServers || []).filter(s => s !== id);
     const envOverrides = { ...(c.mcpServerEnv || {}) };
@@ -388,7 +388,7 @@ export function handleMcpRemove(payload: { id: string }): AdminResponse {
   return { success: true, data: { id }, hint: 'Server removed.' };
 }
 
-export function handleMcpEnable(payload: { id: string; scope?: string }): AdminResponse {
+export async function handleMcpEnable(payload: { id: string; scope?: string }): Promise<AdminResponse> {
   const { id, scope = 'both' } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
@@ -399,7 +399,7 @@ export function handleMcpEnable(payload: { id: string; scope?: string }): AdminR
   }
 
   if (scope === 'global' || scope === 'both') {
-    atomicModifyConfig(c => {
+    await atomicModifyConfig(c => {
       const enabled = new Set(c.mcpEnabledServers || []);
       enabled.add(id);
       return { ...c, mcpEnabledServers: Array.from(enabled) };
@@ -415,12 +415,12 @@ export function handleMcpEnable(payload: { id: string; scope?: string }): AdminR
   return { success: true, data: { id, scope: scopeLabel }, hint: `Enabled ${id} (${scopeLabel}).` };
 }
 
-export function handleMcpDisable(payload: { id: string; scope?: string }): AdminResponse {
+export async function handleMcpDisable(payload: { id: string; scope?: string }): Promise<AdminResponse> {
   const { id, scope = 'both' } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
   if (scope === 'global' || scope === 'both') {
-    atomicModifyConfig(c => {
+    await atomicModifyConfig(c => {
       const enabled = new Set(c.mcpEnabledServers || []);
       enabled.delete(id);
       return { ...c, mcpEnabledServers: Array.from(enabled) };
@@ -435,11 +435,11 @@ export function handleMcpDisable(payload: { id: string; scope?: string }): Admin
   return { success: true, data: { id } };
 }
 
-export function handleMcpEnv(payload: {
+export async function handleMcpEnv(payload: {
   id: string;
   action: 'set' | 'get' | 'delete';
   env?: Record<string, string>;
-}): AdminResponse {
+}): Promise<AdminResponse> {
   const { id, action, env } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
@@ -458,7 +458,7 @@ export function handleMcpEnv(payload: {
     if (!env || Object.keys(env).length === 0) {
       return { success: false, error: 'No environment variables provided' };
     }
-    atomicModifyConfig(c => {
+    await atomicModifyConfig(c => {
       const mcpServerEnv = { ...(c.mcpServerEnv || {}) };
       mcpServerEnv[id] = { ...(mcpServerEnv[id] || {}), ...env };
       return { ...c, mcpServerEnv };
@@ -471,7 +471,7 @@ export function handleMcpEnv(payload: {
     if (!env || Object.keys(env).length === 0) {
       return { success: false, error: 'No keys specified for deletion' };
     }
-    atomicModifyConfig(c => {
+    await atomicModifyConfig(c => {
       const mcpServerEnv = { ...(c.mcpServerEnv || {}) };
       if (mcpServerEnv[id]) {
         // Deep-copy per-server env to avoid mutating the original config object
@@ -762,12 +762,12 @@ export function handleModelList(): AdminResponse {
   return { success: true, data };
 }
 
-export function handleModelSetKey(payload: { id: string; apiKey: string }): AdminResponse {
+export async function handleModelSetKey(payload: { id: string; apiKey: string }): Promise<AdminResponse> {
   const { id, apiKey } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
   if (!apiKey) return { success: false, error: 'Missing required field: apiKey' };
 
-  atomicModifyConfig(c => ({
+  await atomicModifyConfig(c => ({
     ...c,
     providerApiKeys: { ...(c.providerApiKeys || {}), [id]: apiKey },
   }));
@@ -776,11 +776,11 @@ export function handleModelSetKey(payload: { id: string; apiKey: string }): Admi
   return { success: true, data: { id }, hint: `API key saved for ${id}.` };
 }
 
-export function handleModelSetDefault(payload: { id: string }): AdminResponse {
+export async function handleModelSetDefault(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
-  atomicModifyConfig(c => ({
+  await atomicModifyConfig(c => ({
     ...c,
     defaultProviderId: id,
   }));
@@ -824,7 +824,7 @@ export async function handleModelVerify(payload: { id: string; model?: string })
 
     if (result.success) {
       // Persist verify status
-      atomicModifyConfig(c => ({
+      await atomicModifyConfig(c => ({
         ...c,
         providerVerifyStatus: {
           ...(c.providerVerifyStatus ?? {}),
@@ -915,7 +915,7 @@ export function handleModelAdd(payload: {
   };
 }
 
-export function handleModelRemove(payload: { id: string }): AdminResponse {
+export async function handleModelRemove(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
   if (!isValidId(id)) return { success: false, error: 'Invalid id: only alphanumeric, hyphens, and underscores allowed' };
@@ -932,7 +932,7 @@ export function handleModelRemove(payload: { id: string }): AdminResponse {
   }
 
   // Clean up API key and verify status
-  atomicModifyConfig(c => {
+  await atomicModifyConfig(c => {
     const apiKeys = { ...(c.providerApiKeys ?? {}) };
     delete apiKeys[id];
     const verifyStatus = { ...(c.providerVerifyStatus ?? {}) };
@@ -968,17 +968,17 @@ export function handleAgentList(): AdminResponse {
   return { success: true, data: agents };
 }
 
-export function handleAgentEnable(payload: { id: string }): AdminResponse {
+export async function handleAgentEnable(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   return modifyAgent(id, agent => ({ ...agent, enabled: true }), 'enable');
 }
 
-export function handleAgentDisable(payload: { id: string }): AdminResponse {
+export async function handleAgentDisable(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   return modifyAgent(id, agent => ({ ...agent, enabled: false }), 'disable');
 }
 
-export function handleAgentSet(payload: { id: string; key: string; value: unknown }): AdminResponse {
+export async function handleAgentSet(payload: { id: string; key: string; value: unknown }): Promise<AdminResponse> {
   const { id, key, value } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
   if (!key) return { success: false, error: 'Missing required field: key' };
@@ -1005,10 +1005,10 @@ export function handleAgentChannelList(payload: { agentId: string }): AdminRespo
   })) };
 }
 
-export function handleAgentChannelAdd(payload: {
+export async function handleAgentChannelAdd(payload: {
   agentId: string;
   channel: Record<string, unknown>;
-}): AdminResponse {
+}): Promise<AdminResponse> {
   const { agentId, channel } = payload;
   if (!agentId) return { success: false, error: 'Missing required field: agentId' };
   if (!channel.type) return { success: false, error: 'Missing required field: channel.type' };
@@ -1028,7 +1028,7 @@ export function handleAgentChannelAdd(payload: {
   }), 'channel-add');
 }
 
-export function handleAgentChannelRemove(payload: { agentId: string; channelId: string }): AdminResponse {
+export async function handleAgentChannelRemove(payload: { agentId: string; channelId: string }): Promise<AdminResponse> {
   const { agentId, channelId } = payload;
   if (!agentId) return { success: false, error: 'Missing required field: agentId' };
   if (!channelId) return { success: false, error: 'Missing required field: channelId' };
@@ -1058,7 +1058,7 @@ export function handleConfigGet(payload: { key: string }): AdminResponse {
   return { success: true, data: { key, value: redacted } };
 }
 
-export function handleConfigSet(payload: { key: string; value: unknown; dryRun?: boolean }): AdminResponse {
+export async function handleConfigSet(payload: { key: string; value: unknown; dryRun?: boolean }): Promise<AdminResponse> {
   const { key, value, dryRun } = payload;
   if (!key) return { success: false, error: 'Missing required field: key' };
 
@@ -1078,7 +1078,7 @@ export function handleConfigSet(payload: { key: string; value: unknown; dryRun?:
     return { success: true, dryRun: true, preview: { key, value } };
   }
 
-  atomicModifyConfig(c => setNestedValue(c, key, value));
+  await atomicModifyConfig(c => setNestedValue(c, key, value));
   broadcast('config:changed', { section: 'config', action: 'set', key });
   return { success: true, data: { key }, hint: `Config '${key}' updated.` };
 }
@@ -2844,11 +2844,11 @@ function getCurrentWorkspacePath(): string | undefined {
 }
 
 /** Modify an agent in config by ID */
-function modifyAgent(
+async function modifyAgent(
   id: string,
   modifier: (agent: AgentConfigSlim) => AgentConfigSlim,
   action: string,
-): AdminResponse {
+): Promise<AdminResponse> {
   // Pre-check existence (fast-fail before acquiring write)
   const config = loadConfig();
   if (!(config.agents ?? []).some(a => a.id === id)) {
@@ -2856,7 +2856,7 @@ function modifyAgent(
   }
 
   // Find by ID inside the modifier to avoid TOCTOU stale-index bugs
-  atomicModifyConfig(c => {
+  await atomicModifyConfig(c => {
     const updated = [...(c.agents ?? [])];
     const freshIdx = updated.findIndex(a => a.id === id);
     if (freshIdx < 0) return c; // agent disappeared between reads — no-op

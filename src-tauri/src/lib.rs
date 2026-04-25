@@ -25,6 +25,7 @@ pub mod search;
 pub mod thought;
 mod tray;
 mod updater;
+pub mod utils;
 
 use sidecar::{
     cleanup_stale_sidecars, cleanup_stale_sidecars_preamble, init_startup_cleanup_barrier,

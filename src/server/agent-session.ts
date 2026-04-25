@@ -2516,11 +2516,11 @@ export function getPendingInteractiveRequests(): Array<{
  * @param lastAssistantToolCount - Tool count for the last assistant message
  * @param lastAssistantDurationMs - Duration for the last assistant response
  */
-function persistMessagesToStorage(
+async function persistMessagesToStorage(
   lastAssistantUsage?: MessageUsage,
   lastAssistantToolCount?: number,
   lastAssistantDurationMs?: number
-): void {
+): Promise<void> {
   const sessionMessages: SessionMessage[] = messages.map((msg, index) => {
     const isLastAssistant = index === messages.length - 1 && msg.role === 'assistant';
     // Strip Playwright tool results from disk persistence (keep in-memory data for SDK context)
@@ -2546,7 +2546,7 @@ function persistMessagesToStorage(
       durationMs: isLastAssistant && lastAssistantDurationMs ? lastAssistantDurationMs : undefined,
     };
   });
-  saveSessionMessages(sessionId, sessionMessages);
+  await saveSessionMessages(sessionId, sessionMessages);
   // Compute lastMessagePreview from last real user message
   // (skip system-injected messages like HEARTBEAT, MEMORY_UPDATE).
   // Also track whether we found a real user message to decide lastActiveAt update.
@@ -2584,7 +2584,7 @@ function persistMessagesToStorage(
   }
   // Only update lastActiveAt if a real user message exists (not just system injections).
   // This prevents heartbeat/memory-update from making stale sessions appear "active".
-  updateSessionMetadata(sessionId, {
+  await updateSessionMetadata(sessionId, {
     ...(foundRealUserMessage ? { lastActiveAt: new Date().toISOString() } : {}),
     lastMessagePreview,
   });
@@ -3669,15 +3669,18 @@ function handleMessageComplete(): void {
   // Calculate duration for this turn
   const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
 
-  // Persist messages with usage info after AI response completes
-  persistMessagesToStorage({
+  // Persist messages with usage info after AI response completes.
+  // Fire-and-forget: persistMessagesToStorage is async (cooperative file lock),
+  // but the enclosing handler is a sync stream-event callback. Errors are already
+  // swallowed inside SessionStore writers; surfacing them here would be no-op.
+  void persistMessagesToStorage({
     inputTokens: currentTurnUsage.inputTokens,
     outputTokens: currentTurnUsage.outputTokens,
     cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
     cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
     model: currentTurnUsage.model,
     modelUsage: currentTurnUsage.modelUsage,
-  }, currentTurnToolCount, durationMs);
+  }, currentTurnToolCount, durationMs).catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
 }
 
 function handleMessageStopped(): void {
@@ -3704,8 +3707,8 @@ function handleMessageStopped(): void {
   }
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage || lastMessage.role !== 'assistant' || typeof lastMessage.content === 'string') {
-    // Persist even if no assistant message
-    persistMessagesToStorage();
+    // Persist even if no assistant message (fire-and-forget — async lock).
+    void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
     return;
   }
   lastMessage.content = lastMessage.content.map((block) => {
@@ -3719,8 +3722,8 @@ function handleMessageStopped(): void {
     }
     return block;
   });
-  // Persist after processing message
-  persistMessagesToStorage();
+  // Persist after processing message (fire-and-forget — async lock).
+  void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
 }
 
 function handleMessageError(error: string): void {
@@ -3754,8 +3757,8 @@ function handleMessageError(error: string): void {
     content: `Error: ${error}`,
     timestamp: new Date().toISOString()
   });
-  // Persist error message
-  persistMessagesToStorage();
+  // Persist error message (fire-and-forget — async lock).
+  void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
 }
 
 function findToolBlockById(toolUseId: string): { tool: ToolUseState } | null {
@@ -4223,7 +4226,7 @@ export async function resetSession(): Promise<void> {
   // sessionId still points to the OLD session here (updated in step 3).
   if (messages.length > 0) {
     console.log(`[agent] resetSession: persisting ${messages.length} in-memory messages before clearing`);
-    persistMessagesToStorage();
+    await persistMessagesToStorage();
   }
 
   // 2. Clear all message state (shared with initializeAgent)
@@ -4549,7 +4552,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // (e.g., if an active streaming session accumulated messages not yet saved to disk)
   if (messages.length > 0) {
     console.log(`[agent] switchToSession: persisting ${messages.length} in-memory messages before clearing`);
-    persistMessagesToStorage();
+    await persistMessagesToStorage();
   }
 
   // Reset message/queue/streaming state (shared with initializeAgent, resetSession)
@@ -4820,7 +4823,7 @@ export async function enqueueUserMessage(
       // Session already in index — only update title if it's still default
       const title = trimmed ? trimmed.slice(0, 40) + (trimmed.length > 40 ? '...' : '') : '图片消息';
       if (existingMeta.title === 'New Chat') {
-        updateSessionMetadata(sessionId, { title });
+        await updateSessionMetadata(sessionId, { title });
       }
       console.log(`[agent] session ${sessionId} already exists in SessionStore, preserving stats`);
     } else {
@@ -4845,13 +4848,13 @@ export async function enqueueUserMessage(
       if (sessionMeta.title.length < trimmed.length) {
         sessionMeta.title += '...';
       }
-      saveSessionMetadata(sessionMeta);
+      await saveSessionMetadata(sessionMeta);
       console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${lazyAgent ? (useLiveFollow ? 'im' : 'owned') : 'none'})`);
     }
   } else {
     // Update session title from first real message if needed
     if (trimmed && messages.length === 0) {
-      updateSessionTitleFromMessage(sessionId, trimmed);
+      await updateSessionTitleFromMessage(sessionId, trimmed);
     }
   }
 
@@ -5046,7 +5049,7 @@ export async function enqueueUserMessage(
   broadcast('chat:message-replay', { message: userMessage });
 
   // Persist messages to disk after adding user message
-  persistMessagesToStorage();
+  await persistMessagesToStorage();
 
   const queueItem: MessageQueueItem = {
     id: queueId,
@@ -5389,7 +5392,7 @@ export async function rewindSession(userMessageId: string): Promise<{
 
     // 6. 截断消息
     messages.length = targetIndex;
-    persistMessagesToStorage();
+    await persistMessagesToStorage();
 
     // 7. 设置下次 query 的对话截断点
     //    UUID 有效性校验（OR 逻辑）：
@@ -5433,13 +5436,13 @@ export async function rewindSession(userMessageId: string): Promise<{
  * Non-destructive — the current session remains untouched.
  * The new session uses SDK's forkSession option on first startup.
  */
-export function forkSession(assistantMessageId: string): {
+export async function forkSession(assistantMessageId: string): Promise<{
   success: boolean;
   newSessionId?: string;
   agentDir?: string;
   title?: string;
   error?: string;
-} {
+}> {
   // 1. Find target assistant message in memory first, then fall back to persistent storage.
   // The in-memory `messages[]` may be empty after session switch/reset (clearMessageState),
   // while the frontend still shows the fork button because it has the message from loaded state.
@@ -5540,8 +5543,8 @@ export function forkSession(assistantMessageId: string): {
     }));
 
     // 5. Persist new session
-    saveSessionMetadata(newSession);
-    saveSessionMessages(newSession.id, forkedMessages);
+    await saveSessionMetadata(newSession);
+    await saveSessionMessages(newSession.id, forkedMessages);
 
     console.log(`[agent] forked session ${sourceSessionId} → ${newSession.id} at message ${assistantMessageId} (sdkUuid: ${targetMsg.sdkUuid}), ${forkedMessages.length} messages copied`);
 
@@ -5660,7 +5663,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       forkResumeAt = messageUuid;
       // Clear forkFrom so subsequent restarts resume normally
       delete forkMeta.forkFrom;
-      saveSessionMetadata(forkMeta);
+      await saveSessionMetadata(forkMeta);
     }
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
@@ -6099,7 +6102,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Save SDK session_id and verify unified session status
         if (nextSystemInit.session_id) {
           const isUnified = nextSystemInit.session_id === sessionId;
-          updateSessionMetadata(sessionId, {
+          await updateSessionMetadata(sessionId, {
             sdkSessionId: nextSystemInit.session_id,
             unifiedSession: isUnified,
           });
@@ -6516,7 +6519,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             };
             messages.push(localCommandMessage);
             broadcast('chat:message-replay', { message: localCommandMessage });
-            persistMessagesToStorage();
+            await persistMessagesToStorage();
           }
 
           // Check for structured tool_use_result data (e.g., WebSearch results)
@@ -7267,7 +7270,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       if (!isMidTurn) {
         // Normal turn start: push to messages, persist, broadcast immediately
         messages.push(userMessage);
-        persistMessagesToStorage();
+        await persistMessagesToStorage();
         resetTurnUsage();
         currentTurnStartTime = Date.now();
         broadcast('queue:started', {

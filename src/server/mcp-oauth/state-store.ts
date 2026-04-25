@@ -7,11 +7,12 @@
  * File: ~/.myagents/mcp_oauth_state.json (mode 0o600)
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync, statSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, renameSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import type { McpOAuthState, McpOAuthStateStore, LegacyOAuthToken } from './types';
 import { ensureDirSync } from '../utils/fs-utils';
+import { withFileLock } from '../utils/file-lock';
 
 export function getOAuthConfigDir(): string {
   return process.env.MYAGENTS_CONFIG_DIR || join(homedir(), '.myagents');
@@ -29,66 +30,35 @@ function getLegacyTokenFile(): string {
 export const DISCOVERY_TTL_MS = 24 * 60 * 60 * 1000;
 const WRITE_LOCK_TIMEOUT_MS = 10 * 1000;
 const WRITE_LOCK_STALE_MS = 30 * 1000;
-const WRITE_LOCK_RETRY_MS = 50;
 
 function ensureDir(): void {
   const configDir = getOAuthConfigDir();
   ensureDirSync(configDir);
 }
 
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function acquireWriteLock(): () => void {
+function getStateLockPath(): string {
   const locksDir = join(getOAuthConfigDir(), 'mcp_oauth_locks');
-  const lockDir = join(locksDir, 'state-store.lock');
-  const startedAt = Date.now();
-
   ensureDirSync(locksDir);
-
-  while (true) {
-    try {
-      mkdirSync(lockDir, { mode: 0o700 });
-      writeFileSync(join(lockDir, 'owner'), `${process.pid}\n`, { encoding: 'utf-8' });
-      return () => {
-        try { rmSync(lockDir, { recursive: true, force: true }); } catch { /* noop */ }
-      };
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') throw err;
-
-      try {
-        const ageMs = Date.now() - statSync(lockDir).mtimeMs;
-        if (ageMs > WRITE_LOCK_STALE_MS) {
-          rmSync(lockDir, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        if (!existsSync(lockDir)) continue;
-      }
-
-      if (Date.now() - startedAt > WRITE_LOCK_TIMEOUT_MS) {
-        throw new Error('Timed out waiting for OAuth state store write lock');
-      }
-
-      sleepSync(WRITE_LOCK_RETRY_MS);
-    }
-  }
+  return join(locksDir, 'state-store.lock');
 }
 
-function withWriteLock<T>(fn: () => T): T {
+async function withWriteLock<T>(fn: () => T | Promise<T>): Promise<T> {
   if (writeLockDepth > 0) {
-    return fn();
+    return await fn();
   }
 
-  const release = acquireWriteLock();
   writeLockDepth++;
   try {
-    return fn();
+    return await withFileLock(
+      {
+        lockPath: getStateLockPath(),
+        timeoutMs: WRITE_LOCK_TIMEOUT_MS,
+        staleMs: WRITE_LOCK_STALE_MS,
+      },
+      async () => fn(),
+    );
   } finally {
     writeLockDepth--;
-    release();
   }
 }
 
@@ -154,7 +124,12 @@ export function loadStateStore(_forceReload = false): McpOAuthStateStore {
     // First load — try migration from legacy
     const migrated = migrateFromLegacy();
     if (Object.keys(migrated).length > 0) {
-      saveStateStore(migrated);
+      // Fire-and-forget — first-load migration is best-effort, errors get logged.
+      void saveStateStore(migrated).catch(err => {
+        console.error('[mcp-oauth] Failed to persist migrated state:', err);
+      });
+      memoryCache = migrated;
+      memoryCacheFile = stateFile;
     } else {
       memoryCache = migrated;
     }
@@ -180,9 +155,9 @@ function saveStateStoreUnlocked(store: McpOAuthStateStore): void {
 }
 
 /** Save the full state store to disk (atomic write via tmp+rename) and update cache */
-export function saveStateStore(store: McpOAuthStateStore): void {
+export async function saveStateStore(store: McpOAuthStateStore): Promise<void> {
   try {
-    withWriteLock(() => saveStateStoreUnlocked(store));
+    await withWriteLock(() => saveStateStoreUnlocked(store));
   } catch (err) {
     console.error('[mcp-oauth] Failed to save state store:', err);
   }
@@ -194,9 +169,9 @@ export function getServerState(serverId: string): McpOAuthState | undefined {
 }
 
 /** Update state for a specific server (merge) */
-export function updateServerState(serverId: string, patch: Partial<McpOAuthState>): void {
+export async function updateServerState(serverId: string, patch: Partial<McpOAuthState>): Promise<void> {
   try {
-    withWriteLock(() => {
+    await withWriteLock(() => {
       const store = loadStateStore(true);
       store[serverId] = { ...store[serverId], ...patch };
       saveStateStoreUnlocked(store);
@@ -207,9 +182,9 @@ export function updateServerState(serverId: string, patch: Partial<McpOAuthState
 }
 
 /** Clear a specific field from server state */
-export function clearServerField(serverId: string, field: keyof McpOAuthState): void {
+export async function clearServerField(serverId: string, field: keyof McpOAuthState): Promise<void> {
   try {
-    withWriteLock(() => {
+    await withWriteLock(() => {
       const store = loadStateStore(true);
       if (store[serverId]) {
         delete store[serverId][field];

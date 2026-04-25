@@ -1943,7 +1943,7 @@ async function main() {
         if (!messageId) {
           return jsonResponse({ success: false, error: 'Missing messageId' }, 400);
         }
-        const result = forkSession(messageId);
+        const result = await forkSession(messageId);
         return jsonResponse(result);
       }
 
@@ -2314,7 +2314,7 @@ async function main() {
           if (sessionId) {
             cronSnapshot.id = sessionId;
           }
-          const newSession = createSession(agentDir, cronSnapshot);
+          const newSession = await createSession(agentDir, cronSnapshot);
           const switched = await switchToSession(newSession.id);
           if (!switched) {
             console.error(`[cron] execute-sync taskId=${taskId} failed to switch to new session ${newSession.id}`);
@@ -2755,7 +2755,7 @@ async function main() {
         const agent = findAgentByWorkspacePath(agentDirValue) as AgentConfig | undefined;
         const baseSnapshot = agent ? snapshotForOwnedSession(agent) : {};
         if (runtimeValue) baseSnapshot.runtime = runtimeValue;
-        const session = createSession(agentDirValue, baseSnapshot);
+        const session = await createSession(agentDirValue, baseSnapshot);
         return jsonResponse({ success: true, session });
       }
 
@@ -3044,7 +3044,7 @@ async function main() {
           return jsonResponse({ success: false, error: 'Session ID required.' }, 400);
         }
 
-        const deleted = deleteSession(sessionId);
+        const deleted = await deleteSession(sessionId);
         if (!deleted) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
@@ -3105,7 +3105,7 @@ async function main() {
           updates.configSnapshotAt = new Date().toISOString();
         }
 
-        const updated = updateSessionMetadata(sessionId, updates as Parameters<typeof updateSessionMetadata>[1]);
+        const updated = await updateSessionMetadata(sessionId, updates as Parameters<typeof updateSessionMetadata>[1]);
 
         if (!updated) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
@@ -3236,7 +3236,7 @@ async function main() {
           if (currentMeta?.titleSource === 'user') {
             return jsonResponse({ success: false, skipped: true });
           }
-          updateSessionMetadata(payload.sessionId, { title, titleSource: 'auto' } as Parameters<typeof updateSessionMetadata>[1]);
+          await updateSessionMetadata(payload.sessionId, { title, titleSource: 'auto' } as Parameters<typeof updateSessionMetadata>[1]);
           return jsonResponse({ success: true, title });
         }
 
@@ -8254,7 +8254,7 @@ async function main() {
           if (currentSessionId) {
             const sessionMeta = getSessionMetadata(currentSessionId);
             if (sessionMeta && !sessionMeta.source) {
-              updateSessionMetadata(currentSessionId, { source: payload.source as SessionSource });
+              await updateSessionMetadata(currentSessionId, { source: payload.source as SessionSource });
             }
           }
 

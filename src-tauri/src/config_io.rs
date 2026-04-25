@@ -4,52 +4,15 @@
 //! `config.json.lock` directory. Directory creation is atomic across processes
 //! on supported app filesystems and is available from all three runtimes without
 //! adding a platform-specific dependency.
+//!
+//! Pattern 5 (Single-Writer Invariant) — lock acquisition + stale-recovery now
+//! lives in `crate::utils::file_lock`; this module just composes it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(5);
-const LOCK_POLL: Duration = Duration::from_millis(50);
-
-struct ConfigLockGuard {
-    lock_dir: PathBuf,
-}
-
-impl Drop for ConfigLockGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.lock_dir);
-    }
-}
-
-fn acquire_config_lock(config_path: &Path) -> Result<ConfigLockGuard, String> {
-    let lock_dir = config_path.with_file_name("config.json.lock");
-    let start = Instant::now();
-
-    loop {
-        match fs::create_dir(&lock_dir) {
-            Ok(()) => {
-                let owner = lock_dir.join("owner");
-                let _ = fs::write(owner, format!("rust:{}\n", std::process::id()));
-                return Ok(ConfigLockGuard { lock_dir });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if start.elapsed() >= LOCK_TIMEOUT {
-                    return Err(
-                        "[config-io] Config busy: could not acquire config.json.lock within 5000ms; retry"
-                            .to_string(),
-                    );
-                }
-                thread::sleep(LOCK_POLL);
-            }
-            Err(e) => {
-                return Err(format!("[config-io] Cannot create config lock: {}", e));
-            }
-        }
-    }
-}
+use crate::utils::file_lock::{with_file_lock_blocking, FileLockError, FileLockOptions};
 
 fn read_config_json(config_path: &Path) -> Result<serde_json::Value, String> {
     if !config_path.exists() {
@@ -106,32 +69,52 @@ where
             .map_err(|e| format!("[config-io] Cannot create config dir: {}", e))?;
     }
 
-    let _guard = acquire_config_lock(config_path)?;
+    let lock_path = config_path.with_file_name("config.json.lock");
+    let config_path_owned: PathBuf = config_path.to_path_buf();
 
-    let mut config = read_config_json(config_path)?;
-    let before = config.clone();
-    mutator(&mut config)?;
-
-    if config == before {
-        return Ok(config);
+    // Borrow checker: the mutator + post-write logic capture environment by
+    // value via the closure passed to `with_file_lock_blocking`. The error
+    // helper converts our String errors into FileLockError::Io.
+    fn to_io_err(msg: String) -> FileLockError {
+        FileLockError::Io(std::io::Error::new(std::io::ErrorKind::Other, msg))
     }
 
-    let content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[config-io] Cannot serialize config: {}", e))?;
-    let tmp_path = config_path.with_file_name("config.json.tmp.rust");
-    let bak_path = config_path.with_file_name("config.json.bak");
+    let result = with_file_lock_blocking(
+        &lock_path,
+        FileLockOptions::default(),
+        move || -> Result<serde_json::Value, FileLockError> {
+            let mut config = read_config_json(&config_path_owned).map_err(to_io_err)?;
+            let before = config.clone();
+            mutator(&mut config).map_err(to_io_err)?;
 
-    write_all_synced(&tmp_path, &content)?;
+            if config == before {
+                return Ok(config);
+            }
 
-    if keep_backup && config_path.exists() {
-        let _ = fs::copy(config_path, bak_path);
-    }
+            let content = serde_json::to_string_pretty(&config)
+                .map_err(|e| to_io_err(format!("[config-io] Cannot serialize config: {}", e)))?;
+            let tmp_path = config_path_owned.with_file_name("config.json.tmp.rust");
+            let bak_path = config_path_owned.with_file_name("config.json.bak");
 
-    fs::rename(&tmp_path, config_path)
-        .map_err(|e| format!("[config-io] Cannot rename tmp config: {}", e))?;
-    fsync_parent_dir(config_path)?;
+            write_all_synced(&tmp_path, &content).map_err(to_io_err)?;
 
-    Ok(config)
+            if keep_backup && config_path_owned.exists() {
+                let _ = fs::copy(&config_path_owned, bak_path);
+            }
+
+            fs::rename(&tmp_path, &config_path_owned).map_err(|e| {
+                to_io_err(format!("[config-io] Cannot rename tmp config: {}", e))
+            })?;
+            fsync_parent_dir(&config_path_owned).map_err(to_io_err)?;
+
+            Ok(config)
+        },
+    );
+
+    result.map_err(|e| match e {
+        FileLockError::Busy { .. } => e.to_string(),
+        FileLockError::Io(io_err) => format!("[config-io] {}", io_err),
+    })
 }
 
 /// Fsync a file or directory path for renderer-side atomic writes.

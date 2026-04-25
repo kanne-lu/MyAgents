@@ -193,7 +193,7 @@ async function refreshTokenInner(serverId: string): Promise<OAuthTokenData | nul
         scope: data.scope || state.token.scope,
       };
 
-      updateServerState(serverId, { token: newToken });
+      await updateServerState(serverId, { token: newToken });
       console.log(`[mcp-oauth] Token refreshed for ${serverId}`);
       return newToken;
     } catch (err) {

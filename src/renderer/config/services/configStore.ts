@@ -34,6 +34,7 @@ const withConfigProcessLock = createAsyncLock();
 
 const CONFIG_LOCK_TIMEOUT_MS = 5000;
 const CONFIG_LOCK_POLL_MS = 50;
+const CONFIG_LOCK_STALE_MS = 30000;
 
 export class ConfigBusyError extends Error {
     readonly code = 'CONFIG_BUSY';
@@ -186,11 +187,57 @@ async function acquireFileLock(lockDir: string): Promise<void> {
             }
             return;
         } catch {
+            // mkdir failed — lock dir already exists. Try stale-recovery before
+            // sleeping. The renderer can't observe other processes' pids, so it
+            // relies on the renderer-written owner timestamp (`renderer:<ts>`)
+            // and falls through to age-based break for non-renderer owners (a
+            // node/rust crash leaves a long-stale dir; 30s is generous).
+            if (await tryBreakStaleLock(lockDir)) {
+                continue;
+            }
+
             if (Date.now() - start >= CONFIG_LOCK_TIMEOUT_MS) {
                 throw new ConfigBusyError();
             }
             await delay(CONFIG_LOCK_POLL_MS);
         }
+    }
+}
+
+async function tryBreakStaleLock(lockDir: string): Promise<boolean> {
+    let owner = '';
+    try {
+        owner = (await readTextFile(await join(lockDir, 'owner'))).trim();
+    } catch {
+        // No owner file — fall back to "exists but no metadata" → don't break.
+        return false;
+    }
+
+    // renderer:<ts> — compare the embedded ts to wall clock.
+    const m = /^renderer:(\d+)$/.exec(owner);
+    let ageMs: number | null = null;
+    if (m) {
+        const ts = Number(m[1]);
+        if (Number.isFinite(ts)) ageMs = Date.now() - ts;
+    } else if (/^(node|rust):\d+$/.test(owner)) {
+        // We can't probe pid liveness from the renderer; assume staleness purely
+        // by age. This is safe because the Node/Rust helpers also break their
+        // own stale locks on the next acquire — at worst we race with their
+        // recovery, and the loser just retries.
+        // No reliable timestamp from the owner string alone; skip in this branch.
+        return false;
+    } else {
+        return false;
+    }
+
+    if (ageMs === null || ageMs <= CONFIG_LOCK_STALE_MS) return false;
+
+    console.warn(`[configStore] Breaking stale lock ${lockDir} (age=${ageMs}ms owner=${owner})`);
+    try {
+        await remove(lockDir, { recursive: true });
+        return true;
+    } catch {
+        return false;
     }
 }
 

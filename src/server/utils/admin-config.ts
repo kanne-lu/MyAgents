@@ -13,8 +13,6 @@ import {
   existsSync,
   renameSync,
   readdirSync,
-  mkdirSync,
-  rmSync,
   openSync,
   fsyncSync,
   closeSync,
@@ -25,6 +23,7 @@ import { stripBom } from '../../shared/utils';
 import type { McpServerDefinition } from '../../renderer/config/types';
 import type { SessionMetadata } from '../types/session';
 import { ensureDirSync } from './fs-utils';
+import { withFileLock, FileBusyError } from './file-lock';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -45,7 +44,7 @@ function getProjectsPath(): string {
 }
 
 const CONFIG_LOCK_TIMEOUT_MS = 5000;
-const CONFIG_LOCK_POLL_MS = 50;
+const CONFIG_LOCK_STALE_MS = 30000;
 
 export class ConfigBusyError extends Error {
   readonly code = 'CONFIG_BUSY';
@@ -142,10 +141,13 @@ export function loadConfig(): AdminAppConfig {
 /**
  * Cross-process serialized read-modify-write on config.json.
  * Pattern: lock → read fresh → modify → write .tmp → fsync → backup .bak → rename → fsync dir.
+ *
+ * Async because acquiring the cross-process lockdir polls with `await delay()` —
+ * never a sync busy-wait or `Atomics.wait` (Pattern 5 §5.3.4.a).
  */
-export function withConfigLock(
-  modifier: (config: AdminAppConfig) => AdminAppConfig
-): AdminAppConfig {
+export async function withConfigLock(
+  modifier: (config: AdminAppConfig) => AdminAppConfig | Promise<AdminAppConfig>
+): Promise<AdminAppConfig> {
   const configPath = getConfigPath();
   const configDir = getConfigDir();
 
@@ -154,64 +156,47 @@ export function withConfigLock(
     ensureDirSync(configDir);
   }
 
-  const lockDir = configPath + '.lock';
-  acquireConfigLock(lockDir);
   try {
-    const config = loadConfig();
-    const before = JSON.stringify(config);
-    const modified = modifier(config);
+    return await withFileLock(
+      {
+        lockPath: configPath + '.lock',
+        timeoutMs: CONFIG_LOCK_TIMEOUT_MS,
+        staleMs: CONFIG_LOCK_STALE_MS,
+      },
+      async () => {
+        const config = loadConfig();
+        const before = JSON.stringify(config);
+        const modified = await modifier(config);
 
-    if (JSON.stringify(modified) === before) {
-      return modified;
+        if (JSON.stringify(modified) === before) {
+          return modified;
+        }
+
+        const tmpPath = configPath + '.tmp';
+        const bakPath = configPath + '.bak';
+
+        writeFileSynced(tmpPath, JSON.stringify(modified, null, 2));
+        if (existsSync(configPath)) {
+          try { copyFileSync(configPath, bakPath); } catch { /* best-effort backup */ }
+        }
+        renameSync(tmpPath, configPath);
+        fsyncDir(configDir);
+
+        return modified;
+      }
+    );
+  } catch (err) {
+    if (err instanceof FileBusyError) {
+      throw new ConfigBusyError();
     }
-
-    const tmpPath = configPath + '.tmp';
-    const bakPath = configPath + '.bak';
-
-    writeFileSynced(tmpPath, JSON.stringify(modified, null, 2));
-    if (existsSync(configPath)) {
-      try { copyFileSync(configPath, bakPath); } catch { /* best-effort backup */ }
-    }
-    renameSync(tmpPath, configPath);
-    fsyncDir(configDir);
-
-    return modified;
-  } finally {
-    releaseConfigLock(lockDir);
+    throw err;
   }
 }
 
-export function atomicModifyConfig(
-  modifier: (config: AdminAppConfig) => AdminAppConfig
-): AdminAppConfig {
+export async function atomicModifyConfig(
+  modifier: (config: AdminAppConfig) => AdminAppConfig | Promise<AdminAppConfig>
+): Promise<AdminAppConfig> {
   return withConfigLock(modifier);
-}
-
-function acquireConfigLock(lockDir: string): void {
-  const start = Date.now();
-  while (true) {
-    try {
-      mkdirSync(lockDir);
-      try {
-        writeFileSync(resolve(lockDir, 'owner'), `node:${process.pid}\n`, 'utf-8');
-      } catch { /* owner is diagnostic only */ }
-      return;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw err;
-      }
-      if (Date.now() - start >= CONFIG_LOCK_TIMEOUT_MS) {
-        throw new ConfigBusyError();
-      }
-      sleepSync(CONFIG_LOCK_POLL_MS);
-    }
-  }
-}
-
-function releaseConfigLock(lockDir: string): void {
-  try {
-    rmSync(lockDir, { recursive: true, force: true });
-  } catch { /* best-effort unlock */ }
 }
 
 function writeFileSynced(path: string, content: string): void {
@@ -233,10 +218,6 @@ function fsyncDir(dir: string): void {
   } finally {
     if (fd !== null) closeSync(fd);
   }
-}
-
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 // ---------------------------------------------------------------------------

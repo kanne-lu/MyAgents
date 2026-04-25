@@ -39,9 +39,9 @@ describe("admin config lock", () => {
           "-e",
           `
           const { atomicModifyConfig } = await import(${JSON.stringify(adminConfigUrl)});
-          atomicModifyConfig(config => {
+          await atomicModifyConfig(async (config) => {
             if (${holdMs} > 0) {
-              Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${holdMs});
+              await new Promise(r => setTimeout(r, ${holdMs}));
             }
             return { ...config, ${JSON.stringify(key)}: ${JSON.stringify(value)} };
           });

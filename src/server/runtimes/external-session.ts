@@ -210,13 +210,13 @@ function clearPendingThinking(): void {
  *  agent config (D4). The scenario flag is what v0.1.69 pre-warm broke:
  *  pre-warm Tab → Case 3 first message used to always take the IM path, which
  *  silently leaked agent config changes into owned desktop sessions. */
-function registerSessionMetadataIfNew(
+async function registerSessionMetadataIfNew(
   sessionId: string,
   workspacePath: string,
   messageText: string,
   origin: string,
   scenario: InteractionScenario,
-): void {
+): Promise<void> {
   if (!sessionId || getSessionMetadata(sessionId)) return;
   const useLiveFollow = scenario.type === 'im' || scenario.type === 'agent-channel';
   // Runtime field is overwritten below with `getCurrentRuntimeType()` to honor
@@ -240,7 +240,7 @@ function registerSessionMetadataIfNew(
   const trimmed = messageText.trim();
   meta.title = trimmed.slice(0, 40);
   if (meta.title.length < trimmed.length) meta.title += '...';
-  saveSessionMetadata(meta);
+  await saveSessionMetadata(meta);
   console.log(`[external-session] session ${sessionId} persisted to SessionStore (${origin})`);
 }
 
@@ -852,12 +852,12 @@ async function _doStartExternalSession(options: {
     currentTurnStartTime = Date.now();
 
     // Persist user message immediately (crash safety — don't wait for turn_complete)
-    try { saveSessionMessages(options.sessionId, allSessionMessages); }
+    try { await saveSessionMessages(options.sessionId, allSessionMessages); }
     catch (err) { console.error('[external-session] Failed to persist user message:', err); }
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
     if (!options.resumeSessionId) {
-      registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
+      await registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
     }
   }
 
@@ -911,7 +911,7 @@ async function _doStartExternalSession(options: {
         lastRuntimeSessionId = '';
         if (options.sessionId) {
           try {
-            updateSessionMetadata(options.sessionId, { runtimeSessionId: '' });
+            await updateSessionMetadata(options.sessionId, { runtimeSessionId: '' });
           } catch (metaErr) {
             console.warn('[external-session] Failed to clear stale runtimeSessionId on disk:', metaErr);
           }
@@ -1117,11 +1117,11 @@ export async function sendExternalMessage(
     // Normally this happens inside startExternalSession's initialMessage block,
     // but pre-warm calls startExternalSession WITHOUT an initialMessage, so we
     // have to register here when the first actual message arrives via Case 3.
-    registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
+    await registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
 
     // Persist user message immediately (crash safety)
     if (lastSessionId) {
-      try { saveSessionMessages(lastSessionId, allSessionMessages); }
+      try { await saveSessionMessages(lastSessionId, allSessionMessages); }
       catch (err) { console.error('[external-session] Failed to persist user message:', err); }
     }
 
@@ -1354,7 +1354,7 @@ export function getRuntimePermissionModes(runtimeType: RuntimeType): unknown[] {
 
 /** Flush accumulated content blocks, persist to SessionStore, and broadcast completion.
  * Called by both turn_complete (Codex) and session_complete (CC) to avoid duplication. */
-function persistTurnResult(): void {
+async function persistTurnResult(): Promise<void> {
   const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
   flushAllPending();
 
@@ -1390,9 +1390,9 @@ function persistTurnResult(): void {
   // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
   if (allSessionMessages.length > 0 && lastSessionId) {
     try {
-      saveSessionMessages(lastSessionId, allSessionMessages);
+      await saveSessionMessages(lastSessionId, allSessionMessages);
       const lastMsg = allSessionMessages[allSessionMessages.length - 1];
-      updateSessionMetadata(lastSessionId, {
+      await updateSessionMetadata(lastSessionId, {
         lastActiveAt: new Date().toISOString(),
         lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
         runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
@@ -1627,13 +1627,24 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         // registerSessionMetadataIfNew runs and then updateSessionMetadata succeeds
         // on the next session_init or turn_complete.
         if (lastSessionId && event.sessionId !== lastSessionId) {
-          const updated = updateSessionMetadata(lastSessionId, { runtimeSessionId: event.sessionId });
-          if (!updated) {
-            // Metadata doesn't exist yet (pre-warm). The in-memory lastRuntimeSessionId
-            // is already set above. When registerSessionMetadataIfNew creates the metadata
-            // later, we need to patch it. Schedule a deferred update with session affinity.
-            deferredRuntimeSessionId = { forSessionId: lastSessionId, runtimeSessionId: event.sessionId };
-          }
+          // Eagerly schedule the deferred patch with session affinity. If
+          // updateSessionMetadata succeeds (metadata already exists), clear it.
+          // If metadata doesn't exist yet (pre-warm path), the deferred entry
+          // will be consumed later by registerSessionMetadataIfNew.
+          // handleUnifiedEvent is a sync stream callback — fire-and-forget the
+          // async lock-protected write.
+          const targetSessionId = lastSessionId;
+          const targetRuntimeId = event.sessionId;
+          deferredRuntimeSessionId = { forSessionId: targetSessionId, runtimeSessionId: targetRuntimeId };
+          void updateSessionMetadata(targetSessionId, { runtimeSessionId: targetRuntimeId })
+            .then((updated) => {
+              if (updated && deferredRuntimeSessionId?.forSessionId === targetSessionId
+                  && deferredRuntimeSessionId.runtimeSessionId === targetRuntimeId) {
+                // Metadata existed — persist succeeded; drop the deferred slot.
+                deferredRuntimeSessionId = null;
+              }
+            })
+            .catch((err) => console.warn('[external-session] runtimeSessionId persist failed:', err));
         }
       }
       const info: SystemInitInfo = {
@@ -1690,7 +1701,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       lastTurnSucceeded = true;
       clearWatchdog();
       console.log(`[external-session] turn_complete: text=${currentAssistantText.length}chars, blocks=${currentContentBlocks.length}, elapsed=${currentTurnStartTime ? Date.now() - currentTurnStartTime : 0}ms`);
-      persistTurnResult();
+      // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
+      void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (turn_complete) failed:', err));
       break;
     }
 
@@ -1722,7 +1734,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
           if (!turnCompleted) {
             lastTurnSucceeded = true;
-            persistTurnResult();
+            // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
+            void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (session_complete) failed:', err));
           }
         } else {
           const errorMessage = event.result || 'Session ended with error';

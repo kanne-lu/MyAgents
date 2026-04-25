@@ -66,8 +66,8 @@ describe('mcp oauth', () => {
     expect(registrationRequest?.token_endpoint_auth_method).toBe('none');
   });
 
-  test('state store reloads OAuth credentials written by another process', () => {
-    saveStateStore({
+  test('state store reloads OAuth credentials written by another process', async () => {
+    await saveStateStore({
       notion: {
         registration: { clientId: 'old-client', registeredAt: 1 },
         token: {
@@ -95,8 +95,8 @@ describe('mcp oauth', () => {
     expect(state?.token?.refreshToken).toBe('new-refresh');
   });
 
-  test('state updates merge against fresh disk state instead of stale cache', () => {
-    saveStateStore({
+  test('state updates merge against fresh disk state instead of stale cache', async () => {
+    await saveStateStore({
       notion: {
         registration: { clientId: 'old-client', registeredAt: 1 },
       },
@@ -114,7 +114,7 @@ describe('mcp oauth', () => {
       },
     });
 
-    updateServerState('notion', {
+    await updateServerState('notion', {
       discovery: {
         authServerUrl: 'https://auth.example.com',
         authorizationEndpoint: 'https://auth.example.com/authorize',
@@ -129,7 +129,7 @@ describe('mcp oauth', () => {
     expect(persisted.notion.discovery.tokenEndpoint).toBe('https://auth.example.com/token');
   });
 
-  test('state update can migrate legacy tokens while holding the write lock', () => {
+  test('state update can migrate legacy tokens while holding the write lock', async () => {
     writeFileSync(join(configDir, 'mcp_oauth_tokens.json'), JSON.stringify({
       notion: {
         accessToken: 'legacy-access',
@@ -142,7 +142,7 @@ describe('mcp oauth', () => {
     }), { encoding: 'utf-8', mode: 0o600 });
 
     const startedAt = Date.now();
-    updateServerState('notion', {
+    await updateServerState('notion', {
       registration: { clientId: 'new-client', registeredAt: Date.now() },
     });
 
@@ -152,7 +152,7 @@ describe('mcp oauth', () => {
     expect(persisted.notion.registration.clientId).toBe('new-client');
   });
 
-  test('state clear can migrate legacy tokens while holding the write lock', () => {
+  test('state clear can migrate legacy tokens while holding the write lock', async () => {
     writeFileSync(join(configDir, 'mcp_oauth_tokens.json'), JSON.stringify({
       notion: {
         accessToken: 'legacy-access',
@@ -165,7 +165,7 @@ describe('mcp oauth', () => {
     }), { encoding: 'utf-8', mode: 0o600 });
 
     const startedAt = Date.now();
-    clearServerField('notion', 'token');
+    await clearServerField('notion', 'token');
 
     expect(Date.now() - startedAt).toBeLessThan(1000);
     const state = getServerState('notion');
@@ -174,7 +174,7 @@ describe('mcp oauth', () => {
   });
 
   test('refresh uses the latest stored client credentials', async () => {
-    saveStateStore({
+    await saveStateStore({
       notion: {
         discovery: {
           authServerUrl: 'https://auth.example.com',
@@ -233,7 +233,7 @@ describe('mcp oauth', () => {
   });
 
   test('refresh reuses a token another process already refreshed', async () => {
-    saveStateStore({
+    await saveStateStore({
       notion: {
         discovery: {
           authServerUrl: 'https://auth.example.com',
