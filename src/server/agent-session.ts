@@ -3,7 +3,7 @@ import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlink
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
+import { getScriptDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
@@ -1901,8 +1901,6 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
         // Bun fallback removed — MyAgents no longer bundles Bun, and "bun x" was an
         // emergency escape hatch for Linux boxes with neither Node nor bundled runtime,
         // which is no longer a supported config.
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } = require('./utils/runtime');
         const systemNpx = findExistingPath(getSystemNpxPaths());
 
         if (systemNpx) {
@@ -1912,20 +1910,16 @@ async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
           console.log(`[agent] MCP ${server.id}: Using system npx (${systemNpx})`);
         } else {
           // 2. Fallback to bundled Node.js npx (use absolute path for deterministic resolution)
-          const nodeDir = getNodeDir();
+          const nodeDir = getBundledNodeDir();
           if (nodeDir) {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { join: pathJoin } = require('path');
-            command = process.platform === 'win32' ? pathJoin(nodeDir, 'npx.cmd') : pathJoin(nodeDir, 'npx');
+            command = process.platform === 'win32' ? join(nodeDir, 'npx.cmd') : join(nodeDir, 'npx');
             if (!args.includes('-y')) args = ['-y', ...args];
             console.log(`[agent] MCP ${server.id}: System npx not found, using bundled Node.js npx (${command})`);
           } else {
             // 3. Last resort: derive npx from the runtime path returned by
             //    getBundledRuntimePath() (always a Node binary in v0.2.0+).
             const runtime = getBundledRuntimePath();
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { dirname: pathDirname, resolve: pathResolve } = require('path');
-            const npxSibling = pathResolve(pathDirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
+            const npxSibling = resolve(dirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
             command = npxSibling;
             if (!args.includes('-y')) args = ['-y', ...args];
             console.log(`[agent] MCP ${server.id}: Derived npx from runtime path: ${npxSibling}`);

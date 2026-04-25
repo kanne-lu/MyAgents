@@ -11,6 +11,7 @@
  */
 
 import type { McpServerDefinition } from '../renderer/config/types';
+import { PRESET_PROVIDERS } from '../renderer/config/types';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
   loadConfig,
@@ -732,13 +733,12 @@ export function handleModelList(): AdminResponse {
   const apiKeys = config.providerApiKeys ?? {};
   const verifyStatus = config.providerVerifyStatus ?? {};
 
-  // Load preset providers
-  let presetProviders: Array<Record<string, unknown>> = [];
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PRESET_PROVIDERS } = require('../renderer/config/types');
-    presetProviders = PRESET_PROVIDERS ?? [];
-  } catch { /* ignore */ }
+  // Load preset providers (statically imported — see top of file).
+  // Cast via `unknown` because `Provider` doesn't carry a string index
+  // signature; the downstream loop accesses fields by name through `String(p.id)`
+  // and `p.config as Record<string, unknown> | undefined`, which works on
+  // both shapes uniformly.
+  const presetProviders: Array<Record<string, unknown>> = (PRESET_PROVIDERS ?? []) as unknown as Array<Record<string, unknown>>;
 
   // Load custom providers
   const customProviders = loadCustomProviderFiles();

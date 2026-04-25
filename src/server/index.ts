@@ -1,4 +1,4 @@
-import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
+import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
 import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, readFile, rename, rm, stat, writeFile } from 'fs/promises';
 import { spawn as subprocessSpawn, fireAndForget } from './utils/subprocess';
 import { fileResponse, sniffMime } from './utils/file-response';
@@ -121,10 +121,9 @@ const CRASH_LOG_FILE = (() => {
   try {
     if (!existsSync(CRASH_LOG_DIR)) {
       // Best-effort directory creation. recursive:true handles parent dirs.
-      // (We can't import ensureDirSync here because this block runs *during*
-      // module init, before that helper's transitive deps are available.)
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('fs').mkdirSync(CRASH_LOG_DIR, { recursive: true });
+      // Don't reach for ensureDirSync — this IIFE runs during module init
+      // before some helper's transitive deps are guaranteed warm.
+      mkdirSync(CRASH_LOG_DIR, { recursive: true });
     }
   } catch { /* fall through; later writes will retry */ }
   const ts = new Date().toISOString().replace(/[:]/g, '-');

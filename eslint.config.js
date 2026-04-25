@@ -71,8 +71,36 @@ export default defineConfig(
           caughtErrorsIgnorePattern: '^_'
         }
       ],
-      // Prevent disabling the no-explicit-any rule via inline comments
+      // Prevent disabling no-explicit-any via inline comments — it hides real
+      // type bugs behind `any`. Ban list extends below for ESM-targeted files
+      // (which is everything except `src/cli/**`).
       'eslint-comments/no-restricted-disable': ['error', '@typescript-eslint/no-explicit-any']
+    }
+  },
+  // ESM-targeted files (everything except the CJS-bundled CLI): forbid
+  // `// eslint-disable-next-line @typescript-eslint/no-require-imports`.
+  //
+  // Why: bare `require()` in an ESM file throws `ReferenceError: require is
+  // not defined` at runtime. The Bun→Node v0.2.0 migration accumulated 6+
+  // sites where developers reached for `require()` (probably copy-paste from
+  // legacy CJS code) and silenced the lint with a disable comment. Each one
+  // was a latent crash waiting for the right code path. The MCP playwright
+  // "initialization failed: require is not defined" regression in v0.2.0 was
+  // caused by exactly this. ESM files MUST use static `import` or
+  // `await import()` — never `require()`.
+  //
+  // CLI (`src/cli/**`) is exempt because esbuild bundles it with
+  // `--format=cjs` (see package.json `build:cli`), so `require()` runs in
+  // a real CJS context after bundling.
+  {
+    files: ['**/*.{ts,tsx,js,jsx,mjs,cjs}'],
+    ignores: ['src/cli/**'],
+    rules: {
+      'eslint-comments/no-restricted-disable': [
+        'error',
+        '@typescript-eslint/no-explicit-any',
+        '@typescript-eslint/no-require-imports'
+      ]
     }
   },
   // Structural guard: builtin MCP tool files MUST NOT eager-import the SDK

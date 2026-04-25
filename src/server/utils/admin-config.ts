@@ -22,6 +22,7 @@ import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
 import type { McpServerDefinition } from '../../renderer/config/types';
+import { PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../renderer/config/types';
 import type { SessionMetadata } from '../types/session';
 import { ensureDirSync } from './fs-utils';
 import { withFileLock, FileBusyError } from './file-lock';
@@ -255,22 +256,15 @@ export function saveProjects(projects: ProjectSlim[]): void {
 // MCP helpers (preset + custom merge, matching renderer/config/services/mcpService.ts)
 // ---------------------------------------------------------------------------
 
-/** Preset MCP servers — imported at call time to avoid circular deps */
+/** Preset MCP servers (statically imported — see top of file) */
 function getPresetMcpServers(): McpServerDefinition[] {
-  // Inline the preset list import to avoid pulling in the full types module at module load
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PRESET_MCP_SERVERS } = require('../../renderer/config/types');
-    // Filter out presets whose `platforms` field doesn't include the host —
-    // keeps platform-specific presets (e.g. cuse on darwin/win32) invisible
-    // everywhere on unsupported hosts (catalogue, validation, effective
-    // MCP lists, `myagents mcp list`).
-    return (PRESET_MCP_SERVERS as McpServerDefinition[]).filter(p =>
-      !p.platforms || p.platforms.includes(process.platform)
-    );
-  } catch {
-    return [];
-  }
+  // Filter out presets whose `platforms` field doesn't include the host —
+  // keeps platform-specific presets (e.g. cuse on darwin/win32) invisible
+  // everywhere on unsupported hosts (catalogue, validation, effective
+  // MCP lists, `myagents mcp list`).
+  return (PRESET_MCP_SERVERS as McpServerDefinition[]).filter(p =>
+    !p.platforms || p.platforms.includes(process.platform)
+  );
 }
 
 /**
@@ -348,15 +342,12 @@ export function getProvidersDir(): string {
 
 /** Find a provider by ID: checks PRESET_PROVIDERS first, then custom files in ~/.myagents/providers/ */
 export function findProvider(id: string): Record<string, unknown> | null {
-  // Check presets first
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PRESET_PROVIDERS } = require('../../renderer/config/types');
-    const preset = (PRESET_PROVIDERS as Array<Record<string, unknown>>)?.find(
-      (p: Record<string, unknown>) => p.id === id
-    );
-    if (preset) return preset;
-  } catch { /* ignore */ }
+  // Check presets first (statically imported — see top of file).
+  // Cast via `unknown` because Provider lacks a string index signature.
+  const preset = (PRESET_PROVIDERS as unknown as Array<Record<string, unknown>>)?.find(
+    (p: Record<string, unknown>) => p.id === id
+  );
+  if (preset) return preset;
 
   // Check custom providers
   try {
