@@ -216,6 +216,20 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 
 ---
 
+### v0.2.0 pit-of-success 模块（新增）
+
+v0.2.0 结构性重构落地了 7 个新的 helper 层模块，把"正确路径"做成默认。完整设计见 @specs/ARCHITECTURE.md 的「v0.2.0 Pit-of-Success Modules」章节。
+
+- `withConfigLock` / `with_config_lock` — `~/.myagents/config.json` 跨进程串行写入（Node + Rust + renderer 三端共享同一个 lockdir）。
+- `withFileLock` / `with_file_lock` — 通用 atomic-mkdir-based file lock，stale-recovery 通过 `<runtime>:<pid>:<startMs>` owner sentinel + pid liveness 探测。Async 实现，无 sync busy-wait。
+- `killWithEscalation` — 子进程 stop 的 SIGTERM → SIGKILL → orphan-log 升级链，bounded-time（worst case `gracefulMs + hardMs`）。
+- `withAbortSignal` / `cancellableFetch` / `withBoundedTimeout` / `anySignal` — 所有下游 fetch / 子进程 / 流的统一 cancel 协议（`CancelReason` 枚举）。
+- `maybeSpill` + `/refs/:id` + SSE 优先级队列 — 大 payload（>256KB Node、>1MiB Rust）流到 `~/.myagents/refs/<id>`，SSE 只送 ref；SSE 三档优先级（critical/coalescible/droppable）+ per-client 软硬上限。
+- `withLogContext` + AsyncLocalStorage logger pipeline — `console.*` capture 自动注入 sessionId/tabId/turnId/runtime/requestId，932 个调用零 call-site migration。`UnifiedLogger` 改 in-memory bounded queue + 100ms async flusher。
+- `DeferredInitState` + `/health/{live,ready,functional}` 三分 — sidecar deferred init 状态机，Renderer loading 挂 ready，不再"假就绪"。
+
+---
+
 ## 补充禁止事项
 
 > 核心架构约束（Rust 代理层、local_http、process_cmd、Tab 隔离、持久 Session、Config disk-first 等）已在上方各节以 MUST/禁止 形式给出，此处不重复。以下为上方未覆盖的补充规则。
@@ -237,6 +251,14 @@ MyAgents 是 OpenClaw 的**通用 Plugin 适配层**，不是各家 IM 的硬编
 | Overlay 遮罩层用裸 `<div>` + 手写 `onClick`/`onMouseDown` | 选中文字拖拽到面板外松手会误关闭 | 使用 `<OverlayBackdrop>` 组件（`@/components/OverlayBackdrop`），内置 `onMouseDown` + target guard |
 | 在 onClick 里用 `requestAnimationFrame(() => otherEl.focus())` 抢夺焦点 | macOS WebKit 触摸板 tap 事件合成在 <16ms 内完成，rAF 夺焦会插入 click 合成窗口 → WebKit 判定交互被打断 → 吞掉 click（物理按下正常、轻按首次无效，极隐蔽） | 按钮如果不该抢焦点，改用 `onMouseDown={retainFocusOnMouseDown}`（`@/utils/focusRetention`），原焦点元素天然保持聚焦，不需要再 rAF 夺回 |
 | 在 `src/server/tools/*.ts` 顶部写 `import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'` 或 `import { z } from 'zod/v4'` | 破坏 builtin MCP lazy-load —— Sidecar 冷启动每次付 ~500-1000ms zod schema 构造税，即使用户压根没启用这个 MCP | SDK/zod imports MUST 放在 `createXxxServer()` 内部通过 `await import(...)` 获取；tool 文件顶层只保留 light 依赖（sse/fs/crypto 等）。META 注册在 `src/server/tools/builtin-mcp-meta.ts`；参考 `cron-tools.ts` / `gemini-image-tool.ts` 的形状 |
+| `~/.myagents/config.json` 写入用裸 `tmp + rename`（绕过锁） | 多写者 race，用户密钥 / 设置静默丢失（last writer wins） | Node MUST 用 `withConfigLock` (`src/server/utils/admin-config.ts`)；Rust MUST 用 `with_config_lock` (`src-tauri/src/config_io.rs`)；renderer MUST 走 `withConfigLock` (`src/renderer/config/services/configStore.ts`)。三端共享同一个 `config.json.lock` lockdir |
+| 单写者文件（`cron_tasks.json` / `sessions/*.jsonl` / `mcp-oauth state` 等）裸 append 或 read-modify-write | 应用内多 owner 并发触发 race / 数据损坏 | Node 用 `withFileLock` (`src/server/utils/file-lock.ts`)；Rust 用 `with_file_lock` / `with_file_lock_blocking` (`src-tauri/src/utils/file_lock.rs`)。owner sentinel `<runtime>:<pid>:<startMs>`，stale recovery 自动检 pid liveness |
+| Runtime 子进程 stop 用裸 `setTimeout + child.kill('SIGTERM')` 等 `waitForExit` | 进程拒收 SIGTERM 时 sidecar 永久卡死（user 停止 / 模型切换 / 权限切换 / runtime 切换全中招） | MUST 用 `killWithEscalation` (`src/server/runtimes/utils/kill-with-escalation.ts`)。三个 runtime adapter + `external-session.ts` 的 catch-fallback 已全部走它，新增 stop 路径同样 |
+| 工具 / bridge 用裸 `fetch()` 无 AbortSignal | 卡住的下游 → tool turn 永久 hang，token 持续烧 | MUST 用 `cancellableFetch` 或 `withAbortSignal` (`src/server/utils/cancellation.ts`)。所有工具 fetch（im-bridge / im-cron / im-media / edge-tts / plugin-bridge compat）已迁完，新增 fetch 同样 |
+| 大 payload（>256KB）直接进 SSE / IPC JSON | OOM、UI 线程被 base64 阻塞、慢 client 拖死 sidecar | MUST 用 `maybeSpill` (`src/server/utils/large-value-store.ts`)；renderer 大响应通过 `/refs/:id` 取。SSE `controller.enqueue` MUST 经 priority gate（`dispatchWithBackpressure`） |
+| 同步 busy-wait（`Atomics.wait` / CPU spin / `while (Date.now() < end)`） | 阻塞 Node event loop / pegs CPU / starve TCP accept | 异步 polling（`setTimeout` async loop）；锁等待用现成 helper（`withFileLock` / `withConfigLock`）。`grep "Atomics.wait"` / `grep "while (Date.now"` 在 src/ 应只剩 doc comment |
+| 健康探针把 readiness 等同于 liveness（renderer loading 挂 `/health`） | "假就绪"——sidecar 看着 OK 但首次发消息卡在 deferred init | MUST 区分 `/health/live` / `/health/ready` / `/health/functional` 三个语义；renderer / Rust `wait_for_readiness` / IM watchdog 都挂 `/health/ready`。新加 route 不要 `await __myagentsDeferredInit`（已下线），用 `DeferredInitState` 查询 |
+| 跨进程 trace 需要 correlation 时去改 `console.*` 加前缀 / 引并行的 `sendLog` 通道 | 932 个 call site 漏改一处就断链；并行通道破坏 unified logging | `console.*` 在合适的 boundary 内调用即可（HTTP middleware / SDK turn / runtime spawn 已经在外层 `withLogContext` 包好），自动注入 sessionId/tabId/turnId/runtime/requestId。新边界用 `withLogContext({ ... }, fn)` 包一层；ambient store 按 sessionId\|ownerId 隔离，**不**用 process singleton |
 
 ---
 
