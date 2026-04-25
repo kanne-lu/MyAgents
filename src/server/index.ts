@@ -145,13 +145,13 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('SIGTERM', () => {
   crashLog('SIGNAL', 'SIGTERM');
-  console.error('[process] SIGTERM received, shutting down...');
+  console.log('[process] SIGTERM received, shutting down...');
   process.exit(0);  // Trigger SDK's process.on('exit') handler → SIGTERM CLI subprocess
 });
 
 process.on('SIGINT', () => {
   crashLog('SIGNAL', 'SIGINT');
-  console.error('[process] SIGINT received, shutting down...');
+  console.log('[process] SIGINT received, shutting down...');
   process.exit(0);
 });
 
@@ -2908,6 +2908,26 @@ async function main() {
 
         const session = getSessionData(sessionId);
         if (!session) {
+          // An active session may not yet have on-disk metadata: external runtimes
+          // pre-warm before the first user message, and builtin can race in the
+          // window between Tab open and first persisted turn. Treat the active
+          // session as an empty session-in-progress instead of 404 (which the
+          // frontend retries, producing log noise).
+          const isActiveBuiltin = sessionId === getSessionId();
+          const isActiveExternal = shouldUseExternalRuntime() && sessionId === getExternalSessionId();
+          if (isActiveBuiltin || isActiveExternal) {
+            return jsonResponse({
+              success: true,
+              session: {
+                id: sessionId,
+                messages: [],
+                liveStreamingMessage: null,
+                liveSessionState: isActiveExternal ? getExternalSessionState() : undefined,
+                totalCount: 0,
+                hasMoreBefore: false,
+              },
+            });
+          }
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
 

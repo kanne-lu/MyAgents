@@ -4542,6 +4542,10 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     // SDK 已注册此 session，后续 query 必须用 resume
     sessionRegistered = true;
     console.log(`[agent] switchToSession: will resume session ${sessionId}`);
+  } else if (isExternalRuntime(getCurrentRuntimeType())) {
+    // External runtimes (codex/gemini/CC) don't use sdkSessionId — resume is
+    // driven by runtimeSessionId in external-session.ts. Not a problem.
+    sessionRegistered = false;
   } else {
     // 从未 query 过的 session，用 sessionId 创建
     sessionRegistered = false;
