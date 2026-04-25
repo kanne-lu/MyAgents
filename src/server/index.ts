@@ -320,6 +320,7 @@ import {
   getExternalSessionId,
   getExternalLiveAssistantMessage,
   prewarmExternalSession,
+  awaitExternalSessionStarting,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
 import { VALID_RUNTIMES } from '../shared/types/runtime';
@@ -3377,6 +3378,38 @@ async function main() {
         // session and pollute the log with misleading "session not found" errors.
         // Handle external runtime directly without consulting builtin's store.
         if (shouldUseExternalRuntime()) {
+          // Wait for any in-flight startExternalSession (pre-warm handshake)
+          // to finish. Without this, user clicking session history during the
+          // 10–14s pre-warm spawn-and-handshake window sees `isExternalSessionActive()`
+          // = false → stopExternalSession is skipped → restoreExternalSessionState
+          // resets module state (lastSessionId, etc.) → the still-spawning prewarm
+          // subprocess for session-A then writes its post-spawn assignments
+          // against state that now believes it's session-B. Mirrors the
+          // serialization in setExternalModel/setExternalPermissionMode.
+          await awaitExternalSessionStarting();
+
+          const isCurrentlyActive = isExternalSessionActive() && payload.sessionId === getExternalSessionId();
+          const meta = getSessionMetadata(payload.sessionId);
+
+          // Validate target: must be either the current live session, or a
+          // persisted session whose runtime matches this sidecar. Without this,
+          // a typo'd sessionId would silently succeed and the next user message
+          // would create a fresh session under the wrong id (parity with
+          // builtin's switchToSession which 404s on unknown ids).
+          if (!isCurrentlyActive && !meta) {
+            return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+          }
+          // Cross-runtime guard — if the persisted session was created by a
+          // different runtime, refuse to attach. The cross-runtime fork flow
+          // is initiated by the frontend creating a new session, not by
+          // switching into the old one.
+          if (meta?.runtime && meta.runtime !== getActiveRuntimeType()) {
+            return jsonResponse(
+              { success: false, error: `Session runtime mismatch: persisted=${meta.runtime}, current=${getActiveRuntimeType()}` },
+              409,
+            );
+          }
+
           // Switching to a DIFFERENT live external session — tear down current first.
           // Reopening the same running session must attach, not interrupt.
           if (isExternalSessionActive() && payload.sessionId !== getExternalSessionId()) {
@@ -3384,7 +3417,7 @@ async function main() {
           }
           // Idempotent — sets up resume state (runtimeSessionId / threadId / lastModel
           // etc.) for the next user message. Safe for already-active sessions
-          // (sessionId === lastSessionId short-circuits the state reset inside).
+          // (sessionId === lastSessionId skips the state reset inside).
           restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
           console.log(`[sessions] Switched to external session: ${payload.sessionId}`);
           return jsonResponse({ success: true, sessionId: payload.sessionId });

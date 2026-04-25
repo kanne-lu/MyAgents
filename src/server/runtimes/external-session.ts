@@ -507,20 +507,21 @@ export async function setExternalModel(model: string): Promise<void> {
   if (startingPromise) {
     await startingPromise;
   }
-  // Idempotent short-circuit: same model means nothing to do. Defense-in-depth
-  // against frontend pushing the same value twice (e.g. mid-render dedupe ref
-  // reset) — without this, the fallback `stopExternalSession()` path would
-  // needlessly kill the running process and we'd pay a cold restart on the
-  // next user message.
-  if (model === lastModel) return;
-  lastModel = model;
-  console.log(`[external-session] Model set to "${model}"`);
 
-  // Try in-place switch first if the active runtime supports it (currently
-  // Gemini via ACP `session/set_model`). This preserves the live process +
-  // session state — no stdin/stdout teardown, no re-handshake, and the next
-  // user message hits Case 3 immediately with the new model.
+  // In-place setModel path (currently Gemini via ACP `session/set_model`):
+  // ALWAYS call through, even on duplicate-value pushes. Reasons:
+  //   1. Runtime-layer setModel is idempotent at the protocol layer — calling
+  //      with an unchanged model is a no-op for the runtime.
+  //   2. Short-circuiting here would lose self-healing: if a previous concurrent
+  //      pair of setModel calls landed out of order (later request wrote
+  //      `lastModel` first, earlier request's RPC completed last → runtime model
+  //      drifts from `lastModel`), the user's only recovery is to re-select
+  //      their intended model. A `lastModel === model` short-circuit would
+  //      silently swallow that recovery click.
+  //   3. The cost of a redundant in-place RPC is one cheap protocol roundtrip.
   if (isExternalSessionActive() && activeProcess && activeRuntime?.setModel) {
+    lastModel = model;
+    console.log(`[external-session] Model set to "${model}" (in-place)`);
     try {
       await activeRuntime.setModel(activeProcess, model);
       return;
@@ -530,7 +531,14 @@ export async function setExternalModel(model: string): Promise<void> {
     }
   }
 
-  // Fallback: stop running process so the next message resumes with the new model.
+  // Fallback restart path: stop running process so next message resumes with
+  // the new model. Idempotent short-circuit on duplicate value — frontend
+  // dedupe is best-effort, so a redundant push here would otherwise cause
+  // a needless kill+respawn (paying ~10s cold restart for nothing). Safe at
+  // this point because there's no in-flight runtime RPC to race against.
+  if (model === lastModel) return;
+  lastModel = model;
+  console.log(`[external-session] Model set to "${model}" (will restart on next send)`);
   if (isRunning || activeProcess) {
     console.log('[external-session] Stopping process for model change');
     await stopExternalSession();
@@ -550,6 +558,11 @@ export async function setExternalPermissionMode(mode: string): Promise<void> {
   if (startingPromise) {
     await startingPromise;
   }
+  // Idempotent short-circuit on duplicate value — symmetric with setExternalModel's
+  // fallback-path guard. Safe to short-circuit unconditionally here because all
+  // runtimes implement permission-mode change via stop+restart (no in-place RPC),
+  // so there's no concurrent ordering race that would require self-healing.
+  if (mode === lastPermissionMode) return;
   lastPermissionMode = mode;
   console.log(`[external-session] Permission mode set to "${mode}"`);
   if (isRunning || activeProcess) {
@@ -565,6 +578,20 @@ export async function setExternalPermissionMode(mode: string): Promise<void> {
  */
 export function shouldUseExternalRuntime(): boolean {
   return isExternalRuntime(getCurrentRuntimeType());
+}
+
+/**
+ * Wait for any in-flight startExternalSession (notably pre-warm) to finish.
+ * Used by callers that touch module state which the spawn path will write to —
+ * /sessions/switch's external branch races against pre-warm post-spawn writes
+ * if it doesn't serialize. setExternalModel / setExternalPermissionMode use
+ * the same pattern internally; this exported helper is for HTTP-route callers
+ * that don't have direct access to `startingPromise`.
+ */
+export async function awaitExternalSessionStarting(): Promise<void> {
+  if (startingPromise) {
+    await startingPromise;
+  }
 }
 
 export function getExternalSessionState(): ExternalSessionState {

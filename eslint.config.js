@@ -88,10 +88,6 @@ export default defineConfig(
   // "initialization failed: require is not defined" regression in v0.2.0 was
   // caused by exactly this. ESM files MUST use static `import` or
   // `await import()` — never `require()`.
-  //
-  // CLI (`src/cli/**`) is exempt because esbuild bundles it with
-  // `--format=cjs` (see package.json `build:cli`), so `require()` runs in
-  // a real CJS context after bundling.
   {
     files: ['**/*.{ts,tsx,js,jsx,mjs,cjs}'],
     ignores: ['src/cli/**'],
@@ -101,6 +97,18 @@ export default defineConfig(
         '@typescript-eslint/no-explicit-any',
         '@typescript-eslint/no-require-imports'
       ]
+    }
+  },
+  // CLI is bundled by esbuild with `--format=cjs` (see package.json:build:cli),
+  // so `require()` runs in a real CJS context after bundling. Disable the rule
+  // entirely for CLI files — relying on disable-next-line comments would force
+  // every `require()` call site to carry boilerplate, and (per Codex review)
+  // doesn't actually constitute a true exemption since the underlying rule
+  // would still fire if a contributor forgot the comment.
+  {
+    files: ['src/cli/**/*.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off'
     }
   },
   // Structural guard: builtin MCP tool files MUST NOT eager-import the SDK

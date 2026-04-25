@@ -1483,6 +1483,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // Wait until runtime is determinable. `currentRuntime` falls back to
     // 'builtin' when both async sources are pending; pushing in that window
     // risks the "wrong-runtime push kills correct-runtime prewarm" race.
+    //
+    // Known limitation: this gate accepts `currentAgent` as authoritative
+    // before `sessionRuntime` arrives via SSE chat:system-init / REST
+    // loadSession. For the vast majority of opens that's correct — the
+    // sidecar was just spawned with `MYAGENTS_RUNTIME` derived from the
+    // same `currentAgent.runtime` we read here. The narrow race window is:
+    // user changes agent.runtime in another tab AFTER its sidecar spawned
+    // with the old value but BEFORE this tab's first render. Tightening
+    // to `sessionRuntime !== null` alone would close it but cost ~1s of
+    // delay before the builtin model push reaches a fresh sidecar (SDK
+    // pre-warm would init with self-resolved disk values instead of the
+    // user-selected model). Trade-off chosen: optimize for the common
+    // case; if the cross-tab race becomes a real reported issue, revisit.
     const runtimeResolved = sessionRuntime !== null || currentAgent !== undefined;
     if (!runtimeResolved) return;
     // IM Bot / cross-session join — adoption effect mirrors sidecar config

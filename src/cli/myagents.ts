@@ -1305,7 +1305,6 @@ function buildRequestBody(
       if (flags.promptFile && typeof flags.promptFile === 'string') {
         try {
           // Lazy load — keep CLI startup fast for non-cron commands.
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
           const fs = require('fs') as typeof import('fs');
           // Size guard: 1 MB is already pathologically large for a cron prompt
           // (~250k English words). Refuse /dev/zero, runaway files, binaries
@@ -1697,7 +1696,6 @@ function resolveTaskMdContent(
     try {
       // Lazy require — same pattern as the cron `--prompt-file` reader
       // (keeps startup fast for commands that don't need fs).
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const fs = require('fs') as typeof import('fs');
       const stat = fs.statSync(filePath);
       if (stat.size > TASK_MD_MAX_BYTES) {
