@@ -1,20 +1,61 @@
 ---
 name: agent-browser
 description: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to "open a website", "fill out a form", "click a button", "take a screenshot", "scrape data from a page", "test this web app", "login to a site", "automate browser actions", or any task requiring programmatic web interaction.
-allowed-tools: Bash(agent-browser:*)
+allowed-tools: Bash(agent-browser:*), Bash(npm install*), Bash(npx -y agent-browser*)
 ---
 
 # Browser Automation with agent-browser
 
 ## First-time Setup
 
-On the first use, the browser (Chromium) may not be downloaded yet. If you get an error like "Executable doesn't exist", run this first:
+The CLI is **not pre-installed** with the app — install it on first use, then download Chromium. **Always run this self-check before issuing any agent-browser command in a fresh environment.**
+
+### Step 1: Verify or install the CLI
+
+```bash
+# Probe by RUNNING the CLI (not just checking PATH presence). This catches the
+# common case of a stale wrapper from a previous app version: it lives at
+# ~/.myagents/bin/agent-browser, satisfies `command -v`, but execs a deleted
+# bundle path → fails with "cannot find file". `--version` exercises the real
+# code path and triggers the install fallback when broken.
+agent-browser --version >/dev/null 2>&1 || npm install -g agent-browser@0.15.1
+```
+
+The install lands in `~/.myagents/npm-global/bin/agent-browser` (MyAgents pins `npm_config_prefix` for the AI subprocess), which sits earlier in PATH than any legacy wrapper. Subsequent `agent-browser …` calls find the new binary automatically.
+
+Tell the user **once** that you're installing the browser tool (~few seconds the first time, instant afterward), then proceed.
+
+#### If `npm install -g` fails
+
+If the install fails (network blocked, registry unreachable, EACCES on a locked-down system Node), invoke the CLI via `npx` **inline on every command** — Bash aliases do not persist across separate tool calls in this environment, so each command must carry the prefix:
+
+```bash
+# Use the npx prefix on EVERY command. Do not try to alias — it won't survive.
+npx -y agent-browser@0.15.1 open https://example.com
+npx -y agent-browser@0.15.1 snapshot -i
+npx -y agent-browser@0.15.1 click @e1
+```
+
+This is slower (~1s overhead per call) but works without an install step.
+
+### Step 2: Download Chromium (~160MB, one-time)
 
 ```bash
 agent-browser install
+# OR if you're on the npx fallback:
+# npx -y agent-browser@0.15.1 install
 ```
 
-This downloads Chromium (~160MB, one-time). Inform the user it may take a minute. After installation, all subsequent commands will work immediately.
+Inform the user this download may take a minute on slow connections.
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `agent-browser` runs but shows "cannot find file" | Stale wrapper from a previous app version is shadowing the new install. The new install at `~/.myagents/npm-global/bin/` should win on PATH; if it doesn't, run `which agent-browser` to see which path resolves first, then either remove the stale path or invoke the new binary by its absolute path. |
+| `npm install -g` exits with the registry blocked / network error | Use the `npx` inline fallback above. If `npx` also fails, the user's network is blocking the npm registry — ask them about proxy / VPN. |
+| `agent-browser install` fails to download Chromium | Network issue / GFW. User may need a proxy or VPN. Ask the user. |
+| `Executable doesn't exist` mid-task | Chromium got deleted or the install never finished. Re-run `agent-browser install`. |
 
 ## Core Workflow
 
@@ -471,18 +512,17 @@ agent-browser eval -b "$(echo -n 'Array.from(document.querySelectorAll("a")).map
 
 ## Anti-Detection & Configuration
 
-Anti-detection defaults are pre-configured in `~/.agent-browser/config.json` — headed mode, hidden `navigator.webdriver`, realistic window size/UA, persistent browser profile. No extra flags needed for normal use.
-
-**Persistent login:** The browser profile at `~/.playwright-mcp-profile/` persists cookies/localStorage across sessions. If a site requires login, guide the user to log in once in the headed browser window — subsequent runs will reuse the authenticated session automatically.
-
-**If a site still blocks:** override per-command with CLI flags (temporary), or edit the config file (persistent). CLI flags always override the config file.
+`agent-browser` uses its built-in defaults out of the box. If a site detects automation, override per-command with CLI flags or persist settings in `~/.agent-browser/config.json`.
 
 ```bash
 # Temporary: override UA for one command
 agent-browser --user-agent "custom UA" open https://target.com
+
+# Headed mode (visible browser window) for one command
+agent-browser --headed open https://target.com
 ```
 
-**Persistent config edits:** edit `~/.agent-browser/config.json`. **IMPORTANT:** This file is auto-managed by MyAgents — it regenerates on every app startup when `"_managed_by": "myagents"` is present. To make persistent edits that survive restarts, you **must** first delete the `"_managed_by"` field, then save your changes. `args` field is split by **both comma and newline** — avoid args containing commas (e.g. `--window-size=W,H` will be split incorrectly; use `--start-maximized` instead). All CLI flags map to camelCase keys (`--executable-path` → `executablePath`).
+**Persistent config:** create or edit `~/.agent-browser/config.json` to set defaults. `args` field is split by **both comma and newline** — avoid args containing commas (e.g. `--window-size=W,H` will be split incorrectly; use `--start-maximized` instead). All CLI flags map to camelCase keys (`--executable-path` → `executablePath`).
 
 Config priority (lowest → highest): `~/.agent-browser/config.json` < `./agent-browser.json` < env vars < CLI flags.
 

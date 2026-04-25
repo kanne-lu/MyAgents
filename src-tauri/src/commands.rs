@@ -897,7 +897,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "7";
+const SYSTEM_SKILLS_VERSION: &str = "8";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -907,7 +907,26 @@ const SYSTEM_SKILLS: &[&str] = &[
     "task-implement",
     "ultra-research",
     "download-anything",
+    // v8: agent-browser promoted from utility → system skill. The CLI is
+    // no longer bundled with the app; the SKILL.md teaches AI to self-install
+    // on first use (`npm install -g agent-browser@<pinned>`). Existing users
+    // need the updated SKILL.md to land or their AI will hit `command not
+    // found` after upgrading. System-skill status forces the overwrite.
+    "agent-browser",
 ];
+
+/// Skills unavailable on certain platforms due to upstream bugs.
+/// MUST stay in sync with `src/server/utils/platform.ts::PLATFORM_BLOCKED_SKILLS`.
+/// Used by `cmd_sync_system_skills` to skip force-syncing skills that the
+/// Node-side runtime would later filter out anyway — prevents orphan files
+/// in `~/.myagents/skills/` that confuse users.
+fn is_skill_blocked_on_platform(skill_folder: &str) -> bool {
+    match skill_folder {
+        // agent-browser daemon broken on Windows: vercel-labs/agent-browser#398
+        "agent-browser" => cfg!(target_os = "windows"),
+        _ => false,
+    }
+}
 
 /// Force-sync every system skill from the app bundle to
 /// `~/.myagents/skills/<name>/`. Runs once per `SYSTEM_SKILLS_VERSION`
@@ -947,7 +966,18 @@ pub fn cmd_sync_system_skills<R: Runtime>(
 
     let mut synced = Vec::new();
     let mut missing = Vec::new();
+    let mut platform_skipped = Vec::new();
     for skill_name in SYSTEM_SKILLS {
+        // Platform block: keep parity with Node-side `isSkillBlockedOnPlatform`
+        // (src/server/utils/platform.ts). Without this, a skill marked
+        // unavailable on the current platform (e.g. agent-browser on Windows
+        // due to upstream daemon bug) would be force-synced into
+        // ~/.myagents/skills/ but invisible to the SDK runtime — orphan
+        // disk files that confuse users and serve no purpose.
+        if is_skill_blocked_on_platform(skill_name) {
+            platform_skipped.push(*skill_name);
+            continue;
+        }
         let src = bundled_skills_dir.join(skill_name);
         let dst = skills_dir.join(skill_name);
         if !src.exists() {
@@ -981,10 +1011,11 @@ pub fn cmd_sync_system_skills<R: Runtime>(
         .map_err(|e| format!("version write failed: {}", e))?;
 
     ulog_info!(
-        "[system-skills] Synced v{} — ok: {:?}, missing: {:?}",
+        "[system-skills] Synced v{} — ok: {:?}, missing: {:?}, platform-skipped: {:?}",
         SYSTEM_SKILLS_VERSION,
         synced,
-        missing
+        missing,
+        platform_skipped
     );
     Ok(true)
 }

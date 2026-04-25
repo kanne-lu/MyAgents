@@ -576,7 +576,6 @@ installer.ts         — 扫描 SKILL.md / marketplace.json → InstallAnalysis
 | 社区 npm 包 |
 | `myagents` CLI |
 | AI Bash `node` / `npx` / `npm` |
-| agent-browser wrapper |
 
 打包位置：`src-tauri/resources/nodejs/`。
 

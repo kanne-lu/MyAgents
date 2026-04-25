@@ -34,9 +34,8 @@
 **`honoServe` 立即绑定 127.0.0.1:port** → Rust health check 几十 ms 就通过。
 
 **listen 后由 IIFE 跑重活：**
-- migration
+- cleanup（log rotation + Playwright stale profile lock）
 - skill seed
-- agent-browser wrapper
 - socks bridge
 - `initializeAgent`
 - external runtime restore

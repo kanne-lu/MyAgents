@@ -10,9 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-04-24
 
 ### Breaking
+- **`agent-browser` CLI 不再 bundle**：DMG 体积 -84 MB。改由 `bundled-skills/agent-browser/SKILL.md` 教 AI 在首次浏览器自动化任务时通过 `npm install -g agent-browser@<pinned>` 自装；agent-session 注入 `npm_config_prefix=~/.myagents/npm-global` 锁定安装位置，PATH 上比 `~/.myagents/bin/` 优先级更高，自然屏蔽老版本残留 wrapper。Skill 升格为 system skill（`SYSTEM_SKILLS_VERSION` 7→8）确保现有用户能拿到新指引。**首次浏览器自动化会多花 ~10s 装包，之后即时**；网络受限环境可用 `npx -y agent-browser@<pinned> ...` inline fallback。
 - **运行时统一为 Node.js v24**：MyAgents 自己的 Sidecar、Plugin Bridge、`myagents` CLI 全部切到 bundled Node.js v24；Bun 从应用包中彻底移除（`src-tauri/binaries/bun-*` 删除，体积减少 ~120 MB）。用户侧无需操作；开发者 `npm install` 代替 `bun install`。
 - **Claude Agent SDK 升级到 0.2.119**：新版 SDK 不再 bundle `cli.js`，改为 per-platform native binary（`bun build --compile` 产物，SDK team 自带 Bun runtime）。`resources/claude-agent-sdk/cli.js` 替换为 `claude[.exe]`（macOS arm64 约 213 MB）。
-- **开发依赖收敛**：`@types/bun` 移除，`tsconfig.json` types 只保留 `node`；新增 `esbuild` / `tsx` / `@hono/node-server` / `better-sqlite3` / `vitest` 等 npm 依赖。
+- **开发依赖收敛**：`@types/bun` 移除，`tsconfig.json` types 只保留 `node`；新增 `esbuild` / `tsx` / `@hono/node-server` / `vitest` 等 npm 依赖。
 
 ### Added
 - **`subprocess.ts` / `file-response.ts` 两个新的 pit-of-success helper**：`Bun.spawn` / `Bun.file(p) + new Response(file)` 的 Node 对应，封装了 Node 与 Bun 在 stdio 流语义 / exit 时序 / 背压处理上的差异，调用点保持原状。
@@ -28,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **SDK 升级 → `resolveClaudeCodeCli()` 重写**：按 platform triple 在 `node_modules/@anthropic-ai/claude-agent-sdk-<triple>/claude` 和 `resources/claude-agent-sdk/claude` 两处定位，支持 Linux glibc/musl 检测。
 - **`options.executable: 'bun'` 清理**：5 处 SDK query option 移除（native binary 路径下该选项为 no-op）。
-- **`bun:sqlite` → `better-sqlite3`**：唯一的一次性 Chromium Cookie 迁移逻辑换用成熟 npm 包。
+- **删除 `migrateProfileToStorageState`（v0.1.x → v0.1.30 Cookie 迁移）**：随 agent-browser bundle 一起清掉 `better-sqlite3` 依赖。该迁移在 commit 5cf027f 后才合入 v0.2.0 dev 分支，没有发布版用户跑过它，可安全移除。极少数 v0.1.x 直接升级到 v0.2.0 的用户可能需要重登录浏览器站点（持久 profile cookie 不再自动迁出）。
 - **中止 stdio 竞态**：`subprocess.ts` 的 `exited` Promise 在 Node `'close'` 事件（stdio drained）而非 `'exit'` resolve，匹配 Bun.spawn 原语义。Codex / Gemini adapter 不再有 stdout reader 被抢跑的风险。
 - **Spawn 错误不再被吞**：ENOENT / "bad CPU type" 等现在带完整 error 信息暴露给调用方，不再显示孤单的 "exit code -1"。
 

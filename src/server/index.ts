@@ -1,4 +1,4 @@
-import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
 import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, readFile, rename, rm, stat, writeFile } from 'fs/promises';
 import { spawn as subprocessSpawn, fireAndForget } from './utils/subprocess';
 import { fileResponse, sniffMime } from './utils/file-response';
@@ -255,8 +255,7 @@ import {
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull, isSkillBlockedOnPlatform } from './utils/platform';
-import { getScriptDir, getAgentBrowserCliPath, getBundledRuntimePath, getPackageManagerPath } from './utils/runtime';
-import { ensureBrowserStealthConfig } from './utils/browser-stealth';
+import { getScriptDir } from './utils/runtime';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
 import {
   createSession,
@@ -583,6 +582,10 @@ const SYSTEM_SKILLS: readonly string[] = [
   'task-implement',
   'ultra-research',
   'download-anything',
+  // v8: see commands.rs::SYSTEM_SKILLS — agent-browser promoted to system
+  // skill so existing users get the updated self-install SKILL.md after
+  // the bundled CLI is removed.
+  'agent-browser',
 ];
 
 /**
@@ -658,21 +661,18 @@ function seedBundledSkills(): void {
 }
 
 /**
- * Generate wrapper script for agent-browser CLI in ~/.myagents/bin/.
- * This makes `agent-browser` available as a bare command in SDK subprocess PATH.
- * The wrapper delegates to `{bun} {agent-browser.js}`.
- */
-const AGENT_BROWSER_VERSION = '0.15.1';
-
-/**
- * Clean up stale Playwright MCP profile artifacts left by v0.1.30.
+ * Clean up stale Playwright MCP profile lock files left by a crashed Chromium.
  *
- * v0.1.30 had a bug where ~/.myagents/bin (containing a node→bun shim) was added to
- * global PATH, breaking playwright-core's WebSocket transport. This caused Chrome to
- * launch but hang on the CDP connection, eventually timing out and leaving stale
- * SingletonLock/SingletonSocket files in the profile directory.
+ * Independent of the agent-browser bundle removal — this exists because
+ * Chromium leaves SingletonLock / SingletonSocket / SingletonCookie files in
+ * the user-data-dir when the process crashes (or the OS kills it on app exit
+ * without a clean shutdown). Subsequent Chromium launches with the same
+ * user-data-dir refuse to start with "ProfileInUse" until the locks clear.
  *
- * This cleanup runs once at startup to recover from that state.
+ * Playwright's own startup mostly handles this, but the legacy
+ * `~/.playwright-mcp-profile/` directory pre-dates Playwright MCP's improved
+ * recovery paths and we've seen real "Chromium hangs forever" reports tied to
+ * stale locks here. Cheap idempotent cleanup at sidecar boot.
  */
 function cleanupStalePlaywrightProfile(): void {
   try {
@@ -684,8 +684,8 @@ function cleanupStalePlaywrightProfile(): void {
 
     if (!existsSync(lockPath)) return;
 
-    // macOS/Linux: SingletonLock is a symlink containing "hostname-pid"
-    // Windows: SingletonLock is a regular file containing "hostname-pid"
+    // SingletonLock content: "hostname-pid" (POSIX symlink target on macOS/Linux,
+    // regular file content on Windows).
     let linkTarget: string;
     try {
       linkTarget = readlinkSync(lockPath);
@@ -693,365 +693,34 @@ function cleanupStalePlaywrightProfile(): void {
       try {
         linkTarget = readFileSync(lockPath, 'utf-8').trim();
       } catch {
-        return; // Can't read lock content, skip cleanup
+        return; // Can't read — bail
       }
     }
 
-    // Format: "hostname-pid" (e.g., "Ethan.local-82424")
     const pidMatch = linkTarget.match(/-(\d+)$/);
     if (!pidMatch) return;
-
     const pid = parseInt(pidMatch[1], 10);
 
-    // Check if the process is still alive
+    // Probe pid liveness; if the process is alive, leave its locks alone.
     try {
-      process.kill(pid, 0); // Signal 0 = just check if process exists
-      // Process is alive — don't remove the lock
+      process.kill(pid, 0);
       return;
     } catch {
-      // Process is dead — safe to clean up
+      // Process is dead → safe to clean up
     }
 
-    // Remove stale lock files
-    const staleFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
-    for (const file of staleFiles) {
+    for (const file of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
       const filePath = join(profileDir, file);
       try {
         if (existsSync(filePath)) {
           unlinkSync(filePath);
         }
-      } catch { /* ignore cleanup errors */ }
+      } catch { /* best effort */ }
     }
 
-    console.log(`[startup] Cleaned up stale Playwright MCP profile lock (pid ${pid} no longer running)`);
+    console.log(`[startup] Cleaned up stale Playwright MCP profile lock (pid ${pid} dead)`);
   } catch (err) {
-    // Non-critical — don't block startup
     console.warn('[startup] Playwright profile cleanup failed:', err);
-  }
-}
-
-/**
- * One-time migration: extract cookies from Chromium profile (~/.playwright-mcp-profile/)
- * into Playwright storage-state JSON (~/.myagents/browser-storage-state.json).
- *
- * Runs when the old profile exists but the new storage-state file does not.
- * This preserves login state when upgrading from persistent-profile to isolated mode.
- *
- * Only cookies are migrated (from SQLite). localStorage lives in LevelDB and is
- * too complex to extract statically — ~90% of login state is cookie-based anyway.
- */
-async function migrateProfileToStorageState(): Promise<void> {
-  try {
-    const home = getHomeDirOrNull();
-    if (!home) return;
-
-    const profileDir = join(home, '.playwright-mcp-profile');
-    const myagentsDir = join(home, '.myagents');
-    const storageStatePath = join(myagentsDir, 'browser-storage-state.json');
-
-    // Only migrate once: old profile exists AND new file does not
-    if (!existsSync(profileDir) || existsSync(storageStatePath)) return;
-
-    const cookiesDbPath = join(profileDir, 'Default', 'Cookies');
-    if (!existsSync(cookiesDbPath)) {
-      console.log('[migration] No Cookies DB found in profile, skipping migration');
-      return;
-    }
-
-    // Use better-sqlite3 to read Chromium's Cookies SQLite database.
-    // Chosen over node:sqlite (Node 22+ experimental) for maturity + prebuilt
-    // binaries across all target platforms. Dynamic import — module is CJS and
-    // only loaded on migration path; tsx/esm cannot `require()` in ESM context.
-    const Database = (await import('better-sqlite3')).default;
-    const db = new Database(cookiesDbPath, { readonly: true, fileMustExist: true });
-
-    const sameSiteMap: Record<number, string> = { 0: 'None', 1: 'Lax', 2: 'Strict' };
-
-    // Chrome epoch: microseconds since 1601-01-01 00:00:00 UTC
-    // Unix epoch conversion: subtract 11644473600 seconds, divide by 1000000
-    const CHROME_EPOCH_OFFSET = 11644473600;
-
-    // Filter out cookies with empty value — on macOS/Windows, Chromium encrypts cookie
-    // values (stored in encrypted_value column, decrypted via OS keychain). The plaintext
-    // `value` column is empty for these. We can only migrate unencrypted cookies.
-    const rows = db.prepare(
-      `SELECT host_key, name, value, path, expires_utc, is_httponly, is_secure, samesite
-       FROM cookies
-       WHERE length(name) > 0 AND length(value) > 0`
-    ).all() as Array<{
-      host_key: string; name: string; value: string; path: string;
-      expires_utc: number; is_httponly: number; is_secure: number; samesite: number;
-    }>;
-
-    db.close();
-
-    if (rows.length === 0) {
-      console.log('[migration] Cookies DB is empty, skipping migration');
-      return;
-    }
-
-    const cookies = rows.map(row => ({
-      name: row.name,
-      value: row.value,
-      domain: row.host_key,
-      path: row.path || '/',
-      expires: row.expires_utc > 0
-        ? Math.floor(row.expires_utc / 1000000) - CHROME_EPOCH_OFFSET
-        : -1,
-      httpOnly: !!row.is_httponly,
-      secure: !!row.is_secure,
-      sameSite: sameSiteMap[row.samesite] ?? 'None',
-    }));
-
-    const storageState = { cookies, origins: [] as Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }> };
-
-    ensureDirSync(myagentsDir);
-    writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2));
-    console.log(`[migration] Migrated ${cookies.length} cookies from Chrome profile to ${storageStatePath}`);
-    console.log('[migration] Old profile at ~/.playwright-mcp-profile/ can be safely deleted');
-  } catch (err) {
-    // Non-critical — don't block startup
-    console.warn('[migration] Profile-to-storage-state migration failed:', err);
-  }
-}
-
-/**
- * Write the agent-browser wrapper script to ~/.myagents/bin/.
- * Returns true on success.
- *
- * Architecture: "self-contained wrapper + scoped shims"
- * - ~/.myagents/bin/       → user-facing commands (safe for global PATH)
- * - ~/.myagents/shims/     → internal runtime shims (NEVER in global PATH)
- *
- * The wrapper script prepends shims/ to its own PATH before exec, so the
- * `node → bun` shim is only visible to agent-browser's subprocess tree —
- * it never leaks to Playwright MCP or other tools.
- */
-function writeAgentBrowserWrapper(cliPath: string): boolean {
-  const bunPath = getBundledRuntimePath();
-  const homeDir = getHomeDirOrNull();
-  if (!homeDir) {
-    console.warn('[agent-browser] Home directory not found, skipping wrapper setup');
-    return false;
-  }
-  const binDir = join(homeDir, '.myagents', 'bin');
-  const shimsDir = join(homeDir, '.myagents', 'shims');
-  ensureDirSync(binDir);
-  ensureDirSync(shimsDir);
-
-  // POSIX sh: escape backslash, double-quote, dollar, backtick inside double-quoted strings
-  const shellEscape = (s: string) => s.replace(/([\\"`$])/g, '\\$1');
-  const isWin = process.platform === 'win32';
-
-  // --- agent-browser wrapper (self-contained: sets up shims PATH internally) ---
-  if (isWin) {
-    // Windows needs TWO wrappers (like npm global installs):
-    // 1. .cmd for cmd.exe / PowerShell
-    // 2. extensionless POSIX sh for Git Bash (SDK uses Git Bash on Windows)
-    const safeBun = bunPath.replace(/"/g, '""');
-    const safeCli = cliPath.replace(/"/g, '""');
-    const safeShims = shimsDir.replace(/"/g, '""');
-    writeFileSync(join(binDir, 'agent-browser.cmd'),
-      `@set "PATH=${safeShims};%PATH%"\r\n@"${safeBun}" "${safeCli}" %*\r\n`);
-    writeFileSync(join(binDir, 'agent-browser'),
-      `#!/bin/sh\nexport PATH="${shellEscape(shimsDir)}:$PATH"\nexec "${shellEscape(bunPath)}" "${shellEscape(cliPath)}" "$@"\n`);
-  } else {
-    writeFileSync(join(binDir, 'agent-browser'),
-      `#!/bin/sh\nexport PATH="${shellEscape(shimsDir)}:$PATH"\nexec "${shellEscape(bunPath)}" "${shellEscape(cliPath)}" "$@"\n`,
-      { mode: 0o755 });
-  }
-  console.log(`[agent-browser] Wrapper created: ${join(binDir, 'agent-browser')}${isWin ? ' (.cmd + sh)' : ''}`);
-
-  // --- node shim in ~/.myagents/shims/ (NOT in global PATH) ---
-  // agent-browser's Rust binary spawns daemon.js via hardcoded `node` command.
-  // Since we bundle bun (not Node.js), create a node shim that delegates to bun.
-  // Always overwrite — bunPath may change after app update.
-  const nodeShimPath = join(shimsDir, 'node');
-  if (isWin) {
-    // Windows: create node.exe as a hardlink to bun.exe.
-    // Windows PATH resolves .exe before .cmd (PATHEXT order). Using .exe avoids
-    // cmd.exe being invoked for node.cmd, which would create a visible console window.
-    const nodeExePath = join(shimsDir, 'node.exe');
-    try {
-      if (existsSync(nodeExePath)) unlinkSync(nodeExePath);
-      linkSync(bunPath, nodeExePath);
-    } catch {
-      // Hardlink failed (cross-volume?) — fall back to copy
-      try { copyFileSync(bunPath, nodeExePath); } catch { /* .cmd fallback below */ }
-    }
-    // .cmd fallback for cmd.exe / PowerShell manual invocation
-    const escapedBun = bunPath.replace(/"/g, '""');
-    writeFileSync(join(shimsDir, 'node.cmd'), `@"${escapedBun}" %*\r\n`);
-    // POSIX sh fallback for Git Bash
-    writeFileSync(nodeShimPath, `#!/bin/sh\nexec "${shellEscape(bunPath)}" "$@"\n`);
-  } else {
-    writeFileSync(nodeShimPath, `#!/bin/sh\nexec "${shellEscape(bunPath)}" "$@"\n`, { mode: 0o755 });
-  }
-
-  // --- Migration: remove old node shims from ~/.myagents/bin/ (v0.1.30 artifact) ---
-  // v0.1.30 put the node shim in bin/ alongside agent-browser, polluting global PATH.
-  for (const oldShim of ['node', 'node.exe', 'node.cmd']) {
-    const oldPath = join(binDir, oldShim);
-    try {
-      if (existsSync(oldPath)) {
-        unlinkSync(oldPath);
-        console.log(`[agent-browser] Cleaned up old shim: ${oldPath}`);
-      }
-    } catch { /* ignore */ }
-  }
-
-  return true;
-}
-
-/**
- * Ensure Chromium is installed via agent-browser's own playwright-core.
- * This avoids version mismatch (agent-browser pins a specific Chromium build).
- * See: https://github.com/vercel-labs/agent-browser/issues/107
- *
- * Runs in the background — does not block caller.
- * @param cliPath Path to agent-browser.js (used to locate node_modules/playwright-core)
- */
-/**
- * Check whether Chromium needs installing, using a file-system lock so only one
- * Sidecar process across the whole app performs the download.
- */
-function ensureChromiumInstalled(cliPath: string): void {
-  // cliPath: .../agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
-  // We need:  .../agent-browser-cli/node_modules/playwright-core/cli.js
-  const nodeModulesDir = resolve(cliPath, '..', '..', '..');
-  const playwrightCli = join(nodeModulesDir, 'playwright-core', 'cli.js');
-  if (!existsSync(playwrightCli)) return;
-
-  // File-system lock: only one process installs; others skip.
-  const homeDir = getHomeDirOrNull();
-  if (!homeDir) return;
-  const lockFile = join(homeDir, '.myagents', '.chromium-installing');
-  if (existsSync(lockFile)) {
-    try {
-      const lockTime = statSync(lockFile).mtimeMs;
-      if (Date.now() - lockTime < 10 * 60 * 1000) return; // another process is working (<10 min)
-      rmSync(lockFile, { force: true }); // stale lock
-    } catch { return; }
-  }
-  try {
-    writeFileSync(lockFile, String(process.pid), { flag: 'wx' }); // exclusive create
-  } catch { return; } // another process won the race
-
-  console.log('[agent-browser] Ensuring Chromium is installed via bundled playwright-core...');
-  const bunPath = getBundledRuntimePath();
-  const chromiumProc = subprocessSpawn([bunPath, playwrightCli, 'install', 'chromium'], {
-    cwd: nodeModulesDir,
-    stdout: 'ignore',
-    stderr: 'pipe',
-  });
-  chromiumProc.exited.then(async (code) => {
-    rmSync(lockFile, { force: true });
-    if (code === 0) {
-      console.log('[agent-browser] Chromium ready');
-    } else {
-      const stderr = await new Response(chromiumProc.stderr).text();
-      console.warn(`[agent-browser] Chromium install failed (exit ${code}):`, stderr.slice(0, 500));
-    }
-  }).catch((err) => {
-    rmSync(lockFile, { force: true });
-    console.error('[agent-browser] Chromium install error:', err);
-  });
-}
-
-/**
- * Auto-install agent-browser to ~/.myagents/agent-browser-cli/ using bundled bun or system npm.
- * Runs in the background so it doesn't block Sidecar startup.
- */
-function autoInstallAgentBrowser(): void {
-  const homeDir = getHomeDirOrNull();
-  if (!homeDir) return;
-
-  const installDir = join(homeDir, '.myagents', 'agent-browser-cli');
-  const lockFile = join(installDir, '.installing');
-
-  ensureDirSync(installDir);
-
-  // Atomic lock: stale check + exclusive create (same pattern as ensureChromiumInstalled)
-  if (existsSync(lockFile)) {
-    try {
-      const lockTime = statSync(lockFile).mtimeMs;
-      if (Date.now() - lockTime < 5 * 60 * 1000) {
-        console.log('[agent-browser] Install already in progress, skipping');
-        return;
-      }
-      rmSync(lockFile, { force: true }); // stale lock
-    } catch { /* ignore */ }
-  }
-  try {
-    writeFileSync(lockFile, String(process.pid), { flag: 'wx' }); // exclusive create
-  } catch {
-    console.log('[agent-browser] Install already in progress, skipping');
-    return;
-  }
-
-  // Ensure package.json exists (bun add requires it)
-  const pkgJsonPath = join(installDir, 'package.json');
-  if (!existsSync(pkgJsonPath)) {
-    writeFileSync(pkgJsonPath, '{}');
-  }
-
-  const pm = getPackageManagerPath();
-  const pkg = `agent-browser@${AGENT_BROWSER_VERSION}`;
-  // bun add <pkg> / npm install <pkg> — both work with cwd
-  const finalArgs = pm.installArgs(pkg);
-
-  console.log(`[agent-browser] Auto-installing ${pkg} to ${installDir} using ${pm.type}...`);
-
-  const proc = subprocessSpawn([pm.command, ...finalArgs], {
-    cwd: installDir,
-    stdout: 'ignore',
-    stderr: 'pipe',
-  });
-
-  // Handle in background — don't block startup
-  proc.exited.then(async (code) => {
-    if (code !== 0) {
-      rmSync(lockFile, { force: true });
-      new Response(proc.stderr).text().then((stderr) => {
-        console.error(`[agent-browser] Auto-install failed (exit ${code}):`, stderr.slice(0, 500));
-      }).catch(() => {
-        console.error(`[agent-browser] Auto-install failed (exit ${code})`);
-      });
-      return;
-    }
-
-    console.log('[agent-browser] npm install completed');
-    const cliPath = getAgentBrowserCliPath();
-    if (!cliPath) {
-      rmSync(lockFile, { force: true });
-      console.warn('[agent-browser] CLI still not found after install');
-      return;
-    }
-    writeAgentBrowserWrapper(cliPath);
-    ensureChromiumInstalled(cliPath);
-    ensureBrowserStealthConfig();
-    rmSync(lockFile, { force: true });
-  }).catch((err) => {
-    rmSync(lockFile, { force: true });
-    console.error('[agent-browser] Auto-install error:', err);
-  });
-}
-
-function setupAgentBrowserWrapper(): void {
-  try {
-    const cliPath = getAgentBrowserCliPath();
-    if (cliPath) {
-      writeAgentBrowserWrapper(cliPath);
-      ensureChromiumInstalled(cliPath);  // Background — won't block startup
-      ensureBrowserStealthConfig();
-      return;
-    }
-
-    // CLI not bundled — auto-install to ~/.myagents/agent-browser-cli/
-    console.log('[agent-browser] CLI not found in bundle, starting auto-install...');
-    autoInstallAgentBrowser();
-  } catch (err) {
-    console.error('[agent-browser] Error setting up wrapper:', err);
   }
 }
 
@@ -1548,8 +1217,8 @@ async function main() {
   setSidecarPort(port);
 
   // ── Deferred init gate ──────────────────────────────────────────────────
-  // Everything heavy (migrations, skill seed, agent-browser wrapper, socks
-  // bridge, initializeAgent, external runtime restore) moves to AFTER
+  // Everything heavy (skill seed, socks bridge, initializeAgent, external
+  // runtime restore) moves to AFTER
   // honoServe() binds, so Rust's TCP health check unblocks in < 100ms
   // instead of waiting ~2s for this work to complete. Routes that need
   // agent state `await deferredInit` at the top of the fetch handler.
@@ -9091,23 +8760,10 @@ description: >
       cleanupOldUnifiedLogs();
       cleanupStalePlaywrightProfile();
 
-      currentInitPhase = 'migration';
-      setDeferredInitPhase(currentInitPhase);
-      await migrateProfileToStorageState();
-
       currentInitPhase = 'skill-seed';
       setDeferredInitPhase(currentInitPhase);
       seedBundledSkills();
       console.log('[startup] seedBundledSkills done');
-
-      if (!isSkillBlockedOnPlatform('agent-browser')) {
-        currentInitPhase = 'agent-browser-setup';
-        setDeferredInitPhase(currentInitPhase);
-        setupAgentBrowserWrapper();
-        console.log('[startup] setupAgentBrowserWrapper done');
-      } else {
-        console.log('[startup] Skipping agent-browser on this platform (blocked)');
-      }
 
       currentInitPhase = 'socks-bridge';
       setDeferredInitPhase(currentInitPhase);

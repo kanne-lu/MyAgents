@@ -3,7 +3,7 @@ import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlink
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
+import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
@@ -3047,9 +3047,27 @@ export function buildClaudeSessionEnv(
     essentialPaths.push(bundledNodeDir);
   }
 
-  // MyAgents bin directory — user-facing commands (agent-browser wrapper etc.)
-  // Safe for global PATH: runtime shims (node→bun) are in ~/.myagents/shims/
-  // and scoped inside each wrapper script, not exposed here.
+  // MyAgents-managed npm global prefix — every `npm install -g <pkg>` from an
+  // AI Bash tool lands in `~/.myagents/npm-global/{bin,lib}` thanks to the
+  // `npm_config_prefix` env we inject below. This dir comes BEFORE
+  // `~/.myagents/bin` in essentialPaths so:
+  //   1. AI-installed tools (e.g. agent-browser) shadow any legacy
+  //      `~/.myagents/bin/<name>` wrapper from older app versions —
+  //      legacy wrappers naturally fall idle without explicit cleanup.
+  //   2. We control the install location regardless of whether bundled
+  //      Node or system Node serves the npm subprocess (signed app
+  //      bundle's default prefix is read-only → bare `npm install -g`
+  //      would fail without this override).
+  if (home) {
+    const npmGlobalBinDir = isWindows
+      ? resolve(home, '.myagents', 'npm-global')  // npm on Windows puts binaries under prefix root, not prefix/bin
+      : `${home}/.myagents/npm-global/bin`;
+    essentialPaths.push(npmGlobalBinDir);
+  }
+
+  // MyAgents bin directory — user-facing commands (the `myagents` CLI itself).
+  // Legacy `agent-browser` wrappers from older app versions may still live
+  // here; they're shadowed by `npm-global/bin` above so no cleanup needed.
   if (home) {
     const myagentsBinDir = isWindows
       ? resolve(home, '.myagents', 'bin')
@@ -3117,6 +3135,25 @@ export function buildClaudeSessionEnv(
   delete env.PATH;
   delete env.Path;
   env[PATH_KEY] = finalPath;
+
+  // Pin `npm install -g` target to a writable, MyAgents-managed prefix.
+  //
+  // Without this override:
+  //   - Bundled Node's default prefix is the signed app bundle's Resources
+  //     dir → read-only → `npm install -g` fails EACCES on production macOS.
+  //   - System Node's default prefix is typically `/usr/local` (sudo) or
+  //     a user-configured path that may be inconsistent across machines.
+  //
+  // With the override: `~/.myagents/npm-global/{bin,lib}` is always writable
+  // and the install target is predictable. Combined with adding
+  // `<prefix>/bin` to PATH above, AI-installed CLIs (e.g. agent-browser via
+  // its skill bootstrap) become immediately invocable in subsequent Bash
+  // turns without per-shell setup.
+  if (home) {
+    env.npm_config_prefix = isWindows
+      ? resolve(home, '.myagents', 'npm-global')
+      : `${home}/.myagents/npm-global`;
+  }
   // Disable SDK nonessential traffic (Statsig telemetry, Sentry error reporting, surveys).
   // MyAgents manages its own telemetry; these external connections add startup latency
   // and can timeout in restricted network environments (e.g. China).
@@ -3158,17 +3195,13 @@ export function buildClaudeSessionEnv(
   // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
   // into project .claude/skills/ by syncProjectUserConfig() instead.
 
-  // agent-browser: config is at ~/.agent-browser/config.json (default path, no env var needed)
-
-  // agent-browser: bypass Rust canonicalize() UNC path issue on Windows
-  // https://github.com/vercel-labs/agent-browser/issues/393
-  if (isWindows) {
-    const abCliPath = getAgentBrowserCliPath();
-    if (abCliPath) {
-      // cliPath = .../agent-browser/bin/agent-browser.js → HOME = .../agent-browser/
-      env.AGENT_BROWSER_HOME = resolve(abCliPath, '..', '..');
-    }
-  }
+  // agent-browser: no env injection needed. The CLI ships its own config
+  // discovery (~/.agent-browser/config.json default path) and is installed
+  // by the AI via the agent-browser skill on first use, not bundled here.
+  // Earlier versions set AGENT_BROWSER_HOME on Windows to bypass a Rust
+  // canonicalize() UNC path issue (vercel-labs/agent-browser#393); that
+  // workaround required the bundled CLI path to derive HOME, and is now
+  // upstream's responsibility.
 
   // Self-Config CLI: expose sidecar port so the `myagents` CLI can call back
   if (sidecarPort > 0) {

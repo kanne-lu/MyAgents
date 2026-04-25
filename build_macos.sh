@@ -254,45 +254,10 @@ SDK_DEST="src-tauri/resources/claude-agent-sdk"
 rm -rf "${SDK_DEST}"
 mkdir -p "${SDK_DEST}"
 
-# 预装 agent-browser CLI（使用预生成的 lockfile 避免耗时的依赖解析）
-echo -e "  ${CYAN}预装 agent-browser CLI...${NC}"
-AGENT_BROWSER_DIR="${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
-LOCKFILE_DIR="${PROJECT_DIR}/src/server/agent-browser-lockfile"
-# 版本一致性校验：index.ts 的 AGENT_BROWSER_VERSION 必须与 lockfile 的 package.json 一致
-CODE_VERSION=$(grep "const AGENT_BROWSER_VERSION" "${PROJECT_DIR}/src/server/index.ts" | sed "s/.*= '//;s/'.*//" )
-LOCK_VERSION=$(python3 -c "import json; print(json.load(open('${LOCKFILE_DIR}/package.json'))['dependencies']['agent-browser'])")
-if [ "$CODE_VERSION" != "$LOCK_VERSION" ]; then
-    echo -e "${RED}✗ 版本不一致! index.ts: ${CODE_VERSION}, lockfile: ${LOCK_VERSION}${NC}"
-    echo -e "${YELLOW}  请同步更新 src/server/agent-browser-lockfile/ (参见其 README.md)${NC}"
-    exit 1
-fi
-echo -e "  版本: ${CODE_VERSION}"
-rm -rf "${AGENT_BROWSER_DIR}"
-mkdir -p "${AGENT_BROWSER_DIR}"
-# 复制预生成的 package.json + package-lock.json（跳过依赖解析，秒级安装）
-cp "${LOCKFILE_DIR}/package.json" "${AGENT_BROWSER_DIR}/"
-cp "${LOCKFILE_DIR}/package-lock.json" "${AGENT_BROWSER_DIR}/"
-(cd "${AGENT_BROWSER_DIR}" && npm ci --ignore-scripts)
-if [ $? -ne 0 ]; then
-    echo -e "${RED}✗ agent-browser 预装失败${NC}"
-    exit 1
-fi
-# npm 包内含全平台 native binary，仅保留 darwin 的（删除 linux/win32 避免公证扫描）
-AB_BIN_DIR="${AGENT_BROWSER_DIR}/node_modules/agent-browser/bin"
-rm -f "${AB_BIN_DIR}/agent-browser-linux-"* "${AB_BIN_DIR}/agent-browser-win32-"* 2>/dev/null || true
-# 验证非 darwin 二进制已全部删除
-if find "${AB_BIN_DIR}" -type f \( -name "agent-browser-linux-*" -o -name "agent-browser-win32-*" \) | grep -q .; then
-    echo -e "${RED}✗ 删除非 darwin agent-browser 二进制失败${NC}"
-    exit 1
-fi
-chmod 755 "${AB_BIN_DIR}"/agent-browser-darwin-* 2>/dev/null || true
-# 验证 native binary 存在
-NATIVE_BIN="${AB_BIN_DIR}/agent-browser-darwin-$(uname -m)"
-if [ ! -f "$NATIVE_BIN" ]; then
-    echo -e "${RED}✗ agent-browser native binary 不存在: $(basename "$NATIVE_BIN")${NC}"
-    exit 1
-fi
-echo -e "${GREEN}  ✓ agent-browser CLI 预装完成 (含 native binary)${NC}"
+# NOTE: agent-browser CLI is no longer bundled. The skill at
+# bundled-skills/agent-browser/SKILL.md teaches AI to self-install via
+# `npm install -g agent-browser@<pinned>` (with `npx` fallback) on first
+# use. Removing the bundle saves ~84MB DMG size + ~1-2min build time.
 
 # 预装 sharp 图像处理（替代 jimp，libvips 原生，上游 claude-code 同款）
 # 需要 sharp + @img/sharp-darwin-{arm64,x64} + @img/sharp-libvips-darwin-{arm64,x64}
@@ -428,57 +393,8 @@ done < <(find "$VENDOR_DIR" -type f \( -name "*.node" -o -name "rg" \) -path "*d
 echo -e "${GREEN}✓ Vendor 签名完成 (成功: ${SIGNED_COUNT}, 失败: ${FAILED_COUNT})${NC}"
 echo ""
 
-# ========================================
-# 签名 agent-browser-cli 原生二进制
-# ========================================
-echo -e "  ${CYAN}签名 agent-browser-cli 原生二进制...${NC}"
-
-AB_CLI_DIR="${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
-# 删除所有非 darwin 的 prebuilds（android/ios/linux/win32 含 Mach-O 会被 Apple 公证扫描）
-find "${AB_CLI_DIR}/node_modules" -type d -name "prebuilds" 2>/dev/null | while IFS= read -r prebuild_dir; do
-    for platform_dir in "${prebuild_dir}"/*/; do
-        platform_name=$(basename "$platform_dir")
-        case "$platform_name" in
-            darwin-*) ;; # 保留 darwin
-            *) rm -rf "$platform_dir" ;; # 删除其他平台
-        esac
-    done
-done
-
-# 签名 agent-browser native CLI binary + darwin .bare prebuilds
-AB_SIGNED_COUNT=0
-AB_FAILED_COUNT=0
-
-# 1) 签名 agent-browser native binary (所有 darwin 架构)
-while IFS= read -r binary; do
-    echo -e "    ${CYAN}签名: agent-browser/bin/$(basename "$binary")${NC}"
-    if codesign --force --options runtime --timestamp \
-        --sign "$APPLE_SIGNING_IDENTITY" "$binary" 2>/dev/null; then
-        ((AB_SIGNED_COUNT++))
-    else
-        echo -e "    ${YELLOW}警告: 签名失败 - $binary${NC}"
-        ((AB_FAILED_COUNT++))
-    fi
-done < <(find "${AB_CLI_DIR}/node_modules/agent-browser/bin" -type f -name "agent-browser-darwin-*" 2>/dev/null)
-
-# 2) 签名 .bare prebuilds (bare-fs/bare-os 等 Node.js native addons)
-while IFS= read -r binary; do
-    echo -e "    ${CYAN}签名: $(echo "$binary" | sed "s|.*/node_modules/||")${NC}"
-    if codesign --force --options runtime --timestamp \
-        --sign "$APPLE_SIGNING_IDENTITY" "$binary" 2>/dev/null; then
-        ((AB_SIGNED_COUNT++))
-    else
-        echo -e "    ${YELLOW}警告: 签名失败 - $binary${NC}"
-        ((AB_FAILED_COUNT++))
-    fi
-done < <(find "${AB_CLI_DIR}/node_modules" -type f -name "*.bare" -path "*darwin*" 2>/dev/null)
-
-if [ $AB_FAILED_COUNT -gt 0 ]; then
-    echo -e "${RED}错误: agent-browser 原生二进制签名失败 (${AB_FAILED_COUNT} 个)，公证必定失败${NC}"
-    exit 1
-fi
-echo -e "${GREEN}✓ agent-browser 签名完成 (${AB_SIGNED_COUNT} 个文件)${NC}"
-echo ""
+# NOTE: agent-browser-cli signing block removed — bundle no longer ships.
+# AI installs the CLI on first use via the agent-browser skill (npm install -g).
 
 # ========================================
 # 签名 sharp 原生二进制

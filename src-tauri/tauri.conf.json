@@ -58,7 +58,6 @@
       "../src-tauri/resources/plugin-bridge-dist.js": "plugin-bridge-dist.js",
       "../src/server/plugin-bridge/sdk-shim": "plugin-bridge-sdk-shim",
       "../src-tauri/resources/claude-agent-sdk": "claude-agent-sdk",
-      "../src-tauri/resources/agent-browser-cli": "agent-browser-cli",
       "../src-tauri/resources/sharp-runtime": "sharp-runtime",
       "../src-tauri/resources/nodejs": "nodejs",
       "../src/shared": "shared",

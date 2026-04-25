@@ -53,8 +53,11 @@ MyAgents.app/
         ├── plugin-bridge-dist.js      # Plugin Bridge 打包产物
         ├── plugin-bridge-sdk-shim/    # OpenClaw SDK shim（ESM, v2026.4.24+）
         ├── claude-agent-sdk/          # SDK native binary（独立运行时）
-        ├── agent-browser-cli/         # 预装的 agent-browser（含 native chromium wrapper）
         └── cli/myagents.js            # myagents CLI（esbuild bundle）
+
+注：v0.2.0+ 起 `agent-browser` 不再 bundle —— 改由 bundled-skills/agent-browser/SKILL.md
+教 AI 在首次使用时通过 `npm install -g agent-browser@<pinned>` 自装到
+`~/.myagents/npm-global/bin/`（buildClaudeSessionEnv 注入的 npm prefix）。
 ```
 
 ## 运行时路径工具 (`src/server/utils/runtime.ts`)
@@ -110,8 +113,7 @@ SDK 子进程（AI Bash 工具）看到的 PATH 优先级：
 3. **Plugin Bridge 打包**：esbuild bundle `src/server/plugin-bridge/index.ts` → `plugin-bridge-dist.js`
 4. **CLI 打包**：esbuild bundle `src/cli/myagents.ts` → `resources/cli/myagents.js`
 5. **SDK native binary**：按 target triple 拷贝 + codesign
-6. **agent-browser 预装**：`npm ci --ignore-scripts`（`src/server/agent-browser-lockfile/package-lock.json` 作为锁文件，秒级安装）
-7. **Tauri 构建**：`npm run tauri:build -- --target <triple>`
+6. **Tauri 构建**：`npm run tauri:build -- --target <triple>`
 
 v0.2.0 之前这些步骤用 `bun build` + `bun install` — 完全切到 Node.js 生态后，lockfile 从 `bun.lock` 迁到 `package-lock.json`。
 

@@ -183,7 +183,7 @@ export function getBundledNodePath(): string | null {
 
 /**
  * Get the path to the JavaScript runtime used to execute our own scripts
- * (agent-browser wrapper, Chromium installer, etc.).
+ * (sidecar entrypoint, plugin bridge, etc.).
  *
  * Priority:
  *   1. Bundled Node.js (app-local — guarantees a matching version)
@@ -258,53 +258,16 @@ export function getBundledCusePath(): string | null {
 }
 
 /**
- * Get the path to the bundled agent-browser CLI entry point (agent-browser.js).
- *
- * Search order:
- * 1. Production (macOS): Contents/Resources/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
- * 2. Production (Windows): <install-dir>/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
- * 3. Development: <project-root>/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
- * 4. User-local install: ~/.myagents/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
- *
- * @returns Absolute path to agent-browser.js, or null if not found
- */
-export function getAgentBrowserCliPath(): string | null {
-  const relPath = join('agent-browser-cli', 'node_modules', 'agent-browser', 'bin', 'agent-browser.js');
-  const scriptDir = getScriptDir();
-
-  // Production: agent-browser-cli is alongside server-dist.js in Resources
-  const prodPath = resolve(scriptDir, relPath);
-  if (existsSync(prodPath)) return prodPath;
-
-  // Development: walk up from scriptDir to find agent-browser-cli at project root
-  let dir = scriptDir;
-  for (let i = 0; i < 5; i++) {
-    const devPath = resolve(dir, relPath);
-    if (existsSync(devPath)) return devPath;
-    dir = dirname(dir);
-  }
-
-  // User-local: auto-installed to ~/.myagents/agent-browser-cli/
-  const homeDir = process.env.HOME || process.env.USERPROFILE;
-  if (homeDir) {
-    const userPath = resolve(homeDir, '.myagents', relPath);
-    if (existsSync(userPath)) return userPath;
-  }
-
-  return null;
-}
-
-/**
  * Get the absolute path to the bundled sharp module's CommonJS entry (`lib/index.js`).
  *
  * sharp ships per-platform native addons (`@img/sharp-<triple>/sharp.node`) that
  * esbuild cannot bundle, so we install sharp into a dedicated `sharp-runtime/`
- * node_modules tree (mirrors `agent-browser-cli/`) and load it at runtime via
- * absolute-path dynamic import. Sharp's internal `require('./libvips')` and
- * `require('@img/sharp-<triple>/sharp.node')` both resolve correctly because
- * Node walks up from the loaded entry file to find `sharp-runtime/node_modules/`.
+ * node_modules tree and load it at runtime via absolute-path dynamic import.
+ * Sharp's internal `require('./libvips')` and `require('@img/sharp-<triple>/sharp.node')`
+ * both resolve correctly because Node walks up from the loaded entry file to
+ * find `sharp-runtime/node_modules/`.
  *
- * Search order (matches getAgentBrowserCliPath):
+ * Search order:
  * 1. Production (macOS):   Contents/Resources/sharp-runtime/node_modules/sharp/lib/index.js
  * 2. Production (Windows): <install-dir>/sharp-runtime/node_modules/sharp/lib/index.js
  * 3. Development:          <project-root>/node_modules/sharp/lib/index.js  (top-level dep)
