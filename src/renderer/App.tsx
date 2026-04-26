@@ -710,9 +710,10 @@ export default function App() {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS));
       } else if (e.key === 'w' || e.key === 'W') {
-        // macOS: handled by native menu → window:cmd-w → useTrayEvents.ts.
-        // Windows/Linux: no native menu with Ctrl+W, so handle here directly.
-        // (On macOS this branch is dead code — the menu intercepts before JS.)
+        // macOS: native menu (Window > Close Tab, Cmd+W) emits window:cmd-w
+        // and useTrayEvents handles it — this branch is normally dead code.
+        // Kept as a defensive fallback if the menu accelerator ever misfires.
+        // Windows/Linux: no native menu with Ctrl+W, so this is the primary path.
         e.preventDefault();
         if (!dismissTopmost()) {
           if (!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]')) {

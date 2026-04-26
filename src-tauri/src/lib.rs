@@ -159,6 +159,16 @@ pub fn run() {
     // Build the app first, then run with event handler
     // This allows us to handle RunEvent::ExitRequested for Cmd+Q and Dock quit
     let app = tauri::Builder::default()
+        // Builder-level menu event handler (canonical Tauri 2 pattern).
+        // Routes Window > Close Tab (Cmd+W accelerator + mouse click) to the
+        // frontend, which walks its own overlay/tab close hierarchy.
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "cmd-w-close" {
+                if let Err(e) = app.emit("window:cmd-w", ()) {
+                    ulog_warn!("[App] Cmd+W emit failed: {}", e);
+                }
+            }
+        })
         .register_asynchronous_uri_scheme_protocol("myagents", attachment_protocol::handle)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Another instance was launched — bring the existing window to the foreground
@@ -511,7 +521,7 @@ pub fn run() {
             // which hides the window before JS can handle it.
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{MenuBuilder, SubmenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+                use tauri::menu::{MenuBuilder, SubmenuBuilder, MenuItemBuilder, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 
                 let app_name = app.package_info().name.clone();
                 let app_handle = app.handle();
@@ -542,7 +552,13 @@ pub fn run() {
                     .select_all()
                     .build()?;
 
-                let window_menu = SubmenuBuilder::new(app_handle, "Window")
+                // Use `WINDOW_SUBMENU_ID` (the magic Tauri 2 constant) so
+                // `init_app_menu` calls `NSApp.setWindowsMenu(menu)` — i.e.
+                // marks this submenu as macOS's official Window menu (used
+                // for the open-window tracking list, "Bring All to Front",
+                // etc.). Tauri's default Window menu uses the same ID; we
+                // mirror that pattern when supplying our own.
+                let window_menu = SubmenuBuilder::with_id(app_handle, WINDOW_SUBMENU_ID, "Window")
                     .item(&close_tab)
                     .item(&PredefinedMenuItem::minimize(app_handle, None)?)
                     .item(&PredefinedMenuItem::maximize(app_handle, None)?)
@@ -557,14 +573,8 @@ pub fn run() {
                     .build()?;
 
                 app.set_menu(menu)?;
-
-                // Handle custom menu item click
-                let app_handle_for_menu = app.handle().clone();
-                app.on_menu_event(move |_app, event| {
-                    if event.id().as_ref() == "cmd-w-close" {
-                        let _ = app_handle_for_menu.emit("window:cmd-w", ());
-                    }
-                });
+                // Note: the matching `on_menu_event` handler lives at Builder
+                // level at the top of `run()`.
             }
 
             // Windows: Remove system decorations for custom title bar
