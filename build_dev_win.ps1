@@ -114,11 +114,22 @@ foreach ($dir in $dirsToClean) {
 }
 
 # 创建占位符资源 (关键: 满足 tauri build 需求，但 sidecar.rs 在 debug 模式下会忽略它们)
-$resourcesDir = Join-Path $PROJECT_DIR "src-tauri/resources/claude-agent-sdk"
-if (-not (Test-Path $resourcesDir)) {
-    New-Item -ItemType Directory -Path $resourcesDir -Force | Out-Null
+# 必须把 build_dev.sh 的全套占位符都建出来，否则 Tauri bundler 资源校验会挂：
+#   - server-dist.js / plugin-bridge-dist.js: dev 走 tsx 直接跑源码，不依赖 bundle 产物
+#   - claude-agent-sdk/ : SDK native binary 占位目录
+#   - sharp-runtime/ : sharp 在 dev 走 walk-up 加载，目录只是 bundler 的资源指针
+foreach ($subdir in @("claude-agent-sdk", "sharp-runtime")) {
+    $d = Join-Path $PROJECT_DIR "src-tauri/resources/$subdir"
+    if (-not (Test-Path $d)) {
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+    }
 }
 "// dev placeholder" | Out-File -FilePath (Join-Path $PROJECT_DIR "src-tauri/resources/server-dist.js") -Encoding UTF8
+"// dev placeholder" | Out-File -FilePath (Join-Path $PROJECT_DIR "src-tauri/resources/plugin-bridge-dist.js") -Encoding UTF8
+$sharpPlaceholder = Join-Path $PROJECT_DIR "src-tauri/resources/sharp-runtime/.dev-placeholder"
+if (-not (Test-Path $sharpPlaceholder)) {
+    "dev mode: sharp loads from top-level node_modules/sharp; this dir is prod-only" | Out-File -FilePath $sharpPlaceholder -Encoding UTF8
+}
 
 # VC++ Runtime DLL 占位符（满足 tauri.windows.conf.json 资源校验）
 foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll")) {
@@ -159,11 +170,29 @@ if ($LASTEXITCODE -ne 0) {
 Write-ColorOutput "✓ 前端构建完成" "Green"
 Write-Host ""
 
+# 打包 myagents CLI（与 build_dev.sh 对齐）
+# server-dist.js / plugin-bridge-dist.js 在 dev 模式下用占位符（前面已写），
+# 因为 sidecar.rs:debug 会从源码 tsx 直接跑。CLI 没有这种 dev fallback —
+# Rust 的 cmd_sync_cli 总是从 resources/cli/myagents.js 拷到 ~/.myagents/bin/，
+# 缺这个产物就会 ship 一个连 `myagents --help` 都跑不起来的 debug 包。
+Write-ColorOutput "[2.5/3] 打包 myagents CLI..." "Blue"
+& npm run build:cli
+if ($LASTEXITCODE -ne 0) {
+    Write-ColorOutput "✗ myagents CLI 打包失败" "Red"
+    exit 1
+}
+Write-ColorOutput "✓ myagents CLI 已打包" "Green"
+Write-Host ""
+
 # 强制触发 Rust 重新编译 (确保 sidecar.rs 的逻辑修改生效)
+# build_dev.sh 用 `touch` 只更新 mtime；旧版本这里写的是
+# `(Get-Date) | Out-File -Append`，把时间戳直接 *append 到源码文件内容*，
+# 每次 dev build 都给 sidecar.rs / main.rs 屁股加一行垃圾，污染 git 工作区。
+# PS 没有 touch，但等价做法是改 LastWriteTime 属性。
 $sidecarFile = Join-Path $PROJECT_DIR "src-tauri/src/sidecar.rs"
 $mainFile = Join-Path $PROJECT_DIR "src-tauri/src/main.rs"
-(Get-Date).ToString() | Out-File -FilePath $sidecarFile -Append -Encoding UTF8
-(Get-Date).ToString() | Out-File -FilePath $mainFile -Append -Encoding UTF8
+(Get-Item $sidecarFile).LastWriteTime = Get-Date
+(Get-Item $mainFile).LastWriteTime = Get-Date
 
 # 构建 Tauri 应用
 Write-ColorOutput "[3/3] 构建 Tauri 应用 (Debug 模式, NSIS)..." "Blue"

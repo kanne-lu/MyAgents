@@ -905,17 +905,24 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     );
 
     let mut cmd = crate::process_cmd::new(&node_path);
-    // Always inject tsx/esm. Needed in two cases:
-    //   1. Dev: bridge_script is the TS source — tsx compiles it + resolves
-    //      extensionless relative imports (e.g. `./compat-api` → `./compat-api.ts`)
-    //   2. Prod: bridge_script is pre-bundled JS, but community OpenClaw plugins
-    //      often ship `.ts` source as their entry (per `openclaw.extensions`
-    //      protocol in package.json). Without tsx, Node refuses to load .ts
-    //      under node_modules for security ("Stripping types is currently
-    //      unsupported for files under node_modules").
-    // tsx leaves already-transpiled .js files alone, so loading it in JS-bundle
-    // mode has no functional side effect on bridge's own code.
-    cmd.arg("--import").arg("tsx/esm");
+    // Inject tsx/esm only when the bridge_script is the TypeScript source
+    // (dev mode). In prod we ship `plugin-bridge-dist.js` (esbuild-bundled
+    // JS) and DO NOT bundle the `tsx` package into the install — pre-fix
+    // this branch ran `--import tsx/esm` unconditionally, which on
+    // production installs aborted Node with
+    //   `Cannot find package 'tsx' imported from <install-dir>/`
+    // and the bridge child died before serving its first request. Mirror
+    // of `sidecar.rs::start_sidecar`'s conditional check.
+    //
+    // KNOWN LIMITATION: community OpenClaw plugins that ship `.ts` source
+    // (per `openclaw.extensions` in their package.json) won't load in
+    // prod with this conditional. Future work: bundle a minimal tsx
+    // loader into resources/ so the prod path can keep transpiling user
+    // plugin code on the fly. For 0.2.0 every shipped plugin is .js, so
+    // disabling the prod inject is a net unblocking.
+    if bridge_script.extension().and_then(|s| s.to_str()) == Some("ts") {
+        cmd.arg("--import").arg("tsx/esm");
+    }
     cmd.arg(bridge_script.to_string_lossy().as_ref())
         // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
         // can find and kill orphaned bridge processes after a crash

@@ -92,19 +92,13 @@ echo -e "${GREEN}✓ 通过${NC}"
 echo ""
 
 # Sidecar + Bridge + CLI 打包 —— 三件套统一通过 `npm run build:*`
-# (`node scripts/esbuild-bundle.mjs <target>`) 调用 esbuild JS API。
-# 单一配置入口，避免 shell 引号在跨平台 / cross-shell 场景下出岔子。
+# (`node scripts/esbuild-bundle.mjs <target>`)。Driver 内部 post-build：
+# - cli: 复制 myagents.cmd 到 resources/cli/
+# - server: 校验产物不含硬编码 __dirname 路径
 echo -e "${BLUE}[3/6] 打包 Sidecar / Bridge / CLI ...${NC}"
-mkdir -p src-tauri/resources ./src-tauri/resources/cli
 npm run build:server
 npm run build:bridge
 npm run build:cli
-cp ./src/cli/myagents.cmd ./src-tauri/resources/cli/myagents.cmd
-
-if grep -qE 'var __dirname = "/' ./src-tauri/resources/server-dist.js; then
-    echo -e "${RED}✗ 错误: server-dist.js 包含硬编码的 __dirname 路径${NC}"
-    exit 1
-fi
 echo -e "${GREEN}✓ 打包完成${NC}"
 echo ""
 

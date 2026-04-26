@@ -212,27 +212,14 @@ echo -e "${BLUE}[5/7] 构建前端和服务端...${NC}"
 # Sidecar / Bridge / CLI 三件套都走 `npm run build:*` —— 后台是
 # `node scripts/esbuild-bundle.mjs <target>`。单一配置入口（entry /
 # banner / format / external / target），不再让 shell 引号介入。
-mkdir -p src-tauri/resources ./src-tauri/resources/cli
+# Driver 内部包含 post-build 步骤：cli 复制 myagents.cmd，server 校验
+# 无硬编码 __dirname 路径——这两步以前在每个平台脚本里各抄一遍，现已合并。
 echo -e "  ${CYAN}打包服务端代码...${NC}"
 npm run build:server
 echo -e "  ${CYAN}打包 Plugin Bridge...${NC}"
 npm run build:bridge
 echo -e "  ${CYAN}打包 myagents CLI...${NC}"
 npm run build:cli
-# 复制 Windows launcher 到同目录（cmd_sync_cli 从 resources/cli/ 读取）
-cp ./src/cli/myagents.cmd ./src-tauri/resources/cli/myagents.cmd
-
-# 验证打包结果不包含开发机硬编码路径
-# esbuild 同样会将 __dirname 视为编译时符号，源码必须改用 import.meta.url 替代
-# 检查任何 "var __dirname = \"/Users/..." 模式 (覆盖所有用户名)
-if grep -qE 'var __dirname = "/Users/[^"]+' ./src-tauri/resources/server-dist.js; then
-    echo -e "${RED}✗ 错误: server-dist.js 包含硬编码的 __dirname 路径!${NC}"
-    echo -e "${YELLOW}  检测到: $(grep -oE 'var __dirname = "[^"]+"' ./src-tauri/resources/server-dist.js | head -1)${NC}"
-    echo -e "${YELLOW}  请检查代码中是否使用了 __dirname (会被打包器硬编码)${NC}"
-    echo -e "${YELLOW}  应使用 import.meta.url + fileURLToPath 在运行时获取路径${NC}"
-    exit 1
-fi
-echo -e "${GREEN}  ✓ 服务端代码验证通过 (无硬编码路径)${NC}"
 
 # SDK native binary 按架构在 per-target loop 里拷贝（见下方 Tauri 构建循环）。
 # SDK 0.2.113+ 不再 ship cli.js/sdk.mjs/vendor，改为 per-platform native binary。

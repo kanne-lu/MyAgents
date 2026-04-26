@@ -471,55 +471,21 @@ try {
     # ========================================
     Write-Host "[5/7] 构建前端和服务端..." -ForegroundColor Blue
 
-    # 打包服务端代码
-    Write-Host "  打包服务端代码..." -ForegroundColor Cyan
-    $resourcesDir = Join-Path $ProjectDir "src-tauri\resources"
-    if (-not (Test-Path $resourcesDir)) {
-        New-Item -ItemType Directory -Path $resourcesDir -Force | Out-Null
-    }
-
-    & npx esbuild ./src/server/index.ts `
-        --bundle --platform=node --format=esm --target=node20 `
-        --outfile=./src-tauri/resources/server-dist.js --sourcemap `
-        --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);'
-    if ($LASTEXITCODE -ne 0) {
-        throw "服务端打包失败"
-    }
-
-    # 验证打包结果不包含硬编码路径
-    $serverDist = Get-Content "src-tauri\resources\server-dist.js" -Raw
-    if ($serverDist -match 'var __dirname = "/Users/[^"]+"') {
-        throw "server-dist.js 包含硬编码的 __dirname 路径!"
-    }
-    Write-Host "    OK - 服务端代码验证通过" -ForegroundColor Green
-
-    # 打包 Plugin Bridge 代码 (OpenClaw channel plugin 支持)
-    Write-Host "  打包 Plugin Bridge..." -ForegroundColor Cyan
-    & npx esbuild ./src/server/plugin-bridge/index.ts `
-        --bundle --platform=node --format=esm --target=node20 `
-        --outfile=./src-tauri/resources/plugin-bridge-dist.js --sourcemap `
-        --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);' `
-        --external:openclaw
-    if ($LASTEXITCODE -ne 0) {
-        throw "Plugin Bridge 打包失败"
-    }
-    Write-Host "    OK - Plugin Bridge 打包完成" -ForegroundColor Green
-
-    # 打包 myagents CLI（shebang 用 node）
-    Write-Host "  打包 myagents CLI..." -ForegroundColor Cyan
-    $cliResDir = Join-Path $ProjectDir "src-tauri\resources\cli"
-    if (-not (Test-Path $cliResDir)) {
-        New-Item -ItemType Directory -Path $cliResDir -Force | Out-Null
-    }
-    & npx esbuild ./src/cli/myagents.ts `
-        --bundle --platform=node --format=cjs --target=node20 `
-        --outfile=./src-tauri/resources/cli/myagents.js `
-        --banner:js='#!/usr/bin/env node'
-    if ($LASTEXITCODE -ne 0) {
-        throw "myagents CLI 打包失败"
-    }
-    Copy-Item "./src/cli/myagents.cmd" "./src-tauri/resources/cli/myagents.cmd" -Force
-    Write-Host "    OK - myagents CLI 打包完成" -ForegroundColor Green
+    # Sidecar / Bridge / CLI 三件套统一通过 npm scripts，由
+    # `scripts/esbuild-bundle.mjs` 单一入口驱动。Driver 自带 post-build：
+    #   - cli: 复制 myagents.cmd 到 resources/cli/
+    #   - server: 校验产物不含硬编码 __dirname 路径
+    # 实际上 tauri:build 的 beforeBuildCommand (tauri.conf.json) 也会
+    # 跑同一组 npm 脚本——这里显式提前一步是为了 build 阶段提早暴露
+    # 错误（避免等到 cargo 链接成功才发现 server-dist.js 有问题）。
+    Write-Host "  打包 Sidecar / Bridge / CLI..." -ForegroundColor Cyan
+    & npm run build:server
+    if ($LASTEXITCODE -ne 0) { throw "服务端打包失败" }
+    & npm run build:bridge
+    if ($LASTEXITCODE -ne 0) { throw "Plugin Bridge 打包失败" }
+    & npm run build:cli
+    if ($LASTEXITCODE -ne 0) { throw "myagents CLI 打包失败" }
+    Write-Host "    OK - Sidecar / Bridge / CLI 打包完成" -ForegroundColor Green
 
     # 拷贝 Claude Agent SDK native binary（0.2.113+ 取代 cli.js 分发模式）
     # Windows 默认构建 x64；arm64 需另行处理（本脚本目前仅 x64）
