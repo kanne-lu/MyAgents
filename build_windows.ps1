@@ -487,6 +487,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "myagents CLI 打包失败" }
     Write-Host "    OK - Sidecar / Bridge / CLI 打包完成" -ForegroundColor Green
 
+    # 填充 tsx-runtime（Plugin Bridge 走绝对路径 --import）—— Windows 当前
+    # 仅 x64 构建；将来加 arm64 时把 --cpu 参数化。
+    Write-Host "  填充 tsx-runtime (win32-x64)..." -ForegroundColor Cyan
+    & npm run build:tsx-runtime -- win32 x64
+    if ($LASTEXITCODE -ne 0) { throw "tsx-runtime 填充失败" }
+    Write-Host "    OK - tsx-runtime 就绪" -ForegroundColor Green
+
     # 拷贝 Claude Agent SDK native binary（0.2.113+ 取代 cli.js 分发模式）
     # Windows 默认构建 x64；arm64 需另行处理（本脚本目前仅 x64）
     Write-Host "  拷贝 Claude native binary (win32-x64)..." -ForegroundColor Cyan

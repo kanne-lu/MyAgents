@@ -86,6 +86,14 @@ mkdir -p "${PROJECT_DIR}/src-tauri/resources/sharp-runtime"
 echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/server-dist.js"
 echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/plugin-bridge-dist.js"
 
+# 填充 tsx-runtime（dev 模式 bridge.rs::find_tsx_runtime_loader 优先 fallback
+# 到项目根 node_modules/tsx，但 Tauri bundler 仍要求资源目录存在；填一个最小
+# 占位避免 cargo bundle 警告，prod build 才需要完整安装）。
+mkdir -p "${PROJECT_DIR}/src-tauri/resources/tsx-runtime"
+[ -f "${PROJECT_DIR}/src-tauri/resources/tsx-runtime/.dev-placeholder" ] || \
+    echo "dev mode: tsx loads from top-level node_modules/tsx via find_tsx_runtime_loader fallback" \
+    > "${PROJECT_DIR}/src-tauri/resources/tsx-runtime/.dev-placeholder"
+
 # Rebuild native addons against bundled Node ABI (fixes ERR_DLOPEN_FAILED
 # when system npm used a different Node.js version for initial install).
 NODE_BIN="${PROJECT_DIR}/src-tauri/resources/nodejs/bin/node"

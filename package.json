@@ -33,6 +33,7 @@
     "build:server": "node scripts/esbuild-bundle.mjs server",
     "build:bridge": "node scripts/esbuild-bundle.mjs bridge",
     "build:cli": "node scripts/esbuild-bundle.mjs cli",
+    "build:tsx-runtime": "node scripts/setup-tsx-runtime.mjs",
     "server": "node --import tsx/esm src/server/index.ts",
     "start": "npm run build:web && npm run server",
     "tauri": "tauri",

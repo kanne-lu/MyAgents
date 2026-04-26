@@ -420,6 +420,12 @@ for TARGET in "${BUILD_TARGETS[@]}"; do
     echo -e "  ${CYAN}确保 Node.js 匹配目标架构 (${NODE_TARGET_ARCH})...${NC}"
     "${PROJECT_DIR}/scripts/download_nodejs.sh" --target "$NODE_TARGET_ARCH"
 
+    # ---- 重新填充 tsx-runtime 资源以匹配目标架构 ----
+    # `setup-tsx-runtime.mjs` 用 npm 的 --os/--cpu 选择对应平台的
+    # `@esbuild/<triple>` 二进制；跨架构 Mac DMG 必须按 TARGET 重灌。
+    echo -e "  ${CYAN}填充 tsx-runtime (darwin-${NODE_TARGET_ARCH})...${NC}"
+    npm run build:tsx-runtime -- darwin "$NODE_TARGET_ARCH"
+
     # 签名 Node.js 二进制 (TCC / notarization 需要统一签名)
     NODE_BINARY="${NODEJS_DIR}/bin/node"
     if [ -f "$NODE_BINARY" ]; then

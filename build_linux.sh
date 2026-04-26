@@ -99,6 +99,12 @@ echo -e "${BLUE}[3/6] 打包 Sidecar / Bridge / CLI ...${NC}"
 npm run build:server
 npm run build:bridge
 npm run build:cli
+
+# 填充 tsx-runtime 资源（Plugin Bridge 通过绝对路径 --import 引用）。
+# 用 npm 的 --os/--cpu 选择对应平台的 @esbuild/<triple>。
+LINUX_TSX_CPU=$([[ "$(uname -m)" == "aarch64" || "$(uname -m)" == "arm64" ]] && echo "arm64" || echo "x64")
+echo -e "${BLUE}[3.1/6] 填充 tsx-runtime (linux-${LINUX_TSX_CPU})...${NC}"
+npm run build:tsx-runtime -- linux "${LINUX_TSX_CPU}"
 echo -e "${GREEN}✓ 打包完成${NC}"
 echo ""
 

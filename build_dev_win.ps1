@@ -118,7 +118,7 @@ foreach ($dir in $dirsToClean) {
 #   - server-dist.js / plugin-bridge-dist.js: dev 走 tsx 直接跑源码，不依赖 bundle 产物
 #   - claude-agent-sdk/ : SDK native binary 占位目录
 #   - sharp-runtime/ : sharp 在 dev 走 walk-up 加载，目录只是 bundler 的资源指针
-foreach ($subdir in @("claude-agent-sdk", "sharp-runtime")) {
+foreach ($subdir in @("claude-agent-sdk", "sharp-runtime", "tsx-runtime")) {
     $d = Join-Path $PROJECT_DIR "src-tauri/resources/$subdir"
     if (-not (Test-Path $d)) {
         New-Item -ItemType Directory -Path $d -Force | Out-Null
@@ -129,6 +129,10 @@ foreach ($subdir in @("claude-agent-sdk", "sharp-runtime")) {
 $sharpPlaceholder = Join-Path $PROJECT_DIR "src-tauri/resources/sharp-runtime/.dev-placeholder"
 if (-not (Test-Path $sharpPlaceholder)) {
     "dev mode: sharp loads from top-level node_modules/sharp; this dir is prod-only" | Out-File -FilePath $sharpPlaceholder -Encoding UTF8
+}
+$tsxPlaceholder = Join-Path $PROJECT_DIR "src-tauri/resources/tsx-runtime/.dev-placeholder"
+if (-not (Test-Path $tsxPlaceholder)) {
+    "dev mode: tsx loads from top-level node_modules/tsx via find_tsx_runtime_loader fallback" | Out-File -FilePath $tsxPlaceholder -Encoding UTF8
 }
 
 # VC++ Runtime DLL 占位符（满足 tauri.windows.conf.json 资源校验）
