@@ -239,6 +239,15 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release\resources -Recurse -
 
 Tauri GUI 应用从 Finder/Explorer 启动时不继承 shell PATH（无 homebrew、无用户 PATH）。`system_binary::find(binary_name)` 自动补充常见路径（`/opt/homebrew/bin`、`/usr/local/bin`、`C:\Program Files\nodejs` 等），确保系统工具（npm、git、pgrep 等）可被发现。
 
+### `cmd_fsync_path` Windows-specific quirks (`src-tauri/src/config_io.rs`)
+
+跨平台 fsync 在 Windows 上有两类需要专门处理的失败：
+
+1. **`FlushFileBuffers` 要求 `GENERIC_WRITE`**：Unix 下 `fsync(2)` 接受只读 fd，但 Windows 的等价 API 要求写权限，否则 `os error 5 (拒绝访问)`。`opts_for_fsync()` 在 Windows 上加 `.write(true)`，Unix 上保持只读以避免不必要的写权限请求。
+2. **AV / search-indexer transient share violation**：Defender 实时扫描、OneDrive 同步、Backblaze 索引器在我们刚写完文件之后会瞬间用 `FILE_SHARE_NONE` 打开它，让我们的后续打开返回 `ERROR_SHARING_VIOLATION (32)` 或偶发的 `ERROR_ACCESS_DENIED (5)`。失败窗口是 ms 级，配置 25/50/100ms 退避循环（4 次尝试），透明跳过这段。
+
+`fsync_parent_dir` 在 Windows 上是 no-op：`FlushFileBuffers` 对目录句柄是 documented no-op，且需要 `FILE_FLAG_BACKUP_SEMANTICS` 才能拿到目录句柄。NTFS 自身的 journaling 提供等价的 crash-consistency 保证。
+
 ## Plugin 安装 Fallback 链
 
 三级 fallback 确保社区插件安装成功：

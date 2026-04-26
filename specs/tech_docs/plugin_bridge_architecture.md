@@ -140,6 +140,12 @@ Bun 之前静默容忍，Node 不。v0.2.0 通过 `module.registerHooks()`（Nod
 
 `--import tsx/esm` **在 dev 和 prod 都要注入**（不是只 dev）：qqbot / weixin 这类插件入口是 `.ts`，Node 拒绝对 `node_modules/*.ts` strip types；tsx 对已编译的 `.js` 是 no-op，无副作用。
 
+**tsx 的安装位置（v0.2.0+）**：tsx 不再 `npm install` 到每个 `plugin_dir/`，而是预先打包到 `src-tauri/resources/tsx-runtime/`（per-platform 的 `@esbuild/<triple>` 二进制由构建脚本 `npm run build:tsx-runtime -- <os> <cpu>` 选定）。Spawn 时 Rust 通过 `find_tsx_runtime_loader()` 解析到绝对路径并以 `--import file:///<absolute>/tsx/dist/esm/index.mjs` 形式注入。
+
+为什么这么改：早期版本对每个 plugin_dir 调 `npm install tsx --no-save` ——但 npm 即使带 `--no-save` 也会触发 prune，先前手工拷入的 `node_modules/openclaw/` SDK shim 被它当成"和 package.json 不一致的多余依赖"删除（v0.2.0 macOS 实测）。绕开 npm 的副作用就要把 tsx 的"安装"挪出 plugin_dir，绝对路径 `--import` 是 Node 22 ESM loader 唯一允许的、与 cwd 无关的引用方式。
+
+**cwd 不变量**：spawn Plugin Bridge 进程时 cwd 不能依赖任何相对路径（节点 ESM 的 bare specifier 解析与 Node 启动 cwd 强相关）。Rust 端用 `set_current_dir(plugin_dir)` 把工作目录锚定到插件目录，所有运行时文件引用都通过 `import.meta.url` 或绝对 file URL，不允许出现 `./node_modules/x` 这类相对路径。
+
 ### Phase 4: 消息流转
 
 ```
