@@ -114,7 +114,7 @@ where
     // value via the closure passed to `with_file_lock_blocking`. The error
     // helper converts our String errors into FileLockError::Io.
     fn to_io_err(msg: String) -> FileLockError {
-        FileLockError::Io(std::io::Error::new(std::io::ErrorKind::Other, msg))
+        FileLockError::Io(std::io::Error::other(msg))
     }
 
     let result = with_file_lock_blocking(
@@ -223,10 +223,9 @@ pub async fn cmd_fsync_path(path: String, directory: bool) -> Result<(), String>
                             }
                         }
                     }
-                    Err(last.unwrap_or_else(|| std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "fsync open: exhausted retries",
-                    )))
+                    Err(last.unwrap_or_else(|| {
+                        std::io::Error::other("fsync open: exhausted retries")
+                    }))
                 }
                 #[cfg(not(windows))]
                 {
