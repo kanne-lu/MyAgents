@@ -899,28 +899,52 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         }
     }
 
+    // Self-heal: pre-0.2.0 installs don't have tsx in their plugin
+    // directory (the install_tsx_into_plugin_dir step was added in
+    // 0.2.0 to support `.ts`-shipped plugins like the WeChat / Lark /
+    // QQBot OpenClaw modules). If the user already had a plugin
+    // installed before this app version, calling install_plugin from
+    // the wizard would be required to bring tsx in — instead we
+    // populate it on-demand here, so existing users don't need to
+    // re-install. install_tsx_into_plugin_dir is idempotent (skips
+    // when node_modules/tsx already exists), so the cost on the
+    // happy path is one disk stat.
+    install_tsx_into_plugin_dir(app_handle, &std::path::PathBuf::from(plugin_dir)).await;
+
     ulog_info!(
         "[bridge] Spawning bridge: node={:?} script={:?} plugin_dir={} port={} rust_port={}",
         node_path, bridge_script, plugin_dir, port, rust_port
     );
 
     let mut cmd = crate::process_cmd::new(&node_path);
-    // Inject tsx/esm only when the bridge_script is the TypeScript source
-    // (dev mode). In prod we ship `plugin-bridge-dist.js` (esbuild-bundled
-    // JS) and DO NOT bundle the `tsx` package into the install — pre-fix
-    // this branch ran `--import tsx/esm` unconditionally, which on
-    // production installs aborted Node with
-    //   `Cannot find package 'tsx' imported from <install-dir>/`
-    // and the bridge child died before serving its first request. Mirror
-    // of `sidecar.rs::start_sidecar`'s conditional check.
+    // Inject tsx/esm whenever a tsx package exists in the plugin dir's
+    // node_modules. We reach this branch in three runtime configurations:
     //
-    // KNOWN LIMITATION: community OpenClaw plugins that ship `.ts` source
-    // (per `openclaw.extensions` in their package.json) won't load in
-    // prod with this conditional. Future work: bundle a minimal tsx
-    // loader into resources/ so the prod path can keep transpiling user
-    // plugin code on the fly. For 0.2.0 every shipped plugin is .js, so
-    // disabling the prod inject is a net unblocking.
-    if bridge_script.extension().and_then(|s| s.to_str()) == Some("ts") {
+    //   1. Dev (bridge_script = `src/server/plugin-bridge/index.ts`):
+    //      cwd walk-up reaches the repo's root node_modules, which has
+    //      tsx as a regular dev dep. tsx loader handles the .ts entry.
+    //
+    //   2. Prod, JS-only plugin: tsx not needed; cwd=plugin_dir's
+    //      node_modules has no tsx → we don't inject the flag → bridge
+    //      starts cleanly.
+    //
+    //   3. Prod, plugin shipping `.ts` source (lark/qqbot/weixin):
+    //      `install_tsx_into_plugin_dir` (in install_plugin) installs
+    //      tsx into the plugin dir at install time. We inject the flag
+    //      here, and Node's ESM resolver finds tsx via the cwd-relative
+    //      walk-up below.
+    //
+    // The branching is "tsx is present in plugin_dir/node_modules", not
+    // "bridge_script is .ts" — tsx is needed at *plugin* load time, not
+    // *bridge script* load time.
+    let plugin_dir_path = std::path::PathBuf::from(plugin_dir);
+    let plugin_has_tsx = plugin_dir_path
+        .join("node_modules")
+        .join("tsx")
+        .join("package.json")
+        .exists();
+    let dev_mode_ts_bridge = bridge_script.extension().and_then(|s| s.to_str()) == Some("ts");
+    if plugin_has_tsx || dev_mode_ts_bridge {
         cmd.arg("--import").arg("tsx/esm");
     }
     cmd.arg(bridge_script.to_string_lossy().as_ref())
@@ -938,15 +962,21 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         // Pass config via env var to avoid leaking secrets in `ps` process listing
         .env("BRIDGE_PLUGIN_CONFIG", &config_json);
 
-    // Working directory MUST be the bridge script's parent so Node's ESM
-    // resolver can walk up from there to find `node_modules/tsx` (for
-    // `--import tsx/esm` in debug mode) and any relative imports inside
-    // the bridge script. Without this, cwd inherits from the Tauri app
-    // (macOS GUI apps launch with cwd = `/`), causing
-    // `Cannot find package 'tsx' imported from /`. Mirror of sidecar.rs.
-    if let Some(script_dir) = bridge_script.parent() {
+    // Working directory: prefer the plugin_dir (so Node's ESM resolver
+    // walks up from there to find both `node_modules/tsx` AND the plugin's
+    // own deps). Pre-fix we used bridge_script's parent — that worked for
+    // dev (parent = src/server/plugin-bridge → walk-up to repo node_modules)
+    // but in prod the parent is the Tauri install's resources/ dir, which
+    // has no node_modules. The bridge_script itself is loaded by absolute
+    // path (see `cmd.arg(bridge_script.to_string_lossy().as_ref())` above)
+    // so its location doesn't depend on cwd. Fall back to bridge_script
+    // parent if plugin_dir doesn't exist (defensive — shouldn't happen).
+    if plugin_dir_path.exists() {
+        cmd.current_dir(&plugin_dir_path);
+        ulog_info!("[bridge] Working directory set to plugin_dir: {:?}", plugin_dir_path);
+    } else if let Some(script_dir) = bridge_script.parent() {
         cmd.current_dir(script_dir);
-        ulog_info!("[bridge] Working directory set to: {:?}", script_dir);
+        ulog_info!("[bridge] Working directory fallback (plugin_dir missing): {:?}", script_dir);
     }
 
     // Inject proxy env vars — reuse shared helper (pit-of-success: single source of truth)
@@ -1400,6 +1430,26 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
     // with the real package from the registry. Our shim must always win.
     install_sdk_shim(app_handle, &base_dir).await?;
 
+    // Install tsx into plugin_dir so the bridge's `--import tsx/esm` can
+    // resolve in **production**.
+    //
+    // Why this is needed: OpenClaw plugins routinely ship raw `.ts` source
+    // (qqbot/lark/weixin all do — the `openclaw.extensions` field points at
+    // `index.ts`). Node ≥22 has built-in TS support but explicitly refuses
+    // to strip types from files under `node_modules/` (`ERR_UNSUPPORTED_
+    // NODE_MODULES_TYPE_STRIPPING`), so without a loader hook the bridge
+    // dies on plugin import. tsx is the standard ESM loader hook used by
+    // the OpenClaw ecosystem.
+    //
+    // We install tsx into the plugin dir (not into Tauri resources) so
+    // (a) we don't bloat the installer with esbuild's per-platform binary,
+    // and (b) plugins that don't need tsx never pay the cost — uninstalling
+    // a plugin nukes its tree including tsx. The bridge's `current_dir`
+    // (set in spawn_plugin_bridge below) lets Node's module resolver
+    // walk up from the plugin dir to find tsx via the standard `tsx/esm`
+    // specifier. Dev mode finds tsx via repo-root node_modules, same flow.
+    install_tsx_into_plugin_dir(app_handle, &base_dir).await;
+
     // Try to read plugin manifest
     let manifest = read_plugin_manifest(&base_dir, trimmed).await;
 
@@ -1556,6 +1606,82 @@ async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Res
 
 /// Install the openclaw/plugin-sdk shim into the plugin's node_modules.
 /// Copies from bundled resource files instead of hardcoded strings.
+/// Install `tsx` into the plugin directory's `node_modules/`.
+///
+/// Idempotent — if `node_modules/tsx` already exists, skip. Best-effort: a
+/// failed tsx install is logged but not propagated, because:
+///   - JavaScript plugins (no `.ts` source) don't need tsx at all and
+///     should still load.
+///   - The user can re-run plugin install later if the network was
+///     transient.
+/// The cost of getting it wrong is the `ERR_UNSUPPORTED_NODE_MODULES_
+/// TYPE_STRIPPING` we already saw in the unified log — surfaceable, not
+/// silent corruption.
+async fn install_tsx_into_plugin_dir<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+    plugin_dir: &std::path::Path,
+) {
+    let tsx_marker = plugin_dir.join("node_modules").join("tsx").join("package.json");
+    if tsx_marker.exists() {
+        ulog_info!("[bridge] tsx already present in {:?}, skipping install", plugin_dir);
+        return;
+    }
+
+    let Some((node_path, npm_cli)) = find_bundled_node_npm(app_handle) else {
+        ulog_warn!("[bridge] Bundled npm unavailable, cannot install tsx into plugin dir");
+        return;
+    };
+
+    let plugin_dir_owned = plugin_dir.to_path_buf();
+    let node_dir = node_path.parent().map(|p| p.to_path_buf());
+    let npm_cli_owned = npm_cli.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut cmd = crate::process_cmd::new(&node_path);
+        // `--no-save`: don't pollute plugin's package.json with a tsx dep
+        //              (it isn't a plugin runtime requirement we want to
+        //              record, just a loader hook the bridge needs).
+        // `--no-audit / --no-fund`: cut npm's noisy post-install output.
+        // No `--ignore-scripts` here: tsx pulls in esbuild, whose
+        // per-platform optional dep DOES need its postinstall to install
+        // the right binary. Skipping scripts would leave esbuild broken.
+        cmd.args([
+            npm_cli_owned.to_str().unwrap_or(""),
+            "install",
+            "tsx",
+            "--no-save",
+            "--no-audit",
+            "--no-fund",
+        ])
+            .current_dir(&plugin_dir_owned)
+            .env("NODE_OPTIONS", "--no-experimental-require-module");
+        if let Some(ref nd) = node_dir {
+            if let Some(path) = std::env::var_os("PATH") {
+                let mut paths = std::env::split_paths(&path).collect::<Vec<_>>();
+                paths.insert(0, nd.clone());
+                cmd.env("PATH", std::env::join_paths(&paths).unwrap_or(path));
+            }
+        }
+        apply_proxy_env(&mut cmd);
+        cmd.output()
+    })
+    .await;
+
+    match result {
+        Ok(Ok(output)) if output.status.success() => {
+            ulog_info!("[bridge] tsx installed into plugin dir {:?}", plugin_dir);
+        }
+        Ok(Ok(output)) => {
+            ulog_warn!(
+                "[bridge] tsx install failed (exit {}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(Err(e)) => ulog_warn!("[bridge] tsx install spawn failed: {}", e),
+        Err(e) => ulog_warn!("[bridge] tsx install spawn_blocking join failed: {}", e),
+    }
+}
+
 async fn install_sdk_shim<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     plugin_dir: &std::path::Path,

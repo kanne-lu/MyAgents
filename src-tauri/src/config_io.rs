@@ -138,6 +138,16 @@ where
 }
 
 /// Fsync a file or directory path for renderer-side atomic writes.
+///
+/// Cross-platform note: `File::sync_all()` calls `fsync(2)` on Unix and
+/// `FlushFileBuffers` on Windows. The two have **different access
+/// requirements** — `fsync` accepts a read-only fd, but `FlushFileBuffers`
+/// requires `GENERIC_WRITE`. Pre-fix this command opened the file via
+/// `File::open()` (read-only by default), so on Windows every renderer-side
+/// save (project list, launcher last-used, runtime config) failed with
+/// `os error 5: 拒绝访问 (Access is denied)`. Open with write access on
+/// Windows; keep read-only on Unix where it works and avoids requiring
+/// write perms we don't otherwise need.
 #[tauri::command]
 pub async fn cmd_fsync_path(path: String, directory: bool) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
@@ -150,8 +160,17 @@ pub async fn cmd_fsync_path(path: String, directory: bool) -> Result<(), String>
                 dir.sync_all()
                     .map_err(|e| format!("[config-io] Cannot fsync dir: {}", e))?;
             }
+            // Windows has no equivalent to fsync(2) on directories;
+            // FlushFileBuffers on a directory handle is a no-op. Skip.
             Ok(())
         } else {
+            #[cfg(windows)]
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&p)
+                .map_err(|e| format!("[config-io] Cannot open file for fsync: {}", e))?;
+            #[cfg(not(windows))]
             let file = File::open(&p)
                 .map_err(|e| format!("[config-io] Cannot open file for fsync: {}", e))?;
             file.sync_all()
