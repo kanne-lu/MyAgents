@@ -209,29 +209,16 @@ echo ""
 # 构建前端和服务端
 echo -e "${BLUE}[5/7] 构建前端和服务端...${NC}"
 
-# 打包服务端代码
+# Sidecar / Bridge / CLI 三件套都走 `npm run build:*` —— 后台是
+# `node scripts/esbuild-bundle.mjs <target>`。单一配置入口（entry /
+# banner / format / external / target），不再让 shell 引号介入。
+mkdir -p src-tauri/resources ./src-tauri/resources/cli
 echo -e "  ${CYAN}打包服务端代码...${NC}"
-mkdir -p src-tauri/resources
-npx esbuild ./src/server/index.ts \
-  --bundle --platform=node --format=esm --target=node20 \
-  --outfile=./src-tauri/resources/server-dist.js --sourcemap \
-  --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);'
-
-# 打包 Plugin Bridge 代码 (OpenClaw channel plugin 支持)
+npm run build:server
 echo -e "  ${CYAN}打包 Plugin Bridge...${NC}"
-npx esbuild ./src/server/plugin-bridge/index.ts \
-  --bundle --platform=node --format=esm --target=node20 \
-  --outfile=./src-tauri/resources/plugin-bridge-dist.js --sourcemap \
-  --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);' \
-  --external:openclaw
-
-# 打包 myagents CLI（shebang 用 node，resources/cli/myagents.js 被 cmd_sync_cli 同步到 ~/.myagents/bin/myagents）
+npm run build:bridge
 echo -e "  ${CYAN}打包 myagents CLI...${NC}"
-mkdir -p ./src-tauri/resources/cli
-npx esbuild ./src/cli/myagents.ts \
-  --bundle --platform=node --format=cjs --target=node20 \
-  --outfile=./src-tauri/resources/cli/myagents.js \
-  --banner:js='#!/usr/bin/env node'
+npm run build:cli
 # 复制 Windows launcher 到同目录（cmd_sync_cli 从 resources/cli/ 读取）
 cp ./src/cli/myagents.cmd ./src-tauri/resources/cli/myagents.cmd
 

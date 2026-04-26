@@ -91,25 +91,14 @@ fi
 echo -e "${GREEN}✓ 通过${NC}"
 echo ""
 
-# Sidecar + Bridge + CLI 打包
+# Sidecar + Bridge + CLI 打包 —— 三件套统一通过 `npm run build:*`
+# (`node scripts/esbuild-bundle.mjs <target>`) 调用 esbuild JS API。
+# 单一配置入口，避免 shell 引号在跨平台 / cross-shell 场景下出岔子。
 echo -e "${BLUE}[3/6] 打包 Sidecar / Bridge / CLI ...${NC}"
-mkdir -p src-tauri/resources
-npx esbuild ./src/server/index.ts \
-  --bundle --platform=node --format=esm --target=node20 \
-  --outfile=./src-tauri/resources/server-dist.js --sourcemap \
-  --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);'
-
-npx esbuild ./src/server/plugin-bridge/index.ts \
-  --bundle --platform=node --format=esm --target=node20 \
-  --outfile=./src-tauri/resources/plugin-bridge-dist.js --sourcemap \
-  --banner:js='import { createRequire } from "module"; const require = createRequire(import.meta.url);' \
-  --external:openclaw
-
-mkdir -p ./src-tauri/resources/cli
-npx esbuild ./src/cli/myagents.ts \
-  --bundle --platform=node --format=cjs --target=node20 \
-  --outfile=./src-tauri/resources/cli/myagents.js \
-  --banner:js='#!/usr/bin/env node'
+mkdir -p src-tauri/resources ./src-tauri/resources/cli
+npm run build:server
+npm run build:bridge
+npm run build:cli
 cp ./src/cli/myagents.cmd ./src-tauri/resources/cli/myagents.cmd
 
 if grep -qE 'var __dirname = "/' ./src-tauri/resources/server-dist.js; then

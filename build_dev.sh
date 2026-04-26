@@ -181,13 +181,13 @@ if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
 fi
 echo -e "  ${GREEN}✓ claude (${SDK_TRIPLE}) 已就绪${NC}"
 
-# 打包 myagents CLI（esbuild → resources/cli/myagents.js，shebang 为 node）
+# 打包 myagents CLI（resources/cli/myagents.js，shebang 由 esbuild
+# banner 注入为 node）。统一走 `npm run build:cli` →
+# `scripts/esbuild-bundle.mjs cli` —— 与 build_macos.sh / build_linux.sh
+# / build_windows.ps1 共享同一份配置。
 echo -e "  ${CYAN}打包 myagents CLI...${NC}"
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/cli"
-npx esbuild "${PROJECT_DIR}/src/cli/myagents.ts" \
-  --bundle --platform=node --format=cjs --target=node20 \
-  --outfile="${PROJECT_DIR}/src-tauri/resources/cli/myagents.js" \
-  --banner:js='#!/usr/bin/env node'
+(cd "${PROJECT_DIR}" && npm run build:cli)
 cp "${PROJECT_DIR}/src/cli/myagents.cmd" "${PROJECT_DIR}/src-tauri/resources/cli/myagents.cmd"
 echo -e "  ${GREEN}✓ myagents CLI 已打包${NC}"
 
