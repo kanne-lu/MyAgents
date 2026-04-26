@@ -6,8 +6,10 @@ import { ThoughtPanel } from '@/components/task-center/ThoughtPanel';
 import { TaskListPanel } from '@/components/task-center/TaskListPanel';
 import { DispatchTaskDialog } from '@/components/task-center/DispatchTaskDialog';
 import { taskCenterAvailable } from '@/api/taskCenter';
+import { track } from '@/analytics';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
 import type { Thought } from '@/../shared/types/thought';
+import type { Task } from '@/../shared/types/task';
 
 interface Props {
   isActive?: boolean;
@@ -37,6 +39,7 @@ export default function TaskCenter({ isActive, pendingIntent }: Props) {
   }, []);
 
   const handleDiscuss = useCallback((t: Thought, workspaceId: string) => {
+    track('task_align_discuss', {});
     // Hand off to App.tsx which owns tab creation. The workspace was picked
     // explicitly via the card's workspace popover, so we carry its id through
     // the event; App.tsx uses it instead of running a smart-default guess.
@@ -52,7 +55,12 @@ export default function TaskCenter({ isActive, pendingIntent }: Props) {
     );
   }, []);
 
-  const handleDispatched = useCallback(() => {
+  const handleDispatched = useCallback((task: Task) => {
+    track('task_create', {
+      source: 'desktop',
+      origin: 'thought_dispatch',
+      has_workspace: !!task.workspacePath,
+    });
     setDispatching(null);
     setRefreshKey((k) => k + 1);
   }, []);

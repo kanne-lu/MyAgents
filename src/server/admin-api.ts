@@ -53,6 +53,23 @@ import {
 } from '../shared/types/runtime';
 import { getExternalRuntime, isRuntimeSupported } from './runtimes/factory';
 import { queryRuntimeModels } from './runtimes/external-session';
+import { trackServer } from './analytics';
+
+/**
+ * Infer the analytics `source` for a CLI-originated request.
+ *
+ * - `MYAGENTS_PORT` is injected into AI subproc env by `buildClaudeSessionEnv()`
+ *   (cli_architecture.md). When it's set, the caller is an AI agent invoking
+ *   the CLI as a tool (`cli_agent`). Otherwise it's the user typing in their
+ *   terminal (`cli`).
+ *
+ * Same logic that `handleTaskUpdateStatus` already uses for the persisted
+ * `actor` field — extracted so every CLI handler can tag analytics events
+ * consistently without re-deriving the heuristic.
+ */
+function cliSource(): 'cli' | 'cli_agent' {
+  return process.env.MYAGENTS_PORT ? 'cli_agent' : 'cli';
+}
 
 // ---------------------------------------------------------------------------
 // Management API forwarding (Node Sidecar → Rust)
@@ -1022,10 +1039,17 @@ export async function handleAgentChannelAdd(payload: {
     enabled: channel.enabled !== undefined ? !!channel.enabled : true,
   };
 
-  return modifyAgent(agentId, agent => ({
+  const result = await modifyAgent(agentId, agent => ({
     ...agent,
     channels: [...(agent.channels ?? []), newChannel],
   }), 'channel-add');
+  if (result.success) {
+    trackServer('agent_channel_create', {
+      source: cliSource(),
+      platform: newChannel.type,
+    });
+  }
+  return result;
 }
 
 export async function handleAgentChannelRemove(payload: { agentId: string; channelId: string }): Promise<AdminResponse> {
@@ -1033,10 +1057,29 @@ export async function handleAgentChannelRemove(payload: { agentId: string; chann
   if (!agentId) return { success: false, error: 'Missing required field: agentId' };
   if (!channelId) return { success: false, error: 'Missing required field: channelId' };
 
-  return modifyAgent(agentId, agent => ({
+  // Capture platform BEFORE the channel is removed — once `modifyAgent`
+  // commits, the channel is gone and we can't read its type. Best-effort:
+  // if the lookup fails (agent missing, channel missing) we still attempt
+  // the remove and report `platform: 'unknown'` rather than skipping
+  // analytics entirely.
+  let platform = 'unknown';
+  try {
+    const config = loadConfig();
+    const agent = (config.agents ?? []).find(a => a.id === agentId);
+    const ch = agent?.channels?.find(c => c.id === channelId);
+    if (ch?.type) platform = ch.type;
+  } catch {
+    // Silent — analytics must not affect the main flow.
+  }
+
+  const result = await modifyAgent(agentId, agent => ({
     ...agent,
     channels: (agent.channels ?? []).filter(ch => ch.id !== channelId),
   }), 'channel-remove');
+  if (result.success) {
+    trackServer('agent_channel_remove', { source: cliSource(), platform });
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1551,7 +1594,15 @@ export async function handleTaskCreateDirect(
   const overridden = computeOverriddenFields(payload);
   const resp = await managementApi('/api/task/create-direct', 'POST', payload);
   const wrapped = wrapMgmtResponse(resp);
-  return enrichTaskCreateResponse(wrapped, payload, overridden);
+  const enriched = enrichTaskCreateResponse(wrapped, payload, overridden);
+  if (enriched.success) {
+    trackServer('task_create', {
+      source: cliSource(),
+      origin: 'manual',
+      has_workspace: typeof payload.workspacePath === 'string' && payload.workspacePath.length > 0,
+    });
+  }
+  return enriched;
 }
 
 export async function handleTaskCreateFromAlignment(
@@ -1563,17 +1614,63 @@ export async function handleTaskCreateFromAlignment(
   const overridden = computeOverriddenFields(payload);
   const resp = await managementApi('/api/task/create-from-alignment', 'POST', payload);
   const wrapped = wrapMgmtResponse(resp);
-  return enrichTaskCreateResponse(wrapped, payload, overridden);
+  const enriched = enrichTaskCreateResponse(wrapped, payload, overridden);
+  if (enriched.success) {
+    trackServer('task_create', {
+      source: cliSource(),
+      origin: 'thought_dispatch',
+      has_workspace: typeof payload.workspacePath === 'string' && payload.workspacePath.length > 0,
+    });
+  }
+  return enriched;
+}
+
+/**
+ * Read the task's `sessionIds.length` from Rust before kicking off a run.
+ * Returns `null` if the read fails — analytics call sites then fall back to
+ * `null` for `run_count` so we don't fabricate a count. Best-effort: a
+ * failed pre-fetch does NOT abort the run itself.
+ */
+async function fetchTaskSessionCount(id: string): Promise<number | null> {
+  try {
+    const resp = await managementApi(`/api/task/get${qsFrom({ id })}`);
+    if (!resp.ok) return null;
+    const task = (resp as Record<string, unknown>).task as Record<string, unknown> | undefined;
+    const sessions = task?.sessionIds;
+    return Array.isArray(sessions) ? sessions.length : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function handleTaskRun(payload: { id: string }): Promise<AdminResponse> {
+  // Fetch run count BEFORE the run so the analytics value matches the GUI's
+  // `task.sessionIds.length + 1` semantic (i.e. "if this run succeeds, it'll
+  // be the Nth"). Doing it after would over-count by 1 since the run
+  // appends a new sessionId.
+  const priorCount = await fetchTaskSessionCount(payload.id);
   const resp = await managementApi('/api/task/run', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  if (wrapped.success) {
+    trackServer('task_run', {
+      source: cliSource(),
+      run_count: priorCount !== null ? priorCount + 1 : null,
+    });
+  }
+  return wrapped;
 }
 
 export async function handleTaskRerun(payload: { id: string }): Promise<AdminResponse> {
+  const priorCount = await fetchTaskSessionCount(payload.id);
   const resp = await managementApi('/api/task/rerun', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  if (wrapped.success) {
+    trackServer('task_run', {
+      source: cliSource(),
+      run_count: priorCount !== null ? priorCount + 1 : null,
+    });
+  }
+  return wrapped;
 }
 
 /**
@@ -1663,7 +1760,14 @@ export async function handleTaskUpdateStatus(
     payload.source = 'cli';
   }
   const resp = await managementApi('/api/task/update-status', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  // Only `stopped` counts as a "stop" event in analytics terms — other
+  // status transitions (running/done/blocked/etc) flow through the same
+  // endpoint but aren't user-initiated stops.
+  if (wrapped.success && payload.status === 'stopped') {
+    trackServer('task_stop', { source: cliSource() });
+  }
+  return wrapped;
 }
 
 export async function handleTaskAppendSession(payload: {
@@ -1683,8 +1787,32 @@ export async function handleTaskArchive(payload: {
 }
 
 export async function handleTaskDelete(payload: { id: string }): Promise<AdminResponse> {
+  // Fetch the task's status BEFORE the delete so we can report it in the
+  // analytics event. Best-effort — if the read fails (e.g. id doesn't exist),
+  // we still attempt the delete and just report `status: 'unknown'`. We
+  // accept the extra round-trip because delete is a low-frequency action
+  // and the status field is the most useful dimension for understanding
+  // what users are pruning (orphan todos vs. completed work etc.).
+  let status = 'unknown';
+  try {
+    const fetched = await managementApi(`/api/task/get${qsFrom({ id: payload.id })}`);
+    if (fetched.ok) {
+      const task = (fetched as Record<string, unknown>).task as
+        | Record<string, unknown>
+        | undefined;
+      if (task && typeof task.status === 'string') {
+        status = task.status;
+      }
+    }
+  } catch {
+    // Silent — analytics must not affect the main flow.
+  }
   const resp = await managementApi('/api/task/delete', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  if (wrapped.success) {
+    trackServer('task_delete', { source: cliSource(), status });
+  }
+  return wrapped;
 }
 
 /**
@@ -1738,7 +1866,13 @@ export async function handleThoughtCreate(payload: {
   images?: string[];
 }): Promise<AdminResponse> {
   const resp = await managementApi('/api/thought/create', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  if (wrapped.success) {
+    // No `location` for CLI — the field is GUI-specific (launcher vs
+    // task_center surface). Set to null so the column type stays uniform.
+    trackServer('thought_create', { source: cliSource(), location: null });
+  }
+  return wrapped;
 }
 
 // ---------------------------------------------------------------------------

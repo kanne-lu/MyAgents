@@ -22,6 +22,7 @@ import {
 } from 'react';
 import { ChevronDown, ChevronUp, Hash, PenLine } from 'lucide-react';
 import { thoughtCreate } from '@/api/taskCenter';
+import { track } from '@/analytics';
 import Tip from '@/components/Tip';
 import { Popover } from '@/components/ui/Popover';
 import {
@@ -351,6 +352,10 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     setError(null);
     try {
       const t = await thoughtCreate({ content });
+      track('thought_create', {
+        source: 'desktop',
+        location: variant === 'launcher' ? 'launcher' : 'task_center',
+      });
       setValue('');
       setTagMenu(null);
       onCreated?.(t);
@@ -359,7 +364,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     } finally {
       setBusy(false);
     }
-  }, [value, busy, onCreated]);
+  }, [value, busy, onCreated, variant]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

@@ -28,6 +28,15 @@ export type {
   EventParams,
   MessageSendParams,
   MessageCompleteParams,
+  Source,
+  TaskCreateParams,
+  TaskRunParams,
+  TaskStopParams,
+  TaskDeleteParams,
+  LauncherModeSwitchParams,
+  ThoughtCreateParams,
+  AgentChannelMutationParams,
+  AgentChannelToggleParams,
   TrackEvent,
 } from './types';
 

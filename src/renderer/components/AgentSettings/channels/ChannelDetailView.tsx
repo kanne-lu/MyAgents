@@ -390,7 +390,10 @@ export default function ChannelDetailView({
             }
             const updatedChannels = (agent.channels ?? []).filter(ch => ch.id !== channelId);
             await patchAgentConfig(agent.id, { channels: updatedChannels });
-            track('agent_channel_remove', { platform: channelRef.current?.type ?? 'unknown' });
+            track('agent_channel_remove', {
+                source: 'desktop',
+                platform: channelRef.current?.type ?? 'unknown',
+            });
             toastRef.current.success('Channel 已删除');
             onChanged();
             onBack();

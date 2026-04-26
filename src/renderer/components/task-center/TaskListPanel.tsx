@@ -21,6 +21,7 @@ import {
   taskRun,
   taskUpdateStatus,
 } from '@/api/taskCenter';
+import { track } from '@/analytics';
 import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
@@ -278,24 +279,40 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
   );
 
   const handleRun = useCallback(
-    (task: Task) => runAction(task.id, '执行', () => taskRun(task.id)),
+    (task: Task) =>
+      runAction(task.id, '执行', async () => {
+        track('task_run', {
+          source: 'desktop',
+          run_count: task.sessionIds.length + 1,
+        });
+        await taskRun(task.id);
+      }),
     [runAction],
   );
   const handleStop = useCallback(
     (task: Task) =>
-      runAction(task.id, '中止', () =>
-        taskUpdateStatus({ id: task.id, status: 'stopped', message: '用户手动中止' }),
-      ),
+      runAction(task.id, '中止', async () => {
+        track('task_stop', { source: 'desktop' });
+        await taskUpdateStatus({ id: task.id, status: 'stopped', message: '用户手动中止' });
+      }),
     [runAction],
   );
   const handleRerun = useCallback(
-    (task: Task) => runAction(task.id, '重新派发', () => taskRerun(task.id)),
+    (task: Task) =>
+      runAction(task.id, '重新派发', async () => {
+        track('task_run', {
+          source: 'desktop',
+          run_count: task.sessionIds.length + 1,
+        });
+        await taskRerun(task.id);
+      }),
     [runAction],
   );
   const handleDelete = useCallback(
     (task: Task) => {
       if (!window.confirm(`确认删除任务「${task.name}」？此操作不可恢复。`)) return;
       void runAction(task.id, '删除', async () => {
+        track('task_delete', { source: 'desktop', status: task.status });
         await taskDelete(task.id);
         // Optimistic removal — SSE will not fire a status-changed for delete.
         setTasks((prev) => prev.filter((x) => x.id !== task.id));
@@ -661,6 +678,11 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
           onClose={() => setShowCreateModal(false)}
           onDispatched={(created) => {
             setShowCreateModal(false);
+            track('task_create', {
+              source: 'desktop',
+              origin: 'manual',
+              has_workspace: !!created.workspacePath,
+            });
             toastRef.current.success(`「${created.name}」已创建`);
             void reload();
           }}
