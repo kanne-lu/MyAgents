@@ -9,23 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.0] - 2026-04-26
 
-### Second-wave hardening (Windows ship blockers + tsx-runtime architecture)
+### Fixed（Windows / Linux 启动 + IM 插件可靠性）
 
-The post-first-review commits (6570b83 .. HEAD) covered Windows release startup, plugin auto-load reliability, and a third cross-review pass:
+- **Windows 安装后能正常启动**：之前 Windows 用户装好 0.2.0 打开应用，会卡在「正在加载历史会话」永远进不去（Sidecar 启动时模块加载报 `createRequire 重复声明` 直接退出）。现在 Windows 一键启动，和 macOS 一样开箱即用。
+- **Linux 上 `myagents` CLI 能直接执行**：之前在 Linux 装完应用后跑 `myagents --help` 会被系统拒绝（脚本头部多了一行 Bun 时代留下的 shebang），现在恢复正常。
+- **IM Bot 自动启动稳定**：飞书 / 企业微信 / 微信 / QQ 等 OpenClaw 插件之前偶发「启动失败 → 自动重试 → 又失败」的循环（多个 Bot 同时启动时会互相破坏对方的依赖目录）。现在多个 Bot 并发启动彼此隔离，重启 / 切工作区不再触发这个 race。
+- **应用闪退后 `myagents` CLI 不再损坏**：极端情况下应用进程被强杀的瞬间正好在同步 CLI，会把 `~/.myagents/bin/myagents` 写到一半，下次开机用户在终端调用 CLI 直接报「文件损坏」。现在采用原子替换，要么旧版本要么新版本，不会卡在中间态。
+- **Windows 上保存配置 / 项目列表 / 启动页历史不再失败**：之前在 Windows 上偶尔出现「拒绝访问」的红色错误（杀软 / OneDrive / Backblaze 在我们写完文件的瞬间扫描占用），导致刚切换的工作区下次打开应用就丢了。现在自动等开扫窗口过去再写盘，用户感知不到。
+- **任务中心「想法」输入光标位置精确**：在想法输入框打 `#标签` 时，标签的高亮位置偶尔会跟实际文字错开半个字符，长内容下越走越偏。修复后高亮、光标、文本三层永远对齐。
+- **AI 实时输出更稳**：少数情况下 AI 的实时事件（外部 Runtime 状态切换、turn 完成等）在网络抖动时会被静默丢弃，前端看到「打字打了一半就停了」。所有结构性事件现在都标记为关键优先级，背压时优先送达。
 
-- **Windows server-dist.js startup SyntaxError**: esbuild banner's `createRequire` collided with `imageResize.ts`'s top-level `import { createRequire } from 'module'` — Node ≥22's ESM loader rejected the module on first load (`Identifier 'createRequire' has already been declared`), Sidecar died before answering `/health`, renderer hung on "loading history". Banner now binds a unique alias `__myAgentsCreateRequire` so the collision is structurally impossible regardless of how many depths-deep deps re-import the symbol.
-- **Cross-platform esbuild driver**: replaced inline `npm run build:*` commands that embedded the banner via `--banner:js='...'` (single quotes broke under Windows `cmd.exe`). Single source of truth in `scripts/esbuild-bundle.mjs` — entry/banner/format/external/sourcemap + post-build hooks (CLI launcher copy, server hardcoded-path validation) live in one place. Removed three near-identical copies across `build_macos.sh` / `build_linux.sh` / `build_windows.ps1`.
-- **CLI double-shebang (#107)**: dropped legacy `#!/usr/bin/env bun` from `src/cli/myagents.ts` source. Only the esbuild banner injects `#!/usr/bin/env node`; previously the bundled file had two shebangs and Linux refused to exec it.
-- **`tsx-runtime` bundled into `resources/`**: previously each plugin auto-load triggered `npm install tsx --no-save` inside the plugin_dir. Even with `--no-save`, npm's prune step deleted the manually-copied SDK shim (`node_modules/openclaw/`), causing every plugin start to alternate between "shim missing" and "shim restored" depending on order. New approach: ship tsx once in `src-tauri/resources/tsx-runtime/` (per-platform `@esbuild/<triple>` selected by `npm run build:tsx-runtime -- <os> <cpu>` in build scripts), Rust spawns Plugin Bridge with `--import file:///<absolute>/tsx/dist/esm/index.mjs`. No more per-plugin npm runs, no shim destruction race.
-- **Per-plugin install Mutex + spawn-time shim repair**: `bridge.rs` now serializes installs per `plugin_dir` via `OnceLock<Mutex<HashMap>>`. Combined with shim install reordered to LAST (after npm install completes), concurrent bot auto-start no longer races to corrupt `node_modules/openclaw/`.
-- **`cmd_fsync_path` Windows ERROR_SHARING_VIOLATION retry**: Defender / OneDrive / Backblaze indexers briefly open files with `FILE_SHARE_NONE` after they're written, returning os error 32 or 5 to our subsequent open. 25/50/100ms backoff, 4 attempts, Windows-only. The contended window is ms-scale so the retry is transparent.
-- **`cmd_fsync_path` Windows access-denied (os error 5)**: `FlushFileBuffers` requires `GENERIC_WRITE`, but `File::open()` defaults to read-only. Renderer-side atomic writes (project list, launcher last-used, runtime config) all failed on Windows. New `opts_for_fsync()` helper sets `.write(true)` on Windows, keeps `.read(true)` only on Unix where `fsync(2)` accepts a read-only fd.
-- **`cmd_sync_cli` atomic tmp+rename**: previous direct `fs::copy` could leave `~/.myagents/bin/myagents.{js,cmd}` partially written if the host died mid-copy. Now writes to `<dst>.tmp.new` and atomically renames.
-- **`patch_lark_sdk_for_bun` → `patch_lark_sdk_use_fetch_adapter`**: Bun-specific suffix was misleading after the Node migration. The fetch adapter is also strictly faster on Node (252ms vs 30278ms cold-handshake — fetch routes through undici's pool vs axios's per-request http connection), so we keep the patch; the rename just drops the misleading runtime-specific suffix.
-- **`ThoughtInput` mirror/textarea geometry alignment**: extracted `MIRROR_TEXTAREA_SHARED_CLASS` fn + `MIRROR_TEXTAREA_SHARED_STYLE` const — two inline className strings could silently diverge, causing the autosize mirror div's measured height to disagree with the textarea's painted height. Single source now prevents future drift.
-- **15 structural SSE events registered**: events emitted by core flows (`turn-finalized`, `external-runtime-state`, etc.) but not declared in `SSE_EVENT_PRIORITIES` were silently degraded under backpressure. All registered with explicit priorities.
-- **`esbuild-bundle.mjs` __dirname guard tightened**: regex now matches Windows backslash form (`C:\\Users\\…`) and lowercase drive letters in addition to POSIX absolute paths. Was missing the Windows leak vector entirely.
-- **Build script consolidation**: `build_dev.sh` / `build_dev_win.ps1` rely on `tauri:build`'s `beforeBuildCommand` (tauri.conf.json:10) for `build:server` / `build:bridge` / `build:cli`; redundant placeholder writes for `server-dist.js` / `plugin-bridge-dist.js` and the explicit `npm run build:cli` call removed. Production scripts (`build_macos.sh`, `build_linux.sh`, `build_windows.ps1`) keep their explicit pre-bundling — fail-fast value before a 5-min sharp/codesign loop.
+### Internal（不影响用户行为）
+
+- 构建工具链合并：esbuild 打包逻辑统一到 `scripts/esbuild-bundle.mjs`，Windows 上不再因 shell 引号差异导致构建失败；mac / Linux / Windows / dev 五个构建脚本不再互相抄。
+- Plugin Bridge tsx 加载方式重写：tsx 改为应用包内置（每平台版本随构建器一次性打入 `resources/tsx-runtime/`），插件目录不再做 `npm install`。这是上面「IM Bot 自动启动稳定」的根因修复。
+- Rust 端 `cmd_fsync_path` 在 Windows 上的实现重写（写权限 + 短暂打开冲突重试），上面「Windows 保存不再失败」的支撑代码。
+- 第三轮 cross-review 收尾：clippy 干净 / typecheck 干净 / lint 干净，没有遗留已知 tech debt。
 
 ### Hardening (post-cross-review pass before tag)
 
