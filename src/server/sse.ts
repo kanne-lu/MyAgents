@@ -62,7 +62,7 @@ const unknownEventWarned = new Set<string>();
  *   - log / telemetry chatter                              → 'droppable'
  */
 export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = Object.freeze({
-  // Streaming deltas — coalescible.
+  // Streaming deltas — coalescible (replace same-key tail under pressure).
   'chat:message-chunk': 'coalescible',
   'chat:thinking-chunk': 'coalescible',
   'chat:tool-input-delta': 'coalescible',
@@ -73,27 +73,47 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'chat:log': 'droppable',
   'chat:logs': 'droppable',
   'chat:debug-message': 'droppable',
-  // Critical — never drop or coalesce.
+  // Critical — never drop or coalesce. Includes block-boundary / start
+  // markers, completion / error events, status updates, queue lifecycle,
+  // and renderer-driven request/response gates. The SDK emits these in
+  // tight bursts at turn start (system_init → status → thinking-start →
+  // content-block-stop → tool-use-start → …); coalescing any of them
+  // would corrupt the renderer's structural state machine.
+  'chat:system-init': 'critical',
+  'chat:system-status': 'critical',
+  'chat:status': 'critical',
+  'chat:init': 'critical',
+  'chat:api-retry': 'critical',
+  'chat:attachments-filtered': 'critical',
+  'chat:thinking-start': 'critical',
+  'chat:content-block-stop': 'critical',
+  'chat:message-sdk-uuid': 'critical',
+  'chat:message-replay': 'critical',
   'chat:message-stopped': 'critical',
   'chat:message-complete': 'critical',
   'chat:message-error': 'critical',
   'chat:agent-error': 'critical',
-  'chat:system-init': 'critical',
-  'chat:init': 'critical',
-  'chat:message-replay': 'critical',
+  'chat:tool-use-start': 'critical',
+  'chat:tool-result-start': 'critical',
   'chat:tool-result-complete': 'critical',
+  'chat:server-tool-use-start': 'critical',
+  'chat:subagent-tool-use': 'critical',
+  'chat:subagent-tool-result-start': 'critical',
   'chat:subagent-tool-result-complete': 'critical',
+  'chat:permission-mode-changed': 'critical',
+  'chat:task-notification': 'critical',
+  'chat:task-started': 'critical',
   'permission:request': 'critical',
   'ask-user-question:request': 'critical',
   'exit-plan-mode:request': 'critical',
   'enter-plan-mode:request': 'critical',
   'cron:task-exit-requested': 'critical',
   'mcp:oauth-expired': 'critical',
-  'chat:permission-mode-changed': 'critical',
-  'chat:status': 'critical',
   'config:changed': 'critical',
-  'chat:task-notification': 'critical',
-  'chat:task-started': 'critical',
+  'queue:added': 'critical',
+  'queue:started': 'critical',
+  'queue:cancelled': 'critical',
+  'workspace:files-changed': 'critical',
 });
 
 function resolvePriority(event: string): SseEventPriority {
