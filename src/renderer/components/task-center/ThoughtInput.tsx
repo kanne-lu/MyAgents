@@ -425,29 +425,40 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             aria-hidden
             className="pointer-events-none absolute inset-0 overflow-hidden"
           >
-            <div
-              ref={overlayInnerRef}
-              className={`${theme.outerPaddingClass} ${theme.innerPaddingClass} ${theme.textareaClass} text-[var(--ink)]`}
-              style={{
-                fontFamily: 'inherit',
-                whiteSpace: 'pre-wrap',
-                overflowWrap: 'break-word',
-                willChange: 'transform',
-              }}
-            >
-              {segments.map((seg, i) =>
-                seg.type === 'tag' ? (
-                  <span
-                    key={i}
-                    className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
-                  >
-                    {seg.value}
-                  </span>
-                ) : (
-                  <span key={i}>{seg.value}</span>
-                ),
-              )}
-              {value.endsWith('\n') && '\u200b'}
+            {/* `paddingWrapper` reproduces the outer's padding INSIDE the
+                clip box so the inner text-rendering area exactly matches
+                the textarea's bounding box. Without this layer the inner
+                used the full clip-box width while the textarea used
+                (clip-box - outer-padding); any additional textarea-only
+                padding (notably `pr-10` for the expand-toggle in
+                launcher mode) made the two layers wrap at different
+                characters and the caret would float into "mystery"
+                whitespace after the visible mirror text. */}
+            <div className={theme.outerPaddingClass}>
+              <div
+                ref={overlayInnerRef}
+                className={`${theme.innerPaddingClass} ${theme.textareaClass} text-[var(--ink)] ${showExpandToggle ? 'pr-10' : ''}`}
+                style={{
+                  fontFamily: 'inherit',
+                  whiteSpace: 'pre-wrap',
+                  overflowWrap: 'break-word',
+                  willChange: 'transform',
+                }}
+              >
+                {segments.map((seg, i) =>
+                  seg.type === 'tag' ? (
+                    <span
+                      key={i}
+                      className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
+                    >
+                      {seg.value}
+                    </span>
+                  ) : (
+                    <span key={i}>{seg.value}</span>
+                  ),
+                )}
+                {value.endsWith('\n') && '\u200b'}
+              </div>
             </div>
           </div>
           <textarea
