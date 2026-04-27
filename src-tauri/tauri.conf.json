@@ -55,7 +55,7 @@
     ],
     "resources": {
       "../src-tauri/resources/server-dist.js": "server-dist.js",
-      "../src-tauri/resources/plugin-bridge-dist.js": "plugin-bridge-dist.js",
+      "../src-tauri/resources/plugin-bridge-dist.mjs": "plugin-bridge-dist.mjs",
       "../src/server/plugin-bridge/sdk-shim": "plugin-bridge-sdk-shim",
       "../src-tauri/resources/claude-agent-sdk": "claude-agent-sdk",
       "../src-tauri/resources/sharp-runtime": "sharp-runtime",

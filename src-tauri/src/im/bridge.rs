@@ -852,12 +852,17 @@ impl BridgeProcess {
 
 /// Find the plugin-bridge script (dev: TS source, prod: bundled JS)
 fn find_bridge_script<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<PathBuf> {
-    // Production: bundled JS in resources
+    // Production: bundled .mjs in resources. Extension is load-bearing —
+    // Node treats `.mjs` as ESM unconditionally per spec, which sidesteps
+    // a tsx-loader CJS-conversion trap that fired on Windows production
+    // installs (no `package.json` above the resources dir, Node defaults
+    // to commonjs, tsx transpiles → ERR_REQUIRE_CYCLE_MODULE). See
+    // scripts/esbuild-bundle.mjs `bridge` target for the full rationale.
     #[cfg(not(debug_assertions))]
     {
         use crate::sidecar::normalize_external_path;
         if let Ok(resource_dir) = app_handle.path().resource_dir() {
-            let bundled: PathBuf = resource_dir.join("plugin-bridge-dist.js");
+            let bundled: PathBuf = resource_dir.join("plugin-bridge-dist.mjs");
             if bundled.exists() {
                 let bundled = normalize_external_path(bundled);
                 ulog_info!("[bridge] Using bundled bridge script: {:?}", bundled);

@@ -69,7 +69,21 @@ const TARGETS = {
   },
   bridge: {
     entryPoints: ['src/server/plugin-bridge/index.ts'],
-    outfile: 'src-tauri/resources/plugin-bridge-dist.js',
+    // `.mjs` is load-bearing, not stylistic. Plugin Bridge is spawned with
+    // `--import tsx/esm` so tsx's loader hooks see every module load. When
+    // the bundle lives somewhere with no `package.json` above declaring
+    // `"type": "module"` (e.g. a Windows production install at
+    // `C:\Users\hackl\AppData\Local\MyAgents\`), Node's default classifier
+    // returns `format: "commonjs"` for the `.js` entry. tsx's hook then
+    // detects ESM syntax in the CJS-classified file, transpiles it to CJS
+    // via esbuild, and re-serves it as a `data:text/javascript` URL — which
+    // ends up triggering an ERR_REQUIRE_CYCLE_MODULE on the still-loading
+    // entry. Renaming the output to `.mjs` short-circuits the whole path:
+    // Node treats `.mjs` as ESM unconditionally per spec, tsx's CJS branch
+    // never fires. Verified against a real Windows 0.2.0 install log.
+    // server-dist.js stays `.js` because the sidecar spawn doesn't pass
+    // `--import` (no tsx in the chain), so the same trap doesn't apply.
+    outfile: 'src-tauri/resources/plugin-bridge-dist.mjs',
     format: 'esm',
     sourcemap: true,
     banner: { js: ESM_INTEROP_BANNER },

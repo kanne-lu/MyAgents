@@ -114,7 +114,7 @@ foreach ($dir in $dirsToClean) {
 }
 
 # 创建占位符资源目录（满足 Tauri bundle 阶段的资源校验）。
-# server-dist.js / plugin-bridge-dist.js / cli/myagents.js 由 tauri:build
+# server-dist.js / plugin-bridge-dist.mjs / cli/myagents.js 由 tauri:build
 # 的 beforeBuildCommand（tauri.conf.json）通过 npm run build:server/bridge/cli
 # 在构建期间生成；不需要额外占位文件。
 #   - claude-agent-sdk/ : SDK native binary 占位目录

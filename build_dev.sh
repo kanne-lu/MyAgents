@@ -77,7 +77,7 @@ echo -e "${BLUE}[准备] 清理旧构建...${NC}"
 rm -rf "${PROJECT_DIR}/dist"
 # Tauri bundle 阶段需要 resources/ 下被引用的目录都存在（即使是空的——dev 模式
 # 下 Rust 端会 fallback 到顶层 node_modules）。文件级 resource（server-dist.js
-# / plugin-bridge-dist.js / cli/myagents.js）则由 tauri:build 的
+# / plugin-bridge-dist.mjs / cli/myagents.js）则由 tauri:build 的
 # beforeBuildCommand 通过 `npm run build:server/bridge/cli` 在构建期间生成，
 # 不需要额外占位文件。
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk"
