@@ -82,12 +82,14 @@ fn ensure_high_file_descriptor_limit() {
 
 // Configuration constants
 const BASE_PORT: u16 = 31415;
-// Health check: 600 attempts × 500ms ≈ 5 min upper bound.
-// In practice localhost TCP fails instantly (~1ms), so real wall-time ≈ 600 × 500ms = 5 min.
-// The generous limit accommodates Windows Defender first-run scanning of bun.exe,
-// which can hold the process for 20-30s before any code executes.
+// Health check: exponential backoff 50ms → 500ms, capped. Wall-clock ceiling ≈ 5 min.
+// Node cold start is ~2s (tsx boot + module load), so the first 5 attempts at
+// 50/100/200/400/500ms (cumulative 1.25s) usually arrive before listen — cheap,
+// no-ops. Attempts 6+ poll at 500ms to accommodate Windows Defender first-run
+// scanning (20-30s hold) without burning CPU.
 const HEALTH_CHECK_MAX_ATTEMPTS: u32 = 600;
-const HEALTH_CHECK_DELAY_MS: u64 = 500;
+const HEALTH_CHECK_DELAY_CAP_MS: u64 = 500;
+const HEALTH_CHECK_DELAY_START_MS: u64 = 50;
 const HEALTH_CHECK_TIMEOUT_MS: u64 = 100;
 // HTTP health check for existing sidecar.
 // 2000ms accommodates Windows systems under startup load (Defender, proxy, Plugin Bridge init).
@@ -111,39 +113,41 @@ const SIDECAR_MARKER: &str = "--myagents-sidecar";
 // read by `cli.rs` to know which port to connect to.
 const PORT_FILE_NAME: &str = "sidecar.port";
 
-// ===== Crashed Bun Tracking =====
-// When a bundled bun crashes with STATUS_ACCESS_VIOLATION (0xC0000005, typically AVX2
-// incompatibility in VMs), mark it as crashed so subsequent attempts fall through to system bun.
-static CRASHED_BUN_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+// ===== Crashed Node Tracking =====
+// When a bundled Node.js crashes with STATUS_ACCESS_VIOLATION (0xC0000005) on Windows —
+// usually a missing VC++ runtime DLL or some AV-injection incompatibility — mark it as
+// crashed so subsequent spawn attempts fall through to system Node.
+// v0.1.x tracked Bun crashes here (AVX2 baseline issue); Node has its own failure modes.
+static CRASHED_NODE_PATHS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
 #[allow(dead_code)] // Only called from #[cfg(windows)] blocks; harmless on other platforms
-fn mark_bun_as_crashed(path: &std::path::Path) {
+fn mark_node_as_crashed(path: &std::path::Path) {
     let normalized = normalize_external_path(path.to_path_buf());
     // unwrap_or_else recovers from Mutex poisoning — the body is trivial (Vec::push),
     // so the data is still consistent even if a previous holder panicked.
-    let mut paths = CRASHED_BUN_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    let mut paths = CRASHED_NODE_PATHS.lock().unwrap_or_else(|e| e.into_inner());
     if !paths.iter().any(|p| p == &normalized) {
         paths.push(normalized.clone());
         ulog_warn!(
-            "[sidecar] Marked bun as crashed (will try system fallback on next attempt): {:?}",
+            "[sidecar] Marked node as crashed (will try system fallback on next attempt): {:?}",
             normalized
         );
     }
 }
 
-fn is_bun_crashed(path: &std::path::Path) -> bool {
+fn is_node_crashed(path: &std::path::Path) -> bool {
     let normalized = normalize_external_path(path.to_path_buf());
-    let paths = CRASHED_BUN_PATHS.lock().unwrap_or_else(|e| e.into_inner());
+    let paths = CRASHED_NODE_PATHS.lock().unwrap_or_else(|e| e.into_inner());
     paths.iter().any(|x| x == &normalized)
 }
 
 /// On Windows, check if the process exited with STATUS_ACCESS_VIOLATION (0xC0000005)
-/// and mark the bun binary as crashed for fallback to system bun.
+/// and mark the node binary as crashed for fallback to system node.
 #[cfg(target_os = "windows")]
-fn maybe_mark_crashed_bun(status: &std::process::ExitStatus, bun_path: &std::path::Path) {
+fn maybe_mark_crashed_node(status: &std::process::ExitStatus, node_path: &std::path::Path) {
     let code = status.code().unwrap_or(0) as u32;
     if code == 0xc0000005 {
-        mark_bun_as_crashed(bun_path);
+        mark_node_as_crashed(node_path);
     }
 }
 
@@ -547,7 +551,7 @@ impl SidecarInstance {
     }
 }
 
-/// Ensure Bun process is killed when SidecarInstance is dropped
+/// Ensure Node.js process is killed when SidecarInstance is dropped
 impl Drop for SidecarInstance {
     fn drop(&mut self) {
         ulog_info!("[sidecar] Drop: killing process on port {}", self.port);
@@ -1212,25 +1216,19 @@ pub(crate) fn normalize_external_path(path: PathBuf) -> PathBuf {
     path
 }
 
-/// Diagnose why bun executable was not found and return a user-friendly error message.
-fn diagnose_bun_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> String {
+/// Diagnose why Node executable was not found and return a user-friendly error message.
+fn diagnose_node_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> String {
     let mut details = Vec::new();
 
-    // Check resource_dir
     match app_handle.path().resource_dir() {
         Ok(resource_dir) => {
             details.push(format!("resource_dir: {:?}", resource_dir));
-            #[cfg(target_os = "windows")]
-            {
-                let expected = resource_dir.join("bun-x86_64-pc-windows-msvc.exe");
-                if !expected.exists() {
-                    if let Some(parent) = resource_dir.parent() {
-                        let parent_bun = parent.join("bun-x86_64-pc-windows-msvc.exe");
-                        if !parent_bun.exists() {
-                            details.push("bun binary not found in install directory — may have been quarantined by antivirus".to_string());
-                        }
-                    }
-                }
+            let expected = node_path_in_resources(&resource_dir);
+            if !expected.exists() {
+                details.push(format!(
+                    "bundled Node.js missing at {:?} — build scripts may not have run scripts/download_nodejs.sh",
+                    expected
+                ));
             }
         }
         Err(e) => {
@@ -1238,18 +1236,17 @@ fn diagnose_bun_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> String {
         }
     }
 
-    // Check exe location
-    #[cfg(target_os = "windows")]
     if let Ok(exe_path) = std::env::current_exe() {
         details.push(format!("current_exe: {:?}", exe_path));
     }
 
     let diag = details.join("; ");
     let msg = format!(
-        "Bun runtime not found. {} | \
-         Possible causes: (1) Antivirus quarantined bun.exe — check Windows Security > Protection History. \
-         (2) Installation is corrupted — try reinstalling. \
-         Workaround: install Bun manually from https://bun.sh",
+        "Node.js runtime not found. {} | \
+         Possible causes: (1) Bundled Node not downloaded — run scripts/download_nodejs.sh. \
+         (2) Antivirus quarantined node.exe on Windows — check Windows Security > Protection History. \
+         (3) Installation is corrupted — try reinstalling. \
+         Workaround: install Node.js manually from https://nodejs.org (v20+).",
         diag
     );
     ulog_error!("[sidecar] {}", msg);
@@ -1257,7 +1254,7 @@ fn diagnose_bun_not_found<R: Runtime>(app_handle: &AppHandle<R>) -> String {
 }
 
 /// Diagnose why bun process exited immediately and return a user-friendly error message.
-fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::path::Path) -> String {
+fn diagnose_immediate_exit(status: &std::process::ExitStatus, node_path: &std::path::Path) -> String {
     let status_str = format!("{:?}", status);
 
     #[cfg(target_os = "windows")]
@@ -1289,7 +1286,7 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::pa
                  Check Windows Security > Protection History, or add the install directory to exclusions."
             }
             1 => {
-                "Bun exited with code 1. Check if Git for Windows is installed \
+                "Node exited with code 1. Check if Git for Windows is installed \
                  (required by Claude Agent SDK): https://git-scm.com/downloads/win"
             }
             _ => "",
@@ -1297,13 +1294,13 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::pa
 
         let msg = if hint.is_empty() {
             format!(
-                "Bun process exited immediately (status: {}, code: 0x{:08x}). bun_path: {:?}",
-                status_str, code, bun_path
+                "Node process exited immediately (status: {}, code: 0x{:08x}). node_path: {:?}",
+                status_str, code, node_path
             )
         } else {
             format!(
-                "Bun process exited immediately (status: {}, code: 0x{:08x}). {} | bun_path: {:?}",
-                status_str, code, hint, bun_path
+                "Node process exited immediately (status: {}, code: 0x{:08x}). {} | node_path: {:?}",
+                status_str, code, hint, node_path
             )
         };
         ulog_error!("[sidecar] {}", msg);
@@ -1313,134 +1310,55 @@ fn diagnose_immediate_exit(status: &std::process::ExitStatus, bun_path: &std::pa
     #[cfg(not(target_os = "windows"))]
     {
         let msg = format!(
-            "Bun process exited immediately with status: {}. bun_path: {:?}",
-            status_str, bun_path
+            "Node process exited immediately with status: {}. node_path: {:?}",
+            status_str, node_path
         );
         ulog_error!("[sidecar] {}", msg);
         msg
     }
 }
 
-/// Helper: check if bun exists at the given directory with platform-specific names
-#[cfg(target_os = "windows")]
-fn check_bun_in_dir(dir: &std::path::Path, label: &str) -> Option<PathBuf> {
-    let win_bun = dir.join("bun-x86_64-pc-windows-msvc.exe");
-    let win_bun_simple = dir.join("bun.exe");
-
-    // If ANY bun in this directory is marked as crashed, skip ALL candidates.
-    // Both filenames likely point to the same binary, so trying the sibling would just crash again.
-    let any_crashed = (win_bun.exists() && is_bun_crashed(&win_bun))
-        || (win_bun_simple.exists() && is_bun_crashed(&win_bun_simple));
-    if any_crashed {
-        ulog_warn!("[sidecar] Skipping all bun candidates from {} (crashed): {:?}", label, dir);
-        return None;
-    }
-
-    if win_bun.exists() {
-        ulog_info!("[sidecar] Using bundled bun from {} (platform): {:?}", label, win_bun);
-        return Some(win_bun);
-    }
-    if win_bun_simple.exists() {
-        ulog_info!("[sidecar] Using bundled bun from {} (simple): {:?}", label, win_bun_simple);
-        return Some(win_bun_simple);
-    }
-    None
-}
-
-/// Find the bun executable path.
+/// Find the Node.js executable path.
 /// Returns a normalized path safe for `Command::new()` (no `\\?\` prefix on Windows).
-fn find_bun_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
-    find_bun_executable_inner(app_handle).map(normalize_external_path)
+fn find_node_executable<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
+    find_node_executable_inner(app_handle).map(normalize_external_path)
 }
 
-/// Public wrapper for find_bun_executable (used by im::bridge module).
-pub fn find_bun_executable_pub<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
-    find_bun_executable(app_handle)
+/// Public wrapper for find_node_executable (used by im::bridge module).
+pub fn find_node_executable_pub<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
+    find_node_executable(app_handle)
 }
 
-fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
-    // First, try to find bundled bun via resource_dir
+/// Build the canonical Node.js path relative to a given resources directory.
+/// macOS/Linux: <resources>/nodejs/bin/node
+/// Windows:     <resources>\nodejs\node.exe
+fn node_path_in_resources(resources: &std::path::Path) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        resources.join("nodejs").join("node.exe")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        resources.join("nodejs").join("bin").join("node")
+    }
+}
+
+fn find_node_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<PathBuf> {
+    // Bundled Node.js lives under resource_dir/nodejs/ (shipped by build_*.sh
+    // via scripts/download_nodejs.sh). Unlike the prior Bun externalBin
+    // flow, Node.js is a binary + lib directory combo that can't ride
+    // Tauri's externalBin — it's a plain resource copy.
     match app_handle.path().resource_dir() {
         Ok(resource_dir) => {
             ulog_info!("[sidecar] resource_dir resolved to: {:?}", resource_dir);
 
-            #[cfg(target_os = "macos")]
-            {
-                if let Some(contents_dir) = resource_dir.parent() {
-                    // externalBin places binaries in MacOS/ with platform suffix
-                    #[cfg(target_arch = "aarch64")]
-                    let macos_bun = contents_dir.join("MacOS").join("bun-aarch64-apple-darwin");
-                    #[cfg(target_arch = "x86_64")]
-                    let macos_bun = contents_dir.join("MacOS").join("bun-x86_64-apple-darwin");
-
-                    if macos_bun.exists() {
-                        ulog_info!("Using bundled bun from MacOS: {:?}", macos_bun);
-                        return Some(macos_bun);
-                    }
-
-                    // Also check without suffix (for backward compatibility)
-                    let macos_bun_simple = contents_dir.join("MacOS").join("bun");
-                    if macos_bun_simple.exists() {
-                        ulog_info!("Using bundled bun from MacOS (simple): {:?}", macos_bun_simple);
-                        return Some(macos_bun_simple);
-                    }
-                }
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                // Windows NSIS: bun.exe is in the same directory as the main executable.
-                // resource_dir() may return either $INSTDIR or $INSTDIR\resources depending
-                // on the Tauri version and Windows config. Check both resource_dir itself
-                // and its parent to handle both cases.
-                if let Some(found) = check_bun_in_dir(&resource_dir, "resource_dir") {
-                    return Some(found);
-                }
-                if let Some(parent) = resource_dir.parent() {
-                    if let Some(found) = check_bun_in_dir(parent, "resource_dir parent") {
-                        return Some(found);
-                    }
-                }
-            }
-
-            // Check in resource_dir/binaries/ for development mode
-            #[cfg(target_os = "windows")]
-            let bundled_bun = resource_dir.join("binaries").join("bun.exe");
-            #[cfg(not(target_os = "windows"))]
-            let bundled_bun = resource_dir.join("binaries").join("bun");
-
-            if bundled_bun.exists() {
-                if is_bun_crashed(&bundled_bun) {
-                    ulog_warn!("Skipping crashed bundled bun: {:?}", bundled_bun);
+            let bundled = node_path_in_resources(&resource_dir);
+            if bundled.exists() {
+                if is_node_crashed(&bundled) {
+                    ulog_warn!("Skipping crashed bundled node: {:?}", bundled);
                 } else {
-                    ulog_info!("Using bundled bun: {:?}", bundled_bun);
-                    return Some(bundled_bun);
-                }
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                #[cfg(target_arch = "aarch64")]
-                let platform_bun = resource_dir.join("binaries").join("bun-aarch64-apple-darwin");
-                #[cfg(target_arch = "x86_64")]
-                let platform_bun = resource_dir.join("binaries").join("bun-x86_64-apple-darwin");
-
-                if platform_bun.exists() {
-                    ulog_info!("Using bundled platform bun: {:?}", platform_bun);
-                    return Some(platform_bun);
-                }
-            }
-
-            #[cfg(target_os = "windows")]
-            {
-                let platform_bun = resource_dir.join("binaries").join("bun-x86_64-pc-windows-msvc.exe");
-                if platform_bun.exists() {
-                    if is_bun_crashed(&platform_bun) {
-                        ulog_warn!("Skipping crashed bundled platform bun: {:?}", platform_bun);
-                    } else {
-                        ulog_info!("Using bundled platform bun: {:?}", platform_bun);
-                        return Some(platform_bun);
-                    }
+                    ulog_info!("Using bundled node: {:?}", bundled);
+                    return Some(bundled);
                 }
             }
         }
@@ -1449,88 +1367,59 @@ fn find_bun_executable_inner<R: Runtime>(app_handle: &AppHandle<R>) -> Option<Pa
         }
     }
 
-    // Fallback: find bun relative to the current executable (most reliable on Windows)
-    #[cfg(target_os = "windows")]
-    {
-        match std::env::current_exe() {
-            Ok(exe_path) => {
-                ulog_info!("[sidecar] current_exe: {:?}", exe_path);
-                if let Some(exe_dir) = exe_path.parent() {
-                    if let Some(found) = check_bun_in_dir(exe_dir, "exe_dir") {
-                        return Some(found);
-                    }
+    // Fallback: find node relative to the current executable (most reliable on Windows
+    // installer layouts where resource_dir returns something unexpected).
+    if let Ok(exe_path) = std::env::current_exe() {
+        ulog_info!("[sidecar] current_exe: {:?}", exe_path);
+        if let Some(exe_dir) = exe_path.parent() {
+            #[cfg(target_os = "macos")]
+            let layouts: [PathBuf; 2] = [
+                // Inside the .app bundle: Contents/Resources/nodejs/bin/node
+                exe_dir.parent().map(|p| p.join("Resources").join("nodejs").join("bin").join("node"))
+                    .unwrap_or_else(|| exe_dir.join("Resources").join("nodejs").join("bin").join("node")),
+                exe_dir.join("nodejs").join("bin").join("node"),
+            ];
+            #[cfg(target_os = "windows")]
+            let layouts: [PathBuf; 2] = [
+                exe_dir.join("resources").join("nodejs").join("node.exe"),
+                exe_dir.join("nodejs").join("node.exe"),
+            ];
+            #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+            let layouts: [PathBuf; 2] = [
+                exe_dir.join("resources").join("nodejs").join("bin").join("node"),
+                exe_dir.join("nodejs").join("bin").join("node"),
+            ];
+
+            for candidate in &layouts {
+                if candidate.exists() {
+                    ulog_info!("Using bundled node (exe-relative): {:?}", candidate);
+                    return Some(candidate.clone());
                 }
             }
-            Err(e) => {
-                ulog_warn!("[sidecar] current_exe() failed: {}", e);
-            }
         }
     }
 
-    // Fallback: system locations
+    // Last resort: system Node.js from PATH. Dev-mode fallback so `npm run dev` /
+    // `./start_dev.sh` works on machines where bundled Node hasn't been downloaded yet.
     #[cfg(target_os = "windows")]
     {
-        let candidates = [
-            format!(
-                "{}\\.bun\\bin\\bun.exe",
-                std::env::var("USERPROFILE").unwrap_or_default()
-            ),
-            format!(
-                "{}\\bun\\bin\\bun.exe",
-                std::env::var("LOCALAPPDATA").unwrap_or_default()
-            ),
-            format!(
-                "{}\\bun\\bun.exe",
-                std::env::var("PROGRAMFILES").unwrap_or_default()
-            ),
-        ];
-
-        for candidate in &candidates {
-            let path = PathBuf::from(candidate);
-            if path.exists() {
-                ulog_info!("Using system bun: {:?}", path);
-                return Some(path);
-            }
-        }
-
-        // Try to find bun in PATH (augmented with common system dirs)
-        if let Some(path) = crate::system_binary::find("bun.exe")
-            .or_else(|| crate::system_binary::find("bun"))
+        if let Some(path) = crate::system_binary::find("node.exe")
+            .or_else(|| crate::system_binary::find("node"))
         {
-            ulog_info!("Using bun from PATH: {:?}", path);
+            ulog_info!("Using system node: {:?}", path);
             return Some(path);
         }
-
-        ulog_error!("[sidecar] Bun executable not found in any location. Checked: resource_dir, exe_dir, system locations, PATH");
-        return None;
     }
-
     #[cfg(not(target_os = "windows"))]
     {
-        // Try well-known paths first, then fall back to augmented PATH search.
-        // system_binary::find already includes /opt/homebrew/bin etc., but checking
-        // explicit paths is faster and covers ~/.bun/bin which isn't in the standard list.
-        let home = std::env::var("HOME").unwrap_or_default();
-        let explicit_paths = [
-            "/opt/homebrew/bin/bun",
-            "/usr/local/bin/bun",
-        ];
-        for candidate in explicit_paths {
-            let path = PathBuf::from(candidate);
-            if path.exists() {
-                ulog_info!("Using system bun: {:?}", path);
-                return Some(path);
-            }
+        if let Some(path) = crate::system_binary::find("node") {
+            ulog_info!("Using system node: {:?}", path);
+            return Some(path);
         }
-        // ~/.bun/bin/bun (user-local install)
-        let user_bun = PathBuf::from(format!("{}/.bun/bin/bun", home));
-        if user_bun.exists() {
-            ulog_info!("Using system bun: {:?}", user_bun);
-            return Some(user_bun);
-        }
-
-        crate::system_binary::find("bun")
     }
+
+    ulog_error!("[sidecar] Node executable not found in any location. Checked: resource_dir, exe-relative, PATH");
+    None
 }
 
 /// Find the server script path.
@@ -1615,12 +1504,20 @@ fn find_server_script_inner<R: Runtime>(_app_handle: &AppHandle<R>) -> Option<Pa
 /// Checked every 20 iterations (~10s) to detect early crashes (e.g., AVX2 0xC0000005 on Windows
 /// VMs where Windows Defender delays the crash by 20-30s, bypassing the 50ms early exit check).
 fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Result<(), String> {
-    let delay = Duration::from_millis(HEALTH_CHECK_DELAY_MS);
+    // Exponential backoff: 50, 100, 200, 400, 500, 500, 500, ... (cap).
+    // See HEALTH_CHECK_DELAY_* constants for rationale.
+    let delay_for = |attempt: u32| -> Duration {
+        let ms = HEALTH_CHECK_DELAY_START_MS
+            .saturating_mul(1u64 << attempt.saturating_sub(1).min(10))
+            .min(HEALTH_CHECK_DELAY_CAP_MS);
+        Duration::from_millis(ms)
+    };
 
     for attempt in 1..=HEALTH_CHECK_MAX_ATTEMPTS {
-        // Every 20 attempts (~10s), check if process is still alive.
-        // This catches crashes that happen after the 50ms early exit check
-        // (e.g., Windows Defender scans bun.exe for 20-30s before it executes and crashes).
+        // Alive check: every 20 attempts in the slow-poll regime is ~10s. But
+        // the early fast regime compresses 20 attempts to ~1.6s, still safe.
+        // Catches crashes that happen after our initial try_wait (e.g. Windows
+        // Defender holds node.exe for 20-30s then lets a crash happen).
         if attempt % 20 == 0 {
             if let Some(ref check) = alive_check {
                 if !check() {
@@ -1642,7 +1539,7 @@ fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Res
             }
             Err(_) => {
                 if attempt < HEALTH_CHECK_MAX_ATTEMPTS {
-                    thread::sleep(delay);
+                    thread::sleep(delay_for(attempt));
                 }
             }
         }
@@ -1652,6 +1549,60 @@ fn wait_for_health(port: u16, alive_check: Option<Box<dyn Fn() -> bool>>) -> Res
         "Sidecar failed TCP health check after {} attempts on port {}",
         HEALTH_CHECK_MAX_ATTEMPTS, port
     ))
+}
+
+/// Pattern 4: wait for /health/ready (deferred init complete) after /health/live
+/// passes. Returns Ok if the sidecar reports ready within `timeout_secs`,
+/// Err with the structured failure phase + error if it reports `failed`, or
+/// Err with a timeout message otherwise.
+///
+/// Tolerates older sidecar builds (no /health/ready) by treating a 404 as
+/// "ready" (best-effort backward compat — older sidecars used the bare /health
+/// as both signals).
+fn wait_for_readiness(port: u16, timeout_secs: u64) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{}/health/ready", port);
+    let client = match crate::local_http::blocking_builder()
+        .timeout(Duration::from_millis(2000))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(format!("readiness client build failed: {}", e)),
+    };
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
+    let mut last_phase: Option<String> = None;
+    while std::time::Instant::now() < deadline {
+        match client.get(&url).send() {
+            Ok(resp) => {
+                let status = resp.status();
+                if status == reqwest::StatusCode::NOT_FOUND {
+                    // Older sidecar; treat as ready.
+                    return Ok(());
+                }
+                if status.is_success() {
+                    return Ok(());
+                }
+                // 503 — try to surface phase / error from the structured body.
+                let body = resp.text().unwrap_or_default();
+                if body.contains("\"state\":\"failed\"") {
+                    return Err(format!("sidecar deferred init failed: {}", body));
+                }
+                // Track the most recent phase for the timeout error message.
+                if let Some(start) = body.find("\"phase\":\"") {
+                    let rest = &body[start + 9..];
+                    if let Some(end) = rest.find('"') {
+                        last_phase = Some(rest[..end].to_string());
+                    }
+                }
+            }
+            Err(_) => {
+                // Sidecar not yet listening, or transient error — try again.
+            }
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let phase_part = last_phase.map(|p| format!(" (last phase: {})", p)).unwrap_or_default();
+    Err(format!("sidecar /health/ready timed out after {}s{}", timeout_secs, phase_part))
 }
 
 /// Quick HTTP health check for existing sidecar (non-blocking style with short timeout)
@@ -1710,8 +1661,8 @@ pub fn start_tab_sidecar<R: Runtime>(
     manager_guard.remove_instance(tab_id);
 
     // Find executables
-    let bun_path = find_bun_executable(app_handle)
-        .ok_or_else(|| diagnose_bun_not_found(app_handle))?;
+    let node_path = find_node_executable(app_handle)
+        .ok_or_else(|| diagnose_node_not_found(app_handle))?;
     let script_path = find_server_script(app_handle)
         .ok_or_else(|| "Server script not found".to_string())?;
 
@@ -1723,9 +1674,15 @@ pub fn start_tab_sidecar<R: Runtime>(
         tab_id, port, agent_dir
     );
 
-    // Build command - 直接用 bun <script> 而非 bun run <script>（更稳定）
-    // Add SIDECAR_MARKER for reliable process identification and cleanup
-    let mut cmd = crate::process_cmd::new(&bun_path);
+    // Build command — node directly executes server-dist.js (esbuild output).
+    // In debug mode (.ts source) we inject tsx's ESM loader so TypeScript is
+    // transpiled on the fly. Release builds load the pre-bundled .js and skip
+    // the loader, keeping startup lean.
+    // SIDECAR_MARKER tails every argv for reliable process identification.
+    let mut cmd = crate::process_cmd::new(&node_path);
+    if script_path.extension().and_then(|s| s.to_str()) == Some("ts") {
+        cmd.arg("--import").arg("tsx/esm");
+    }
     cmd.arg(&script_path)
         .arg("--port")
         .arg(port.to_string())
@@ -1807,7 +1764,7 @@ pub fn start_tab_sidecar<R: Runtime>(
 
     ulog_info!(
         "[sidecar] Spawning: bun={:?}, script={:?}, port={}, is_global={}",
-        bun_path, script_path, port, is_global
+        node_path, script_path, port, is_global
     );
 
     // Spawn
@@ -1851,16 +1808,17 @@ pub fn start_tab_sidecar<R: Runtime>(
         });
     }
 
-    // Brief wait to let stdout/stderr threads capture initial output
-    // Reduced from 500ms to 50ms for faster startup
-    thread::sleep(Duration::from_millis(50));
+    // Check if the process already exited. `try_wait()` is a non-blocking
+    // poll — if the OS hasn't reaped the child yet, returns Ok(None). We no
+    // longer pre-sleep 50ms here; the health-loop's alive_check (every 20
+    // attempts) catches any crash that escapes this initial probe.
     if let Ok(Some(status)) = child.try_wait() {
-        // Process exited immediately, wait a bit for stderr thread to capture output
+        // Crash detected — give the stderr reader a brief window to flush.
         thread::sleep(Duration::from_millis(100));
         ulog_error!("[sidecar] Process exited immediately with status: {:?}", status);
         #[cfg(target_os = "windows")]
-        maybe_mark_crashed_bun(&status, &bun_path);
-        let diag = diagnose_immediate_exit(&status, &bun_path);
+        maybe_mark_crashed_node(&status, &node_path);
+        let diag = diagnose_immediate_exit(&status, &node_path);
         return Err(diag);
     }
 
@@ -1927,7 +1885,7 @@ pub fn start_tab_sidecar<R: Runtime>(
                 match instance.process.try_wait() {
                     Ok(Some(status)) => {
                         #[cfg(target_os = "windows")]
-                        maybe_mark_crashed_bun(&status, &bun_path);
+                        maybe_mark_crashed_node(&status, &node_path);
                         let detail = format!(" | process exited: {:?}", status);
                         ulog_error!("[sidecar]{}", detail);
                         diag.push_str(&detail);
@@ -2640,8 +2598,8 @@ fn create_new_session_sidecar<R: Runtime>(
 
     // Need to start a new Sidecar
     // First, find executables
-    let bun_path = find_bun_executable(app_handle)
-        .ok_or_else(|| diagnose_bun_not_found(app_handle))?;
+    let node_path = find_node_executable(app_handle)
+        .ok_or_else(|| diagnose_node_not_found(app_handle))?;
     let script_path = find_server_script(app_handle)
         .ok_or_else(|| "Server script not found".to_string())?;
 
@@ -2653,8 +2611,11 @@ fn create_new_session_sidecar<R: Runtime>(
         session_id, port, owner
     );
 
-    // Build command
-    let mut cmd = crate::process_cmd::new(&bun_path);
+    // Build command (see sibling SessionSidecar path for the tsx-loader rationale)
+    let mut cmd = crate::process_cmd::new(&node_path);
+    if script_path.extension().and_then(|s| s.to_str()) == Some("ts") {
+        cmd.arg("--import").arg("tsx/esm");
+    }
     cmd.arg(&script_path)
         .arg("--port")
         .arg(port.to_string())
@@ -2778,14 +2739,14 @@ fn create_new_session_sidecar<R: Runtime>(
         });
     }
 
-    // Brief wait to check if process exits immediately
-    thread::sleep(Duration::from_millis(50));
+    // Check if the process already exited (non-blocking poll). No pre-sleep;
+    // the health-loop's alive_check catches any crash this probe misses.
     if let Ok(Some(status)) = child.try_wait() {
         thread::sleep(Duration::from_millis(100));
         ulog_error!("[sidecar] SessionSidecar exited immediately with status: {:?}", status);
         #[cfg(target_os = "windows")]
-        maybe_mark_crashed_bun(&status, &bun_path);
-        let diag = diagnose_immediate_exit(&status, &bun_path);
+        maybe_mark_crashed_node(&status, &node_path);
+        let diag = diagnose_immediate_exit(&status, &node_path);
         return Err(diag);
     }
 
@@ -2823,9 +2784,26 @@ fn create_new_session_sidecar<R: Runtime>(
         }
     });
 
-    // Wait for health
+    // Wait for health (TCP up). Then wait for /health/ready (deferred init
+    // complete) so renderer-driven session startup gates on actual readiness,
+    // not just liveness. Other startup paths (cron / IM bot) keep the looser
+    // liveness-only contract — they don't surface a "still warming up" UI.
     match wait_for_health(port, Some(alive_check)) {
         Ok(()) => {
+            // Pattern 4: tighten the renderer-driven session sidecar startup
+            // to wait for /health/ready as well. 30s timeout matches existing
+            // long-running migration / SDK init budgets.
+            if let Err(e) = wait_for_readiness(port, 30) {
+                ulog_error!("[sidecar] Session {} /health/ready failed: {}", session_id, e);
+                let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
+                let port_matches = manager_guard.sidecars.get(session_id)
+                    .map(|s| s.port == port)
+                    .unwrap_or(false);
+                if port_matches {
+                    manager_guard.remove_sidecar(session_id);
+                }
+                return Err(e);
+            }
             // Mark as healthy — verify port to avoid mutating a replacement sidecar
             // that was created by another thread (e.g., health monitor) during the wait.
             let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
@@ -2860,7 +2838,7 @@ fn create_new_session_sidecar<R: Runtime>(
                 #[cfg(target_os = "windows")]
                 if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
                     if let Ok(Some(status)) = sidecar.process.try_wait() {
-                        maybe_mark_crashed_bun(&status, &bun_path);
+                        maybe_mark_crashed_node(&status, &node_path);
                     }
                 }
                 // Remove the failed sidecar (ours, not a replacement)
@@ -3223,27 +3201,50 @@ fn poll_background_completion<R: Runtime>(
 }
 
 /// Cancel background completion for a session (e.g., when user reconnects).
-/// Simply removes the BackgroundCompletion owner; the polling thread will detect this and exit.
+///
+/// Pattern 1 (Unified Cancellation): goes through `release_session_sidecar`
+/// rather than mutating `sidecar.owners` directly. The release path is the
+/// canonical "owner removal + maybe-stop" entry — bypassing it left the
+/// "owners empty → stop sidecar" invariant unenforced (audit A: ownerless
+/// but live sidecar → orphan).
+///
+/// Pre-check whether the BackgroundCompletion owner exists before calling
+/// release (release returns Ok(false) for non-existent owners too, but we
+/// want to distinguish "no-op because nothing to cancel" from "released").
 pub fn cancel_background_completion(
     manager: &ManagedSidecarManager,
     session_id: &str,
 ) -> Result<bool, String> {
     let bg_owner = SidecarOwner::BackgroundCompletion(session_id.to_string());
-    let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
 
-    if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
-        if sidecar.owners.contains(&bg_owner) {
-            sidecar.owners.remove(&bg_owner);
-            ulog_info!("[bg-completion] Cancelled background completion for session {}", session_id);
-            Ok(true)
-        } else {
-            ulog_debug!("[bg-completion] No BackgroundCompletion owner to cancel for session {}", session_id);
-            Ok(false)
-        }
-    } else {
-        ulog_debug!("[bg-completion] No sidecar found to cancel background completion for session {}", session_id);
-        Ok(false)
+    // Cheap probe: does this session have the BackgroundCompletion owner?
+    // Holding the lock only for the read keeps release_session_sidecar's
+    // own lock acquisition uncontested.
+    let has_bg_owner = {
+        let manager_guard = manager.lock().map_err(|e| e.to_string())?;
+        manager_guard
+            .sidecars
+            .get(session_id)
+            .map(|s| s.owners.contains(&bg_owner))
+            .unwrap_or(false)
+    };
+
+    if !has_bg_owner {
+        ulog_debug!(
+            "[bg-completion] No BackgroundCompletion owner to cancel for session {}",
+            session_id
+        );
+        return Ok(false);
     }
+
+    // Delegate to the canonical release path so the "owners empty → stop"
+    // invariant is enforced and any ancillary cleanup runs.
+    let stopped = release_session_sidecar(manager, session_id, &bg_owner)?;
+    ulog_info!(
+        "[bg-completion] Cancelled background completion for session {} (sidecar_stopped: {})",
+        session_id, stopped
+    );
+    Ok(true)
 }
 
 /// Start background completion for a session

@@ -11,6 +11,7 @@ import TabProvider from '@/context/TabProvider';
 import { useToast } from '@/components/Toast';
 import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
+import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
 import { notifyCronTaskComplete } from '@/services/notificationService';
 import { useConfig } from '@/hooks/useConfig';
 import { useThemeEffect } from '@/hooks/useTheme';
@@ -197,6 +198,11 @@ export default function App() {
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
   const { config, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
 
+  // Helper Agent's persisted model defaults — used by BugReportOverlay (initial
+  // picker selection + persist on pick) and by the LAUNCH_BUG_REPORT handler
+  // (fallback when callers, e.g. Chat error banner, don't pre-select a model).
+  const helperAgentDefaults = useHelperAgentModelDefaults();
+
   // Apply theme (light/dark/system) to <html> element
   useThemeEffect();
 
@@ -231,6 +237,9 @@ export default function App() {
 
   const configProjectsRef = useRef(configProjects);
   configProjectsRef.current = configProjects;
+
+  const helperAgentDefaultsRef = useRef(helperAgentDefaults);
+  helperAgentDefaultsRef.current = helperAgentDefaults;
 
   // Ref for full AppConfig — needed by session-switch flow (T12) to resolve per-workspace
   // agent.runtime for cross-runtime detection without putting `config` into the
@@ -701,9 +710,10 @@ export default function App() {
         e.preventDefault();
         window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS));
       } else if (e.key === 'w' || e.key === 'W') {
-        // macOS: handled by native menu → window:cmd-w → useTrayEvents.ts.
-        // Windows/Linux: no native menu with Ctrl+W, so handle here directly.
-        // (On macOS this branch is dead code — the menu intercepts before JS.)
+        // macOS: native menu (Window > Close Tab, Cmd+W) emits window:cmd-w
+        // and useTrayEvents handles it — this branch is normally dead code.
+        // Kept as a defensive fallback if the menu accelerator ever misfires.
+        // Windows/Linux: no native menu with Ctrl+W, so this is the primary path.
         e.preventDefault();
         if (!dismissTopmost()) {
           if (!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]')) {
@@ -899,7 +909,15 @@ export default function App() {
       // The actual session ID will be created by the backend when the session starts
       const effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
 
-      // Ensure Sidecar is running for this Session, Tab as owner
+      // Ensure Sidecar is running for this Session, Tab as owner.
+      //
+      // Pattern 4: this call resolves only after the sidecar's /health/ready
+      // returns 200 — i.e. deferred init (migration / skill-seed / sdk-init)
+      // has finished. If readiness times out or reports `failed`, the Rust
+      // call throws with the last-observed phase embedded in the error
+      // string, which we surface via `setTabErrors` → Launcher.startError.
+      // For finer-grained UX (inline phase banner during the brief
+      // pending → ready window) callers can use `useSessionReady`.
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
       console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 
@@ -1889,8 +1907,22 @@ export default function App() {
       try {
         // --- Pre-checks (before any Tab mutation) ---
 
-        // Prefer the provider chosen in the overlay, fallback to first available
-        const providerId = event.detail.providerId;
+        // Resolve provider+model with this priority:
+        //   1. Caller-supplied (e.g. BugReportOverlay model picker).
+        //   2. Helper Agent's persisted default (if its provider is still
+        //      registered) — keeps Chat error-banner quick-launch and overlay
+        //      submissions consistent with the same default model.
+        //   3. First registered provider (fallback when helper never set one).
+        const helperDefaults = helperAgentDefaultsRef.current;
+        let providerId = event.detail.providerId;
+        let model = event.detail.model;
+        if (!providerId && helperDefaults.initialProviderId) {
+          const helperProvider = appProvidersRef.current.find(p => p.id === helperDefaults.initialProviderId);
+          if (helperProvider) {
+            providerId = helperProvider.id;
+            if (!model) model = helperDefaults.initialModel;
+          }
+        }
         const provider = providerId
           ? appProvidersRef.current.find(p => p.id === providerId)
           : appProvidersRef.current[0];
@@ -1921,7 +1953,7 @@ export default function App() {
         const initialMessage: InitialMessage = {
           text: buildSupportPrompt(description, appVersion),
           providerId: provider.id,
-          model: event.detail.model,
+          model,
           images: event.detail.images,
         };
 
@@ -2120,6 +2152,9 @@ export default function App() {
           providers={appProviders}
           apiKeys={appApiKeys}
           providerVerifyStatus={appProviderVerifyStatus}
+          initialProviderId={helperAgentDefaults.initialProviderId}
+          initialModel={helperAgentDefaults.initialModel}
+          onModelChange={helperAgentDefaults.onModelChange}
         />
       )}
     </div>

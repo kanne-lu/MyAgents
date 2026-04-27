@@ -123,7 +123,6 @@ try {
     $depOk = $true
     if (-not (Test-Command "rustc --version" "https://rustup.rs")) { $depOk = $false }
     if (-not (Test-Command "npm --version" "https://nodejs.org")) { $depOk = $false }
-    if (-not (Test-Command "bun --version" "https://bun.sh")) { $depOk = $false }
 
     # 检查 Rust Windows 目标
     $installedTargets = & rustup target list --installed 2>$null
@@ -137,17 +136,6 @@ try {
 
     if (-not $depOk) {
         throw "请先安装缺失的依赖"
-    }
-
-    # 检查构建必需文件
-    $bunBinaryPath = "src-tauri\binaries\bun-x86_64-pc-windows-msvc.exe"
-    Write-Host "  检查 bundled bun... " -NoNewline
-    if (Test-Path $bunBinaryPath) {
-        Write-Host "OK" -ForegroundColor Green
-    } else {
-        Write-Host "MISSING" -ForegroundColor Red
-        Write-Host "    请先运行 .\setup_windows.ps1 下载 Bun 二进制" -ForegroundColor Yellow
-        $depOk = $false
     }
 
     # 每次构建都拉取最新 cuse release — 与 macOS 构建保持一致
@@ -290,7 +278,7 @@ try {
         $depOk = $false
     }
 
-    # VC++ Runtime DLL (app-local deployment for bun.exe)
+    # VC++ Runtime DLL (app-local deployment for bundled Node.js + native modules)
     $resDir = "src-tauri\resources"
     $vcDlls = @("vcruntime140.dll", "vcruntime140_1.dll")
     Write-Host "  检查 VC++ Runtime DLL... " -NoNewline
@@ -415,13 +403,7 @@ try {
     Write-Host "[准备] 清理旧构建..." -ForegroundColor Blue
 
     # 杀死残留进程（避免文件锁定）
-    $bunProcesses = Get-Process | Where-Object { $_.ProcessName -eq "bun" }
     $appProcesses = Get-Process | Where-Object { $_.ProcessName -eq "MyAgents" }
-
-    if ($bunProcesses) {
-        $bunProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
-        Write-Host "  清理了 $($bunProcesses.Count) 个 Bun 进程" -ForegroundColor Gray
-    }
 
     if ($appProcesses) {
         $appProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -432,9 +414,8 @@ try {
     $maxWait = 20  # 20 * 100ms = 2s
     $waited = 0
     while ($waited -lt $maxWait) {
-        $remainingBun = Get-Process -Name "bun" -ErrorAction SilentlyContinue
         $remainingApp = Get-Process -Name "MyAgents" -ErrorAction SilentlyContinue
-        if (-not $remainingBun -and -not $remainingApp) {
+        if (-not $remainingApp) {
             break
         }
         Start-Sleep -Milliseconds 100
@@ -473,7 +454,7 @@ try {
     # ========================================
     if (-not $SkipTypeCheck) {
         Write-Host "[4/7] TypeScript 类型检查..." -ForegroundColor Blue
-        & bun run typecheck
+        & npm run typecheck
         if ($LASTEXITCODE -ne 0) {
             throw "TypeScript 检查失败，请修复后重试"
         }
@@ -490,108 +471,98 @@ try {
     # ========================================
     Write-Host "[5/7] 构建前端和服务端..." -ForegroundColor Blue
 
-    # 打包服务端代码
-    Write-Host "  打包服务端代码..." -ForegroundColor Cyan
-    $resourcesDir = Join-Path $ProjectDir "src-tauri\resources"
-    if (-not (Test-Path $resourcesDir)) {
-        New-Item -ItemType Directory -Path $resourcesDir -Force | Out-Null
-    }
+    # Sidecar / Bridge / CLI 三件套统一通过 npm scripts，由
+    # `scripts/esbuild-bundle.mjs` 单一入口驱动。Driver 自带 post-build：
+    #   - cli: 复制 myagents.cmd 到 resources/cli/
+    #   - server: 校验产物不含硬编码 __dirname 路径
+    # 实际上 tauri:build 的 beforeBuildCommand (tauri.conf.json) 也会
+    # 跑同一组 npm 脚本——这里显式提前一步是为了 build 阶段提早暴露
+    # 错误（避免等到 cargo 链接成功才发现 server-dist.js 有问题）。
+    Write-Host "  打包 Sidecar / Bridge / CLI..." -ForegroundColor Cyan
+    & npm run build:server
+    if ($LASTEXITCODE -ne 0) { throw "服务端打包失败" }
+    & npm run build:bridge
+    if ($LASTEXITCODE -ne 0) { throw "Plugin Bridge 打包失败" }
+    & npm run build:cli
+    if ($LASTEXITCODE -ne 0) { throw "myagents CLI 打包失败" }
+    Write-Host "    OK - Sidecar / Bridge / CLI 打包完成" -ForegroundColor Green
 
-    & bun build ./src/server/index.ts --outfile=./src-tauri/resources/server-dist.js --target=bun
-    if ($LASTEXITCODE -ne 0) {
-        throw "服务端打包失败"
-    }
+    # 填充 tsx-runtime（Plugin Bridge 走绝对路径 --import）—— Windows 当前
+    # 仅 x64 构建；将来加 arm64 时把 --cpu 参数化。
+    Write-Host "  填充 tsx-runtime (win32-x64)..." -ForegroundColor Cyan
+    & npm run build:tsx-runtime -- win32 x64
+    if ($LASTEXITCODE -ne 0) { throw "tsx-runtime 填充失败" }
+    Write-Host "    OK - tsx-runtime 就绪" -ForegroundColor Green
 
-    # 验证打包结果不包含硬编码路径
-    $serverDist = Get-Content "src-tauri\resources\server-dist.js" -Raw
-    if ($serverDist -match 'var __dirname = "/Users/[^"]+"') {
-        throw "server-dist.js 包含硬编码的 __dirname 路径!"
-    }
-    Write-Host "    OK - 服务端代码验证通过" -ForegroundColor Green
-
-    # 打包 Plugin Bridge 代码 (OpenClaw channel plugin 支持)
-    Write-Host "  打包 Plugin Bridge..." -ForegroundColor Cyan
-    & bun build ./src/server/plugin-bridge/index.ts --outfile=./src-tauri/resources/plugin-bridge-dist.js --target=bun
-    if ($LASTEXITCODE -ne 0) {
-        throw "Plugin Bridge 打包失败"
-    }
-    Write-Host "    OK - Plugin Bridge 打包完成" -ForegroundColor Green
-
-    # 复制 SDK 依赖
-    Write-Host "  复制 SDK 依赖..." -ForegroundColor Cyan
-    $sdkSrc = Join-Path $ProjectDir "node_modules\@anthropic-ai\claude-agent-sdk"
+    # 拷贝 Claude Agent SDK native binary（0.2.113+ 取代 cli.js 分发模式）
+    # Windows 默认构建 x64；arm64 需另行处理（本脚本目前仅 x64）
+    Write-Host "  拷贝 Claude native binary (win32-x64)..." -ForegroundColor Cyan
+    $sdkTriple = "win32-x64"
+    $claudeSrc = Join-Path $ProjectDir "node_modules\@anthropic-ai\claude-agent-sdk-${sdkTriple}\claude.exe"
     $sdkDest = Join-Path $ProjectDir "src-tauri\resources\claude-agent-sdk"
 
-    if (-not (Test-Path $sdkSrc)) {
-        throw "SDK 目录不存在: $sdkSrc"
+    if (-not (Test-Path $claudeSrc)) {
+        throw "Claude native binary 不存在: $claudeSrc — 请运行 npm install 安装 @anthropic-ai/claude-agent-sdk-$sdkTriple"
     }
 
     if (Test-Path $sdkDest) {
         Remove-Item -Recurse -Force $sdkDest
     }
     New-Item -ItemType Directory -Path $sdkDest -Force | Out-Null
+    Copy-Item $claudeSrc (Join-Path $sdkDest "claude.exe") -Force
+    Write-Host "    OK - Claude native binary 就绪 ($sdkTriple)" -ForegroundColor Green
 
-    Copy-Item "$sdkSrc\cli.js" $sdkDest -Force
-    Copy-Item "$sdkSrc\sdk.mjs" $sdkDest -Force
-    # SDK <=0.2.84 shipped resvg.wasm at package root; 0.2.107 removed it.
-    # Copy any .wasm still present without failing on an empty glob.
-    $wasmFiles = Get-ChildItem -Path "$sdkSrc\*.wasm" -ErrorAction SilentlyContinue
-    if ($wasmFiles) {
-        Copy-Item $wasmFiles.FullName $sdkDest -Force
-    }
-    Copy-Item "$sdkSrc\vendor" $sdkDest -Recurse -Force
-    Write-Host "    OK - SDK 依赖复制完成" -ForegroundColor Green
+    # NOTE: agent-browser CLI is no longer bundled. The skill at
+    # bundled-skills/agent-browser/SKILL.md teaches AI to self-install via
+    # `npm install -g agent-browser@<pinned>` (with `npx` fallback) on first
+    # use. Removing the bundle saves ~84MB installer size + build time.
 
-    # 预装 agent-browser CLI（使用预生成的 lockfile 避免耗时的依赖解析）
-    Write-Host "  预装 agent-browser CLI..." -ForegroundColor Cyan
-    $agentBrowserDir = Join-Path $ProjectDir "src-tauri\resources\agent-browser-cli"
-    $lockfileDir = Join-Path $ProjectDir "src\server\agent-browser-lockfile"
-    # 版本一致性校验：index.ts 的 AGENT_BROWSER_VERSION 必须与 lockfile 的 package.json 一致
-    $indexTs = Get-Content (Join-Path $ProjectDir "src\server\index.ts") -Raw
-    if ($indexTs -match "const AGENT_BROWSER_VERSION = '([^']+)'") {
-        $codeVersion = $Matches[1]
-    } else {
-        throw "无法从 index.ts 读取 AGENT_BROWSER_VERSION"
+    # 预装 sharp 图像处理（替代 jimp，libvips 原生）
+    Write-Host "  预装 sharp 图像处理（libvips 原生）..." -ForegroundColor Cyan
+    $sharpDir = Join-Path $ProjectDir "src-tauri\resources\sharp-runtime"
+    if (Test-Path $sharpDir) {
+        Remove-Item -Recurse -Force $sharpDir
     }
-    $lockPkg = Get-Content (Join-Path $lockfileDir "package.json") -Raw | ConvertFrom-Json
-    $lockVersion = $lockPkg.dependencies.'agent-browser'
-    if ($codeVersion -ne $lockVersion) {
-        throw "版本不一致! index.ts: $codeVersion, lockfile: $lockVersion — 请同步更新 src/server/agent-browser-lockfile/"
-    }
-    Write-Host "  版本: $codeVersion" -ForegroundColor Cyan
-    if (Test-Path $agentBrowserDir) {
-        Remove-Item -Recurse -Force $agentBrowserDir
-    }
-    New-Item -ItemType Directory -Path $agentBrowserDir -Force | Out-Null
-    # 复制预生成的 package.json + bun.lock（跳过依赖解析，秒级安装）
-    Copy-Item (Join-Path $lockfileDir "package.json") $agentBrowserDir -Force
-    Copy-Item (Join-Path $lockfileDir "bun.lock") $agentBrowserDir -Force
-    Push-Location $agentBrowserDir
-    & bun install --frozen-lockfile --ignore-scripts
+    New-Item -ItemType Directory -Path $sharpDir -Force | Out-Null
+    $sharpPkgJson = @"
+{
+  "name": "sharp-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": { "sharp": "0.34.5" }
+}
+"@
+    Set-Content -Path (Join-Path $sharpDir "package.json") -Value $sharpPkgJson -Encoding utf8
+    Push-Location $sharpDir
+    & npm install --no-audit --no-fund --no-save --ignore-scripts
     Pop-Location
     if ($LASTEXITCODE -ne 0) {
-        throw "agent-browser 预装失败"
+        throw "sharp 主包预装失败"
     }
-    # npm 包内含全平台 native binary，仅保留 win32 的（删除 darwin/linux）
-    $abBinDir = Join-Path $agentBrowserDir "node_modules\agent-browser\bin"
-    Get-ChildItem -Path $abBinDir -Filter "agent-browser-darwin-*" -ErrorAction SilentlyContinue | Remove-Item -Force
-    Get-ChildItem -Path $abBinDir -Filter "agent-browser-linux-*" -ErrorAction SilentlyContinue | Remove-Item -Force
-    # 验证非 win32 二进制已全部删除
-    $leaked = Get-ChildItem -Path $abBinDir -Filter "agent-browser-*" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notlike "agent-browser-win32-*" -and $_.Name -ne "agent-browser.js" }
-    if ($leaked) {
-        throw "删除非 win32 agent-browser 二进制失败: $($leaked.Name -join ', ')"
+    # Windows 只装 x64 变体（arm64 Windows 用户少且 sharp 0.34 也支持，可按需扩展）
+    $sharpWinArch = if ($Target -match "aarch64") { "arm64" } else { "x64" }
+    Push-Location $sharpDir
+    & npm install --no-save --force --no-audit --no-fund --ignore-scripts `
+        "@img/sharp-win32-$sharpWinArch@0.34.5"
+    Pop-Location
+    if ($LASTEXITCODE -ne 0) {
+        throw "sharp Windows 平台包安装失败"
     }
-    # 验证 native binary 存在
-    $nativeBin = Join-Path $abBinDir "agent-browser-win32-x64.exe"
-    if (-not (Test-Path $nativeBin)) {
-        throw "agent-browser native binary 不存在: agent-browser-win32-x64.exe"
+    $sharpNode = Join-Path $sharpDir "node_modules\@img\sharp-win32-$sharpWinArch\lib\sharp-win32-$sharpWinArch.node"
+    if (-not (Test-Path $sharpNode)) {
+        throw "sharp-win32-$sharpWinArch.node 缺失"
     }
-    Write-Host "    OK - agent-browser CLI 预装完成 (含 native binary)" -ForegroundColor Green
+    # 删除非 win32 变体（节省 NSIS 安装包大小）
+    $imgDir = Join-Path $sharpDir "node_modules\@img"
+    Get-ChildItem -Path $imgDir -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "sharp-darwin*" -or $_.Name -like "sharp-linux*" -or $_.Name -like "sharp-libvips-darwin*" -or $_.Name -like "sharp-libvips-linux*" -or $_.Name -eq "sharp-wasm32" } |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "    OK - sharp 预装完成 (win32-$sharpWinArch)" -ForegroundColor Green
 
     # 构建前端 (增加内存限制避免 OOM)
     Write-Host "  构建前端..." -ForegroundColor Cyan
     $env:NODE_OPTIONS = "--max-old-space-size=4096"
-    & bun run build:web
+    & npm run build:web
     if ($LASTEXITCODE -ne 0) {
         throw "前端构建失败"
     }
@@ -605,7 +576,7 @@ try {
     Write-Host "[6/7] 构建 Tauri 应用 (Release)..." -ForegroundColor Blue
     Write-Host "  这可能需要几分钟，请耐心等待..." -ForegroundColor Yellow
 
-    & bun run tauri:build -- --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
+    & npm run tauri:build -- --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
     if ($LASTEXITCODE -ne 0) {
         throw "Tauri 构建失败"
     }
@@ -634,15 +605,6 @@ try {
             New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
 
             Copy-Item $exePath $portableDir -Force
-
-            $bunExe = Join-Path $targetDir "bun-x86_64-pc-windows-msvc.exe"
-            if (Test-Path $bunExe) {
-                Copy-Item $bunExe $portableDir -Force
-                # Create bun.exe alias for SDK subprocess compatibility
-                # (SDK uses which("bun") which only matches bun.exe, not the triple-suffixed name)
-                $bunAlias = Join-Path $portableDir "bun.exe"
-                Copy-Item $bunExe $bunAlias -Force
-            }
 
             # Copy VC++ Runtime DLLs for portable version (app-local deployment)
             foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll")) {

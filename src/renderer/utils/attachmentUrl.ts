@@ -6,7 +6,7 @@
 // JSON round-trip, zero base64 bloat, zero main-thread read.
 //
 // Browser dev (vite): the scheme isn't registered, so we fall back to
-// `/api/attachment/<rel>` served by Bun. proxyFetch on the global sidecar
+// `/api/attachment/<rel>` served by the Node Sidecar. proxyFetch on the global sidecar
 // handles the routing; using an absolute path here lets <img src> go through
 // the vite dev server proxy without needing a Tauri bridge.
 

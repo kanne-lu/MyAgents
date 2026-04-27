@@ -255,12 +255,17 @@ const ProcessRow = memo(function ProcessRow({
                 )}
             </button>
 
-            {/* Expanded Body - CSS Grid animation for smooth height transition */}
-            {hasContent && (
-                <div
-                    className="grid transition-[grid-template-rows] duration-200 ease-out"
-                    style={{ gridTemplateRows: isExpanded ? '1fr' : '0fr' }}
-                >
+            {/* Expanded Body — Pattern 3 §3.2.3 (Collapse = unmount).
+                Previously the body was always mounted under `gridTemplateRows: 0fr`
+                — a 100-tool tab would mount 100 ToolUse / Markdown subtrees and
+                pay re-render cost on every streaming delta even though they
+                are visually collapsed. Now we only mount the body when the
+                row is actually expanded; the cheap header (chevron / label)
+                stays so the affordance is preserved. The CSS-grid animation
+                still plays for the duration the body is mounted, giving the
+                same expand/collapse easing on toggles. */}
+            {hasContent && isExpanded && (
+                <div className="grid grid-rows-[1fr] transition-[grid-template-rows] duration-200 ease-out">
                     <div className="overflow-hidden">
                         <div className="border-t border-[var(--line)] bg-[var(--paper-elevated)]/50 px-4 pb-4 pt-3">
                             <div className="ml-7">

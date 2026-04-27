@@ -178,7 +178,7 @@ setImCronContext({ botId, chatId, platform, workspacePath, model?, permissionMod
 
 ```
 AI 调用 cron(action, ...)
-  → Bun handler (im-cron-tool.ts)
+  → Node.js handler (im-cron-tool.ts)
   → fetch http://127.0.0.1:{MANAGEMENT_PORT}/api/cron/{action}
   → Rust Management API handler (management_api.rs)
   → CronTaskManager 操作
@@ -241,7 +241,7 @@ setImMediaContext({ botId, chatId, platform })
 
 ```
 AI 调用 send_media(file_path, caption?)
-  → Bun handler (im-media-tool.ts)
+  → Node.js handler (im-media-tool.ts)
   → POST http://127.0.0.1:{MANAGEMENT_PORT}/api/im/send-media
   → Rust handler (management_api.rs)
     → get adapter from ManagedImBots[botId]

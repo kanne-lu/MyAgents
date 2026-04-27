@@ -9,6 +9,13 @@ import { useBackgroundTaskPolling } from '@/hooks/useBackgroundTaskPolling';
 import { getBackgroundTaskStatus, isTerminalStatus, BACKGROUND_TASK_STATUS_EVENT, type BackgroundTaskTerminalStatus } from '@/utils/backgroundTaskStatus';
 import { CheckCircle, ChevronDown, ChevronRight, Clock, Coins, Loader2, Terminal, Wrench, XCircle } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Virtuoso } from 'react-virtuoso';
+
+// Pattern 3 §3.2.3 — virtualize the expanded trace list when subagent calls are
+// numerous. Below this threshold the simple flow layout wins (no overscan
+// overhead, immediate fit-to-content height); above it Virtuoso pays for
+// itself by mounting only the visible window.
+const TRACE_VIRTUALIZE_THRESHOLD = 30;
 
 // Constants
 const DEFAULT_LINE_HEIGHT = 22;
@@ -433,17 +440,37 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
 });
 
 // Trace 列表组件 - 显示所有子工具调用记录
+//
+// Pattern 3 §3.2.3 — for short traces (<30 calls) we keep the original
+// flow layout (cheap, fits naturally to content). For long traces we
+// virtualise via react-virtuoso so a Task with 500 subagent calls only
+// mounts the rows currently in view (~10) instead of all 500 at once.
 const TaskTraceList = memo(function TaskTraceList({ calls }: { calls: SubagentToolCall[] }) {
+  const itemContent = useCallback((index: number) => {
+    const call = calls[index];
+    return <SubagentCallItem key={call.id} call={call} />;
+  }, [calls]);
+
   return (
     <div id="task-trace-content" className="pl-2 border-l-2 border-[var(--line)]">
       <div className="px-1 pb-2 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">
         调用记录 ({calls.length})
       </div>
-      <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-        {calls.map(call => (
-          <SubagentCallItem key={call.id} call={call} />
-        ))}
-      </div>
+      {calls.length < TRACE_VIRTUALIZE_THRESHOLD ? (
+        <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+          {calls.map(call => (
+            <SubagentCallItem key={call.id} call={call} />
+          ))}
+        </div>
+      ) : (
+        <Virtuoso
+          totalCount={calls.length}
+          itemContent={itemContent}
+          style={{ height: '24rem' }}
+          className="pr-1"
+          increaseViewportBy={200}
+        />
+      )}
     </div>
   );
 });

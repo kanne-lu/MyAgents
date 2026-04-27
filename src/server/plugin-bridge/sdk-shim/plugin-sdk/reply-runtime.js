@@ -163,7 +163,7 @@ async function generateTopicLabel(_params) {
   return undefined;
 }
 
-module.exports = {
+export {
   // chunk
   chunkMarkdownText,
   chunkMarkdownTextWithMode,

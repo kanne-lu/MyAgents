@@ -21,6 +21,37 @@ use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 // Note: ulog_* macros write to BOTH system log AND unified log (~/.myagents/logs/unified-*.log)
 // This is critical for bridge stdout/stderr — using log::info! only writes to system log.
 
+// ===== Per-plugin install/prepare mutex =====
+//
+// Multiple bots can share the same OpenClaw plugin_id (e.g. two Lark
+// accounts on `@larksuite/openclaw-lark`). On app startup auto-start
+// fans them out concurrently; the periodic monitor likewise restarts
+// dead channels in parallel. Their `spawn_plugin_bridge` paths each do:
+//   1. Shim integrity check → optional `install_sdk_shim` (rmtree + copy_dir_recursive)
+//   2. tsx-runtime resolve → spawn Node bridge
+//
+// Step 1's `rmtree + copy_dir_recursive` is NOT atomic — two callers
+// racing here can corrupt the shim tree (one's rmtree wins midway
+// through the other's copy). Codex Critical 3 / Agent A M2 flagged
+// this. The same risk applies to `install_plugin` (wizard-driven, but
+// nothing prevents the user from kicking off a re-install while a
+// bot using the same plugin spawns).
+//
+// In-process async mutex per `plugin_dir` is enough because:
+//   - Tauri single-instance plugin prevents cross-process MyAgents.
+//   - We only need to serialize *our own* mutations of `plugin_dir`.
+//
+// Keyed by canonicalised plugin_dir path so lexically-different paths
+// pointing at the same dir share a lock.
+fn plugin_install_lock(plugin_dir: &std::path::Path) -> std::sync::Arc<Mutex<()>> {
+    use std::sync::{Arc, OnceLock};
+    static LOCKS: OnceLock<std::sync::Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let key = std::fs::canonicalize(plugin_dir).unwrap_or_else(|_| plugin_dir.to_path_buf());
+    let mut guard = map.lock().expect("plugin install lock map poisoned");
+    Arc::clone(guard.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))))
+}
+
 // ===== Bridge Sender Registry =====
 // Lets management API route inbound messages from Bridge → processing loop.
 
@@ -290,22 +321,49 @@ impl ImAdapter for BridgeAdapter {
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                    // Periodic health check
-                    match self.client.get(self.url("/health")).send().await {
-                        Ok(resp) if resp.status().is_success() => {
-                            if consecutive_failures > 0 {
-                                ulog_info!("[bridge:{}] Health check recovered after {} failures", self.plugin_id, consecutive_failures);
-                                consecutive_failures = 0;
+                    // Pattern 4: poll /health/ready (gateway loaded + registered),
+                    // not /health (TCP only). A bridge whose gateway has crashed
+                    // post-startup keeps /health 200 but /health/ready 503.
+                    //
+                    // Backward-compat: if /health/ready 404s (older bridge build
+                    // shipped without the new endpoint), fall back to /health for
+                    // one rollout cycle so a stale bundled bridge doesn't trip
+                    // the watchdog.
+                    let ready_url = self.url("/health/ready");
+                    let mut probed_status: Option<reqwest::StatusCode> = None;
+                    let mut probe_err: Option<String> = None;
+                    match self.client.get(&ready_url).send().await {
+                        Ok(resp) => {
+                            let status = resp.status();
+                            probed_status = Some(status);
+                            if status == reqwest::StatusCode::NOT_FOUND {
+                                // Older bridge — fall back to /health. Remove
+                                // this branch one release after rollout.
+                                match self.client.get(self.url("/health")).send().await {
+                                    Ok(fb) => probed_status = Some(fb.status()),
+                                    Err(e) => probe_err = Some(e.to_string()),
+                                }
                             }
                         }
-                        Ok(resp) => {
-                            consecutive_failures += 1;
-                            ulog_error!("[bridge:{}] Health check returned {}, failure {}/{}", self.plugin_id, resp.status(), consecutive_failures, MAX_FAILURES);
+                        Err(e) => probe_err = Some(e.to_string()),
+                    }
+                    let success = probed_status.map(|s| s.is_success()).unwrap_or(false);
+                    if success {
+                        if consecutive_failures > 0 {
+                            ulog_info!("[bridge:{}] Health check recovered after {} failures", self.plugin_id, consecutive_failures);
+                            consecutive_failures = 0;
                         }
-                        Err(e) => {
-                            consecutive_failures += 1;
-                            ulog_error!("[bridge:{}] Health check failed: {}, failure {}/{}", self.plugin_id, e, consecutive_failures, MAX_FAILURES);
-                        }
+                    } else if let Some(status) = probed_status {
+                        consecutive_failures += 1;
+                        // Pull /status for a more useful error reason before deciding.
+                        let detail = match self.client.get(self.url("/status")).send().await {
+                            Ok(r) => r.text().await.unwrap_or_default(),
+                            Err(_) => String::new(),
+                        };
+                        ulog_error!("[bridge:{}] /health/ready returned {}, failure {}/{}, status={}", self.plugin_id, status, consecutive_failures, MAX_FAILURES, detail);
+                    } else if let Some(err) = probe_err {
+                        consecutive_failures += 1;
+                        ulog_error!("[bridge:{}] Health check failed: {}, failure {}/{}", self.plugin_id, err, consecutive_failures, MAX_FAILURES);
                     }
                     if consecutive_failures >= MAX_FAILURES {
                         ulog_error!("[bridge:{}] Bridge process appears dead ({} consecutive health check failures), exiting listen loop", self.plugin_id, MAX_FAILURES);
@@ -794,14 +852,18 @@ impl BridgeProcess {
 
 /// Find the plugin-bridge script (dev: TS source, prod: bundled JS)
 fn find_bridge_script<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<PathBuf> {
-    // Production: bundled JS in resources
+    // Production: bundled .mjs in resources. Extension is load-bearing —
+    // Node treats `.mjs` as ESM unconditionally per spec, which sidesteps
+    // a tsx-loader CJS-conversion trap that fired on Windows production
+    // installs (no `package.json` above the resources dir, Node defaults
+    // to commonjs, tsx transpiles → ERR_REQUIRE_CYCLE_MODULE). See
+    // scripts/esbuild-bundle.mjs `bridge` target for the full rationale.
     #[cfg(not(debug_assertions))]
     {
         use crate::sidecar::normalize_external_path;
         if let Ok(resource_dir) = app_handle.path().resource_dir() {
-            let bundled: PathBuf = resource_dir.join("plugin-bridge-dist.js");
+            let bundled: PathBuf = resource_dir.join("plugin-bridge-dist.mjs");
             if bundled.exists() {
-                // Normalize \\?\ prefix — Bun hangs on extended-length paths
                 let bundled = normalize_external_path(bundled);
                 ulog_info!("[bridge] Using bundled bridge script: {:?}", bundled);
                 return Some(bundled);
@@ -809,29 +871,18 @@ fn find_bridge_script<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Op
         }
     }
 
-    // Development: source TS
-    let dev_candidates = [
-        // Relative to project root
-        "src/server/plugin-bridge/index.ts",
-    ];
-
-    // Find project root from Cargo.toml location
+    // Development: source TS (tsx/esm injected at spawn; see spawn_bridge)
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let project_root = std::path::Path::new(manifest_dir)
         .parent()
         .unwrap_or(std::path::Path::new("."));
-
-    for candidate in dev_candidates {
-        let path = project_root.join(candidate);
-        if path.exists() {
-            ulog_info!("[bridge] Using dev bridge script: {:?}", path);
-            return Some(path);
-        }
+    let ts_source = project_root.join("src/server/plugin-bridge/index.ts");
+    if ts_source.exists() {
+        ulog_info!("[bridge] Using dev bridge script: {:?}", ts_source);
+        return Some(ts_source);
     }
 
-    // Suppress unused variable warning in release builds
     let _ = app_handle;
-
     ulog_error!("[bridge] Bridge script not found");
     None
 }
@@ -845,10 +896,10 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
     bot_id: &str,
     plugin_config: Option<&serde_json::Value>,
 ) -> Result<BridgeProcess, String> {
-    use crate::sidecar::find_bun_executable_pub;
+    use crate::sidecar::find_node_executable_pub;
 
-    let bun_path = find_bun_executable_pub(app_handle)
-        .ok_or_else(|| "Bun executable not found".to_string())?;
+    let node_path = find_node_executable_pub(app_handle)
+        .ok_or_else(|| "Node executable not found".to_string())?;
 
     let bridge_script = find_bridge_script(app_handle)
         .ok_or_else(|| "Plugin bridge script not found".to_string())?;
@@ -858,10 +909,35 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .unwrap_or_else(|| "{}".to_string());
 
     // ── Shim integrity + freshness check ──
-    // 1. If node_modules/openclaw/ is the real npm package (not our shim) → re-install
-    // 2. If shim version doesn't match SHIM_COMPAT_VERSION → re-install (shim content updated)
+    // 1. If node_modules/openclaw/ is missing → re-install (covers
+    //    pre-0.2.0 installs and any plugin tree where the shim got
+    //    accidentally cleaned).
+    // 2. If node_modules/openclaw/ is the real npm package (not our
+    //    shim) → re-install.
+    // 3. If shim version doesn't match SHIM_COMPAT_VERSION → re-install
+    //    (shim content updated, e.g. compat version bump).
+    //
+    // tsx is no longer installed per-plugin (was: `install_tsx_into_
+    // plugin_dir` would `npm install tsx` here, but its prune step
+    // wiped the shim). tsx is now bundled once into
+    // `resources/tsx-runtime/` and passed to Node via absolute-path
+    // `--import` below — see `find_tsx_runtime_loader`.
+    //
+    // Concurrency guard (Codex C3 / Agent A M2): hold per-plugin_dir
+    // mutex for the duration of the integrity-check + reinstall block.
+    // Two bots sharing the same OpenClaw plugin_id (e.g. two Lark
+    // accounts) can `spawn_plugin_bridge` in parallel during auto-start
+    // or monitor-driven restart, and concurrent `install_sdk_shim`
+    // (which `rmtree`s and re-`copy_dir_recursive`s) corrupts the
+    // shim tree. Lock serialises ours; we don't hold it across the
+    // actual node spawn — bridges run independently after the prep
+    // phase.
+    let plugin_dir_buf = std::path::PathBuf::from(plugin_dir);
     {
-        let openclaw_pkg = std::path::Path::new(plugin_dir)
+        let lock_arc = plugin_install_lock(&plugin_dir_buf);
+        let _lock_guard = lock_arc.lock().await;
+
+        let openclaw_pkg = plugin_dir_buf
             .join("node_modules").join("openclaw").join("package.json");
         let needs_repair = if openclaw_pkg.exists() {
             std::fs::read_to_string(&openclaw_pkg)
@@ -880,16 +956,41 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         };
         if needs_repair {
             ulog_warn!("[bridge] Shim integrity/freshness check failed for {}, re-installing", plugin_dir);
-            let _ = install_sdk_shim(app_handle, &std::path::PathBuf::from(plugin_dir)).await;
+            if let Err(e) = install_sdk_shim(app_handle, &plugin_dir_buf).await {
+                ulog_error!("[bridge] SDK shim re-install FAILED for {}: {} — bridge will fail to load openclaw plugins", plugin_dir, e);
+            }
         }
+        // _lock_guard drops here, releasing the mutex before Node spawn.
     }
 
     ulog_info!(
-        "[bridge] Spawning bridge: bun={:?} script={:?} plugin_dir={} port={} rust_port={}",
-        bun_path, bridge_script, plugin_dir, port, rust_port
+        "[bridge] Spawning bridge: node={:?} script={:?} plugin_dir={} port={} rust_port={}",
+        node_path, bridge_script, plugin_dir, port, rust_port
     );
 
-    let mut cmd = crate::process_cmd::new(&bun_path);
+    let mut cmd = crate::process_cmd::new(&node_path);
+    // Inject tsx via absolute file URL pointing at the bundled
+    // `resources/tsx-runtime/` (prod) or the project's own `node_modules/tsx`
+    // (dev). The loader has zero side effects on `.js` plugin loads (esbuild's
+    // transform path matches on `.ts`/`.tsx`/`.jsx` only), so we can inject
+    // it unconditionally — JS-only plugins pay essentially zero cost. Plugins
+    // shipping `.ts` source get type-stripping for free.
+    //
+    // Why absolute file URL instead of bare specifier `tsx/esm`:
+    //   - Bare specifier resolution depends on cwd's `node_modules` walk-up.
+    //     With `cwd = plugin_dir`, that path doesn't contain tsx anymore
+    //     (we no longer install it per-plugin), so a bare specifier would
+    //     fail with `Cannot find package 'tsx'`.
+    //   - Absolute file URL is location-independent. cwd can be anywhere.
+    let plugin_dir_path = std::path::PathBuf::from(plugin_dir);
+    if let Some(tsx_loader) = find_tsx_runtime_loader(app_handle) {
+        cmd.arg("--import").arg(path_to_file_url(&tsx_loader));
+    } else {
+        ulog_warn!(
+            "[bridge] tsx loader not found — `.ts`-shipped plugins will fail. \
+             Run `node scripts/setup-tsx-runtime.mjs <os> <cpu>` and rebuild."
+        );
+    }
     cmd.arg(bridge_script.to_string_lossy().as_ref())
         // Same marker as regular sidecars — ensures cleanup_stale_sidecars()
         // can find and kill orphaned bridge processes after a crash
@@ -904,6 +1005,23 @@ pub async fn spawn_plugin_bridge<R: tauri::Runtime>(
         .arg(bot_id)
         // Pass config via env var to avoid leaking secrets in `ps` process listing
         .env("BRIDGE_PLUGIN_CONFIG", &config_json);
+
+    // Working directory: prefer the plugin_dir (so Node's ESM resolver
+    // walks up from there to find both `node_modules/tsx` AND the plugin's
+    // own deps). Pre-fix we used bridge_script's parent — that worked for
+    // dev (parent = src/server/plugin-bridge → walk-up to repo node_modules)
+    // but in prod the parent is the Tauri install's resources/ dir, which
+    // has no node_modules. The bridge_script itself is loaded by absolute
+    // path (see `cmd.arg(bridge_script.to_string_lossy().as_ref())` above)
+    // so its location doesn't depend on cwd. Fall back to bridge_script
+    // parent if plugin_dir doesn't exist (defensive — shouldn't happen).
+    if plugin_dir_path.exists() {
+        cmd.current_dir(&plugin_dir_path);
+        ulog_info!("[bridge] Working directory set to plugin_dir: {:?}", plugin_dir_path);
+    } else if let Some(script_dir) = bridge_script.parent() {
+        cmd.current_dir(script_dir);
+        ulog_info!("[bridge] Working directory fallback (plugin_dir missing): {:?}", script_dir);
+    }
 
     // Inject proxy env vars — reuse shared helper (pit-of-success: single source of truth)
     apply_proxy_env(&mut cmd);
@@ -1161,6 +1279,15 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         .await
         .map_err(|e| format!("Failed to create plugin dir: {}", e))?;
 
+    // Concurrency guard: serialise installs against a per-plugin_dir mutex
+    // shared with `spawn_plugin_bridge`'s shim integrity check. Without
+    // this lock, a wizard-driven re-install racing with an auto-start
+    // bot's spawn-time shim repair could interleave `rmtree` + `npm
+    // install` + `copy_dir_recursive` and corrupt `node_modules/`.
+    // Lock is held for the rest of the install body; dropped on return.
+    let _install_guard_arc = plugin_install_lock(&base_dir);
+    let _install_guard = _install_guard_arc.lock().await;
+
     if trimmed != npm_spec.trim() {
         ulog_info!("[bridge] Sanitized npm spec: '{}' → '{}'", npm_spec.trim(), trimmed);
     }
@@ -1297,35 +1424,16 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
         }
     }
 
-    // --- Bun fallback: if both system and bundled npm failed ---
+    // Both system npm and bundled npm failed — there is no further fallback.
+    // (The pre-0.2.0 "Bun fallback" branch ran `node add` / `node install`,
+    // which are not valid Node subcommands; with Bun removed it could never
+    // succeed.)
     if !npm_succeeded {
-        use crate::sidecar::find_bun_executable_pub;
-        // find_bun_executable_pub searches bundled bun first, then system bun (PATH, ~/.bun, etc.)
-        let bun_path = find_bun_executable_pub(app_handle)
-            .ok_or_else(|| format!("Plugin install failed: no npm (bundled/system) and no Bun found. Please install Node.js or Bun."))?;
-
-        ulog_warn!("[bridge] Falling back to Bun for plugin install: {}", npm_spec);
-
-        let bun_for_add = bun_path;
-        let base_for_add = base_dir.clone();
-        let npm_spec_owned = install_spec.clone();
-        let add_output = tokio::task::spawn_blocking(move || {
-            let mut cmd = crate::process_cmd::new(&bun_for_add);
-            cmd.args(["add", npm_spec_owned.as_str()])
-                .current_dir(&base_for_add);
-            apply_proxy_env(&mut cmd);
-            cmd.output()
-        })
-        .await
-        .map_err(|e| format!("spawn_blocking: {}", e))?
-        .map_err(|e| format!("bun add failed: {}", e))?;
-
-        if !add_output.status.success() {
-            let stderr = String::from_utf8_lossy(&add_output.stderr);
-            ulog_error!("[bridge] Bun fallback also failed for {}: {}", npm_spec, stderr.trim());
-            return Err(format!("Plugin install failed (npm + bun all failed). Please install Node.js or Bun.\nLast error: {}", stderr));
-        }
-        ulog_info!("[bridge] Bun fallback install {} succeeded", npm_spec);
+        return Err(format!(
+            "Plugin install failed for {}: bundled npm unavailable and system npm not found in PATH. \
+             Install Node.js, or reinstall MyAgents to restore the bundled runtime.",
+            npm_spec
+        ));
     }
 
     // Dependency repair + shim install (order matters: repair FIRST, shim LAST).
@@ -1364,29 +1472,19 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
                 _ => { ulog_warn!("[bridge] Dependency repair: spawn failed"); }
             }
         } else {
-            // Bun fallback
-            use crate::sidecar::find_bun_executable_pub;
-            if let Some(bun_path) = find_bun_executable_pub(app_handle) {
-                let bun_repair_dir = base_dir.clone();
-                match tokio::task::spawn_blocking(move || {
-                    let mut cmd = crate::process_cmd::new(&bun_path);
-                    cmd.args(["install", "--ignore-scripts"])
-                        .current_dir(&bun_repair_dir);
-                    apply_proxy_env(&mut cmd);
-                    cmd.output()
-                }).await {
-                    Ok(Ok(output)) if output.status.success() => {
-                        ulog_info!("[bridge] Dependency repair (bun) succeeded");
-                    }
-                    _ => { ulog_warn!("[bridge] Dependency repair (bun) failed"); }
-                }
-            }
+            // No bundled npm — initial plugin install above must have used system
+            // npm; rely on that path's transitive dep resolution. No fallback runner.
+            ulog_warn!("[bridge] Skipping dependency repair: bundled npm unavailable");
         }
     }
 
     // Install plugin-sdk shim as the FINAL step (after dependency repair).
-    // This MUST be last — npm/bun install above may overwrite node_modules/openclaw/
-    // with the real package from the registry. Our shim must always win.
+    // This MUST be last — npm/bun install above may overwrite
+    // `node_modules/openclaw/` with the real package from the registry.
+    // tsx is no longer installed per-plugin (it's bundled in
+    // `resources/tsx-runtime/` and reached via absolute-path `--import`),
+    // so npm's prune step no longer touches our shim. Our shim simply
+    // wins as the last writer to `node_modules/openclaw/`.
     install_sdk_shim(app_handle, &base_dir).await?;
 
     // Try to read plugin manifest
@@ -1436,7 +1534,7 @@ pub async fn install_openclaw_plugin<R: tauri::Runtime>(
 }
 
 /// Our shim's OpenClaw compat version. Must match sdk-shim/package.json and compat-runtime.ts.
-const SHIM_COMPAT_VERSION: &str = "2026.4.9";
+const SHIM_COMPAT_VERSION: &str = "2026.4.24";
 
 /// Check if installed plugin's peerDependencies.openclaw is compatible with our shim.
 /// Returns a warning message if incompatible, None if OK.
@@ -1483,6 +1581,92 @@ async fn check_plugin_compat(pkg_json_path: &std::path::Path) -> Option<String> 
         ))
     } else {
         None
+    }
+}
+
+/// Locate the absolute filesystem path to tsx's ESM loader entrypoint.
+///
+/// Bundled at build time (`scripts/setup-tsx-runtime.mjs <os> <cpu>`)
+/// into `src-tauri/resources/tsx-runtime/node_modules/tsx/dist/esm/index.mjs`,
+/// with a per-platform `@esbuild/<triple>/bin/esbuild[.exe]` next to it
+/// so esbuild's transpile API works without requiring host=target.
+///
+/// Plugin Bridge passes this path to Node via `--import file://<...>`,
+/// letting OpenClaw plugins shipping `.ts` source (lark / qqbot / weixin
+/// — `openclaw.extensions` points at `index.ts`) load without per-plugin
+/// `npm install tsx`. Pre-fix: `install_tsx_into_plugin_dir` ran npm
+/// install in each plugin's directory, which (despite `--no-save`)
+/// reconciled `node_modules/` against the plugin's `package.json` and
+/// pruned away our manually-copied `node_modules/openclaw/` SDK shim.
+/// Plugin then failed to load with `Cannot find package 'openclaw'`.
+/// Bundling tsx once kills that whole class of failure.
+fn find_tsx_runtime_loader<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    use crate::sidecar::normalize_external_path;
+
+    // Result is fed to Node via `--import file:///<path>` — must be free of
+    // Windows' `\\?\` extended-length prefix, otherwise `fileURLToPath`
+    // rejects with `ERR_INVALID_FILE_URL_PATH: must be absolute` and Plugin
+    // Bridge dies before serving its first health check (verified on a real
+    // 0.2.0 Windows build). Both prod and dev branches funnel through the
+    // same normalize call so neither path can regress.
+
+    // Production: bundled in resources/tsx-runtime/
+    #[cfg(not(debug_assertions))]
+    {
+        if let Ok(resource_dir) = app_handle.path().resource_dir() {
+            let p = resource_dir
+                .join("tsx-runtime")
+                .join("node_modules")
+                .join("tsx")
+                .join("dist")
+                .join("esm")
+                .join("index.mjs");
+            if p.exists() {
+                return Some(normalize_external_path(p));
+            }
+        }
+    }
+
+    // Development: load from the project's own node_modules (tsx is a
+    // dev dependency in package.json, present after `npm install`).
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let project_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+    let dev_path = project_root
+        .join("node_modules")
+        .join("tsx")
+        .join("dist")
+        .join("esm")
+        .join("index.mjs");
+    if dev_path.exists() {
+        return Some(normalize_external_path(dev_path));
+    }
+
+    let _ = app_handle;
+    None
+}
+
+/// Convert an absolute `Path` to a `file://` URL string suitable for Node's
+/// `--import` flag. On Windows we must replace `\` with `/` and prepend the
+/// extra `/` so the URL parses correctly (`file:///C:/...`).
+///
+/// Precondition: `path` must already have any platform-specific prefixes
+/// (notably Windows' `\\?\`) stripped. Use `sidecar::normalize_external_path`
+/// at the path's source. We don't strip here so this stays a pure URL
+/// formatter — keeping the platform-quirk logic in one helper instead of
+/// reimplementing it at every URL call site.
+fn path_to_file_url(path: &std::path::Path) -> String {
+    let s = path.display().to_string();
+    #[cfg(windows)]
+    {
+        // Windows paths look like `C:\Users\...`; URL form is `file:///C:/Users/...`.
+        format!("file:///{}", s.replace('\\', "/"))
+    }
+    #[cfg(not(windows))]
+    {
+        // Unix paths already start with `/`.
+        format!("file://{}", s)
     }
 }
 
@@ -1564,17 +1748,22 @@ async fn install_sdk_shim<R: tauri::Runtime>(
     ulog_info!("[bridge] SDK shim installed from {:?} → {:?}", shim_src, shim_dst);
 
     // Patch @larksuiteoapi/node-sdk to use a fetch-based axios adapter.
-    // Bun's default axios http adapter has a bug where socket connections are
-    // silently closed, causing 30s hangs. This patch replaces the SDK's
-    // defaultHttpInstance with one using native fetch (252ms vs 30278ms).
-    patch_lark_sdk_for_bun(plugin_dir).await;
+    // Originally added (pre-0.2.0) for Bun, where the default axios http
+    // adapter silently closed socket connections and produced 30s hangs.
+    // The patch (252ms vs 30278ms) is also strictly faster on Node — fetch
+    // routes through undici's connection pool instead of axios's
+    // per-request Node http connection — so we keep it. Function renamed
+    // from `..._for_bun` to drop the misleading runtime-specific suffix.
+    patch_lark_sdk_use_fetch_adapter(plugin_dir).await;
 
     Ok(())
 }
 
-/// Patch @larksuiteoapi/node-sdk's defaultHttpInstance to use a fetch-based
-/// axios adapter instead of the default Node.js http adapter (incompatible with Bun).
-async fn patch_lark_sdk_for_bun(plugin_dir: &std::path::Path) {
+/// Replace `@larksuiteoapi/node-sdk`'s default axios HTTP adapter with a
+/// fetch-based one. Originally a Bun-incompatibility workaround
+/// (`patch_lark_sdk_for_bun`); kept on Node because the fetch adapter is
+/// also a 100× latency win on the cold-handshake path.
+async fn patch_lark_sdk_use_fetch_adapter(plugin_dir: &std::path::Path) {
     let sdk_file = plugin_dir
         .join("node_modules")
         .join("@larksuiteoapi")

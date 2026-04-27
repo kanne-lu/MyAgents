@@ -237,6 +237,11 @@ pub struct ImMessage {
     pub reply_to_body: Option<String>,
     /// Group-level custom system prompt (from Bridge plugin config)
     pub group_system_prompt: Option<String>,
+    /// Per-request identity (Pattern A — IM Pipeline v2).
+    /// Empty by default; mod.rs main loop fills it in when dispatching to spawn task.
+    /// Carried through to /api/im/chat payload + all log statements for full-chain trace.
+    /// Buffered replays generate a fresh request_id (each retry is its own request).
+    pub request_id: String,
 }
 
 impl ImMessage {
@@ -483,6 +488,8 @@ impl BufferedMessage {
 
     /// Convert back to ImMessage for route_message() replay.
     /// Note: attachments are lost (binary data too large for JSON serialization).
+    /// `request_id` is left empty — the spawn entry in mod.rs will assign a fresh
+    /// one for the retry attempt (each replay is its own logical request).
     pub fn to_im_message(&self) -> ImMessage {
         ImMessage {
             chat_id: self.chat_id.clone(),
@@ -502,6 +509,7 @@ impl BufferedMessage {
             hint_group_name: self.hint_group_name.clone(),
             reply_to_body: self.reply_to_body.clone(),
             group_system_prompt: self.group_system_prompt.clone(),
+            request_id: String::new(),
         }
     }
 }

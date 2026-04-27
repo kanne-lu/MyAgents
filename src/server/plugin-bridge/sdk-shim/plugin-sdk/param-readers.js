@@ -80,7 +80,7 @@ function readStringParam(params, key, options) {
   return value;
 }
 
-module.exports = {
+export {
   readNumberParam,
   readStringArrayParam,
   readStringOrNumberParam,

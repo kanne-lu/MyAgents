@@ -1082,6 +1082,7 @@ impl DingtalkAdapter {
             hint_group_name: None,
             reply_to_body: None,
             group_system_prompt: None,
+            request_id: String::new(),
         };
 
         let text_preview: String = msg.text.chars().take(100).collect();
@@ -1351,5 +1352,11 @@ impl super::adapter::ImStreamAdapter for DingtalkAdapter {
             format!("📎 {}", filename)
         };
         self.send_text_message(chat_id, &text).await
+    }
+
+    /// Pattern C: trait-based dispatch for AI Card finalization. Forwards to
+    /// the existing inherent method `Self::post_stream_cleanup`.
+    async fn post_stream_cleanup(&self, chat_id: &str) {
+        DingtalkAdapter::post_stream_cleanup(self, chat_id).await;
     }
 }

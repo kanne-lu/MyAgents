@@ -66,7 +66,8 @@ if [ -f "$LOCK_FILE" ]; then
 fi
 # Fallback: 杀死任何漏网的 MyAgents 进程（lock file 可能不存在或 PID 已过期）
 pkill -9 -f "MyAgents.app" 2>/dev/null || true
-pkill -9 -f "bun run.*server" 2>/dev/null || true
+pkill -9 -f "node.*src/server/index.ts" 2>/dev/null || true
+pkill -9 -f "node.*server-dist.js" 2>/dev/null || true
 sleep 1  # 等待进程完全退出
 echo -e "${GREEN}✓ 进程已清理${NC}"
 echo ""
@@ -74,11 +75,39 @@ echo ""
 # 清理旧构建（包括 Rust 缓存的 resources）
 echo -e "${BLUE}[准备] 清理旧构建...${NC}"
 rm -rf "${PROJECT_DIR}/dist"
-# 创建占位符资源 (关键: 满足 tauri build 需求，但 sidecar.rs 在 debug 模式下会忽略它们)
+# Tauri bundle 阶段需要 resources/ 下被引用的目录都存在（即使是空的——dev 模式
+# 下 Rust 端会 fallback 到顶层 node_modules）。文件级 resource（server-dist.js
+# / plugin-bridge-dist.mjs / cli/myagents.js）则由 tauri:build 的
+# beforeBuildCommand 通过 `npm run build:server/bridge/cli` 在构建期间生成，
+# 不需要额外占位文件。
 mkdir -p "${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk"
-mkdir -p "${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
-echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/server-dist.js"
-echo "// dev placeholder" > "${PROJECT_DIR}/src-tauri/resources/plugin-bridge-dist.js"
+mkdir -p "${PROJECT_DIR}/src-tauri/resources/sharp-runtime"
+[ -f "${PROJECT_DIR}/src-tauri/resources/sharp-runtime/.dev-placeholder" ] || \
+    echo "dev mode: sharp loads from top-level node_modules/sharp; this dir is prod-only" \
+    > "${PROJECT_DIR}/src-tauri/resources/sharp-runtime/.dev-placeholder"
+
+# 填充 tsx-runtime（dev 模式 bridge.rs::find_tsx_runtime_loader 优先 fallback
+# 到项目根 node_modules/tsx，但 Tauri bundler 仍要求资源目录存在；填一个最小
+# 占位避免 cargo bundle 警告，prod build 才需要完整安装）。
+mkdir -p "${PROJECT_DIR}/src-tauri/resources/tsx-runtime"
+[ -f "${PROJECT_DIR}/src-tauri/resources/tsx-runtime/.dev-placeholder" ] || \
+    echo "dev mode: tsx loads from top-level node_modules/tsx via find_tsx_runtime_loader fallback" \
+    > "${PROJECT_DIR}/src-tauri/resources/tsx-runtime/.dev-placeholder"
+
+# Rebuild native addons against bundled Node ABI (fixes ERR_DLOPEN_FAILED
+# when system npm used a different Node.js version for initial install).
+NODE_BIN="${PROJECT_DIR}/src-tauri/resources/nodejs/bin/node"
+if [ -x "$NODE_BIN" ]; then
+    EXPECTED_ABI=$("$NODE_BIN" -p "process.versions.modules" 2>/dev/null)
+    NATIVE_NODE="${PROJECT_DIR}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    if [ -f "$NATIVE_NODE" ]; then
+        # Check actual ABI by test-loading with bundled Node (cheap fail-fast)
+        if ! "$NODE_BIN" -e "require('better-sqlite3')" 2>/dev/null; then
+            echo -e "${CYAN}[预备] Rebuilding native addons for Node ABI ${EXPECTED_ABI}...${NC}"
+            PATH="${PROJECT_DIR}/src-tauri/resources/nodejs/bin:$PATH" npm rebuild better-sqlite3
+        fi
+    fi
+fi
 
 # 清理 debug 构建产物（确保 resources 被重新复制）
 rm -rf "${PROJECT_DIR}/src-tauri/target/debug/bundle"
@@ -90,7 +119,7 @@ echo ""
 # TypeScript 检查
 echo -e "${BLUE}[1/3] TypeScript 类型检查...${NC}"
 cd "${PROJECT_DIR}"
-if ! bun run typecheck; then
+if ! npm run typecheck; then
     echo -e "${RED}✗ TypeScript 检查失败，请修复后重试${NC}"
     exit 1
 fi
@@ -101,7 +130,7 @@ echo ""
 echo -e "${BLUE}[2/3] 构建前端...${NC}"
 export VITE_DEBUG_MODE=true
 echo -e "${YELLOW}  VITE_DEBUG_MODE=${VITE_DEBUG_MODE}${NC}"
-bun run build:web
+npm run build:web
 echo -e "${GREEN}✓ 前端构建完成${NC}"
 echo ""
 
@@ -122,28 +151,60 @@ unset APPLE_API_KEY
 unset APPLE_API_KEY_PATH
 echo -e "${YELLOW}⚠ 已禁用 Apple 公证 (开发版，保留签名)${NC}"
 
-# 确保 Node.js 运行时已下载
+# 确保 Node.js 运行时已下载且架构匹配当前主机
+# 历史坑：build_macos.sh 的 per-TARGET loop 最后一次 download_nodejs.sh --target x64
+# 会用 x86_64 覆盖 resources/nodejs；后续 build_dev.sh 如果只检查 "文件存在"，就会
+# 把 x64 Node 带入 debug app（arm64 Mac 上 tsx → esbuild 因架构不匹配而崩）。
+# 正确做法：始终调用 download_nodejs.sh（默认当前 arch），它内部的 check_existing
+# 会检测 arm64/x86_64 mismatch 并自动重下，幂等无额外成本。
 NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
-if [ ! -f "${NODEJS_DIR}/bin/node" ] && [ ! -f "${NODEJS_DIR}/node.exe" ]; then
-    echo -e "${YELLOW}Node.js 运行时未找到，正在下载...${NC}"
-    "${PROJECT_DIR}/scripts/download_nodejs.sh"
-fi
+echo -e "${BLUE}[准备] 确保 Node.js 运行时匹配当前主机架构...${NC}"
+"${PROJECT_DIR}/scripts/download_nodejs.sh"
 
-# 确保签名 Bun 可执行文件 (与 build_macos.sh 相同逻辑)
-if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-    echo -e "  ${CYAN}签名 Bun 可执行文件...${NC}"
-    BUN_BINARIES_DIR="${PROJECT_DIR}/src-tauri/binaries"
-    for bun_binary in "${BUN_BINARIES_DIR}"/bun-*-apple-darwin; do
-        if [ -f "$bun_binary" ]; then
-            xattr -d com.apple.quarantine "$bun_binary" 2>/dev/null || true
-            codesign --force --options runtime --timestamp \
-                --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
-                --sign "$APPLE_SIGNING_IDENTITY" "$bun_binary" 2>/dev/null || true
-        fi
-    done
-    echo -e "  ${GREEN}✓ Bun 签名完成${NC}"
+# 拷贝 Claude Agent SDK native binary（按本机架构，debug app 运行时需要）
+# 0.2.113+ 取代原 cli.js 分发模式
+HOST_ARCH=$(uname -m)
+if [[ "$HOST_ARCH" == "arm64" ]]; then
+    SDK_TRIPLE="darwin-arm64"
 else
-    echo -e "${YELLOW}⚠ 未设置 APPLE_SIGNING_IDENTITY，跳过 Bun 签名${NC}"
+    SDK_TRIPLE="darwin-x64"
+fi
+CLAUDE_SRC="${PROJECT_DIR}/node_modules/@anthropic-ai/claude-agent-sdk-${SDK_TRIPLE}/claude"
+CLAUDE_DEST="${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk/claude"
+if [ ! -f "$CLAUDE_SRC" ]; then
+    echo -e "${RED}✗ Claude native binary 不存在: $CLAUDE_SRC${NC}"
+    echo -e "${YELLOW}  请运行 npm install 安装 @anthropic-ai/claude-agent-sdk-${SDK_TRIPLE}${NC}"
+    exit 1
+fi
+echo -e "  ${CYAN}拷贝 Claude native binary (${SDK_TRIPLE})...${NC}"
+rm -f "$CLAUDE_DEST"
+cp "$CLAUDE_SRC" "$CLAUDE_DEST"
+chmod +x "$CLAUDE_DEST"
+xattr -d com.apple.quarantine "$CLAUDE_DEST" 2>/dev/null || true
+# Debug 构建下，如设置了签名身份则签名；否则 ad-hoc
+if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+    codesign --force --options runtime --timestamp \
+        --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
+        --sign "$APPLE_SIGNING_IDENTITY" "$CLAUDE_DEST" 2>/dev/null || true
+fi
+echo -e "  ${GREEN}✓ claude (${SDK_TRIPLE}) 已就绪${NC}"
+
+# myagents CLI 的打包不在这里——`npm run tauri:build` 的 beforeBuildCommand
+# (tauri.conf.json) 已包含 `npm run build:cli`，由 `scripts/esbuild-bundle.mjs`
+# 的 post-build hook 同步把 myagents.cmd 拷贝到 resources/cli/。dev 脚本只需
+# 保证目录存在，避免 Tauri bundle 阶段的 resource 校验报错。
+mkdir -p "${PROJECT_DIR}/src-tauri/resources/cli"
+
+# Debug 模式签名 (optional — build_macos.sh per-TARGET loop 已处理 Node + Claude)
+# build_dev.sh 只构建 host arch 单个，本段处理该情况下的 Node + Claude 签名。
+if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+    NODE_BIN_DEV="${PROJECT_DIR}/src-tauri/resources/nodejs/bin/node"
+    if [ -f "$NODE_BIN_DEV" ]; then
+        xattr -d com.apple.quarantine "$NODE_BIN_DEV" 2>/dev/null || true
+        codesign --force --options runtime --timestamp \
+            --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
+            --sign "$APPLE_SIGNING_IDENTITY" "$NODE_BIN_DEV" 2>/dev/null || true
+    fi
 fi
 
 echo -e "${YELLOW}这可能需要几分钟...${NC}"
@@ -151,9 +212,9 @@ echo -e "${YELLOW}这可能需要几分钟...${NC}"
 # (App 本身会正常构建，只是 updater 签名会失败)
 if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
     echo -e "${YELLOW}⚠ 未设置 TAURI_SIGNING_PRIVATE_KEY，更新签名将被跳过${NC}"
-    bun run tauri:build -- --debug --bundles app || true
+    npm run tauri:build -- --debug --bundles app || true
 else
-    bun run tauri:build -- --debug --bundles app
+    npm run tauri:build -- --debug --bundles app
 fi
 
 # 查找输出

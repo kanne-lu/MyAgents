@@ -213,6 +213,63 @@ pub trait ImStreamAdapter: ImAdapter {
     ) -> impl std::future::Future<Output = AdapterResult<()>> + Send {
         async { Ok(()) }
     }
+
+    /// Hook called after a turn's events have been fully dispatched (terminal
+    /// 'complete' / 'error'). DingTalk overrides this to finalize AI Card
+    /// state. Default: no-op.
+    fn post_stream_cleanup(
+        &self,
+        _chat_id: &str,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        async { /* default no-op */ }
+    }
+}
+
+/// Push a fully-formed text message to IM, preferring the streaming protocol
+/// when the adapter supports it.
+///
+/// Why this exists: chat replies go through `reply_router` which uses
+/// `start_stream` / `stream_chunk` / `finalize_stream` (CardKit on Feishu,
+/// AI Card on DingTalk, draft+edit on Telegram). Out-of-band pushes
+/// (heartbeat content, cron-completion notifications, system pause notices)
+/// historically called plain `send_message`, which on Feishu maps to
+/// `msg_type: "post"` (chat bubble) instead of `msg_type: "interactive"`
+/// (CardKit). The two surfaces render with different font sizes and styles
+/// in the Feishu client, breaking visual consistency.
+///
+/// This helper closes that gap: complete content is delivered via
+/// `start_stream(text) → finalize_stream(text)`, so it lands on the same
+/// CardKit surface as live chat replies. Falls back to `send_message`
+/// transparently when the adapter doesn't support streaming, or when
+/// any streaming step fails.
+pub async fn push_text_preferring_stream<A: ImStreamAdapter>(
+    adapter: &A,
+    chat_id: &str,
+    text: &str,
+) -> AdapterResult<()> {
+    if !adapter.supports_streaming() {
+        return adapter.send_message(chat_id, text).await;
+    }
+    match adapter.start_stream(chat_id, text).await {
+        Ok(stream_id) => {
+            if let Err(e) = adapter.finalize_stream(chat_id, &stream_id, text).await {
+                let _ = adapter.abort_stream(chat_id, &stream_id).await;
+                crate::ulog_warn!(
+                    "[adapter] push_text_preferring_stream: finalize_stream failed, falling back: {}",
+                    e
+                );
+                return adapter.send_message(chat_id, text).await;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            crate::ulog_warn!(
+                "[adapter] push_text_preferring_stream: start_stream failed, falling back: {}",
+                e
+            );
+            adapter.send_message(chat_id, text).await
+        }
+    }
 }
 
 /// Split a message into chunks at natural break points (paragraph, line, sentence, word).

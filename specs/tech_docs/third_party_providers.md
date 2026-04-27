@@ -315,7 +315,7 @@ function checkDecorativeToolText(text: string): { filtered: boolean; reason?: st
 
 ---
 
-## 自定义供应商 (v0.1.51+)
+## 自定义供应商
 
 用户可通过 Settings 或 Admin API 添加自定义 OpenAI 兼容供应商。自定义供应商配置持久化到 `~/.myagents/providers/{id}.json`。
 

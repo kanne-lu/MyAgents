@@ -65,13 +65,7 @@ if ($PKG_VERSION -ne $TAURI_VERSION -or $PKG_VERSION -ne $CARGO_VERSION) {
 # 杀死残留进程（避免"旧代码"问题）
 Write-ColorOutput "[准备] 杀死残留进程..." "Blue"
 
-$bunProcesses = Get-Process | Where-Object { $_.ProcessName -eq "bun" }
 $appProcesses = Get-Process | Where-Object { $_.ProcessName -eq "MyAgents" }
-
-if ($bunProcesses) {
-    $bunProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
-    Write-Host "  清理了 $($bunProcesses.Count) 个 Bun 进程" -ForegroundColor Gray
-}
 
 if ($appProcesses) {
     $appProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -82,9 +76,8 @@ if ($appProcesses) {
 $maxWait = 20  # 20 * 100ms = 2s
 $waited = 0
 while ($waited -lt $maxWait) {
-    $remainingBun = Get-Process -Name "bun" -ErrorAction SilentlyContinue
     $remainingApp = Get-Process -Name "MyAgents" -ErrorAction SilentlyContinue
-    if (-not $remainingBun -and -not $remainingApp) {
+    if (-not $remainingApp) {
         break
     }
     Start-Sleep -Milliseconds 100
@@ -120,12 +113,27 @@ foreach ($dir in $dirsToClean) {
     }
 }
 
-# 创建占位符资源 (关键: 满足 tauri build 需求，但 sidecar.rs 在 debug 模式下会忽略它们)
-$resourcesDir = Join-Path $PROJECT_DIR "src-tauri/resources/claude-agent-sdk"
-if (-not (Test-Path $resourcesDir)) {
-    New-Item -ItemType Directory -Path $resourcesDir -Force | Out-Null
+# 创建占位符资源目录（满足 Tauri bundle 阶段的资源校验）。
+# server-dist.js / plugin-bridge-dist.mjs / cli/myagents.js 由 tauri:build
+# 的 beforeBuildCommand（tauri.conf.json）通过 npm run build:server/bridge/cli
+# 在构建期间生成；不需要额外占位文件。
+#   - claude-agent-sdk/ : SDK native binary 占位目录
+#   - sharp-runtime/ : sharp 在 dev 走 walk-up 加载，目录只是 bundler 的资源指针
+#   - cli/ : 仅占位，CLI bundle 由 esbuild-bundle.mjs 的 post-build hook 写入
+foreach ($subdir in @("claude-agent-sdk", "sharp-runtime", "tsx-runtime", "cli")) {
+    $d = Join-Path $PROJECT_DIR "src-tauri/resources/$subdir"
+    if (-not (Test-Path $d)) {
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+    }
 }
-"// dev placeholder" | Out-File -FilePath (Join-Path $PROJECT_DIR "src-tauri/resources/server-dist.js") -Encoding UTF8
+$sharpPlaceholder = Join-Path $PROJECT_DIR "src-tauri/resources/sharp-runtime/.dev-placeholder"
+if (-not (Test-Path $sharpPlaceholder)) {
+    "dev mode: sharp loads from top-level node_modules/sharp; this dir is prod-only" | Out-File -FilePath $sharpPlaceholder -Encoding UTF8
+}
+$tsxPlaceholder = Join-Path $PROJECT_DIR "src-tauri/resources/tsx-runtime/.dev-placeholder"
+if (-not (Test-Path $tsxPlaceholder)) {
+    "dev mode: tsx loads from top-level node_modules/tsx via find_tsx_runtime_loader fallback" | Out-File -FilePath $tsxPlaceholder -Encoding UTF8
+}
 
 # VC++ Runtime DLL 占位符（满足 tauri.windows.conf.json 资源校验）
 foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll")) {
@@ -140,19 +148,13 @@ foreach ($dll in @("vcruntime140.dll", "vcruntime140_1.dll")) {
     }
 }
 
-# agent-browser-cli 占位符目录（满足 tauri build 资源校验）
-$agentBrowserPlaceholder = Join-Path $PROJECT_DIR "src-tauri/resources/agent-browser-cli"
-if (-not (Test-Path $agentBrowserPlaceholder)) {
-    New-Item -ItemType Directory -Path $agentBrowserPlaceholder -Force | Out-Null
-}
-
 Write-ColorOutput "✓ 已清理并创建占位符" "Green"
 Write-Host ""
 
 # TypeScript 检查
 Write-ColorOutput "[1/3] TypeScript 类型检查..." "Blue"
 Set-Location $PROJECT_DIR
-$typecheckResult = & bun run typecheck
+$typecheckResult = & npm run typecheck
 if ($LASTEXITCODE -ne 0) {
     Write-ColorOutput "✗ TypeScript 检查失败，请修复后重试" "Red"
     exit 1
@@ -164,7 +166,7 @@ Write-Host ""
 Write-ColorOutput "[2/3] 构建前端..." "Blue"
 $env:VITE_DEBUG_MODE = "true"
 Write-ColorOutput "  VITE_DEBUG_MODE=$env:VITE_DEBUG_MODE" "Yellow"
-& bun run build:web
+& npm run build:web
 if ($LASTEXITCODE -ne 0) {
     Write-ColorOutput "✗ 前端构建失败" "Red"
     exit 1
@@ -172,11 +174,19 @@ if ($LASTEXITCODE -ne 0) {
 Write-ColorOutput "✓ 前端构建完成" "Green"
 Write-Host ""
 
+# myagents CLI 的打包不在这里——`npm run tauri:build` 的 beforeBuildCommand
+# (tauri.conf.json) 已包含 `npm run build:cli`，由 `scripts/esbuild-bundle.mjs`
+# 的 post-build hook 同步把 myagents.cmd 拷贝到 resources/cli/。
+
 # 强制触发 Rust 重新编译 (确保 sidecar.rs 的逻辑修改生效)
+# build_dev.sh 用 `touch` 只更新 mtime；旧版本这里写的是
+# `(Get-Date) | Out-File -Append`，把时间戳直接 *append 到源码文件内容*，
+# 每次 dev build 都给 sidecar.rs / main.rs 屁股加一行垃圾，污染 git 工作区。
+# PS 没有 touch，但等价做法是改 LastWriteTime 属性。
 $sidecarFile = Join-Path $PROJECT_DIR "src-tauri/src/sidecar.rs"
 $mainFile = Join-Path $PROJECT_DIR "src-tauri/src/main.rs"
-(Get-Date).ToString() | Out-File -FilePath $sidecarFile -Append -Encoding UTF8
-(Get-Date).ToString() | Out-File -FilePath $mainFile -Append -Encoding UTF8
+(Get-Item $sidecarFile).LastWriteTime = Get-Date
+(Get-Item $mainFile).LastWriteTime = Get-Date
 
 # 构建 Tauri 应用
 Write-ColorOutput "[3/3] 构建 Tauri 应用 (Debug 模式, NSIS)..." "Blue"
@@ -197,7 +207,7 @@ Write-ColorOutput "这可能需要几分钟..." "Yellow"
 
 # 使用 --target 指定架构，确保构建正确的版本
 try {
-    & bun run tauri:build -- --debug --bundles nsis --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
+    & npm run tauri:build -- --debug --bundles nsis --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
     if ($LASTEXITCODE -ne 0 -and $env:TAURI_SIGNING_PRIVATE_KEY) {
         throw "Tauri build failed"
     }

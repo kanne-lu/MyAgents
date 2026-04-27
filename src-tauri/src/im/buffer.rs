@@ -98,6 +98,13 @@ impl MessageBuffer {
         idx.and_then(|i| self.queue.remove(i))
     }
 
+    /// Count of buffered messages matching a session key — used as the bound
+    /// for Pattern E's per-session drain loop (snapshot of queue length so a
+    /// replay-then-buffer cycle can't loop infinitely).
+    pub fn len_for_session(&self, session_key: &str) -> usize {
+        self.queue.iter().filter(|m| m.session_key == session_key).count()
+    }
+
     /// Persist buffer to disk
     pub fn save_to_disk(&self) -> Result<(), String> {
         let path = match &self.persist_path {

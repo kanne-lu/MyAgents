@@ -122,7 +122,7 @@ pub async fn start_management_api() -> Result<u16, String> {
         // Default axum 2MB limit is too small — raise to 50MB for this API.
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
             ulog_error!("[management-api] Server error: {}", e);
         }
@@ -994,6 +994,7 @@ async fn handle_bridge_message(
         hint_group_name: payload.group_name,
         reply_to_body: payload.reply_to_body,
         group_system_prompt: payload.group_system_prompt,
+        request_id: String::new(),
     };
 
     match sender.send(msg).await {

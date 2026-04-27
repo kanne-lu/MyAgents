@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use crate::sidecar::ManagedSidecarManager;
 use crate::{ulog_info, ulog_warn, ulog_debug};
 
-use super::adapter::ImAdapter;
+use super::adapter::push_text_preferring_stream;
 use super::router::{EnsureSidecarPrep, SessionRouter};
 use super::types::{ActiveHours, HeartbeatConfig, WakeReason};
 use super::{AnyAdapter, PeerLocks};
@@ -172,7 +172,7 @@ impl HeartbeatRunner {
                                 self.bot_label, MAX_CONSECUTIVE_ERRORS
                             )
                         };
-                        if let Err(e) = adapter.send_message(&source_id, &msg).await {
+                        if let Err(e) = push_text_preferring_stream(adapter.as_ref(), &source_id, &msg).await {
                             ulog_warn!("[heartbeat] Failed to send pause notification: {}", e);
                         }
                     }
@@ -495,7 +495,7 @@ impl HeartbeatRunner {
                         ulog_debug!("[heartbeat] Dedup suppressed (same content as last push)");
                     } else {
                         ulog_info!("[heartbeat] Pushing content to IM (len={})", text.len());
-                        if let Err(e) = adapter.send_message(&source_id, text).await {
+                        if let Err(e) = push_text_preferring_stream(adapter.as_ref(), &source_id, text).await {
                             ulog_warn!("[heartbeat] Failed to send IM message: {}", e);
                         }
                         *last_push = Some(text.clone());

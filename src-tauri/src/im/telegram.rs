@@ -197,6 +197,7 @@ impl MessageCoalescer {
             hint_group_name: batch.hint_group_name,
             reply_to_body: batch.reply_to_body,
             group_system_prompt: batch.group_system_prompt,
+            request_id: String::new(),
         })
     }
 }
@@ -1305,6 +1306,7 @@ impl TelegramAdapter {
             hint_group_name: None,
             reply_to_body: None,
             group_system_prompt: None,
+            request_id: String::new(),
         })
     }
 
@@ -1703,6 +1705,7 @@ mod tests {
             hint_group_name: None,
             reply_to_body: None,
             group_system_prompt: None,
+            request_id: String::new(),
         }
     }
 

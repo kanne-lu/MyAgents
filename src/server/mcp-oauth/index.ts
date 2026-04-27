@@ -58,7 +58,7 @@ export async function probeOAuthRequirement(
   }
 
   // Cache the result
-  updateServerState(serverId, { discovery });
+  await updateServerState(serverId, { discovery });
 
   return {
     required: true,
@@ -87,7 +87,7 @@ export async function authorizeServer(
   if (!discovery || !isDiscoveryCacheValid(discovery)) {
     discovery = await discoverOAuth(mcpUrl) ?? undefined;
     if (discovery) {
-      updateServerState(serverId, { discovery });
+      await updateServerState(serverId, { discovery });
     }
   }
 
@@ -113,7 +113,7 @@ export async function authorizeServer(
     }
 
     // Persist manual config
-    updateServerState(serverId, { manualConfig });
+    await updateServerState(serverId, { manualConfig });
   } else {
     // === Auto mode ===
     if (!discovery) {
@@ -135,7 +135,7 @@ export async function authorizeServer(
         redirectUri,
         scopes,
       );
-      updateServerState(serverId, { registration });
+      await updateServerState(serverId, { registration });
       clientId = registration.clientId;
       clientSecret = registration.clientSecret;
       // Pass the already-bound server to startAuthorizationFlow (no re-bind needed)
@@ -156,15 +156,15 @@ export async function authorizeServer(
   }, existingServer);
 
   // Wrap waitForToken to store token and emit event
-  const waitForCompletion = waitForToken.then((token: OAuthTokenData | null) => {
+  const waitForCompletion = waitForToken.then(async (token: OAuthTokenData | null) => {
     if (token) {
-      updateServerState(serverId, { token });
+      await updateServerState(serverId, { token });
       emitTokenChange(serverId, 'acquired');
       return true;
     }
     // Discovery cache might be stale if flow failed
     if (discovery) {
-      clearServerField(serverId, 'discovery');
+      await clearServerField(serverId, 'discovery');
     }
     return false;
   });
@@ -204,7 +204,7 @@ export async function revokeAuthorization(serverId: string): Promise<void> {
     }
   }
 
-  clearServerField(serverId, 'token');
+  await clearServerField(serverId, 'token');
   emitTokenChange(serverId, 'revoked');
   console.log(`[mcp-oauth] Authorization revoked for ${serverId}`);
 }

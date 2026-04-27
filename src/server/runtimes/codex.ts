@@ -6,7 +6,7 @@
 // System prompt: thread/start → developerInstructions
 // Session: thread/start (new) / thread/resume (continuing)
 
-import { spawn, type Subprocess } from 'bun';
+import { spawn, type Subprocess, type SubprocessStdin } from '../utils/subprocess';
 import { writeFileSync , existsSync, readdirSync, unlinkSync, statSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
@@ -15,6 +15,8 @@ import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, U
 import { StaleRuntimeSessionError } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
+import { killWithEscalation } from './utils/kill-with-escalation';
+import { withLogContext } from '../logger-context';
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
 const TEMP_IMG_DIR = join(
@@ -94,15 +96,15 @@ class JsonRpcClient {
   private onNotification: ((method: string, params: unknown) => void) | null = null;
   private onServerRequest: ((id: number, method: string, params: unknown) => void) | null = null;
   private encoder = new TextEncoder();
-  private sink: { write(data: Uint8Array): number; flush(): void };
+  private sink: SubprocessStdin;
   private reading = false;
 
   constructor(
     private proc: Subprocess,
   ) {
     const stdin = proc.stdin;
-    if (!stdin || typeof stdin === 'number') throw new Error('stdin not available');
-    this.sink = stdin as { write(data: Uint8Array): number; flush(): void };
+    if (!stdin) throw new Error('stdin not available');
+    this.sink = stdin;
   }
 
   /** Register notification handler (server → client, no id) */
@@ -225,12 +227,10 @@ class JsonRpcClient {
   }
 
   private write(msg: unknown): void {
-    try {
-      this.sink.write(this.encoder.encode(JSON.stringify(msg) + '\n'));
-      this.sink.flush();
-    } catch {
-      // Process stdin may be closed
-    }
+    // Fire-and-forget. sink.write() returns a Promise; back-pressure is
+    // absorbed by Node's internal buffer. Rejection (e.g. stdin closed)
+    // is swallowed — JSON-RPC layer detects liveness via process exit.
+    void this.sink.write(this.encoder.encode(JSON.stringify(msg) + '\n')).catch(() => { /* stdin may be closed */ });
   }
 
   /** Clean up: reject all pending requests */
@@ -272,7 +272,7 @@ class CodexProcess implements RuntimeProcess {
     throw new Error('Codex uses JSON-RPC, not raw stdin. Use rpc.call() instead.');
   }
 
-  kill(signal?: number): void {
+  kill(signal?: NodeJS.Signals | number): void {
     if (this.exited) return;
     try {
       this.proc.kill(signal ?? 15);
@@ -285,14 +285,13 @@ class CodexProcess implements RuntimeProcess {
     return code;
   }
 
-  /** Close stdin to signal the process to finish */
-  closeStdin(): void {
+  /** Close stdin to signal the process to finish (awaits EOF flush). */
+  async closeStdin(): Promise<void> {
     const stdin = this.proc.stdin;
-    if (!stdin || typeof stdin === 'number') return;
+    if (!stdin) return;
     try {
-      const sink = stdin as { end(): void };
-      sink.end();
-    } catch { /* ignore */ }
+      await stdin.end();
+    } catch { /* already closed / EPIPE */ }
   }
 }
 
@@ -427,18 +426,26 @@ export class CodexRuntime implements AgentRuntime {
       stdin: 'pipe',
       cwd: options.workspacePath,
       env: augmentedProcessEnv(),
+      // Detached → child becomes its own process-group leader on POSIX so
+      // killWithEscalation({ killTree: true }) below can take down the entire
+      // model/tool tree, not just the wrapper.
+      detached: true,
     });
 
     const codexProc = new CodexProcess(proc);
 
     // Dedup guard: prevent double session_complete from notification + process exit
     let sessionCompleteEmitted = false;
+    // Pattern 6: every event delivery is wrapped in an ALS frame stamped
+    // with `runtime: 'codex'` so any nested console.* (in onEvent or its
+    // downstream handlers) is correlated. Frames are short-lived (one per
+    // event) which keeps ALS overhead bounded.
     const wrappedOnEvent: UnifiedEventCallback = (event) => {
       if (event.kind === 'session_complete') {
         if (sessionCompleteEmitted) return; // Already emitted, skip duplicate
         sessionCompleteEmitted = true;
       }
-      onEvent(event);
+      withLogContext({ runtime: 'codex' }, () => onEvent(event));
     };
 
     // Wire up notification handler to emit UnifiedEvents
@@ -665,18 +672,21 @@ export class CodexRuntime implements AgentRuntime {
         }, 3_000).catch(() => {});
       }
       // 2. Close stdin — signals app-server to shut down (like CC's closeStdin)
-      codexProc.closeStdin();
+      await codexProc.closeStdin();
     } catch { /* ignore */ }
 
-    // Force kill after timeout if graceful shutdown didn't work
-    const killTimer = setTimeout(() => {
-      codexProc.kill();
-    }, 3_000);
-
     try {
-      await codexProc.waitForExit();
+      await killWithEscalation(codexProc, {
+        gracefulMs: 3_000,
+        hardMs: 2_000,
+        killTree: true,
+        onStep: (step, info) => {
+          if (step === 'orphan') {
+            console.warn(`[codex] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);
+          }
+        },
+      });
     } catch { /* ignore */ } finally {
-      clearTimeout(killTimer);
       codexProc.rpc.destroy();
     }
   }

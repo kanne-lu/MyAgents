@@ -12,8 +12,14 @@ function getBuildVersions() {
   // Extract Claude Agent SDK version
   const claudeAgentSdkVersion = packageJson.dependencies?.['@anthropic-ai/claude-agent-sdk']?.replace('^', '') || 'unknown';
 
-  // Extract Bun version from packageManager field (format: "bun@1.3.2")
-  const bunVersion = packageJson.packageManager?.split('@')[1] || 'unknown';
+  // Extract bundled Node.js version from scripts/download_nodejs.sh (NODE_VERSION="x.y.z")
+  const nodeScript = (() => {
+    try {
+      return readFileSync(resolve(__dirname, 'scripts/download_nodejs.sh'), 'utf-8');
+    } catch { return ''; }
+  })();
+  const nodeMatch = nodeScript.match(/NODE_VERSION\s*=\s*"([^"]+)"/);
+  const nodeVersion = nodeMatch ? nodeMatch[1] : 'unknown';
 
   // Extract Tauri version from Cargo.toml (look for: tauri = { version = "2.9.5", ... })
   const tauriMatch = cargoToml.match(/tauri\s*=\s*\{\s*version\s*=\s*"([^"]+)"/);
@@ -21,7 +27,7 @@ function getBuildVersions() {
 
   return {
     claudeAgentSdk: claudeAgentSdkVersion,
-    bun: bunVersion,
+    node: nodeVersion,
     tauri: tauriVersion,
   };
 }

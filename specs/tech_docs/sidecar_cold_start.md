@@ -1,0 +1,102 @@
+# Sidecar 冷启动性能架构
+
+> 多轮性能优化后的 Sidecar 冷启动路径，Tab 打开端到端从 5-7s 降到 ~2-3s。
+> 核心思路：**listen 尽快 → 重活延后 → MCP 按需**。
+
+## 总览
+
+冷启动路径上有四个降延迟杠杆：
+
+1. **Rust 侧 health check 探测节奏** — 让 Rust 尽早检测到 Sidecar listen
+2. **Node `main()` 重排序** — listen 前只做极轻量操作，重活在 listen 后跑
+3. **Tab fast-path** — Tab session 跳过 MCP 磁盘扫描
+4. **Tier 2 懒加载** — Settings UI / OpenAI bridge / 大模块按需 import
+
+实测数据（不含 Node 本身冷启动 ~1.5s）：
+- META 注册总耗时: ~0ms（只存函数引用）
+- 首次 cron-tools factory: ~124ms（SDK+zod+schema 一次性）
+- 再次同 MCP: 0ms（命中缓存）
+- 其他 MCP（SDK 已缓存）: ~10ms（纯 zod schema 构造）
+
+## Rust 侧启动时序 (`src-tauri/src/sidecar.rs`)
+
+- TCP health check 指数退避 50→500ms（前 5 次累计 1.25s 覆盖常见冷启动窗口），代替固定 500ms 轮询
+- 删除了 `spawn` 后的 50ms guard sleep —— `try_wait()` 本就非阻塞，crash 检测已由 health loop 的 alive_check（每 20 次）承担
+
+## Node Sidecar `main()` 重排序 (`src/server/index.ts`)
+
+**listen 前只做极轻量操作：**
+- `ensureAgentDir`
+- `initLogger`
+- `setSidecarPort`
+- `createBridgeHandler`
+
+**`honoServe` 立即绑定 127.0.0.1:port** → Rust health check 几十 ms 就通过。
+
+**listen 后由 IIFE 跑重活：**
+- cleanup（log rotation + Playwright stale profile lock）
+- skill seed
+- socks bridge
+- `initializeAgent`
+- external runtime restore
+- boot banner
+
+`globalThis.__myagentsDeferredInit` 作为路由级 readiness gate：除 `/health` 外所有 route 在处理前 `await` 它；稳定态下是亚微秒 no-op。
+
+> 注：v0.2.0 后期已迁移到 `DeferredInitState` 状态机 + 三分 readiness endpoints，详见 `pit_of_success.md` 的「DeferredInitState」节。
+
+**`warmupShellPath()` 异步化：** interactive `zsh -i -l` 的 PATH 检测从同步 `execSync` 改成异步 `execFile`，防止阻塞事件循环 → starve TCP accept。
+
+## Tab fast-path
+
+`initializeAgent` 对 Tab session 传 `resolveWorkspaceConfig(..., { includeMcp: false })`，跳过 MCP 磁盘扫描。
+
+**为什么 Tab 不需要 self-resolve MCP：**
+- Tab 的 MCP 由前端 `/api/mcp/set` 下发
+- self-resolve 不仅做白工，还会触发 fingerprint 差异 → abort → 30s 重启循环
+
+**其它优化：** `getSessionMetadata` 从 3 次合并成 1 次 memo。
+
+## Tier 2 懒加载
+
+### 大模块改为 `await import()`
+
+| 模块 | 大小 | 触发条件 |
+|------|------|---------|
+| `admin-api` | ~2900 行，40+ handler | 用户点 Settings |
+| `openai-bridge` | 2664 行 | 用户用 OpenAI 兼容 provider |
+| `adm-zip` | — | 用户上传 zip skill |
+
+只在用户真正触发对应功能时才 parse。
+
+### Builtin MCP 懒加载架构
+
+6 个 in-process MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）通过 `src/server/tools/builtin-mcp-meta.ts` 集中登记 META，运行时按需 `getBuiltinMcpInstance(id)` 加载。
+
+- 首次加载付 100-400ms（SDK + zod）
+- 后续 0ms 缓存
+- 失败自动 evict 防 poisoned cache
+- ESLint `@typescript-eslint/no-restricted-imports` 规则（作用域 `src/server/tools/*.ts`）结构性禁止顶层 value-import SDK/zod
+
+详见 `pit_of_success.md` 的「Builtin MCP 懒加载架构」节。
+
+### Settings UI 的 MCP 列表
+
+从**静态** `PRESET_MCP_SERVERS`（`src/renderer/config/types.ts`）读取——与运行时 META 解耦，禁用某个 builtin 后连 META 本身都不加载。
+
+## 排查冷启动退化的 checklist
+
+如果某次改动后 Tab 打开变慢，按下面顺序排查：
+
+1. **是否给 `src/server/tools/*.ts` 顶层加了 SDK/zod value import？** —— ESLint 应该会拦下，但旧代码可能漏。
+2. **是否在 listen 之前加了同步重活？** —— grep `index.ts main()` 的 listen 前代码段。
+3. **是否新加了路由不走 deferred-init gate？** —— 除 `/health/*` 和 `/refs/:id` 外都应走 gate。
+4. **是否 Tab session 误开启了 MCP self-resolve？** —— 检查 `initializeAgent` 的 `includeMcp` 参数。
+5. **是否新加了 `console.log` 在 hot path 而 logger 未 buffered？** —— `UnifiedLogger` 是 in-memory bounded queue，但极高频日志仍可能拖慢。
+
+## 与其他文档的关系
+
+- 启动期 readiness 状态机 → `pit_of_success.md` 的 DeferredInitState 节
+- Builtin MCP 懒加载完整规范 → `pit_of_success.md` 的对应节
+- 内置 Node.js 路径与 PATH 注入 → `bundled_node.md`
+- 整体启动时序在系统中的位置 → `ARCHITECTURE.md` 的 Sidecar Manager 与通信模式节

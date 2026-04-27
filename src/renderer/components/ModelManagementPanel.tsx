@@ -15,10 +15,12 @@ import {
   toModelEntity,
   formatTokenCount,
   supportsModelDiscovery,
+  synthesizeModalitiesFromDiscovered,
   type DiscoveredModel,
 } from '@/config/services/modelDiscoveryService';
 import { atomicModifyConfig } from '@/config/configService';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
+import { ModalityBadges } from '@/components/ModalityBadges';
 
 interface ModelManagementPanelProps {
   provider: Provider;
@@ -400,6 +402,9 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
         )}
       </div>
 
+      {/* Modality badges (image / video / audio — text-only models render nothing) */}
+      <ModalityBadges modalities={model.inputModalities} className="flex-shrink-0" />
+
       {/* Context length */}
       {model.contextLength ? (
         <span className="flex-shrink-0 text-[10px] text-[var(--ink-subtle)]">
@@ -448,6 +453,12 @@ const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
   const title = displayName ?? model.id;
   const subtitle = displayName ? model.id : null;
 
+  // Synthesize modalities via the shared helper so this preview row stays in
+  // sync with `toModelEntity` (the persisted form). Returns undefined when
+  // discovery exposed no flags either way — the badge component then renders
+  // nothing, matching how an unknown / future-modality model would appear.
+  const discoveredModalities = synthesizeModalitiesFromDiscovered(model);
+
   return (
     <div className="group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--hover-bg)]">
       {/* Model info — same style as ActiveModelRow */}
@@ -457,6 +468,9 @@ const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
           <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{subtitle}</span>
         )}
       </div>
+
+      {/* Modality badges — text-only models render nothing */}
+      <ModalityBadges modalities={discoveredModalities} className="flex-shrink-0" />
 
       {/* Metadata */}
       {model.contextLength ? (

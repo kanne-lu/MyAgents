@@ -1,4 +1,3 @@
-#!/usr/bin/env bun
 /**
  * myagents — Self-Configuration CLI for MyAgents
  *
@@ -7,6 +6,13 @@
  *
  * Environment:
  *   MYAGENTS_PORT — Sidecar port (injected by buildClaudeSessionEnv)
+ *
+ * No shebang here. `npm run build:cli` (esbuild) injects `#!/usr/bin/env node`
+ * through `--banner:js` so the *built* `myagents.js` artifact is what carries
+ * the shebang. A leftover `#!/usr/bin/env bun` on this source file used to
+ * stack with the banner and produced a TWO-shebang artifact (issue #107):
+ * bun parses the first line as shebang, the second line `#!/usr/bin/env node`
+ * is then read as JS and rejected as a syntax error. Same outcome under node.
  */
 
 // ---------------------------------------------------------------------------
@@ -1305,7 +1311,6 @@ function buildRequestBody(
       if (flags.promptFile && typeof flags.promptFile === 'string') {
         try {
           // Lazy load — keep CLI startup fast for non-cron commands.
-          // eslint-disable-next-line @typescript-eslint/no-require-imports
           const fs = require('fs') as typeof import('fs');
           // Size guard: 1 MB is already pathologically large for a cron prompt
           // (~250k English words). Refuse /dev/zero, runaway files, binaries
@@ -1697,7 +1702,6 @@ function resolveTaskMdContent(
     try {
       // Lazy require — same pattern as the cron `--prompt-file` reader
       // (keeps startup fast for commands that don't need fs).
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const fs = require('fs') as typeof import('fs');
       const stat = fs.statSync(filePath);
       if (stat.size > TASK_MD_MAX_BYTES) {

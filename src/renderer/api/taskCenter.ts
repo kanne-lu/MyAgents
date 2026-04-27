@@ -220,7 +220,7 @@ export function searchTasks(
 // Execution triggers (renderer → Global Sidecar → Rust Management API)
 // ============================================================
 //
-// `taskRun` / `taskRerun` go through the Admin API path (Bun Sidecar forwards
+// `taskRun` / `taskRerun` go through the Admin API path (Node Sidecar forwards
 // to Rust `/api/task/run|rerun`) because the execution primitive binds a
 // CronTask to the Task Center task and kicks the Rust scheduler. The Tauri
 // IPC shortcut (`cmd_task_update_status`) would skip CronTask registration

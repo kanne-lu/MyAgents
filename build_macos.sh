@@ -100,7 +100,8 @@ echo ""
 # 清理残留进程
 # ========================================
 echo -e "${BLUE}[准备] 清理残留进程...${NC}"
-pkill -f "bun run.*server" 2>/dev/null || true
+pkill -f "node.*src/server/index.ts" 2>/dev/null || true
+pkill -f "node.*server-dist.js" 2>/dev/null || true
 pkill -f "MyAgents.app" 2>/dev/null || true
 sleep 1
 echo -e "${GREEN}✓ 进程已清理${NC}"
@@ -188,7 +189,7 @@ echo ""
 # TypeScript 类型检查
 echo -e "${BLUE}[4/7] TypeScript 类型检查...${NC}"
 cd "${PROJECT_DIR}"
-if ! bun run typecheck; then
+if ! npm run typecheck; then
     echo -e "${RED}✗ TypeScript 检查失败，请修复后重试${NC}"
     exit 1
 fi
@@ -208,101 +209,96 @@ echo ""
 # 构建前端和服务端
 echo -e "${BLUE}[5/7] 构建前端和服务端...${NC}"
 
-# 打包服务端代码
+# Sidecar / Bridge / CLI 三件套都走 `npm run build:*` —— 后台是
+# `node scripts/esbuild-bundle.mjs <target>`。单一配置入口（entry /
+# banner / format / external / target），不再让 shell 引号介入。
+# Driver 内部包含 post-build 步骤：cli 复制 myagents.cmd，server 校验
+# 无硬编码 __dirname 路径——这两步以前在每个平台脚本里各抄一遍，现已合并。
 echo -e "  ${CYAN}打包服务端代码...${NC}"
-mkdir -p src-tauri/resources
-bun build ./src/server/index.ts --outfile=./src-tauri/resources/server-dist.js --target=bun
-
-# 打包 Plugin Bridge 代码 (OpenClaw channel plugin 支持)
+npm run build:server
 echo -e "  ${CYAN}打包 Plugin Bridge...${NC}"
-bun build ./src/server/plugin-bridge/index.ts --outfile=./src-tauri/resources/plugin-bridge-dist.js --target=bun
+npm run build:bridge
+echo -e "  ${CYAN}打包 myagents CLI...${NC}"
+npm run build:cli
 
-# 验证打包结果不包含开发机硬编码路径
-# bun build 会将 __dirname 硬编码为编译时路径，必须使用 import.meta.url 替代
-# 检查任何 "var __dirname = \"/Users/..." 模式 (覆盖所有用户名)
-if grep -qE 'var __dirname = "/Users/[^"]+' ./src-tauri/resources/server-dist.js; then
-    echo -e "${RED}✗ 错误: server-dist.js 包含硬编码的 __dirname 路径!${NC}"
-    echo -e "${YELLOW}  检测到: $(grep -oE 'var __dirname = "[^"]+"' ./src-tauri/resources/server-dist.js | head -1)${NC}"
-    echo -e "${YELLOW}  请检查代码中是否使用了 __dirname (会被 bun build 硬编码)${NC}"
-    echo -e "${YELLOW}  应使用 import.meta.url + fileURLToPath 在运行时获取路径${NC}"
-    exit 1
-fi
-echo -e "${GREEN}  ✓ 服务端代码验证通过 (无硬编码路径)${NC}"
-
-# 复制 SDK 依赖
-echo -e "  ${CYAN}复制 SDK 依赖...${NC}"
-SDK_SRC="node_modules/@anthropic-ai/claude-agent-sdk"
+# SDK native binary 按架构在 per-target loop 里拷贝（见下方 Tauri 构建循环）。
+# SDK 0.2.113+ 不再 ship cli.js/sdk.mjs/vendor，改为 per-platform native binary。
+# 目录保留清理，具体 claude[.exe] 文件在 loop 内按 $TARGET 对应架构拷贝 + codesign。
 SDK_DEST="src-tauri/resources/claude-agent-sdk"
 rm -rf "${SDK_DEST}"
 mkdir -p "${SDK_DEST}"
-cp "${SDK_SRC}/cli.js" "${SDK_DEST}/"
-cp "${SDK_SRC}/sdk.mjs" "${SDK_DEST}/"
-# SDK ≤0.2.84 shipped resvg.wasm at package root; 0.2.107 removed it.
-# Copy any .wasm that's still there without failing on an empty glob, so
-# this line keeps working across SDK upgrades in either direction.
-for wasm in "${SDK_SRC}"/*.wasm; do
-    [ -f "$wasm" ] && cp "$wasm" "${SDK_DEST}/"
-done
-cp -R "${SDK_SRC}/vendor" "${SDK_DEST}/"
 
-# 预装 agent-browser CLI（使用预生成的 lockfile 避免耗时的依赖解析）
-echo -e "  ${CYAN}预装 agent-browser CLI...${NC}"
-AGENT_BROWSER_DIR="${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
-LOCKFILE_DIR="${PROJECT_DIR}/src/server/agent-browser-lockfile"
-# 版本一致性校验：index.ts 的 AGENT_BROWSER_VERSION 必须与 lockfile 的 package.json 一致
-CODE_VERSION=$(grep "const AGENT_BROWSER_VERSION" "${PROJECT_DIR}/src/server/index.ts" | sed "s/.*= '//;s/'.*//" )
-LOCK_VERSION=$(python3 -c "import json; print(json.load(open('${LOCKFILE_DIR}/package.json'))['dependencies']['agent-browser'])")
-if [ "$CODE_VERSION" != "$LOCK_VERSION" ]; then
-    echo -e "${RED}✗ 版本不一致! index.ts: ${CODE_VERSION}, lockfile: ${LOCK_VERSION}${NC}"
-    echo -e "${YELLOW}  请同步更新 src/server/agent-browser-lockfile/ (参见其 README.md)${NC}"
-    exit 1
-fi
-echo -e "  版本: ${CODE_VERSION}"
-rm -rf "${AGENT_BROWSER_DIR}"
-mkdir -p "${AGENT_BROWSER_DIR}"
-# 复制预生成的 package.json + bun.lock（跳过依赖解析，秒级安装）
-cp "${LOCKFILE_DIR}/package.json" "${AGENT_BROWSER_DIR}/"
-cp "${LOCKFILE_DIR}/bun.lock" "${AGENT_BROWSER_DIR}/"
-(cd "${AGENT_BROWSER_DIR}" && bun install --frozen-lockfile --ignore-scripts)
+# NOTE: agent-browser CLI is no longer bundled. The skill at
+# bundled-skills/agent-browser/SKILL.md teaches AI to self-install via
+# `npm install -g agent-browser@<pinned>` (with `npx` fallback) on first
+# use. Removing the bundle saves ~84MB DMG size + ~1-2min build time.
+
+# 预装 sharp 图像处理（替代 jimp，libvips 原生，上游 claude-code 同款）
+# 需要 sharp + @img/sharp-darwin-{arm64,x64} + @img/sharp-libvips-darwin-{arm64,x64}
+# 为什么不用 agent-browser 的 lockfile 模式：sharp 的 optional deps 按 host 平台过滤，
+# 单 lockfile 只能锁定一个架构。改为 package.json 显式声明 + 强制安装所有 darwin 变体。
+echo -e "  ${CYAN}预装 sharp 图像处理（libvips 原生）...${NC}"
+SHARP_DIR="${PROJECT_DIR}/src-tauri/resources/sharp-runtime"
+rm -rf "${SHARP_DIR}"
+mkdir -p "${SHARP_DIR}"
+cat > "${SHARP_DIR}/package.json" <<'SHARP_PKG'
+{
+  "name": "sharp-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": { "sharp": "0.34.5" }
+}
+SHARP_PKG
+(cd "${SHARP_DIR}" && npm install --no-audit --no-fund --no-save --ignore-scripts)
 if [ $? -ne 0 ]; then
-    echo -e "${RED}✗ agent-browser 预装失败${NC}"
+    echo -e "${RED}✗ sharp 主包预装失败${NC}"
     exit 1
 fi
-# npm 包内含全平台 native binary，仅保留 darwin 的（删除 linux/win32 避免公证扫描）
-AB_BIN_DIR="${AGENT_BROWSER_DIR}/node_modules/agent-browser/bin"
-rm -f "${AB_BIN_DIR}/agent-browser-linux-"* "${AB_BIN_DIR}/agent-browser-win32-"* 2>/dev/null || true
-# 验证非 darwin 二进制已全部删除
-if find "${AB_BIN_DIR}" -type f \( -name "agent-browser-linux-*" -o -name "agent-browser-win32-*" \) | grep -q .; then
-    echo -e "${RED}✗ 删除非 darwin agent-browser 二进制失败${NC}"
+# 强制安装所有 macOS 架构的 @img/sharp-* 和 @img/sharp-libvips-*（精确版本锁定，避免 patch 漂移）
+# npm install 默认只装 host arch 的 optional dep，这里显式补全另一个 arch
+(cd "${SHARP_DIR}" && npm install --no-save --force --no-audit --no-fund --ignore-scripts \
+    @img/sharp-darwin-arm64@0.34.5 @img/sharp-darwin-x64@0.34.5 \
+    @img/sharp-libvips-darwin-arm64@1.2.4 @img/sharp-libvips-darwin-x64@1.2.4)
+if [ $? -ne 0 ]; then
+    echo -e "${RED}✗ sharp 跨架构包安装失败${NC}"
     exit 1
 fi
-chmod 755 "${AB_BIN_DIR}"/agent-browser-darwin-* 2>/dev/null || true
-# 验证 native binary 存在
-NATIVE_BIN="${AB_BIN_DIR}/agent-browser-darwin-$(uname -m)"
-if [ ! -f "$NATIVE_BIN" ]; then
-    echo -e "${RED}✗ agent-browser native binary 不存在: $(basename "$NATIVE_BIN")${NC}"
-    exit 1
-fi
-echo -e "${GREEN}  ✓ agent-browser CLI 预装完成 (含 native binary)${NC}"
+# 验证两个架构的原生二进制都存在
+for ARCH in arm64 x64; do
+    SHARP_NODE="${SHARP_DIR}/node_modules/@img/sharp-darwin-${ARCH}/lib/sharp-darwin-${ARCH}.node"
+    SHARP_DYLIB_DIR="${SHARP_DIR}/node_modules/@img/sharp-libvips-darwin-${ARCH}/lib"
+    if [ ! -f "$SHARP_NODE" ]; then
+        echo -e "${RED}✗ sharp-darwin-${ARCH}.node 缺失${NC}"
+        exit 1
+    fi
+    if [ ! -d "$SHARP_DYLIB_DIR" ] || [ -z "$(ls "$SHARP_DYLIB_DIR"/*.dylib 2>/dev/null)" ]; then
+        echo -e "${RED}✗ sharp-libvips-darwin-${ARCH} dylib 缺失${NC}"
+        exit 1
+    fi
+done
+# 删除 linux/win32 的 @img/sharp-* 包（避免公证扫描非 darwin 原生代码）
+find "${SHARP_DIR}/node_modules/@img" -maxdepth 1 -type d \
+    \( -name "sharp-linux*" -o -name "sharp-win32*" -o -name "sharp-libvips-linux*" -o -name "sharp-libvips-win32*" -o -name "sharp-wasm32" \) \
+    -exec rm -rf {} + 2>/dev/null || true
+echo -e "${GREEN}  ✓ sharp 预装完成 (darwin arm64 + x64)${NC}"
 
 # 构建前端
 echo -e "  ${CYAN}构建前端...${NC}"
-bun run build:web
+npm run build:web
 echo -e "${GREEN}✓ 前端和服务端构建完成${NC}"
 echo ""
 
 # Node.js 运行时目录（每个构建目标在循环中按架构下载）
 NODEJS_DIR="${PROJECT_DIR}/src-tauri/resources/nodejs"
 
-# 签名 Bun 可执行文件 (重要：确保与应用使用相同签名)
+# ========================================
+# 签名 externalBin 可执行文件
 # ========================================
 echo -e "${BLUE}[6/7] 签名外部二进制文件...${NC}"
 
-# 签名 Bun 可执行文件
-# 重要：Bun 默认使用官方签名 (Jarred Sumner)，需要重签名为应用签名
-# 否则 macOS TCC 会将 Bun 视为独立应用，每次访问受保护目录都需要单独授权
-# 参考：https://developer.apple.com/forums/thread/129494
-#       https://book.hacktricks.wiki/en/macos-hardening/macos-security-and-privilege-escalation/macos-security-protections/macos-tcc/
+# 重签名：官方/下载的二进制默认用各自官方签名；macOS TCC 会把它们视为独立应用，
+# 导致每次访问受保护目录需单独授权。重签后子进程与主应用共享同一 Team ID，TCC
+# 权限（含 Screen Recording / Accessibility / AppleEvents）统一继承。
 echo -e "  ${CYAN}签名 externalBin 可执行文件 (使用应用签名替换官方签名)...${NC}"
 # Pit-of-success: signs ANY file matching src-tauri/binaries/*-apple-darwin.
 # Dropping a new externalBin under src-tauri/binaries/ with the apple-darwin
@@ -371,61 +367,79 @@ done < <(find "$VENDOR_DIR" -type f \( -name "*.node" -o -name "rg" \) -path "*d
 echo -e "${GREEN}✓ Vendor 签名完成 (成功: ${SIGNED_COUNT}, 失败: ${FAILED_COUNT})${NC}"
 echo ""
 
+# NOTE: agent-browser-cli signing block removed — bundle no longer ships.
+# AI installs the CLI on first use via the agent-browser skill (npm install -g).
+
 # ========================================
-# 签名 agent-browser-cli 原生二进制
+# 签名 sharp 原生二进制
 # ========================================
-echo -e "  ${CYAN}签名 agent-browser-cli 原生二进制...${NC}"
+echo -e "  ${CYAN}签名 sharp 原生二进制 (.node + libvips .dylib)...${NC}"
+SHARP_SIGNED_COUNT=0
+SHARP_FAILED_COUNT=0
 
-AB_CLI_DIR="${PROJECT_DIR}/src-tauri/resources/agent-browser-cli"
-# 删除所有非 darwin 的 prebuilds（android/ios/linux/win32 含 Mach-O 会被 Apple 公证扫描）
-find "${AB_CLI_DIR}/node_modules" -type d -name "prebuilds" 2>/dev/null | while IFS= read -r prebuild_dir; do
-    for platform_dir in "${prebuild_dir}"/*/; do
-        platform_name=$(basename "$platform_dir")
-        case "$platform_name" in
-            darwin-*) ;; # 保留 darwin
-            *) rm -rf "$platform_dir" ;; # 删除其他平台
-        esac
-    done
-done
-
-# 签名 agent-browser native CLI binary + darwin .bare prebuilds
-AB_SIGNED_COUNT=0
-AB_FAILED_COUNT=0
-
-# 1) 签名 agent-browser native binary (所有 darwin 架构)
-while IFS= read -r binary; do
-    echo -e "    ${CYAN}签名: agent-browser/bin/$(basename "$binary")${NC}"
-    if codesign --force --options runtime --timestamp \
-        --sign "$APPLE_SIGNING_IDENTITY" "$binary" 2>/dev/null; then
-        ((AB_SIGNED_COUNT++))
-    else
-        echo -e "    ${YELLOW}警告: 签名失败 - $binary${NC}"
-        ((AB_FAILED_COUNT++))
-    fi
-done < <(find "${AB_CLI_DIR}/node_modules/agent-browser/bin" -type f -name "agent-browser-darwin-*" 2>/dev/null)
-
-# 2) 签名 .bare prebuilds (bare-fs/bare-os 等 Node.js native addons)
+# @img/sharp-darwin-<arch>/lib/*.node 和 @img/sharp-libvips-darwin-<arch>/lib/*.dylib 都需要签名
+# 不签的话公证会拒；sharp 在 TCC 下不需要额外权限（纯 CPU 图像处理）。
 while IFS= read -r binary; do
     echo -e "    ${CYAN}签名: $(echo "$binary" | sed "s|.*/node_modules/||")${NC}"
     if codesign --force --options runtime --timestamp \
         --sign "$APPLE_SIGNING_IDENTITY" "$binary" 2>/dev/null; then
-        ((AB_SIGNED_COUNT++))
+        ((SHARP_SIGNED_COUNT++))
     else
         echo -e "    ${YELLOW}警告: 签名失败 - $binary${NC}"
-        ((AB_FAILED_COUNT++))
+        ((SHARP_FAILED_COUNT++))
     fi
-done < <(find "${AB_CLI_DIR}/node_modules" -type f -name "*.bare" -path "*darwin*" 2>/dev/null)
+done < <(find "${SHARP_DIR}/node_modules/@img" -type f \( -name "*.node" -o -name "*.dylib" \) 2>/dev/null)
 
-if [ $AB_FAILED_COUNT -gt 0 ]; then
-    echo -e "${RED}错误: agent-browser 原生二进制签名失败 (${AB_FAILED_COUNT} 个)，公证必定失败${NC}"
+if [ $SHARP_FAILED_COUNT -gt 0 ]; then
+    echo -e "${RED}错误: sharp 原生二进制签名失败 (${SHARP_FAILED_COUNT} 个)，公证必定失败${NC}"
     exit 1
 fi
-echo -e "${GREEN}✓ agent-browser 签名完成 (${AB_SIGNED_COUNT} 个文件)${NC}"
+if [ $SHARP_SIGNED_COUNT -eq 0 ]; then
+    echo -e "${RED}错误: 未签名任何 sharp 二进制，sharp 预装可能失败${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✓ sharp 签名完成 (${SHARP_SIGNED_COUNT} 个文件)${NC}"
 echo ""
 
 # 构建 Tauri 应用
 echo -e "${BLUE}[7/7] 构建 Tauri 应用 (Release + 签名 + 公证)...${NC}"
 echo -e "${YELLOW}这可能需要 5-10 分钟 (包含公证等待时间)...${NC}"
+
+# ---- 补齐 Claude Agent SDK 的跨架构 native 包 ----
+# `@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64}` 在 package.json 里
+# 是 optionalDependencies；npm 默认只装匹配 host 架构的那一份，所以
+# arm64 Mac 上 `npm install` 后只有 darwin-arm64，build "Both" 模式跑到
+# 第二轮（x64）就会在下面 per-TARGET loop 里报「Claude native binary
+# 不存在」。
+#
+# 强制安装非 host 架构 optional dep 的关键是 npm 的 `--os` / `--cpu`
+# 覆写——这两个 flag 是 npm 用来判断"该不该跳过这个 optional"的输入，
+# 单纯的 `--force` 不会绕过这个过滤（experimental verified：在 arm64
+# host 上 `npm install --force <darwin-x64-pkg>` 报 "up to date" 但其
+# 实没装）。每个 arch 必须用各自的 flag 单独装一次。
+#
+# `--no-save` 不写回 package.json（仓库 optionalDeps 形态保持不变）；
+# `--ignore-scripts` 同 setup-tsx-runtime 的逻辑（避免跨平台 postinstall
+# 触发自检失败）。
+SDK_VERSION=$(grep '"@anthropic-ai/claude-agent-sdk-darwin-arm64"' "${PROJECT_DIR}/package.json" | sed 's/.*: "\([0-9][0-9.]*\)".*/\1/')
+if [ -z "$SDK_VERSION" ]; then
+    echo -e "${RED}✗ 无法从 package.json 解析 Claude SDK 版本号${NC}"
+    exit 1
+fi
+for ARCH in arm64 x64; do
+    SDK_PKG_BIN="${PROJECT_DIR}/node_modules/@anthropic-ai/claude-agent-sdk-darwin-${ARCH}/claude"
+    if [ ! -f "$SDK_PKG_BIN" ]; then
+        echo -e "${BLUE}[7.0/7] 补齐 Claude SDK darwin-${ARCH}@${SDK_VERSION}...${NC}"
+        (cd "${PROJECT_DIR}" && npm install --no-save --no-audit --no-fund --ignore-scripts \
+            --os=darwin --cpu="$ARCH" \
+            "@anthropic-ai/claude-agent-sdk-darwin-${ARCH}@${SDK_VERSION}")
+        if [ ! -f "$SDK_PKG_BIN" ]; then
+            echo -e "${RED}✗ darwin-${ARCH} 安装后仍未找到 binary: $SDK_PKG_BIN${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}  ✓ darwin-${ARCH} 就绪${NC}"
+    fi
+done
 
 for TARGET in "${BUILD_TARGETS[@]}"; do
     echo ""
@@ -442,6 +456,45 @@ for TARGET in "${BUILD_TARGETS[@]}"; do
     echo -e "  ${CYAN}确保 Node.js 匹配目标架构 (${NODE_TARGET_ARCH})...${NC}"
     "${PROJECT_DIR}/scripts/download_nodejs.sh" --target "$NODE_TARGET_ARCH"
 
+    # ---- 重新填充 tsx-runtime 资源以匹配目标架构 ----
+    # `setup-tsx-runtime.mjs` 用 npm 的 --os/--cpu 选择对应平台的
+    # `@esbuild/<triple>` 二进制；跨架构 Mac DMG 必须按 TARGET 重灌。
+    echo -e "  ${CYAN}填充 tsx-runtime (darwin-${NODE_TARGET_ARCH})...${NC}"
+    npm run build:tsx-runtime -- darwin "$NODE_TARGET_ARCH"
+
+    # ---- 签名 tsx-runtime 内的 esbuild 原生二进制 ----
+    # esbuild 是 Go 静态编译，没有 JIT 需求；跟 ripgrep / sharp 一样只要
+    # `--options runtime --timestamp`，不需要 entitlements。
+    # npm 安装后两处 path 都有 binary：
+    #   - node_modules/esbuild/bin/esbuild              (npm postinstall 拷贝/硬链接)
+    #   - node_modules/@esbuild/<triple>/bin/esbuild    (per-platform optional dep)
+    # 两者通常共享同一个 inode（hardlink），但 codesign 路径独立，必须各签一次；
+    # node_modules/.bin/esbuild 是 symlink，notarizer 跟随符号链接验证，所以签源
+    # 文件就够了，不必单独处理。
+    TSX_RUNTIME_DIR="${PROJECT_DIR}/src-tauri/resources/tsx-runtime"
+    TSX_SIGNED_COUNT=0
+    TSX_FAILED_COUNT=0
+    while IFS= read -r binary; do
+        echo -e "    ${CYAN}签名: $(echo "$binary" | sed "s|.*/tsx-runtime/||")${NC}"
+        xattr -d com.apple.quarantine "$binary" 2>/dev/null || true
+        if codesign --force --options runtime --timestamp \
+            --sign "$APPLE_SIGNING_IDENTITY" "$binary" 2>/dev/null; then
+            ((TSX_SIGNED_COUNT++))
+        else
+            echo -e "    ${RED}✗ 签名失败 - $binary${NC}"
+            ((TSX_FAILED_COUNT++))
+        fi
+    done < <(find "${TSX_RUNTIME_DIR}/node_modules" -type f -path "*/bin/esbuild" 2>/dev/null)
+    if [ $TSX_FAILED_COUNT -gt 0 ]; then
+        echo -e "${RED}✗ tsx-runtime esbuild 签名失败 (${TSX_FAILED_COUNT} 个)，公证必定失败${NC}"
+        exit 1
+    fi
+    if [ $TSX_SIGNED_COUNT -eq 0 ]; then
+        echo -e "${RED}✗ 未签名任何 esbuild 二进制，setup-tsx-runtime 可能没装上 native dep${NC}"
+        exit 1
+    fi
+    echo -e "    ${GREEN}✓ tsx-runtime esbuild 签名完成 (${TSX_SIGNED_COUNT} 个)${NC}"
+
     # 签名 Node.js 二进制 (TCC / notarization 需要统一签名)
     NODE_BINARY="${NODEJS_DIR}/bin/node"
     if [ -f "$NODE_BINARY" ]; then
@@ -456,7 +509,37 @@ for TARGET in "${BUILD_TARGETS[@]}"; do
         fi
     fi
 
-    bun run tauri:build -- --target "$TARGET"
+    # ---- 拷贝并签名 Claude Agent SDK native binary ----
+    # SDK 0.2.113+ 通过 per-platform optional deps 分发 `bun build --compile` 产物。
+    # 每个 target 架构拷对应的 binary；binary 内嵌 Bun runtime，需 allow-jit entitlements
+    # （与 Node 一致，已在 Entitlements.plist 声明）。
+    if [[ "$NODE_TARGET_ARCH" == "arm64" ]]; then
+        SDK_TRIPLE="darwin-arm64"
+    else
+        SDK_TRIPLE="darwin-x64"
+    fi
+    CLAUDE_SRC="${PROJECT_DIR}/node_modules/@anthropic-ai/claude-agent-sdk-${SDK_TRIPLE}/claude"
+    CLAUDE_DEST="${PROJECT_DIR}/src-tauri/resources/claude-agent-sdk/claude"
+    echo -e "  ${CYAN}拷贝 Claude native binary (${SDK_TRIPLE})...${NC}"
+    if [ ! -f "$CLAUDE_SRC" ]; then
+        echo -e "    ${RED}✗ Claude native binary 不存在: $CLAUDE_SRC${NC}"
+        echo -e "    ${YELLOW}  请运行 \`npm install\` 以安装 @anthropic-ai/claude-agent-sdk-${SDK_TRIPLE}${NC}"
+        exit 1
+    fi
+    rm -f "$CLAUDE_DEST"
+    cp "$CLAUDE_SRC" "$CLAUDE_DEST"
+    chmod +x "$CLAUDE_DEST"
+    xattr -d com.apple.quarantine "$CLAUDE_DEST" 2>/dev/null || true
+    if codesign --force --options runtime --timestamp \
+        --entitlements "${PROJECT_DIR}/src-tauri/Entitlements.plist" \
+        --sign "$APPLE_SIGNING_IDENTITY" "$CLAUDE_DEST"; then
+        echo -e "    ${GREEN}✓ claude (${SDK_TRIPLE}) 签名成功${NC}"
+    else
+        echo -e "    ${RED}✗ claude 签名失败${NC}"
+        exit 1
+    fi
+
+    npm run tauri:build -- --target "$TARGET"
 
     echo -e "${GREEN}✓ $TARGET 构建完成${NC}"
 done

@@ -1472,6 +1472,7 @@ impl FeishuAdapter {
             hint_group_name: None,
             reply_to_body: None,
             group_system_prompt: None,
+            request_id: String::new(),
         })
     }
 

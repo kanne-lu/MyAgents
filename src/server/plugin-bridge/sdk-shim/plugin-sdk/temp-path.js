@@ -1,10 +1,10 @@
 /** Shim for openclaw/plugin-sdk/temp-path */
 
-const crypto = require('node:crypto');
-const { tmpdir } = require('node:os');
-const path = require('node:path');
-const { mkdirSync, mkdtempSync, rmSync } = require('node:fs');
-const { rm } = require('node:fs/promises');
+import crypto from 'node:crypto';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { mkdirSync, mkdtempSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 
 function sanitizePrefix(prefix) {
   const normalized = prefix.replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
@@ -59,7 +59,7 @@ async function withTempDownloadPath(params, fn) {
   }
 }
 
-module.exports = {
+export {
   buildRandomTempFilePath,
   withTempDownloadPath,
 };

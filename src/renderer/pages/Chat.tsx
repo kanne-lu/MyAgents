@@ -1448,38 +1448,74 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to specific sub-properties, not full object refs
   }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject]);
 
-  // Sync selectedModel to backend so pre-warm uses the correct model.
-  // Without this, backend currentModel stays undefined until the first message,
-  // causing a blocking setModel() call during pre-warm → active transition.
+  // Unified model-push effect — single source of truth for `/api/model/set`.
+  //
+  // Replaces three formerly-independent push paths (mount-time builtin sync,
+  // mount-time external sync, post-connect re-sync). The split was a race:
+  // each effect re-derived `modelToPush` from `isExternalRuntime` independently,
+  // and during the first render(s) `currentAgent` / `sessionRuntime` may both
+  // still be loading → `isExternalRuntime` transiently `false` → the builtin
+  // path posts `agent.primaryModel` (e.g. "Pro/moonshotai/Kimi-K2.6") even on
+  // a session whose frozen runtime is `codex`, killing the just-prewarmed
+  // external process via setExternalModel's "Stopping process for model change".
+  //
+  // Invariants this effect enforces:
+  //   1. Session runtime is FROZEN (v0.1.69) — `currentRuntime` resolves to one
+  //      value per Tab; we WAIT for runtime resolution before any push instead
+  //      of speculatively filling.
+  //   2. External runtime + user hasn't explicitly picked a model → DON'T push.
+  //      Codex/Gemini fall back to their own default (gpt-5.5 / auto-gemini-3)
+  //      when /api/model/set is never called. Pushing the builtin preset here
+  //      is a category error: that preset belongs to the builtin code path that
+  //      this session will never take.
+  //   3. Builtin runtime → push `selectedModel` (agent's primaryModel).
+  //   4. Idempotent: dedupe via ref so re-renders (sessionId upgrade, runtime
+  //      model list arrival, runtimeModel state init) don't cause repeats.
+  //      Reset on disconnect so a sidecar restart re-pushes — in-process model
+  //      state lives only in the old sidecar process and dies with it.
+  const lastPushedModelKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    // Skip when external runtime is active — runtimeModel has its own sync effect below.
-    // Without this guard, selectedModel (initialized from agent.model, e.g. "glm-5.1")
-    // would be pushed to setExternalModel(), overriding the runtime's own model. See: #71
-    if (isExternalRuntime) return;
-    if (selectedModel) {
-      // Skip push when joining existing sidecar — adoption effect will set the correct model
-      if (joinedExistingSidecarRef.current) {
-        if (isDebugMode()) {
-          console.log('[Chat] Skipping model push (joined existing sidecar)');
-        }
-        return;
-      }
-      apiPost('/api/model/set', { model: selectedModel }).catch(err => {
-        console.error('[Chat] Failed to sync model to backend:', err);
-      });
+    // Sidecar gone → in-process model state cleared; allow re-push on reconnect.
+    if (!isConnected) {
+      lastPushedModelKeyRef.current = null;
+      return;
     }
-  }, [selectedModel, apiPost, isExternalRuntime]);
+    // Wait until runtime is determinable. `currentRuntime` falls back to
+    // 'builtin' when both async sources are pending; pushing in that window
+    // risks the "wrong-runtime push kills correct-runtime prewarm" race.
+    //
+    // Known limitation: this gate accepts `currentAgent` as authoritative
+    // before `sessionRuntime` arrives via SSE chat:system-init / REST
+    // loadSession. For the vast majority of opens that's correct — the
+    // sidecar was just spawned with `MYAGENTS_RUNTIME` derived from the
+    // same `currentAgent.runtime` we read here. The narrow race window is:
+    // user changes agent.runtime in another tab AFTER its sidecar spawned
+    // with the old value but BEFORE this tab's first render. Tightening
+    // to `sessionRuntime !== null` alone would close it but cost ~1s of
+    // delay before the builtin model push reaches a fresh sidecar (SDK
+    // pre-warm would init with self-resolved disk values instead of the
+    // user-selected model). Trade-off chosen: optimize for the common
+    // case; if the cross-tab race becomes a real reported issue, revisit.
+    const runtimeResolved = sessionRuntime !== null || currentAgent !== undefined;
+    if (!runtimeResolved) return;
+    // IM Bot / cross-session join — adoption effect mirrors sidecar config
+    // back into our state; we must NOT overwrite the live sidecar's model.
+    if (joinedExistingSidecarRef.current) return;
 
-  // Sync external runtime model to backend — same pattern as selectedModel above.
-  // /api/model/set routes to setExternalModel() when shouldUseExternalRuntime() is true.
-  useEffect(() => {
-    if (isExternalRuntime && runtimeModel) {
-      if (joinedExistingSidecarRef.current) return;
-      apiPost('/api/model/set', { model: runtimeModel }).catch(err => {
-        console.error('[Chat] Failed to sync runtime model to backend:', err);
-      });
-    }
-  }, [isExternalRuntime, runtimeModel, apiPost]);
+    const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
+    // External + no explicit pick → defer to runtime's built-in default.
+    if (!modelToPush) return;
+
+    const dedupeKey = `${sessionId}::${modelToPush}`;
+    if (lastPushedModelKeyRef.current === dedupeKey) return;
+    lastPushedModelKeyRef.current = dedupeKey;
+
+    apiPost('/api/model/set', { model: modelToPush }).catch(err => {
+      console.error('[Chat] sync model failed:', err);
+      lastPushedModelKeyRef.current = null; // allow retry
+    });
+  }, [isConnected, sessionRuntime, currentAgent, isExternalRuntime,
+      runtimeModel, selectedModel, sessionId, apiPost]);
 
   // Adopt sidecar config when joining an existing sidecar (e.g. IM Bot session).
   // Reads the sidecar's current model and applies it to React state so the Tab
@@ -1648,48 +1684,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     return () => window.removeEventListener(CUSTOM_EVENTS.SKILL_COPIED_TO_PROJECT, handleSkillCopied);
   }, []);
 
-  // Re-sync Tab-scoped state on `isConnected` false → true transition.
+  // Workspace refresh on sidecar reconnect (mid-session crash recovery, Rust
+  // health-monitor restart, `recoverSessionSidecar`). Bumps the trigger that
+  // re-runs `loadAndSyncAgents` / `loadSkillsAndCommands` / DirectoryPanel.
   //
-  // This is the RECOVERY hook — fires when a Sidecar that died mid-session
-  // comes back up (Rust health monitor restart or `recoverSessionSidecar`).
-  // Cold-start boot races are absorbed upstream in `tauriClient`, so on
-  // initial mount this effect fires once but is (idempotently) redundant
-  // with the mount-time sync effects — intentional; cost is one extra
-  // network call per boot, which beats forking "recovery vs startup" paths.
-  //
-  //   • `workspaceRefreshTrigger` bump re-runs `loadAndSyncAgents`,
-  //     `loadSkillsAndCommands`, and `DirectoryPanel.rawRefresh` — all
-  //     three gate on this trigger, so re-syncing them is a single bump.
-  //   • `/api/model/set` re-push (both built-in AND external runtimes):
-  //     the mount-time sync-model effects only re-fire when their model
-  //     source *changes*. A restarted Sidecar self-resolves built-in
-  //     config from disk but has NO disk memory for the external-runtime
-  //     model — that lived only in the old sidecar process. So after a
-  //     mid-session restart both paths need an explicit push to stay
-  //     consistent with what the user actually selected.
+  // Model re-push after reconnect is handled by the unified model-push effect
+  // above — its `lastPushedModelKeyRef` is cleared on `isConnected=false`, so
+  // the next true reading naturally re-pushes the current runtime's model.
   useEffect(() => {
     const wasConnected = prevIsConnectedRef.current;
     prevIsConnectedRef.current = isConnected;
     if (!wasConnected && isConnected) {
       setWorkspaceRefreshTrigger(k => k + 1);
-      if (!joinedExistingSidecarRef.current) {
-        // Pick whichever model source matches the active runtime. Previously
-        // this branch only re-synced the built-in `selectedModel` and left
-        // external-runtime Tabs (Codex / Gemini / Claude Code) with a stale
-        // in-process default after a Sidecar restart — the user's chosen
-        // runtime model lives only in sidecar memory, so skipping the push
-        // here means the next turn would silently run on the wrong model.
-        // Both paths hit the same `/api/model/set` endpoint; the backend
-        // routes to the built-in vs external setter based on runtime.
-        const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
-        if (modelToPush) {
-          apiPost('/api/model/set', { model: modelToPush }).catch(err => {
-            console.error('[Chat] Failed to re-sync model after sidecar ready:', err);
-          });
-        }
-      }
     }
-  }, [isConnected, isExternalRuntime, runtimeModel, selectedModel, apiPost]);
+  }, [isConnected]);
 
   // Handle provider change with analytics tracking.
   // targetModel: when provided, use this model instead of the provider's primaryModel
@@ -2623,7 +2631,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             FileActionProvider.refreshTrigger intentionally excludes
             toolCompleteCount. toolCompleteCount bumps on every
             workspace:files-changed SSE event, which fires on a 500ms
-            debounce from the Bun file watcher whenever *anything* in the
+            debounce from the Node file watcher whenever *anything* in the
             workspace changes (tsc/vite output, git index, log files, …).
             Tying the path-existence cache to that signal caused a full
             wipe-and-requery storm — on an active dev workspace, a POST

@@ -6,6 +6,7 @@
 // We only need to: spawn process, relay events, and handle permission delegation.
 
 import { broadcast } from '../sse';
+import { killWithEscalation } from './utils/kill-with-escalation';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
@@ -30,6 +31,8 @@ import {
   normalizeUsage,
   restoreRuntimeUsageTotals,
 } from './usage-utils';
+import { imEventBus, type ImEventType } from '../utils/im-event-bus';
+import { imRequestRegistry } from '../utils/im-request-registry';
 
 // ─── Module state ───
 
@@ -210,13 +213,13 @@ function clearPendingThinking(): void {
  *  agent config (D4). The scenario flag is what v0.1.69 pre-warm broke:
  *  pre-warm Tab → Case 3 first message used to always take the IM path, which
  *  silently leaked agent config changes into owned desktop sessions. */
-function registerSessionMetadataIfNew(
+async function registerSessionMetadataIfNew(
   sessionId: string,
   workspacePath: string,
   messageText: string,
   origin: string,
   scenario: InteractionScenario,
-): void {
+): Promise<void> {
   if (!sessionId || getSessionMetadata(sessionId)) return;
   const useLiveFollow = scenario.type === 'im' || scenario.type === 'agent-channel';
   // Runtime field is overwritten below with `getCurrentRuntimeType()` to honor
@@ -240,7 +243,7 @@ function registerSessionMetadataIfNew(
   const trimmed = messageText.trim();
   meta.title = trimmed.slice(0, 40);
   if (meta.title.length < trimmed.length) meta.title += '...';
-  saveSessionMetadata(meta);
+  await saveSessionMetadata(meta);
   console.log(`[external-session] session ${sessionId} persisted to SessionStore (${origin})`);
 }
 
@@ -367,13 +370,12 @@ function extractTextPreview(content: string, maxLen = 100): string {
   return content.slice(0, maxLen);
 }
 
-// IM stream callback — mirrors agent-session.ts pattern for IM Bot relay
-type ImStreamCallback = (
-  event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity',
-  data: string,
-) => void;
-let imStreamCallback: ImStreamCallback | null = null;
-let imCallbackNulledDuringTurn = false; // Prevents stale turn events leaking to new callback
+// Pattern B — IM Pipeline v2: ImEventBus replaces the legacy single-callback model.
+// `activeRequestId` is the trace ID of the user message currently being processed
+// by the external runtime; UnifiedEvent → ImEvent translation tags each event with
+// this ID so /api/im/chat subscribers can filter/route to the right reply slot.
+// Mirrors `agent-session.ts::activeRequestId` semantics — same bus instance.
+let activeRequestId: string | null = null;
 
 // Pending permission suggestions — keyed by requestId, consumed by respondExternalPermission.
 // CC sends permission_suggestions in control_request; we echo them back as updatedPermissions
@@ -405,10 +407,11 @@ function isAskUserQuestionInput(input: unknown): input is AskUserQuestionInput {
   });
 }
 
-/** Fire IM callback only if not stale (guard mirrors agent-session.ts pattern) */
-function fireImCallback(event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string): void {
-  if (imStreamCallback && !imCallbackNulledDuringTurn) {
-    imStreamCallback(event, data);
+/** Pattern B — emit per-request IM event. Subscribers in /api/im/chat filter
+ *  by matching requestId. No-op when no active IM trace (desktop / cron). */
+function fireImCallback(type: ImEventType, data: string): void {
+  if (activeRequestId !== null) {
+    imEventBus.emit(activeRequestId, type, data);
   }
 }
 
@@ -481,22 +484,10 @@ export function restoreExternalSessionState(
   console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages)`);
 }
 
-/**
- * Set IM stream callback for relaying CC events to Rust IM.
- * Mirrors agent-session.ts setImStreamCallback pattern.
- */
-export function setExternalImStreamCallback(cb: ImStreamCallback | null): void {
-  if (cb !== null && imStreamCallback !== null) {
-    imCallbackNulledDuringTurn = true;
-    try { imStreamCallback('error', '消息处理被新请求取代'); } catch { /* old stream may already be closed */ }
-  }
-  if (cb === null) {
-    imCallbackNulledDuringTurn = true;
-  } else {
-    imCallbackNulledDuringTurn = false;
-  }
-  imStreamCallback = cb;
-}
+// Pattern B — `setExternalImStreamCallback` removed. The /api/im/chat handler
+// in index.ts subscribes to `imEventBus` directly and filters by requestId.
+// This deletes the duplicate single-callback infrastructure that mirrored
+// agent-session.ts; both builtin and external runtimes now share the same bus.
 
 // ─── Config change handlers ───
 
@@ -516,14 +507,21 @@ export async function setExternalModel(model: string): Promise<void> {
   if (startingPromise) {
     await startingPromise;
   }
-  lastModel = model;
-  console.log(`[external-session] Model set to "${model}"`);
 
-  // Try in-place switch first if the active runtime supports it (currently
-  // Gemini via ACP `session/set_model`). This preserves the live process +
-  // session state — no stdin/stdout teardown, no re-handshake, and the next
-  // user message hits Case 3 immediately with the new model.
+  // In-place setModel path (currently Gemini via ACP `session/set_model`):
+  // ALWAYS call through, even on duplicate-value pushes. Reasons:
+  //   1. Runtime-layer setModel is idempotent at the protocol layer — calling
+  //      with an unchanged model is a no-op for the runtime.
+  //   2. Short-circuiting here would lose self-healing: if a previous concurrent
+  //      pair of setModel calls landed out of order (later request wrote
+  //      `lastModel` first, earlier request's RPC completed last → runtime model
+  //      drifts from `lastModel`), the user's only recovery is to re-select
+  //      their intended model. A `lastModel === model` short-circuit would
+  //      silently swallow that recovery click.
+  //   3. The cost of a redundant in-place RPC is one cheap protocol roundtrip.
   if (isExternalSessionActive() && activeProcess && activeRuntime?.setModel) {
+    lastModel = model;
+    console.log(`[external-session] Model set to "${model}" (in-place)`);
     try {
       await activeRuntime.setModel(activeProcess, model);
       return;
@@ -533,7 +531,14 @@ export async function setExternalModel(model: string): Promise<void> {
     }
   }
 
-  // Fallback: stop running process so the next message resumes with the new model.
+  // Fallback restart path: stop running process so next message resumes with
+  // the new model. Idempotent short-circuit on duplicate value — frontend
+  // dedupe is best-effort, so a redundant push here would otherwise cause
+  // a needless kill+respawn (paying ~10s cold restart for nothing). Safe at
+  // this point because there's no in-flight runtime RPC to race against.
+  if (model === lastModel) return;
+  lastModel = model;
+  console.log(`[external-session] Model set to "${model}" (will restart on next send)`);
   if (isRunning || activeProcess) {
     console.log('[external-session] Stopping process for model change');
     await stopExternalSession();
@@ -553,6 +558,11 @@ export async function setExternalPermissionMode(mode: string): Promise<void> {
   if (startingPromise) {
     await startingPromise;
   }
+  // Idempotent short-circuit on duplicate value — symmetric with setExternalModel's
+  // fallback-path guard. Safe to short-circuit unconditionally here because all
+  // runtimes implement permission-mode change via stop+restart (no in-place RPC),
+  // so there's no concurrent ordering race that would require self-healing.
+  if (mode === lastPermissionMode) return;
   lastPermissionMode = mode;
   console.log(`[external-session] Permission mode set to "${mode}"`);
   if (isRunning || activeProcess) {
@@ -568,6 +578,20 @@ export async function setExternalPermissionMode(mode: string): Promise<void> {
  */
 export function shouldUseExternalRuntime(): boolean {
   return isExternalRuntime(getCurrentRuntimeType());
+}
+
+/**
+ * Wait for any in-flight startExternalSession (notably pre-warm) to finish.
+ * Used by callers that touch module state which the spawn path will write to —
+ * /sessions/switch's external branch races against pre-warm post-spawn writes
+ * if it doesn't serialize. setExternalModel / setExternalPermissionMode use
+ * the same pattern internally; this exported helper is for HTTP-route callers
+ * that don't have direct access to `startingPromise`.
+ */
+export async function awaitExternalSessionStarting(): Promise<void> {
+  if (startingPromise) {
+    await startingPromise;
+  }
 }
 
 export function getExternalSessionState(): ExternalSessionState {
@@ -852,12 +876,12 @@ async function _doStartExternalSession(options: {
     currentTurnStartTime = Date.now();
 
     // Persist user message immediately (crash safety — don't wait for turn_complete)
-    try { saveSessionMessages(options.sessionId, allSessionMessages); }
+    try { await saveSessionMessages(options.sessionId, allSessionMessages); }
     catch (err) { console.error('[external-session] Failed to persist user message:', err); }
 
     // Register session in history index (mirrors agent-session.ts enqueueUserMessage logic)
     if (!options.resumeSessionId) {
-      registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
+      await registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
     }
   }
 
@@ -911,7 +935,7 @@ async function _doStartExternalSession(options: {
         lastRuntimeSessionId = '';
         if (options.sessionId) {
           try {
-            updateSessionMetadata(options.sessionId, { runtimeSessionId: '' });
+            await updateSessionMetadata(options.sessionId, { runtimeSessionId: '' });
           } catch (metaErr) {
             console.warn('[external-session] Failed to clear stale runtimeSessionId on disk:', metaErr);
           }
@@ -960,6 +984,11 @@ export interface ExternalSendContext {
   scenario: InteractionScenario;
   permissionMode?: string;
   model?: string;  // Runtime-specific model (e.g., "sonnet", "opus")
+  // Pattern B — IM trace ID. Forwarded from /api/im/chat (Rust generates at edge).
+  // Tags every UnifiedEvent emitted to ImEventBus so the bus subscriber for this
+  // request can route delta/block-end/etc. to the correct reply slot.
+  // Desktop / cron callers omit (no IM identity) — events drop silently.
+  requestId?: string;
 }
 
 /**
@@ -968,6 +997,22 @@ export interface ExternalSendContext {
  * 1. No previous session → start a new one (first message)
  * 2. Previous process exited → resume with --resume (CC -p mode multi-turn)
  * 3. Process still running → send via stdin (shouldn't happen in -p mode)
+ *
+ * Modality scope (V1): the model-input-modality filter (see
+ * `agent-session.ts::enqueueUserMessage` + `model-capabilities.ts::modelSupportsModality`)
+ * lives only on the builtin Claude Agent SDK path. External runtimes (Claude
+ * Code CLI / Codex / Gemini CLI) pass `images` through unfiltered here.
+ * Rationale:
+ *   - Each external runtime has its own modality contract (Codex blocks
+ *     images, Gemini accepts image+video+audio, CC CLI accepts images).
+ *   - External runtime models aren't in MyAgents' PRESET_PROVIDERS registry,
+ *     so `lookupModelCapability` would return undefined → optimistic
+ *     default-allow → effectively no filter, just runtime overhead.
+ *   - The frontend toast in `SimpleChatInput` is gated behind
+ *     `!isExternalRuntime` to keep UX honest (no false "will be filtered"
+ *     promises on runtimes that pass images through).
+ * If you ever wire modality lookups for external-runtime models, add the
+ * filter here and lift the frontend gate.
  */
 export async function sendExternalMessage(
   text: string,
@@ -1012,6 +1057,17 @@ export async function sendExternalMessage(
   // resetTurnAccumulators(), so this gate doesn't spuriously trip.
   if (!turnCompleted && currentTurnStartTime !== 0 && activeProcess && !activeProcess.exited) {
     await waitForExternalSessionIdle(5 * 60 * 1000, 100);
+  }
+
+  // Pattern B — set the active IM trace ID *after* the previous turn has
+  // settled. Setting it earlier (pre-fix) caused tail deltas/complete events
+  // from the running turn A to be tagged with turn B's requestId during the
+  // wait window, mis-routing them to the wrong IM subscriber and breaking
+  // cancellation attribution. session-end (session_complete /
+  // stopExternalSession) clears it again. No-op when context.requestId is
+  // undefined (desktop / cron paths).
+  if (context?.requestId) {
+    activeRequestId = context.requestId;
   }
 
   // Case 1: No previous session — start fresh
@@ -1101,11 +1157,11 @@ export async function sendExternalMessage(
     // Normally this happens inside startExternalSession's initialMessage block,
     // but pre-warm calls startExternalSession WITHOUT an initialMessage, so we
     // have to register here when the first actual message arrives via Case 3.
-    registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
+    await registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
 
     // Persist user message immediately (crash safety)
     if (lastSessionId) {
-      try { saveSessionMessages(lastSessionId, allSessionMessages); }
+      try { await saveSessionMessages(lastSessionId, allSessionMessages); }
       catch (err) { console.error('[external-session] Failed to persist user message:', err); }
     }
 
@@ -1193,6 +1249,25 @@ export async function respondExternalAskUserQuestion(
 }
 
 /**
+ * Pattern D — IM trace-id-targeted cancellation for external runtimes.
+ * For CC/Codex/Gemini we don't have a per-request granularity (the runtime
+ * processes turns sequentially), so cancellation degenerates to "stop the
+ * active session if `requestId` matches `activeRequestId`". Returns
+ * { aborted, mode } same shape as the builtin `cancelImRequest`.
+ */
+export async function cancelExternalImRequest(
+  requestId: string,
+  _reason: string = 'user',
+): Promise<{ aborted: boolean; mode: 'running' | 'queued' | 'unknown' }> {
+  if (activeRequestId === requestId && isExternalSessionActive()) {
+    console.log(`[external-session] cancelExternalImRequest requestId=${requestId} mode=running`);
+    await stopExternalSession();
+    return { aborted: true, mode: 'running' };
+  }
+  return { aborted: false, mode: 'unknown' };
+}
+
+/**
  * Stop the active external session
  */
 export async function stopExternalSession(): Promise<boolean> {
@@ -1203,7 +1278,32 @@ export async function stopExternalSession(): Promise<boolean> {
     return true;
   } catch (err) {
     console.error('[external-session] Error stopping session:', err);
-    activeProcess.kill();
+    // Pattern 1 P0-1 fix #11: previously fell through to a single
+    // SIGTERM-default kill that could hang indefinitely. Now bound the
+    // shutdown via killWithEscalation: 2s graceful → 1s hard → orphan log.
+    const proc = activeProcess;
+    void killWithEscalation(
+      {
+        pid: proc.pid,
+        exited: proc.exited,
+        kill: (signal) => {
+          // RuntimeProcess.kill accepts number; map signal names to SIGTERM/SIGKILL ints.
+          const num = typeof signal === 'string'
+            ? (signal === 'SIGKILL' ? 9 : 15)
+            : (signal ?? 15);
+          proc.kill(num);
+        },
+        waitForExit: () => proc.waitForExit(),
+      },
+      {
+        gracefulMs: 2000,
+        hardMs: 1000,
+        killTree: true,
+        onStep: (step, info) => {
+          if (step === 'orphan') console.warn(`[external-session] catch fallback orphan pid=${info.pid}`);
+        },
+      },
+    );
     return true;
   } finally {
     activeProcess = null;
@@ -1220,8 +1320,14 @@ export async function stopExternalSession(): Promise<boolean> {
     pendingExternalAskUserQuestions.clear();  // Stale AskUserQuestion requestIds would misroute to new session
     pendingExternalInteractiveRequests.clear();
     externalSystemInitPayload = null;
-    // Notify IM stream callback if active (prevents orphaned SSE streams on user-stop)
+    // Pattern B: notify IM bus subscribers (prevents orphaned SSE streams on user-stop) + clear active ID.
+    // Pattern C: also unregister from request registry.
     fireImCallback('error', 'Session stopped');
+    if (activeRequestId) {
+      imRequestRegistry.setStatus(activeRequestId, 'failed');
+      imRequestRegistry.unregister(activeRequestId);
+    }
+    activeRequestId = null;
     setExternalSessionState('idle');
   }
 }
@@ -1338,7 +1444,7 @@ export function getRuntimePermissionModes(runtimeType: RuntimeType): unknown[] {
 
 /** Flush accumulated content blocks, persist to SessionStore, and broadcast completion.
  * Called by both turn_complete (Codex) and session_complete (CC) to avoid duplication. */
-function persistTurnResult(): void {
+async function persistTurnResult(): Promise<void> {
   const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
   flushAllPending();
 
@@ -1374,9 +1480,9 @@ function persistTurnResult(): void {
   // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
   if (allSessionMessages.length > 0 && lastSessionId) {
     try {
-      saveSessionMessages(lastSessionId, allSessionMessages);
+      await saveSessionMessages(lastSessionId, allSessionMessages);
       const lastMsg = allSessionMessages[allSessionMessages.length - 1];
-      updateSessionMetadata(lastSessionId, {
+      await updateSessionMetadata(lastSessionId, {
         lastActiveAt: new Date().toISOString(),
         lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
         runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
@@ -1411,6 +1517,12 @@ function persistTurnResult(): void {
   });
   setExternalSessionState('idle');
   fireImCallback('complete', '');
+  // Pattern B/C: turn complete — clear active trace ID + unregister from registry.
+  if (activeRequestId) {
+    imRequestRegistry.setStatus(activeRequestId, 'completed');
+    imRequestRegistry.unregister(activeRequestId);
+  }
+  activeRequestId = null;
 }
 
 // ─── Private: UnifiedEvent → SSE broadcast ───
@@ -1571,7 +1683,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           previewFormat,
         });
         // IM/agent-channel bots can't render AskUserQuestion; claude-code.ts already
-        // puts it in --disallowed-tools for those scenarios, so no imStreamCallback fan-out here.
+        // puts it in --disallowed-tools for those scenarios, so no imEventBus fan-out here.
         break;
       }
 
@@ -1611,13 +1723,24 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         // registerSessionMetadataIfNew runs and then updateSessionMetadata succeeds
         // on the next session_init or turn_complete.
         if (lastSessionId && event.sessionId !== lastSessionId) {
-          const updated = updateSessionMetadata(lastSessionId, { runtimeSessionId: event.sessionId });
-          if (!updated) {
-            // Metadata doesn't exist yet (pre-warm). The in-memory lastRuntimeSessionId
-            // is already set above. When registerSessionMetadataIfNew creates the metadata
-            // later, we need to patch it. Schedule a deferred update with session affinity.
-            deferredRuntimeSessionId = { forSessionId: lastSessionId, runtimeSessionId: event.sessionId };
-          }
+          // Eagerly schedule the deferred patch with session affinity. If
+          // updateSessionMetadata succeeds (metadata already exists), clear it.
+          // If metadata doesn't exist yet (pre-warm path), the deferred entry
+          // will be consumed later by registerSessionMetadataIfNew.
+          // handleUnifiedEvent is a sync stream callback — fire-and-forget the
+          // async lock-protected write.
+          const targetSessionId = lastSessionId;
+          const targetRuntimeId = event.sessionId;
+          deferredRuntimeSessionId = { forSessionId: targetSessionId, runtimeSessionId: targetRuntimeId };
+          void updateSessionMetadata(targetSessionId, { runtimeSessionId: targetRuntimeId })
+            .then((updated) => {
+              if (updated && deferredRuntimeSessionId?.forSessionId === targetSessionId
+                  && deferredRuntimeSessionId.runtimeSessionId === targetRuntimeId) {
+                // Metadata existed — persist succeeded; drop the deferred slot.
+                deferredRuntimeSessionId = null;
+              }
+            })
+            .catch((err) => console.warn('[external-session] runtimeSessionId persist failed:', err));
         }
       }
       const info: SystemInitInfo = {
@@ -1674,7 +1797,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       lastTurnSucceeded = true;
       clearWatchdog();
       console.log(`[external-session] turn_complete: text=${currentAssistantText.length}chars, blocks=${currentContentBlocks.length}, elapsed=${currentTurnStartTime ? Date.now() - currentTurnStartTime : 0}ms`);
-      persistTurnResult();
+      // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
+      void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (turn_complete) failed:', err));
       break;
     }
 
@@ -1706,7 +1830,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
           if (!turnCompleted) {
             lastTurnSucceeded = true;
-            persistTurnResult();
+            // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
+            void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (session_complete) failed:', err));
           }
         } else {
           const errorMessage = event.result || 'Session ended with error';

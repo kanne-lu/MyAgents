@@ -3449,6 +3449,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // `tokio::spawn` is fine inside `#[tokio::test]` — the test attribute
+    // provides the runtime context. Allow the project-wide ban only here.
+    #[allow(clippy::disallowed_methods)]
     async fn concurrent_creates_preserve_all_rows() {
         ensure_test_docs_root();
         let dir = tempdir().unwrap();

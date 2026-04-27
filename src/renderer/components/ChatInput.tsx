@@ -2,6 +2,7 @@ import { ArrowUp, Loader2, Paperclip, Square } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
+import { stripMacFunctionKeys } from '@/utils/macFunctionKeyFilter';
 
 import type { ChatModelPreference, SmartModelVariant } from '../../shared/types/ipc';
 
@@ -288,7 +289,7 @@ export default function ChatInput({
           <textarea
             ref={textareaRef}
             value={value}
-            onChange={(e) => onChange(e.target.value)}
+            onChange={(e) => onChange(stripMacFunctionKeys(e.target.value))}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
             placeholder="How can I help you today?"

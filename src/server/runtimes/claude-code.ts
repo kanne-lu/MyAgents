@@ -6,7 +6,7 @@
 // System prompt: --append-system-prompt (or --bare + --append-system-prompt for IM)
 // Session: --session-id / --resume
 
-import { spawn, type Subprocess } from 'bun';
+import { spawn, type Subprocess } from '../utils/subprocess';
 import { writeFileSync , existsSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
@@ -14,6 +14,8 @@ import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
+import { killWithEscalation } from './utils/kill-with-escalation';
+import { withLogContext } from '../logger-context';
 
 /**
  * Build CC CLI message content — string for text-only, array of content blocks for images+text.
@@ -112,14 +114,11 @@ class ClaudeCodeProcess implements RuntimeProcess {
   async writeLine(line: string): Promise<void> {
     if (this.exited) throw new Error('Process has exited');
     const stdin = this.proc.stdin;
-    if (!stdin || typeof stdin === 'number') throw new Error('stdin not available');
-    // Bun's FileSink has .write() and .flush()
-    const sink = stdin as { write(data: Uint8Array): number; flush(): void };
-    sink.write(this.encoder.encode(line + '\n'));
-    sink.flush();
+    if (!stdin) throw new Error('stdin not available');
+    await stdin.write(this.encoder.encode(line + '\n'));
   }
 
-  kill(signal?: number): void {
+  kill(signal?: NodeJS.Signals | number): void {
     if (this.exited) return;
     try {
       this.proc.kill(signal ?? 15); // SIGTERM
@@ -132,14 +131,17 @@ class ClaudeCodeProcess implements RuntimeProcess {
     return code;
   }
 
-  /** Close stdin to signal the process to finish */
-  closeStdin(): void {
+  /**
+   * Close stdin to signal the process to finish.
+   * Resolves when the EOF has been flushed to the child's stdin — lets
+   * graceful-shutdown callers know the signal has actually propagated.
+   */
+  async closeStdin(): Promise<void> {
     const stdin = this.proc.stdin;
-    if (!stdin || typeof stdin === 'number') return;
+    if (!stdin) return;
     try {
-      const sink = stdin as { end(): void };
-      sink.end();
-    } catch { /* ignore */ }
+      await stdin.end();
+    } catch { /* already closed / EPIPE */ }
   }
 }
 
@@ -331,12 +333,18 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
     // Augment PATH with user-level directories (e.g. ~/.local/bin where `claude` lives).
     // NOTE: Also inherits NO_PROXY from Sidecar (injected by proxy_config::apply_to_subprocess()).
+    //
+    // `detached: true` puts the runtime CLI in its own process group on POSIX so
+    // we can later kill the entire tree via `process.kill(-pid, signal)`. Pre-fix,
+    // `proc.kill()` only signalled the wrapper and orphaned model/tool subprocesses
+    // (see killWithEscalation `killTree`).
     const proc = spawn([resolveCommand('claude'), ...args], {
       cwd: options.workspacePath,
       env: augmentedProcessEnv(),
       stdout: 'pipe',
       stderr: 'pipe',
       stdin: 'pipe',
+      detached: true,
     });
 
     const handle = new ClaudeCodeProcess(proc);
@@ -353,8 +361,16 @@ export class ClaudeCodeRuntime implements AgentRuntime {
       console.log(`[claude-code] Initial message sent via stdin (${options.initialMessage.length} chars, ${options.initialImages?.length ?? 0} images)`);
     }
 
+    if (!proc.stdout || !proc.stderr) {
+      throw new Error('Claude Code process: stdout/stderr pipes unavailable');
+    }
+    // Pattern 6: every console.* and onEvent invocation triggered by the
+    // event-pump runs inside an ALS frame stamped with `runtime` so the
+    // unified log can be filtered by runtime. We wrap the read loops, NOT
+    // the kill()/stopExternalSession path (P0-1 territory — must not
+    // change behaviour there).
     // Read stderr for logging
-    this.readStderr(proc.stderr);
+    void withLogContext({ runtime: 'claude-code' }, () => this.readStderr(proc.stderr!));
 
     // Track process exit — only emit session_complete if NDJSON parser didn't already
     let sessionCompleteEmitted = false;
@@ -366,7 +382,10 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Start reading stdout NDJSON in background (uses wrappedOnEvent).
     // Capture the promise so the exit handler can wait for the reader to drain
     // all buffered data before deciding whether to emit a fallback session_complete.
-    const readerDone = this.readEvents(proc.stdout, wrappedOnEvent, handle);
+    const readerDone = withLogContext(
+      { runtime: 'claude-code' },
+      () => this.readEvents(proc.stdout!, wrappedOnEvent, handle),
+    );
 
     proc.exited.then(async (code) => {
       handle.exited = true;
@@ -446,18 +465,19 @@ export class ClaudeCodeRuntime implements AgentRuntime {
   async stopSession(process: RuntimeProcess): Promise<void> {
     if (process.exited) return;
 
-    // Close stdin to let CC finish naturally
-    (process as ClaudeCodeProcess).closeStdin();
+    // Close stdin to let CC finish naturally (awaits EOF propagation)
+    await (process as ClaudeCodeProcess).closeStdin();
 
-    // Wait briefly then force kill
-    const timeout = setTimeout(() => {
-      if (!process.exited) {
-        process.kill(15); // SIGTERM
-      }
-    }, 5000);
-
-    await process.waitForExit().catch(() => { });
-    clearTimeout(timeout);
+    await killWithEscalation(process as ClaudeCodeProcess, {
+      gracefulMs: 5000,
+      hardMs: 2000,
+      killTree: true,
+      onStep: (step, info) => {
+        if (step === 'orphan') {
+          console.warn(`[claude-code] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);
+        }
+      },
+    });
 
     // Clean up per-process hook settings file
     try {

@@ -19,7 +19,127 @@ import { createCompatRuntime } from './compat-runtime';
 import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
+import { serve as honoServe } from '@hono/node-server';
+import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { registerHooks } from 'node:module';
 import { parseArgs } from 'util';
+
+// =============================================================================
+// Plugin compat loader — runtime patch for broken community plugins
+// =============================================================================
+// Some published OpenClaw plugins (e.g. @larksuite/openclaw-lark all versions)
+// have a build-pipeline bug: they emit CJS files (`"use strict";
+// Object.defineProperty(exports, ...); exports.X = Y`) that also reference
+// `import.meta.url` inside function bodies. Node's module classifier sees
+// `import.meta` anywhere in a .js file → forces ESM parsing → the CJS
+// `exports` global becomes undefined → ReferenceError at load.
+//
+// Bun tolerated this silently; Node (spec-compliant) rejects it. Rather than
+// wait for every broken plugin to republish, we register a sync loader hook
+// (`module.registerHooks` — Node 22.15+) that intercepts .js files from plugin
+// node_modules trees. On detecting the CJS+import.meta mixed pattern it:
+//   1. Rewrites `fileURLToPath(import.meta.url)` → `__filename`
+//   2. Rewrites any remaining `import.meta.url` → `pathToFileURL(__filename).href`
+//   3. Forces CJS classification (`format: 'commonjs'`) so Node accepts the file
+//
+// IMPORTANT: Must use `registerHooks()` (sync), NOT `register()` (async).
+// When a CJS file calls `require(broken.js)`, Node pivots to `loadESMFromCJS`
+// synchronously on the main thread — async hooks are not invoked on that path.
+// Only sync hooks catch it.
+const PLUGIN_PATH_RE = /[/\\]openclaw-plugins[/\\][^/\\]+[/\\]node_modules[/\\]/;
+
+registerHooks({
+  load(url, context, next) {
+    if (!url.startsWith('file://') || !url.endsWith('.js') || !PLUGIN_PATH_RE.test(url)) {
+      return next(url, context);
+    }
+    let src: string;
+    try {
+      src = readFileSync(fileURLToPath(url), 'utf8');
+    } catch {
+      return next(url, context);
+    }
+    const hasImportMeta = /\bimport\.meta\b/.test(src);
+    // Detect CJS-style exports: top of file is `"use strict"` and file has any
+    // of the three CJS export patterns. Don't restrict distance — copyright
+    // header comments between them can be >200 chars.
+    const hasCjsExports = /^"use strict";/.test(src)
+      && /\b(?:Object\.defineProperty\(exports|exports\.[\w$]+\s*=|module\.exports\s*=)/.test(src);
+    if (!hasImportMeta || !hasCjsExports) {
+      return next(url, context);
+    }
+    const patched = src
+      .replace(/\(0,\s*[\w$.]+\.fileURLToPath\)\(import\.meta\.url\)/g, '__filename')
+      .replace(/\bfileURLToPath\(import\.meta\.url\)/g, '__filename')
+      .replace(/\bimport\.meta\.url\b/g, 'require("node:url").pathToFileURL(__filename).href');
+    return { format: 'commonjs', source: patched, shortCircuit: true };
+  },
+});
+// =============================================================================
+
+/**
+ * Shape subset of package.json fields this module reads. Bun.file(p).json()
+ * previously returned `any`; we keep ad-hoc shape so callers can do
+ * pkg.dependencies / pkg.version / pkg.main without narrowing.
+ */
+type PkgJsonLike = {
+  name?: string;
+  version?: string;
+  main?: string;
+  module?: string;
+  exports?: unknown;
+  type?: string;
+  keywords?: string[];
+  openclaw?: unknown;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+} & Record<string, unknown>;
+
+async function readJsonFile(path: string, fallback?: PkgJsonLike): Promise<PkgJsonLike> {
+  try {
+    const raw = await readFile(path, 'utf8');
+    return JSON.parse(raw) as PkgJsonLike;
+  } catch {
+    if (fallback !== undefined) return fallback;
+    throw new Error(`Failed to read JSON: ${path}`);
+  }
+}
+
+/**
+ * Resolve an OpenClaw plugin's entry file inside its package directory.
+ *
+ * Implements the protocol from openclaw/src/plugins/manifest.ts:
+ *   1. package.json["openclaw"].extensions: [path, ...] — explicit per-package entries
+ *   2. Fallback: probe DEFAULT_PLUGIN_ENTRY_CANDIDATES at the package root
+ *
+ * Returns the first existing absolute path, or null if none found.
+ */
+const DEFAULT_PLUGIN_ENTRY_CANDIDATES = ['index.ts', 'index.js', 'index.mjs', 'index.cjs'] as const;
+
+async function resolveOpenClawPluginEntry(packageDir: string): Promise<string | null> {
+  const pkg = await readJsonFile(`${packageDir}/package.json`, {}) as {
+    openclaw?: { extensions?: unknown };
+  };
+  const rawExts = pkg.openclaw?.extensions;
+  const declared = Array.isArray(rawExts)
+    ? rawExts.filter((e): e is string => typeof e === 'string' && e.length > 0)
+    : [];
+
+  const candidates = declared.length > 0 ? declared : DEFAULT_PLUGIN_ENTRY_CANDIDATES;
+  for (const rel of candidates) {
+    const abs = `${packageDir}/${rel.replace(/^\.\//, '')}`;
+    try {
+      await readFile(abs); // existence check
+      return abs;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
 
 // Parse CLI arguments
 const { values: args } = parseArgs({
@@ -78,7 +198,7 @@ let pluginWithTicket: ((ticket: Record<string, unknown>, fn: () => Promise<unkno
 async function loadPlugin() {
   // Find the plugin entry point FIRST — we need the module name to infer the channel brand
   const pkgJsonPath = `${pluginDir}/package.json`;
-  const pkgJson = await Bun.file(pkgJsonPath).json().catch(() => ({}));
+  const pkgJson = await readJsonFile(pkgJsonPath, {});
 
   // Find installed packages (look in node_modules for packages with openclaw metadata)
   const deps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
@@ -87,7 +207,7 @@ async function loadPlugin() {
   for (const depName of Object.keys(deps || {})) {
     if (depName === 'openclaw') continue; // Skip the shim
     try {
-      const depPkg = await Bun.file(`${pluginDir}/node_modules/${depName}/package.json`).json();
+      const depPkg = await readJsonFile(`${pluginDir}/node_modules/${depName}/package.json`, {});
       if (depPkg.openclaw || depPkg.keywords?.includes('openclaw')) {
         entryModule = depName;
         pluginName = depPkg.name || depName;
@@ -163,31 +283,48 @@ async function loadPlugin() {
   }
 
   // Import the plugin module.
-  // Prefer the `module` field (ESM entry) over `main` (CJS entry) when available.
-  // Some plugins ship both CJS and ESM, but their CJS bundles `require()` ESM-only
-  // dependencies (e.g. file-type v21+) which fails in Bun. Using the ESM entry
-  // avoids this CJS→ESM incompatibility.
-  let importPath = `${pluginDir}/node_modules/${entryModule}`;
-  try {
-    const pluginPkg = await Bun.file(`${pluginDir}/node_modules/${entryModule}/package.json`).json();
-    if (pluginPkg.module) {
-      importPath = `${pluginDir}/node_modules/${entryModule}/${pluginPkg.module}`;
-      console.log(`[plugin-bridge] Using ESM entry: ${pluginPkg.module}`);
-    }
-  } catch { /* use default resolution */ }
-  const pluginModule = await import(importPath);
+  //
+  // Resolution follows the OpenClaw package manifest protocol — the authoritative
+  // source of truth for a plugin's entry point, not package.json's `main`/`exports`:
+  //
+  //   1. `package.json["openclaw"].extensions: [path, ...]` (OpenClaw convention)
+  //   2. Fallback probe: DEFAULT_PLUGIN_ENTRY_CANDIDATES
+  //      = ["index.ts", "index.js", "index.mjs", "index.cjs"]
+  //
+  // Reference: openclaw/src/plugins/manifest.ts::resolvePackageExtensionEntries
+  //           openclaw/src/plugins/discovery.ts (around line 885)
+  //
+  // Why not rely on `main`/`exports`:
+  //   - lark's main="./dist/index.js" but dist/ isn't in the published tarball
+  //   - qqbot's main="./dist/index.js" but only index.ts is shipped
+  //   - Many plugins declare aspirational build outputs that don't exist
+  //
+  // `openclaw.extensions` points to actually-shipped files by convention.
+  const pluginPkgDir = `${pluginDir}/node_modules/${entryModule}`;
+  const resolvedEntry = await resolveOpenClawPluginEntry(pluginPkgDir);
+  if (!resolvedEntry) {
+    throw new Error(
+      `Plugin entry not found for ${entryModule}. Checked ` +
+      `package.json["openclaw"].extensions and fallback candidates ` +
+      `(index.ts/.js/.mjs/.cjs) under ${pluginPkgDir}`
+    );
+  }
+  console.log(`[plugin-bridge] Using entry: ${resolvedEntry}`);
+  const pluginModule: Record<string, unknown> = await import(pathToFileURL(resolvedEntry).href);
 
   // Plugins can export their registration in several patterns:
   //   1. default export = { register(api) { ... } }  (OpenClaw standard)
   //   2. default export = function(api) { ... }       (simple)
   //   3. module.default.default                       (double-wrapped ESM)
-  const exported = pluginModule.default || pluginModule;
-  if (typeof exported === 'object' && typeof exported.register === 'function') {
-    await exported.register(compatApi);
+  const exported = (pluginModule.default ?? pluginModule) as Record<string, unknown>;
+  const register = exported.register;
+  const nestedRegister = (exported.default as Record<string, unknown> | undefined)?.register;
+  if (typeof exported === 'object' && typeof register === 'function') {
+    await (register as (api: unknown) => unknown)(compatApi);
   } else if (typeof exported === 'function') {
-    await exported(compatApi);
-  } else if (typeof exported === 'object' && typeof exported.default?.register === 'function') {
-    await exported.default.register(compatApi);
+    await (exported as unknown as (api: unknown) => unknown)(compatApi);
+  } else if (typeof exported === 'object' && typeof nestedRegister === 'function') {
+    await (nestedRegister as (api: unknown) => unknown)(compatApi);
   }
 
   capturedPlugin = compatApi.getCapturedPlugin();
@@ -218,16 +355,17 @@ async function loadPlugin() {
   // MCP tool calls arrive as separate HTTP requests — outside the original
   // withTicket() scope — so we must re-inject the ticket before tool.execute().
   //
-  // NOTE: require.resolve() with subpath fails because the plugin's package.json
-  // "exports" field only exposes ".". Use absolute path require() instead —
-  // verified to share the same AsyncLocalStorage instance as the plugin's own code.
+  // NOTE: the plugin's package.json "exports" field only exposes "." so we
+  // can't resolve the subpath via normal import — load the absolute path directly.
+  // Dynamic import() of the CJS module shares the same AsyncLocalStorage instance
+  // as the plugin's own code (verified), which is the whole point.
   if (entryModule && /lark|feishu/i.test(entryModule)) {
     try {
       const ticketPath = `${pluginDir}/node_modules/${entryModule}/src/core/lark-ticket.js`;
-      // eslint-disable-next-line @typescript-eslint/no-require-imports -- runtime dynamic load, must share AsyncLocalStorage instance
-      const ticketMod = require(ticketPath);
-      if (typeof ticketMod.withTicket === 'function') {
-        pluginWithTicket = ticketMod.withTicket;
+      const ticketMod = await import(pathToFileURL(ticketPath).href);
+      const withTicket = ticketMod.withTicket ?? ticketMod.default?.withTicket;
+      if (typeof withTicket === 'function') {
+        pluginWithTicket = withTicket;
         console.log('[plugin-bridge] Discovered withTicket() for LarkTicket context injection');
       }
     } catch {
@@ -364,14 +502,83 @@ async function loadPlugin() {
 }
 
 // Start HTTP server for Rust → Bridge communication
-const server = Bun.serve({
+const server = honoServe({
   port,
-  async fetch(req) {
+  fetch: async (req) => {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    if (path === '/health') {
+    // Pattern 4: three orthogonal health probes.
+    //   /health             — legacy alias for /health/live (Rust watchdog
+    //                         pre-rollout still polls this; keep compatible).
+    //   /health/live        — bridge process is alive + listening.
+    //   /health/ready       — plugin loaded AND gateway registered/started
+    //                         (or waiting-for-QR-login). Failure ⇒ structured 503.
+    //   /health/functional  — gateway has had a successful forward to Rust
+    //                         in the last 60s. Failure ⇒ "alive but not
+    //                         actually serving" (watchdog should restart).
+    if (path === '/health' || path === '/health/live') {
       return Response.json({ ok: true, pluginName });
+    }
+
+    if (path === '/health/ready') {
+      // Loaded plugin + gateway started (or waiting on QR) + no fatal error.
+      const pluginLoaded = !!capturedPlugin;
+      const gatewayOk = pluginLoaded && !gatewayError && (gatewayStarted || waitingForQrLogin);
+      if (gatewayOk) {
+        return Response.json({ state: 'ready', pluginName, waitingForQrLogin });
+      }
+      const reason: string =
+        !pluginLoaded ? 'plugin-not-loaded'
+        : gatewayError ? 'gateway-error'
+        : 'gateway-not-started';
+      return Response.json({
+        state: 'pending',
+        reason,
+        pluginName,
+        error: gatewayError || undefined,
+        waitingForQrLogin,
+      }, { status: 503 });
+    }
+
+    if (path === '/health/functional') {
+      // Functional = readiness + recent forward (or, if the plugin has no
+      // gateway at all because it's send-only, we accept readiness alone).
+      const pluginLoaded = !!capturedPlugin;
+      const gatewayOk = pluginLoaded && !gatewayError && (gatewayStarted || waitingForQrLogin);
+      if (!gatewayOk) {
+        return Response.json({
+          state: 'unready',
+          reason: !pluginLoaded ? 'plugin-not-loaded' : gatewayError ? 'gateway-error' : 'gateway-not-started',
+          error: gatewayError || undefined,
+        }, { status: 503 });
+      }
+      const lastForward = (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt;
+      const hasGateway = typeof capturedPlugin?.gateway?.startAccount === 'function';
+      // Send-only channels never forward inbound messages; consider them
+      // functional whenever they're ready.
+      if (!hasGateway) {
+        return Response.json({ state: 'functional', reason: 'send-only' });
+      }
+      // Just-started bridges may not have seen any traffic yet — give a
+      // grace period equal to the staleness window before we judge.
+      const STALENESS_MS = 60_000;
+      const ageMs = lastForward ? Date.now() - lastForward : Infinity;
+      if (waitingForQrLogin) {
+        // Waiting on user to scan a QR code — no traffic expected yet.
+        return Response.json({ state: 'functional', reason: 'awaiting-qr-login' });
+      }
+      if (ageMs <= STALENESS_MS) {
+        return Response.json({ state: 'functional', lastForwardMsAgo: ageMs });
+      }
+      // Either no forward ever, or last forward >60s ago. We can't easily
+      // ping the gateway from here without plugin-specific code, so report
+      // staleness as "unknown" rather than "broken" for ready-but-quiet bots.
+      return Response.json({
+        state: lastForward ? 'stale' : 'unknown',
+        lastForwardMsAgo: lastForward ? ageMs : null,
+        message: 'no successful forward in the last 60s',
+      });
     }
 
     if (path === '/status') {
@@ -946,7 +1153,10 @@ const server = Bun.serve({
   },
 });
 
-console.log(`[plugin-bridge] HTTP server listening on port ${server.port}`);
+// honoServe returns a Node http.Server whose address() resolves after 'listening'.
+const serverAddr = server.address();
+const listenPort = typeof serverAddr === 'object' && serverAddr ? serverAddr.port : port;
+console.log(`[plugin-bridge] HTTP server listening on port ${listenPort}`);
 
 // Load the plugin
 loadPlugin().catch((err) => {

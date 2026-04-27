@@ -14,6 +14,22 @@ export interface BaseEventParams {
 }
 
 /**
+ * 触发来源 — GUI/CLI/Cron/IM 共用枚举。
+ *
+ * 适用规则：当一个事件可以由多个入口触发（例如任务创建既可以通过 GUI
+ * 的"+ 新建"按钮，也可以通过 `myagents task create-direct` CLI），就必须
+ * 带上这个字段，方便后续按渠道做拆分分析。详见 `analytics_design.md` §4.3。
+ *
+ * 取值约定：
+ *   - `desktop`     桌面端 GUI（未来若有移动端 app，再加 `mobile`）
+ *   - `cli`         用户在终端手动跑 `myagents` 命令
+ *   - `cli_agent`   AI 子进程（agent）通过 CLI 调用（`MYAGENTS_PORT` 在环境里）
+ *   - `cron`        定时任务调度器
+ *   - `im`          IM Bot（飞书 / Telegram / 钉钉）
+ */
+export type Source = 'desktop' | 'cli' | 'cli_agent' | 'cron' | 'im';
+
+/**
  * 事件名称枚举
  *
  * 注意：每个事件都必须有对应的 track() 调用实现
@@ -49,6 +65,9 @@ export type EventName =
   // Agent & Skill
   | 'agent_add'
   | 'agent_remove'
+  | 'agent_channel_create'
+  | 'agent_channel_remove'
+  | 'agent_channel_toggle'
   | 'skill_use'
   // IM Bot
   | 'im_bot_create'
@@ -72,7 +91,16 @@ export type EventName =
   | 'cron_enable'
   | 'cron_start'
   | 'cron_stop'
-  | 'cron_recover';
+  | 'cron_recover'
+  // 任务中心（GUI + CLI 双触发面，带 source 字段）
+  | 'task_create'
+  | 'task_run'
+  | 'task_stop'
+  | 'task_delete'
+  | 'task_align_discuss'
+  // 启动页 / 想法输入
+  | 'launcher_mode_switch'
+  | 'thought_create';
 
 /**
  * message_send 事件参数
@@ -97,6 +125,96 @@ export interface MessageCompleteParams {
   cache_creation_tokens: number; // 缓存创建 tokens
   tool_count: number;            // 工具调用次数
   duration_ms: number;           // 响应耗时（毫秒）
+}
+
+/**
+ * task_create 事件参数
+ */
+export interface TaskCreateParams {
+  source: Source;
+  /**
+   * 创建路径来源 — 区分"凭空新建"和"从想法派发"两种业务语义，
+   * 跟 `source` 字段（触发渠道）正交。
+   */
+  origin: 'manual' | 'thought_dispatch';
+  has_workspace: boolean;
+}
+
+/**
+ * task_run 事件参数
+ */
+export interface TaskRunParams {
+  source: Source;
+  /**
+   * 第几次执行 — 1 = 首次派发；>1 = 重新派发（rerun）。
+   * 取值来自任务的 `sessionIds.length + 1`，即"如果这次执行成功，将是第几次"。
+   *
+   * `null` 仅出现在 CLI 路径上，且当且仅当预读任务记录失败时（罕见 — 例如
+   * Rust Mgmt API 临时不可达）。前端永远填实数。
+   */
+  run_count: number | null;
+}
+
+/**
+ * task_stop / task_delete 事件参数
+ */
+export interface TaskStopParams {
+  source: Source;
+}
+
+export interface TaskDeleteParams {
+  source: Source;
+  /** 删除时任务所处状态（todo / running / done / archived 等） */
+  status: string;
+}
+
+/**
+ * agent_channel_create / agent_channel_remove 事件参数
+ *
+ * 双触发面：
+ *   - GUI（ChannelWizard / ChannelDetailView）→ source: 'desktop'
+ *   - CLI（`myagents agent channel add/remove`）→ source: cliSource()
+ */
+export interface AgentChannelMutationParams {
+  source: Source;
+  /**
+   * 渠道类型：`'feishu'` / `'telegram'` / `'dingtalk'` / `'openclaw:<plugin>'`
+   * / `'unknown'`（仅 GUI 删除路径，channelRef 已被清空时的兜底）。
+   */
+  platform: string;
+}
+
+/**
+ * agent_channel_toggle 事件参数
+ *
+ * 当前 GUI 独有（CLI 没有 enable/disable 子命令）。如果未来 CLI 加上等价
+ * 命令，再扩展为带 `source` 的形式。
+ */
+export interface AgentChannelToggleParams {
+  platform: string;
+  enabled: boolean;
+}
+
+/**
+ * launcher_mode_switch 事件参数
+ *
+ * GUI 独有 —— CLI 没有 launcher 概念，所以不带 `source` 字段。
+ */
+export interface LauncherModeSwitchParams {
+  to: 'task' | 'thought';
+  via: 'click' | 'shortcut';
+}
+
+/**
+ * thought_create 事件参数
+ */
+export interface ThoughtCreateParams {
+  source: Source;
+  /**
+   * UI 上的入口位置 —— 仅在 `source === 'desktop'` 时有意义；
+   * CLI 触发时为 `null`。
+   */
+  location: 'launcher' | 'task_center' | null;
 }
 
 /**

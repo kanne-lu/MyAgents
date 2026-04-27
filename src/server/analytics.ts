@@ -1,9 +1,9 @@
 /**
  * Server-side Analytics
  *
- * Lightweight event tracker for the Bun Sidecar.
+ * Lightweight event tracker for the Node Sidecar.
  * Reads config from ~/.myagents/analytics_config.json (written by frontend at startup).
- * Sends events directly via fetch() — no CORS restrictions in Bun.
+ * Sends events directly via fetch() — Node 20+'s undici-based fetch has no CORS.
  */
 
 import { readFileSync } from 'fs';

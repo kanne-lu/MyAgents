@@ -29,8 +29,8 @@ import type { SystemInitInfo } from '../../shared/types/system';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
-import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
-import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache } from '@/api/tauriClient';
+import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
+import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache, setActiveCorrelation } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import type { PermissionMode } from '@/config/types';
@@ -45,6 +45,13 @@ import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTas
 
 /** Minimum QA rounds before triggering AI title generation */
 const AUTO_TITLE_MIN_ROUNDS = 3;
+
+// Pattern 3 §3.2.2 — display cap on streaming tool results. The renderer
+// truncates the inline result to this many characters; the full result is
+// available on completion (and Pattern 2's maybeSpill makes it accessible
+// via the /refs/:id endpoint when oversize).
+const TOOL_RESULT_DISPLAY_CAP = 8 * 1024;
+const TOOL_RESULT_TAIL_KEEP = 1024;
 
 /**
  * Force-complete any unclosed thinking blocks in a content array.
@@ -462,6 +469,12 @@ export default function TabProvider({
         isNewSessionRef.current = true;
         clearSessionActive();
         toolNameMapRef.current.clear();
+        // Pattern 3 §3.2.2 — reset delta buffers; stale fragments from a prior
+        // session must not leak into a fresh tool block keyed on a recycled id.
+        pendingToolResultDeltasRef.current.clear();
+        pendingToolInputDeltasRef.current.clear();
+        pendingSubagentToolResultDeltasRef.current.clear();
+        pendingSubagentToolInputDeltasRef.current.clear();
         setIsLoading(false);
         setSessionState('idle');  // Reset session state for new conversation
         setSystemStatus(null);
@@ -536,20 +549,58 @@ export default function TabProvider({
         setLogs([]);
     }, []);
 
-    // Listen for React frontend logs
+    // Pattern 6: subscribe to the global FrontendLogStore with a tab-id
+    // filter. Replaces the legacy "every TabProvider keeps its own copy of
+    // every React log" model — entries with no tabId pass through (global)
+    // and entries stamped for THIS tab are surfaced to its UI panel.
     useEffect(() => {
-        const handleReactLog = (event: Event) => {
-            const customEvent = event as CustomEvent<LogEntry>;
-            appendUnifiedLog(customEvent.detail);
-        };
+        const unsubscribe = subscribeFrontendLogs((entry) => {
+            appendUnifiedLog(entry);
+        }, tabId);
+        return () => { unsubscribe(); };
+    }, [appendUnifiedLog, tabId]);
 
-        window.addEventListener(REACT_LOG_EVENT, handleReactLog);
+    // Pattern 6 (FIXED): focus-aware tab registry. The previous "last mounted
+    // wins" model mis-tagged logs and `X-MyAgents-Tab-Id` headers in multi-tab
+    // sessions. Now each TabProvider mounts its tabId into the registry on
+    // mount and removes it on unmount; document-visibility transitions move
+    // the "focused" pointer so the active tab claims correlation.
+    useEffect(() => {
+        setCurrentTabId(tabId, true);
+        setActiveCorrelation({ tabId, mounted: true });
+
+        const handleVisibility = (): void => {
+            if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+                // The browser/Tauri webview only has one "visible" state per
+                // window; the active tab is whichever TabProvider is currently
+                // mounted with focus. Promote ourselves on each visibility-on.
+                import('@/utils/frontendLogger').then(({ setFocusedTabId }) => {
+                    setFocusedTabId(tabId);
+                }).catch(() => { /* ignore */ });
+                import('@/api/tauriClient').then(({ setFocusedCorrelationTabId }) => {
+                    setFocusedCorrelationTabId(tabId);
+                }).catch(() => { /* ignore */ });
+            }
+        };
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', handleVisibility);
+            // Run once at mount to claim focus if we're the visible tab.
+            handleVisibility();
+        }
+
         return () => {
-            window.removeEventListener(REACT_LOG_EVENT, handleReactLog);
+            if (typeof document !== 'undefined') {
+                document.removeEventListener('visibilitychange', handleVisibility);
+            }
+            // Pattern 6 fix: unmount cleanly. Without this, a closed tab's id
+            // would linger in the registry and could be picked as "fallback"
+            // for global logs, mis-tagging them with a dead tab.
+            setCurrentTabId(tabId, false);
+            setActiveCorrelation({ tabId, mounted: false });
         };
-    }, [appendUnifiedLog]);
+    }, [tabId]);
 
-    // Listen for Rust logs via Tauri events (unified with React/Bun logs)
+    // Listen for Rust logs via Tauri events (unified with React/Node logs)
     // Note: Rust logs are only displayed in UI, NOT persisted via frontend API
     // This avoids a log loop: Rust log → API call → Rust proxy logs the call → new Rust log → ...
     useEffect(() => {
@@ -577,6 +628,23 @@ export default function TabProvider({
     // reducing 50 render/s to ~16 render/s during streaming.
     const pendingChunksRef = useRef<string[]>([]);
     const rafIdRef = useRef<number | null>(null);
+
+    // ─── Pattern 3 §3.2.2 — RAF batching for tool-result deltas + tool-input deltas ───
+    // Per-tool-id buffer. Each tool-result-delta event was previously its own
+    // setStreamingMessage(...) update + string concat — that's O(deltas × n)
+    // when the SDK emits a 5 MB result in 50 KB chunks. Now we accumulate
+    // fragments per tool id and flush once per RAF (~16 ms).
+    //
+    // Subagent variants are keyed `<parentToolUseId>:<toolUseId>` to avoid
+    // colliding with same-id local-tool deltas in nested Task calls.
+    interface PendingDeltaBuffer {
+        fragments: string[];
+        flushScheduled: boolean;
+    }
+    const pendingToolResultDeltasRef = useRef<Map<string, PendingDeltaBuffer>>(new Map());
+    const pendingToolInputDeltasRef = useRef<Map<string, PendingDeltaBuffer>>(new Map());
+    const pendingSubagentToolResultDeltasRef = useRef<Map<string, PendingDeltaBuffer>>(new Map());
+    const pendingSubagentToolInputDeltasRef = useRef<Map<string, PendingDeltaBuffer>>(new Map());
 
     const flushPendingChunks = useCallback(() => {
         rafIdRef.current = null;
@@ -629,6 +697,135 @@ export default function TabProvider({
         }
     }, [flushPendingChunks]);
 
+    // ── Pattern 3 §3.2.2 — flush helpers for tool-result / tool-input deltas ──
+    // Truncate the displayed inline tool result to 8 KB so an O(n²) re-render
+    // does not occur when the SDK emits multi-MB results. Pattern 2's
+    // `maybeSpill` already runs on the sidecar before the SSE event leaves
+    // the process; the renderer-side cap is a defence-in-depth bound on the
+    // *displayed* text length, not on persisted data. Constants live at
+    // module scope so the useCallback deps stay clean.
+
+    const flushPendingToolResultDelta = useCallback((toolUseId: string) => {
+        const buf = pendingToolResultDeltasRef.current.get(toolUseId);
+        if (!buf) return;
+        buf.flushScheduled = false;
+        if (buf.fragments.length === 0) return;
+        const merged = buf.fragments.join('');
+        buf.fragments = [];
+        setStreamingMessage(prev => {
+            if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
+            const idx = prev.content.findIndex(b => isToolBlock(b) && b.tool?.id === toolUseId);
+            if (idx === -1) return prev;
+            const block = prev.content[idx];
+            if (!isToolBlock(block) || !block.tool) return prev;
+            const existing = block.tool.result || '';
+            let nextResult = existing + merged;
+            if (nextResult.length > TOOL_RESULT_DISPLAY_CAP) {
+                // Keep head + tail; middle is dropped from the *displayed* state.
+                const head = nextResult.slice(0, TOOL_RESULT_DISPLAY_CAP - TOOL_RESULT_TAIL_KEEP);
+                const tail = nextResult.slice(-TOOL_RESULT_TAIL_KEEP);
+                nextResult = `${head}\n…[truncated for display; full result available on completion]…\n${tail}`;
+            }
+            const updated = [...prev.content];
+            updated[idx] = {
+                ...block,
+                tool: { ...block.tool, result: nextResult, isLoading: true },
+            };
+            return { ...prev, content: updated };
+        });
+    }, [setStreamingMessage]);
+
+    const flushPendingToolInputDelta = useCallback((toolUseId: string) => {
+        const buf = pendingToolInputDeltasRef.current.get(toolUseId);
+        if (!buf) return;
+        buf.flushScheduled = false;
+        if (buf.fragments.length === 0) return;
+        const merged = buf.fragments.join('');
+        buf.fragments = [];
+        setStreamingMessage(prev => {
+            if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
+            const contentArray = prev.content;
+            const idx = contentArray.findIndex(b => b.type === 'tool_use' && b.tool?.id === toolUseId);
+            if (idx === -1) return prev;
+            const block = contentArray[idx];
+            if (block.type !== 'tool_use' || !block.tool) return prev;
+            const newInputJson = (block.tool.inputJson || '') + merged;
+            // Pattern 3 §3.2.2 — only re-parse on flush, not on every delta.
+            const parsedInput = parsePartialJson<ToolInput>(newInputJson);
+            const updated = [...contentArray];
+            updated[idx] = {
+                ...block,
+                tool: { ...block.tool, inputJson: newInputJson, parsedInput: parsedInput || block.tool.parsedInput }
+            };
+            return { ...prev, content: updated };
+        });
+    }, [setStreamingMessage]);
+
+    const flushPendingSubagentToolResultDelta = useCallback((bufKey: string, parentToolUseId: string, toolUseId: string) => {
+        const buf = pendingSubagentToolResultDeltasRef.current.get(bufKey);
+        if (!buf) return;
+        buf.flushScheduled = false;
+        if (buf.fragments.length === 0) return;
+        const merged = buf.fragments.join('');
+        buf.fragments = [];
+        setStreamingMessage(prev => {
+            if (!prev) return prev;
+            return applySubagentCallsUpdate(prev, parentToolUseId, (calls) => {
+                const updatedCalls = calls.map(call => {
+                    if (call.id !== toolUseId) return call;
+                    const existing = call.result || '';
+                    let nextResult = existing + merged;
+                    if (nextResult.length > TOOL_RESULT_DISPLAY_CAP) {
+                        const head = nextResult.slice(0, TOOL_RESULT_DISPLAY_CAP - TOOL_RESULT_TAIL_KEEP);
+                        const tail = nextResult.slice(-TOOL_RESULT_TAIL_KEEP);
+                        nextResult = `${head}\n…[truncated for display; full result available on completion]…\n${tail}`;
+                    }
+                    return { ...call, result: nextResult, isLoading: true };
+                });
+                return { calls: updatedCalls };
+            }) ?? prev;
+        });
+    }, [setStreamingMessage]);
+
+    const flushPendingSubagentToolInputDelta = useCallback((bufKey: string, parentToolUseId: string, toolUseId: string) => {
+        const buf = pendingSubagentToolInputDeltasRef.current.get(bufKey);
+        if (!buf) return;
+        buf.flushScheduled = false;
+        if (buf.fragments.length === 0) return;
+        const merged = buf.fragments.join('');
+        buf.fragments = [];
+        setStreamingMessage(prev => {
+            if (!prev) return prev;
+            return applySubagentCallsUpdate(prev, parentToolUseId, (calls) => {
+                const updatedCalls = calls.map(call => {
+                    if (call.id !== toolUseId) return call;
+                    const nextInputJson = (call.inputJson || '') + merged;
+                    const parsedInput = parsePartialJson<ToolInput>(nextInputJson);
+                    return { ...call, inputJson: nextInputJson, parsedInput: parsedInput || call.parsedInput };
+                });
+                return { calls: updatedCalls };
+            }) ?? prev;
+        });
+    }, [setStreamingMessage]);
+
+    /** Drain all pending tool delta buffers immediately. Used at message-complete. */
+    const flushAllPendingToolDeltas = useCallback(() => {
+        for (const id of Array.from(pendingToolResultDeltasRef.current.keys())) {
+            flushPendingToolResultDelta(id);
+        }
+        for (const id of Array.from(pendingToolInputDeltasRef.current.keys())) {
+            flushPendingToolInputDelta(id);
+        }
+        for (const key of Array.from(pendingSubagentToolResultDeltasRef.current.keys())) {
+            const [parent, tool] = key.split('::');
+            if (parent && tool) flushPendingSubagentToolResultDelta(key, parent, tool);
+        }
+        for (const key of Array.from(pendingSubagentToolInputDeltasRef.current.keys())) {
+            const [parent, tool] = key.split('::');
+            if (parent && tool) flushPendingSubagentToolInputDelta(key, parent, tool);
+        }
+    }, [flushPendingToolResultDelta, flushPendingToolInputDelta, flushPendingSubagentToolResultDelta, flushPendingSubagentToolInputDelta]);
+
     // Cleanup RAF on unmount
     useEffect(() => {
         return () => { if (rafIdRef.current) cancelAnimationFrame(rafIdRef.current); };
@@ -647,6 +844,11 @@ export default function TabProvider({
         if (pendingChunksRef.current.length > 0) {
             flushPendingChunks();
         }
+        // Pattern 3 §3.2.2 — also drain tool delta buffers so accumulated
+        // fragments land on the streaming message before it is moved into
+        // history. Buffers themselves are cleared once the next session/turn
+        // begins (initSession path).
+        flushAllPendingToolDeltas();
 
         // CRITICAL: Use rawSetStreamingMessage updater to read the LATEST streaming message.
         // Reading streamingMessageRef.current directly would race with pending setStreamingMessage
@@ -714,7 +916,7 @@ export default function TabProvider({
             streamingMessageRef.current = null;
             return null;
         });
-    }, [flushPendingChunks, clearSessionActive]);
+    }, [flushPendingChunks, flushAllPendingToolDeltas, clearSessionActive]);
 
     const recoverStreamingUi = useCallback((status: 'stopped' | 'failed') => {
         moveStreamingToHistory(status);
@@ -1092,28 +1294,32 @@ export default function TabProvider({
             case 'chat:tool-input-delta': {
                 // Note: Only handle tool_use, NOT server_tool_use
                 // server_tool_use comes with complete input, no streaming delta needed
+                // Pattern 3 §3.2.2 — RAF-batched. Don't parsePartialJson on every event;
+                // accumulate fragments and parse once per RAF tick.
                 const { toolId, delta } = data as { index: number; toolId: string; delta: string };
-                setStreamingMessage(prev => {
-                    if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
-                    const contentArray = prev.content;
-                    const idx = contentArray.findIndex(b => b.type === 'tool_use' && b.tool?.id === toolId);
-                    if (idx === -1) return prev;
-                    const block = contentArray[idx];
-                    if (block.type !== 'tool_use' || !block.tool) return prev;
-                    const newInputJson = (block.tool.inputJson || '') + delta;
-                    const parsedInput = parsePartialJson<ToolInput>(newInputJson);
-                    const updated = [...contentArray];
-                    updated[idx] = {
-                        ...block,
-                        tool: { ...block.tool, inputJson: newInputJson, parsedInput: parsedInput || block.tool.parsedInput }
-                    };
-                    return { ...prev, content: updated };
-                });
+                let buf = pendingToolInputDeltasRef.current.get(toolId);
+                if (!buf) {
+                    buf = { fragments: [], flushScheduled: false };
+                    pendingToolInputDeltasRef.current.set(toolId, buf);
+                }
+                buf.fragments.push(delta);
+                if (!buf.flushScheduled) {
+                    buf.flushScheduled = true;
+                    requestAnimationFrame(() => flushPendingToolInputDelta(toolId));
+                }
                 break;
             }
 
             case 'chat:content-block-stop': {
                 const { index, toolId } = data as { index: number; toolId?: string };
+                // Pattern 3 §3.2.2 — drain RAF-batched tool-input deltas for this
+                // tool block before applying the final JSON.parse on the
+                // accumulated inputJson; otherwise the terminal parse races
+                // against pending fragments.
+                if (toolId && pendingToolInputDeltasRef.current.has(toolId)) {
+                    flushPendingToolInputDelta(toolId);
+                    pendingToolInputDeltasRef.current.delete(toolId);
+                }
                 setStreamingMessage(prev => {
                     if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
                     const contentArray = prev.content;
@@ -1158,16 +1364,41 @@ export default function TabProvider({
                 break;
             }
 
+            case 'chat:tool-result-delta': {
+                // Pattern 3 §3.2.2 — RAF-batched. Accumulate fragments per tool id
+                // and flush once per animation frame instead of one setState per delta.
+                const payload = data as { toolUseId: string; delta?: string };
+                if (!payload?.toolUseId || !payload.delta) break;
+                let buf = pendingToolResultDeltasRef.current.get(payload.toolUseId);
+                if (!buf) {
+                    buf = { fragments: [], flushScheduled: false };
+                    pendingToolResultDeltasRef.current.set(payload.toolUseId, buf);
+                }
+                buf.fragments.push(payload.delta);
+                if (!buf.flushScheduled) {
+                    buf.flushScheduled = true;
+                    const toolUseId = payload.toolUseId;
+                    requestAnimationFrame(() => flushPendingToolResultDelta(toolUseId));
+                }
+                break;
+            }
+
             case 'chat:tool-result-start':
-            case 'chat:tool-result-delta':
             case 'chat:tool-result-complete': {
                 const payload = data as {
                     toolUseId: string;
                     content?: string;
-                    delta?: string;
                     isError?: boolean;
                     metadata?: import('@/types/chat').ToolResultMeta;
                 };
+
+                // Pattern 3 §3.2.2 — drain any pending RAF deltas for this tool
+                // before applying the terminal start/complete payload, so the
+                // accumulated fragments are not stranded behind the final value.
+                if (pendingToolResultDeltasRef.current.has(payload.toolUseId)) {
+                    flushPendingToolResultDelta(payload.toolUseId);
+                    pendingToolResultDeltasRef.current.delete(payload.toolUseId);
+                }
 
                 setStreamingMessage(prev => {
                     if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
@@ -1179,27 +1410,16 @@ export default function TabProvider({
                     if (!isToolBlock(block) || !block.tool) return prev;
 
                     const updated = [...contentArray];
-                    if (eventName === 'chat:tool-result-delta') {
-                        updated[idx] = {
-                            ...block,
-                            tool: {
-                                ...block.tool,
-                                result: (block.tool.result || '') + (payload.delta ?? ''),
-                                isLoading: true,
-                            }
-                        };
-                    } else {
-                        updated[idx] = {
-                            ...block,
-                            tool: {
-                                ...block.tool,
-                                result: payload.content ?? block.tool.result,
-                                isError: payload.isError,
-                                isLoading: eventName !== 'chat:tool-result-complete',
-                                resultMeta: payload.metadata ?? block.tool.resultMeta,
-                            }
-                        };
-                    }
+                    updated[idx] = {
+                        ...block,
+                        tool: {
+                            ...block.tool,
+                            result: payload.content ?? block.tool.result,
+                            isError: payload.isError,
+                            isLoading: eventName !== 'chat:tool-result-complete',
+                            resultMeta: payload.metadata ?? block.tool.resultMeta,
+                        }
+                    };
 
                     return { ...prev, content: updated };
                 });
@@ -1222,6 +1442,10 @@ export default function TabProvider({
 
             case 'chat:message-complete': {
                 console.log(`[TabProvider ${tabId}] message-complete received`);
+                // Pattern 3 §3.2.2 — drain all pending RAF-batched tool deltas
+                // before finalising the message; otherwise stragglers would
+                // land on a freshly-cleared streaming slot.
+                flushAllPendingToolDeltas();
                 flushSync(() => {
                     // NOTE: isStreamingRef.current is set to false inside moveStreamingToHistory's
                     // updater, NOT here. Setting it here would cause pending message-chunk updaters
@@ -1516,19 +1740,21 @@ export default function TabProvider({
             }
 
             case 'chat:subagent-tool-input-delta': {
+                // Pattern 3 §3.2.2 — RAF-batched per (parent, tool) key.
                 const payload = data as { parentToolUseId: string; toolId: string; delta: string };
-                setStreamingMessage(prev => {
-                    if (!prev) return prev;
-                    return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
-                        const updatedCalls = calls.map(call => {
-                            if (call.id !== payload.toolId) return call;
-                            const nextInputJson = (call.inputJson || '') + payload.delta;
-                            const parsedInput = parsePartialJson<ToolInput>(nextInputJson);
-                            return { ...call, inputJson: nextInputJson, parsedInput: parsedInput || call.parsedInput };
-                        });
-                        return { calls: updatedCalls };
-                    }) ?? prev;
-                });
+                const bufKey = `${payload.parentToolUseId}::${payload.toolId}`;
+                let buf = pendingSubagentToolInputDeltasRef.current.get(bufKey);
+                if (!buf) {
+                    buf = { fragments: [], flushScheduled: false };
+                    pendingSubagentToolInputDeltasRef.current.set(bufKey, buf);
+                }
+                buf.fragments.push(payload.delta);
+                if (!buf.flushScheduled) {
+                    buf.flushScheduled = true;
+                    const parent = payload.parentToolUseId;
+                    const tool = payload.toolId;
+                    requestAnimationFrame(() => flushPendingSubagentToolInputDelta(bufKey, parent, tool));
+                }
                 break;
             }
 
@@ -1549,23 +1775,32 @@ export default function TabProvider({
             }
 
             case 'chat:subagent-tool-result-delta': {
+                // Pattern 3 §3.2.2 — RAF-batched per (parent, tool) key.
                 const payload = data as { parentToolUseId: string; toolUseId: string; delta: string };
-                setStreamingMessage(prev => {
-                    if (!prev) return prev;
-                    return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
-                        const updatedCalls = calls.map(call =>
-                            call.id === payload.toolUseId
-                                ? { ...call, result: (call.result || '') + payload.delta, isLoading: true }
-                                : call
-                        );
-                        return { calls: updatedCalls };
-                    }) ?? prev;
-                });
+                const bufKey = `${payload.parentToolUseId}::${payload.toolUseId}`;
+                let buf = pendingSubagentToolResultDeltasRef.current.get(bufKey);
+                if (!buf) {
+                    buf = { fragments: [], flushScheduled: false };
+                    pendingSubagentToolResultDeltasRef.current.set(bufKey, buf);
+                }
+                buf.fragments.push(payload.delta);
+                if (!buf.flushScheduled) {
+                    buf.flushScheduled = true;
+                    const parent = payload.parentToolUseId;
+                    const tool = payload.toolUseId;
+                    requestAnimationFrame(() => flushPendingSubagentToolResultDelta(bufKey, parent, tool));
+                }
                 break;
             }
 
             case 'chat:subagent-tool-result-complete': {
                 const payload = data as { parentToolUseId: string; toolUseId: string; content: string; isError?: boolean };
+                // Drain pending RAF deltas before terminal payload.
+                const bufKey = `${payload.parentToolUseId}::${payload.toolUseId}`;
+                if (pendingSubagentToolResultDeltasRef.current.has(bufKey)) {
+                    flushPendingSubagentToolResultDelta(bufKey, payload.parentToolUseId, payload.toolUseId);
+                    pendingSubagentToolResultDeltasRef.current.delete(bufKey);
+                }
                 setStreamingMessage(prev => {
                     if (!prev) return prev;
                     return applySubagentCallsUpdate(prev, payload.parentToolUseId, (calls) => {
@@ -1854,7 +2089,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, flushPendingChunksNow, clearSessionActive, resetPaginationState]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, flushPendingChunksNow, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);

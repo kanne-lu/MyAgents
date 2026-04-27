@@ -6,8 +6,9 @@
 //! 2. Triggering single-instance window focus
 //! 3. Starting the full Tauri app just for a CLI query
 //!
-//! The CLI forwards arguments to the Bun CLI script at ~/.myagents/bin/myagents,
-//! which handles argument parsing, HTTP requests to the Sidecar Admin API, and
+//! The CLI forwards arguments to the bundled Node.js + esbuild'd CLI script at
+//! ~/.myagents/bin/myagents (JavaScript, shebang `#!/usr/bin/env node`). The
+//! script handles argument parsing, HTTP requests to the Sidecar Admin API, and
 //! output formatting.
 
 use std::path::PathBuf;
@@ -49,11 +50,11 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    // 1. Find the bun binary (sibling of this executable in the app bundle)
-    let bun_path = match find_bun_binary() {
+    // 1. Find the bundled Node.js binary (installed under resources/nodejs/)
+    let node_path = match find_node_binary() {
         Some(p) => p,
         None => {
-            eprintln!("Error: Cannot find bundled Bun runtime.");
+            eprintln!("Error: Cannot find bundled Node.js runtime.");
             return 1;
         }
     };
@@ -71,12 +72,12 @@ pub fn run(args: &[String]) -> i32 {
     // 3. Discover the Global Sidecar port from the port file
     let port = discover_sidecar_port();
 
-    // 4. Spawn the Bun CLI script with all original args
+    // 4. Spawn Node.js on the CLI script with all original args.
     // NOTE: Intentionally using raw Command::new instead of process_cmd::new().
     // process_cmd applies CREATE_NO_WINDOW on Windows, but CLI mode NEEDS the
     // console for user-visible stdout/stderr output. Same exception category as
     // OS opener commands (open/explorer/xdg-open) documented in CLAUDE.md.
-    let mut cmd = Command::new(&bun_path);
+    let mut cmd = Command::new(&node_path);
     cmd.arg(&cli_script);
     cmd.args(args);
 
@@ -85,12 +86,12 @@ pub fn run(args: &[String]) -> i32 {
     cmd.stdout(Stdio::inherit());
     cmd.stderr(Stdio::inherit());
 
-    // Inject sidecar port if available (the Bun script reads MYAGENTS_PORT)
+    // Inject sidecar port if available (the Node script reads MYAGENTS_PORT)
     if let Some(ref p) = port {
         cmd.env("MYAGENTS_PORT", p);
     }
 
-    // Protect localhost from system proxy (Bun's fetch() reads HTTP_PROXY)
+    // Protect localhost from system proxy (Node's fetch() reads HTTP_PROXY)
     cmd.env("NO_PROXY", crate::proxy_config::LOCALHOST_NO_PROXY);
     cmd.env("no_proxy", crate::proxy_config::LOCALHOST_NO_PROXY);
 
@@ -103,23 +104,51 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
-/// Find the bundled bun binary (co-located with this executable in the app bundle).
-/// macOS: /Applications/MyAgents.app/Contents/MacOS/bun
-/// Windows: <install-dir>/bun.exe
-fn find_bun_binary() -> Option<PathBuf> {
+/// Find the bundled Node.js binary, shipped as a resource alongside the app.
+/// macOS: /Applications/MyAgents.app/Contents/Resources/nodejs/bin/node
+/// Windows: <install-dir>/resources/nodejs/node.exe
+/// Linux (AppImage / deb): <install-dir>/resources/nodejs/bin/node
+fn find_node_binary() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let dir = exe.parent()?;
 
-    // macOS/Linux
-    let bun = dir.join("bun");
-    if bun.exists() {
-        return Some(bun);
+    // macOS: Contents/MacOS/app → Contents/Resources/nodejs/bin/node
+    #[cfg(target_os = "macos")]
+    {
+        let macos_node = dir
+            .parent()
+            .map(|p| p.join("Resources").join("nodejs").join("bin").join("node"))
+            .unwrap_or_else(|| dir.join("Resources").join("nodejs").join("bin").join("node"));
+        if macos_node.exists() {
+            return Some(macos_node);
+        }
     }
 
-    // Windows
-    let bun_exe = dir.join("bun.exe");
-    if bun_exe.exists() {
-        return Some(bun_exe);
+    // Windows: <install-dir>/resources/nodejs/node.exe (or sibling when layout differs)
+    #[cfg(target_os = "windows")]
+    {
+        let win_node = dir.join("resources").join("nodejs").join("node.exe");
+        if win_node.exists() {
+            return Some(win_node);
+        }
+        let sibling = dir.join("nodejs").join("node.exe");
+        if sibling.exists() {
+            return Some(sibling);
+        }
+    }
+
+    // Linux + Unix fallback (skipped on macOS + Windows — each platform's branch above
+    // returns early on success; those platforms don't have this layout).
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        let linux_node = dir.join("resources").join("nodejs").join("bin").join("node");
+        if linux_node.exists() {
+            return Some(linux_node);
+        }
+        let sibling_unix = dir.join("nodejs").join("bin").join("node");
+        if sibling_unix.exists() {
+            return Some(sibling_unix);
+        }
     }
 
     None

@@ -5,11 +5,13 @@ pub mod adapter;
 pub mod bridge;
 pub mod buffer;
 pub mod dingtalk;
+pub mod event_consumer;
 pub mod feishu;
 pub mod group_history;
 pub mod health;
 pub mod heartbeat;
 pub mod memory_update;
+pub mod reply_router;
 pub mod router;
 pub mod telegram;
 pub mod types;
@@ -20,11 +22,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures::StreamExt;
 use reqwest::Client;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Runtime};
 use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
+use crate::config_io::with_config_lock;
 use tokio::sync::{watch, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 
@@ -41,19 +43,38 @@ pub struct ApprovalCallback {
 }
 
 /// Pending approval waiting for user response
-struct PendingApproval {
-    sidecar_port: u16,
-    chat_id: String,
-    card_message_id: String,
-    created_at: Instant,
+pub(crate) struct PendingApproval {
+    pub(crate) sidecar_port: u16,
+    pub(crate) chat_id: String,
+    pub(crate) card_message_id: String,
+    pub(crate) created_at: Instant,
 }
 
-type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
+pub(crate) type PendingApprovals = Arc<Mutex<HashMap<String, PendingApproval>>>;
 
-/// Per-peer locks: serializes requests (IM chat + heartbeat) to the same Sidecar.
-/// Required because /api/im/chat uses a single imStreamCallback; concurrent
-/// requests would conflict. Shared between processing loop and heartbeat runner.
+/// Per-peer locks: serializes the *enqueue* phase (drift check + ensure_sidecar
+/// + POST /api/im/enqueue) per peer_session. Pattern C dropped the lock to
+/// ms-level scope — the SSE long-poll consumer in `event_consumer.rs` runs
+/// independently per peer_session, decoupling lock duration from turn duration.
 pub(crate) type PeerLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
+
+/// Pattern C: per-peer-session reply consumer state. One ImEventConsumer task
+/// + ReplyRouter per session_key. The consumer lazily starts on the first
+/// /api/im/enqueue for a session_key, and is cancelled when the session_key
+/// is no longer active (Sidecar shutdown / peer eviction).
+pub(crate) struct ImConsumerHandle {
+    pub(crate) cancel: event_consumer::CancelFlag,
+    pub(crate) reply_router: reply_router::SharedReplyRouter,
+    /// Sidecar port the consumer is currently bound to (used to detect Sidecar
+    /// rotation — if the port changes, the old consumer must be cancelled
+    /// and a new one spawned).
+    pub(crate) sidecar_port: u16,
+    /// Join handle is kept alive for the consumer task lifetime; we don't
+    /// await it but holding it ensures the task isn't immediately dropped.
+    pub(crate) _join: tauri::async_runtime::JoinHandle<()>,
+}
+
+pub(crate) type ImConsumers = Arc<Mutex<HashMap<String, ImConsumerHandle>>>;
 
 use bridge::BridgeAdapter;
 use buffer::MessageBuffer;
@@ -535,6 +556,12 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Bridge(a) => a.abort_stream(chat_id, stream_id).await,
         }
     }
+    async fn post_stream_cleanup(&self, chat_id: &str) {
+        match self {
+            Self::Telegram(_) | Self::Feishu(_) | Self::Bridge(_) => { /* no-op */ }
+            Self::Dingtalk(a) => adapter::ImStreamAdapter::post_stream_cleanup(a.as_ref(), chat_id).await,
+        }
+    }
 }
 
 /// Managed state for the IM Bot subsystem (multi-bot: bot_id → instance)
@@ -552,20 +579,20 @@ pub struct ImBotInstance {
     buffer: Arc<Mutex<MessageBuffer>>,
     started_at: Instant,
     /// JoinHandle for the message processing loop (awaited during graceful shutdown)
-    process_handle: tokio::task::JoinHandle<()>,
+    process_handle: tauri::async_runtime::JoinHandle<()>,
     /// JoinHandle for the platform listen loop (long-poll / WebSocket)
-    poll_handle: tokio::task::JoinHandle<()>,
+    poll_handle: tauri::async_runtime::JoinHandle<()>,
     /// JoinHandle for the approval callback handler
-    approval_handle: tokio::task::JoinHandle<()>,
+    approval_handle: tauri::async_runtime::JoinHandle<()>,
     /// JoinHandle for the health persist loop
-    health_handle: tokio::task::JoinHandle<()>,
+    health_handle: tauri::async_runtime::JoinHandle<()>,
     /// Random bind code for QR code binding flow
     bind_code: String,
     #[allow(dead_code)]
     pub(crate) config: ImConfig,
     // ===== Heartbeat (v0.1.21) =====
     /// Heartbeat runner background task handle
-    heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    heartbeat_handle: Option<tauri::async_runtime::JoinHandle<()>>,
     /// Channel to send wake signals to heartbeat runner
     pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
     /// Shared heartbeat config (for hot updates)
@@ -626,7 +653,7 @@ pub struct AgentInstance {
     pub channels: HashMap<String, ChannelInstance>,
     pub last_active_channel: Arc<tokio::sync::RwLock<Option<LastActiveChannel>>>,
     // Agent-level heartbeat (shared across channels)
-    pub heartbeat_handle: Option<tokio::task::JoinHandle<()>>,
+    pub heartbeat_handle: Option<tauri::async_runtime::JoinHandle<()>>,
     pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
     pub heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
     // Agent-level hot-reloadable AI config (shared defaults)
@@ -1030,7 +1057,7 @@ async fn create_bot_instance<R: Runtime>(
     // Start platform listen loop (long-poll for Telegram, health watchdog for Bridge)
     let adapter_clone = Arc::clone(&adapter);
     let poll_shutdown_rx = shutdown_rx.clone();
-    let poll_handle = tokio::spawn(async move {
+    let poll_handle = tauri::async_runtime::spawn(async move {
         adapter_clone.listen_loop(poll_shutdown_rx).await;
     });
 
@@ -1039,10 +1066,12 @@ async fn create_bot_instance<R: Runtime>(
     {
         let health_for_watcher = health.clone();
         let mut watcher_shutdown_rx = shutdown_rx.clone();
-        let poll_handle_watcher = poll_handle.abort_handle();
+        // `abort_handle` lives on the inner `tokio::task::JoinHandle`; the
+        // tauri wrapper exposes `inner()` for cases like this.
+        let poll_handle_watcher = poll_handle.inner().abort_handle();
         let bot_id_for_watcher = bot_id.clone();
         let shutdown_tx_for_watcher = shutdown_tx.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             // Wait until either shutdown is signalled or the poll task finishes
             loop {
                 tokio::select! {
@@ -1068,7 +1097,7 @@ async fn create_bot_instance<R: Runtime>(
     let adapter_for_approval = Arc::clone(&adapter);
     let approval_client = crate::local_http::json_client(std::time::Duration::from_secs(30));
     let mut approval_shutdown_rx = shutdown_rx.clone();
-    let approval_handle = tokio::spawn(async move {
+    let approval_handle = tauri::async_runtime::spawn(async move {
         loop {
             let cb = tokio::select! {
                 msg = approval_rx.recv() => match msg {
@@ -1121,8 +1150,10 @@ async fn create_bot_instance<R: Runtime>(
     });
 
     // Per-peer locks: shared between the processing loop and heartbeat runner.
-    // Both must acquire the lock for a session_key before calling Sidecar HTTP APIs,
-    // because /api/im/chat uses a single imStreamCallback — concurrent requests would conflict.
+    // Pattern C (IM Pipeline v2): scope was reduced to ms-level — covers only
+    // the enqueue phase (drift check + ensure_sidecar + POST /api/im/enqueue).
+    // The reply event stream now flows through `event_consumer.rs` long-poll,
+    // independent of the lock.
     let peer_locks: PeerLocks = Arc::new(Mutex::new(HashMap::new()));
 
     // Start message processing loop
@@ -1132,9 +1163,10 @@ async fn create_bot_instance<R: Runtime>(
     //   Regular messages are spawned as per-message tasks via JoinSet.
     //
     //   Lock ordering (per task):
-    //     1. Per-peer lock — serializes requests to the same Sidecar (required because
-    //        /api/im/chat uses a single imStreamCallback; concurrent requests would conflict).
-    //        Heartbeat runner also acquires this lock to prevent callback conflicts.
+    //     1. Per-peer lock — serializes the enqueue phase per session_key
+    //        (drift check + ensure_sidecar + POST /api/im/enqueue, ~ms).
+    //        Heartbeat runner also acquires this lock to keep the enqueue
+    //        phase ordered (Pattern C/D).
     //     2. Global semaphore — limits total concurrent Sidecar I/O across all peers.
     //        Acquired AFTER the peer lock so queued same-peer tasks don't hold permits
     //        while waiting, which would starve other peers.
@@ -1183,13 +1215,18 @@ async fn create_bot_instance<R: Runtime>(
     // the Arc is cloned here for the processing loop.
     let peer_locks_for_loop = Arc::clone(&peer_locks);
     let stream_client = create_sidecar_stream_client();
+    // Pattern C: per-peer-session ImEventConsumer + ReplyRouter registry. One
+    // entry per session_key; lazy-spawn on first /api/im/enqueue, cancel on
+    // session reset / Sidecar shutdown.
+    let im_consumers: ImConsumers = Arc::new(Mutex::new(HashMap::new()));
+    let im_consumers_for_loop = Arc::clone(&im_consumers);
     let platform_for_loop = config.platform.clone();
     // Agent link — starts as None; set after bot is moved into AgentInstance.
     // The processing loop holds a clone of this Arc and checks it after each message.
     let agent_link: SharedAgentLink = Arc::new(RwLock::new(None));
     let agent_link_for_loop = Arc::clone(&agent_link);
 
-    let process_handle = tokio::spawn(async move {
+    let process_handle = tauri::async_runtime::spawn(async move {
         let mut in_flight: JoinSet<()> = JoinSet::new();
 
         // Media group buffering (Telegram albums)
@@ -2234,7 +2271,7 @@ async fn create_bot_instance<R: Runtime>(
                                 let bridge_clone = adapter_for_reply.clone();
                                 let chat_id_clone = chat_id.clone();
                                 let sender_id = msg.sender_id.clone();
-                                tokio::spawn(async move {
+                                tauri::async_runtime::spawn(async move {
                                     if let AnyAdapter::Bridge(ref b) = *bridge_clone {
                                         match b.execute_command(&cmd_name, &cmd_args, &sender_id, &chat_id_clone).await {
                                             Ok(result) => {
@@ -2276,8 +2313,28 @@ async fn create_bot_instance<R: Runtime>(
                     let task_group_permissions = Arc::clone(&group_permissions_for_loop);
                     let task_agent_link = Arc::clone(&agent_link_for_loop);
                     let task_allowed_users = Arc::clone(&allowed_users_for_loop);
+                    // Pattern C: per-peer-session ImEventConsumer + ReplyRouter registry
+                    let task_consumers = Arc::clone(&im_consumers_for_loop);
 
                     in_flight.spawn(async move {
+                        // Pattern A — Per-Request Identity: assign request_id at the dispatch
+                        // boundary so every log line and downstream RPC carries the same trace
+                        // ID. Empty default from adapters means "not yet assigned"; generate
+                        // here. Buffered replays also start with empty → fresh ID per attempt
+                        // (each retry is its own logical request).
+                        let mut msg = msg;
+                        if msg.request_id.is_empty() {
+                            msg.request_id = uuid::Uuid::new_v4().to_string();
+                        }
+                        let request_id = msg.request_id.clone();
+                        ulog_info!(
+                            "[im] Dispatch requestId={} session_key={} sender={} chars={}",
+                            request_id,
+                            session_key,
+                            msg.sender_name.as_deref().unwrap_or("?"),
+                            msg.text.len(),
+                        );
+
                         // 1. Acquire per-peer lock FIRST (serialize requests to same Sidecar).
                         let peer_lock = {
                             let mut locks = task_locks.lock().await;
@@ -2320,6 +2377,11 @@ async fn create_bot_instance<R: Runtime>(
                                     &task_manager,
                                 );
                             if let Some((_old_id, new_id)) = drift_result {
+                                // C3 fix: drift killed the old Sidecar, so its
+                                // ImEventConsumer must be cancelled before we spawn
+                                // a fresh one against the new Sidecar port. Otherwise
+                                // the old consumer keeps long-polling the dead port.
+                                drop_im_consumer(&task_consumers, &session_key).await;
                                 // Clear pending group history so the fresh session doesn't
                                 // get stale context carried over from the drift point.
                                 task_group_history.lock().await.clear(&session_key);
@@ -2374,8 +2436,148 @@ async fn create_bot_instance<R: Runtime>(
                                 .await;
                         }
 
+                        // C2 fix order: build on_terminal + ensure_im_consumer FIRST so the
+                        // consumer is established with the real callback. Buffer drain (Pattern E)
+                        // and the current-message register/enqueue then reuse this consumer
+                        // — no risk of a no-op `on_terminal` poisoning the peer-session.
+                        let sidecar_session_id_initial = task_router
+                            .lock()
+                            .await
+                            .get_peer_session(&session_key)
+                            .map(|p| p.session_id.clone())
+                            .unwrap_or_else(|| session_key.clone());
+                        let on_terminal: Arc<dyn Fn(String, reply_router::TerminalOutcome) + Send + Sync> = {
+                            let router = Arc::clone(&task_router);
+                            let manager = Arc::clone(&task_manager);
+                            let app = task_app.clone();
+                            let health = Arc::clone(&task_health);
+                            let agent_link = Arc::clone(&task_agent_link);
+                            let session_key_cap = session_key.clone();
+                            Arc::new(move |req_id: String, outcome: reply_router::TerminalOutcome| {
+                                let router = Arc::clone(&router);
+                                let manager = Arc::clone(&manager);
+                                let app = app.clone();
+                                let health = Arc::clone(&health);
+                                let agent_link = Arc::clone(&agent_link);
+                                let session_key = session_key_cap.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    {
+                                        let mut router_g = router.lock().await;
+                                        router_g.record_response(&session_key, outcome.session_id.as_deref());
+                                        if let Some(new_sid) = outcome.session_id.as_deref() {
+                                            router_g.upgrade_peer_session_id(&session_key, new_sid, &manager);
+                                        }
+                                    }
+                                    health.set_last_message_at(chrono::Utc::now().to_rfc3339()).await;
+                                    let active_count = router.lock().await.active_sessions();
+                                    health.set_active_sessions(active_count).await;
+                                    {
+                                        let link_guard = agent_link.read().await;
+                                        if link_guard.is_some() {
+                                            let _ = app.emit("agent:status-changed", json!({ "event": "sessions_updated" }));
+                                        } else {
+                                            let _ = app.emit("im:status-changed", json!({ "event": "sessions_updated" }));
+                                        }
+                                    }
+                                    {
+                                        let link_guard = agent_link.read().await;
+                                        if let Some(ref link) = *link_guard {
+                                            let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+                                            let new_lac = LastActiveChannel {
+                                                channel_id: link.channel_id.clone(),
+                                                session_key: session_key.clone(),
+                                                last_active_at: now_str,
+                                            };
+                                            *link.last_active_channel.write().await = Some(new_lac);
+                                            ulog_debug!(
+                                                "[agent] Updated lastActiveChannel: agent={}, channel={}, session={} requestId={}",
+                                                link.agent_id, link.channel_id, session_key, req_id,
+                                            );
+                                        }
+                                    }
+                                });
+                            })
+                        };
+                        let reply_router_arc = ensure_im_consumer(
+                            &task_consumers,
+                            &session_key,
+                            port,
+                            &sidecar_session_id_initial,
+                            Arc::clone(&task_adapter),
+                            Arc::clone(&task_pending_approvals),
+                            task_stream_client.clone(),
+                            on_terminal,
+                        )
+                        .await;
+
+                        // Pattern E: drain previously-buffered messages for this session_key
+                        // before processing the current one. Now reuses the consumer
+                        // established above — buffer-replayed requests get the same
+                        // on_terminal callback as live ones.
+                        {
+                            let drain_count = task_buffer.lock().await.len_for_session(&session_key);
+                            for _ in 0..drain_count {
+                                let buffered = match task_buffer.lock().await.pop_for_session(&session_key) {
+                                    Some(b) => b,
+                                    None => break,
+                                };
+                                let mut buf_msg = buffered.to_im_message();
+                                if buf_msg.request_id.is_empty() {
+                                    buf_msg.request_id = uuid::Uuid::new_v4().to_string();
+                                }
+                                let buf_chat_id = buf_msg.chat_id.clone();
+                                let buf_message_id = buf_msg.message_id.clone();
+                                let buf_request_id = buf_msg.request_id.clone();
+                                let allowed_snapshot_buf = task_allowed_users.read().await.clone();
+                                let bridge_ctx_buf = task_adapter.bridge_context();
+
+                                reply_router_arc.lock().await.register(
+                                    buf_request_id.clone(),
+                                    buf_chat_id.clone(),
+                                    buf_message_id.clone(),
+                                    buf_msg.source_type.clone(),
+                                    None,
+                                );
+
+                                let buf_penv = task_provider_env.read().await.clone();
+                                let buf_model = task_model.read().await.clone();
+                                let result = enqueue_to_sidecar(
+                                    &task_stream_client,
+                                    port,
+                                    &buf_msg,
+                                    &task_perm,
+                                    buf_penv.as_ref(),
+                                    buf_model.as_deref(),
+                                    &task_runtime,
+                                    task_runtime_config.as_ref(),
+                                    None,
+                                    Some(&task_bot_id),
+                                    task_bot_name.as_deref(),
+                                    None,
+                                    Some(&allowed_snapshot_buf),
+                                    bridge_ctx_buf,
+                                ).await;
+                                if let Err(e) = result {
+                                    ulog_warn!(
+                                        "[im] Buffer replay failed requestId={} session_key={} err={}",
+                                        buf_request_id, session_key, e,
+                                    );
+                                    reply_router_arc.lock().await.unregister(&buf_request_id);
+                                    if e.should_buffer() {
+                                        task_buffer.lock().await.push(&buf_msg);
+                                    }
+                                    break;
+                                } else {
+                                    ulog_info!(
+                                        "[im] Replayed buffered requestId={} session_key={}",
+                                        buf_request_id, session_key,
+                                    );
+                                }
+                            }
+                        }
+
                         // 4c. Process attachments (File → save to workspace, Image → base64)
-                        let mut msg = msg; // make mutable for attachment processing
+                        // (msg is already declared `mut` at spawn entry for request_id assignment)
                         let workspace_path = {
                             let router = task_router.lock().await;
                             router
@@ -2425,25 +2627,23 @@ async fn create_bot_instance<R: Runtime>(
                             None
                         };
 
-                        // 5. SSE stream: route message + stream response to Telegram
-                        //    Spawn keepalive to prevent idle collection during long agentic tasks.
-                        //    stream_to_im() can run 30+ min for multi-tool-use turns, during which
-                        //    heartbeat can't touch last_active (blocked by peer lock).
-                        let keepalive = tokio::spawn({
-                            let router = Arc::clone(&task_router);
-                            let key = session_key.clone();
-                            async move {
-                                let mut tick = tokio::time::interval(
-                                    std::time::Duration::from_secs(300),
-                                );
-                                tick.tick().await; // skip immediate first tick
-                                loop {
-                                    tick.tick().await;
-                                    router.lock().await.touch_session_activity(&key);
-                                }
-                            }
-                        });
+                        // 5. Pre-register the ReplySlot for this requestId. Consumer was
+                        //    already established earlier (before buffer drain) with the
+                        //    real on_terminal callback; we just reuse `reply_router_arc`.
+                        {
+                            let mut router_guard = reply_router_arc.lock().await;
+                            router_guard.register(
+                                request_id.clone(),
+                                chat_id.clone(),
+                                message_id.clone(),
+                                msg.source_type.clone(),
+                                group_ctx.as_ref(),
+                            );
+                        }
 
+                        // 7. POST /api/im/enqueue — sync ACK, ms-level. peer_lock drops at end
+                        //    of spawn, so concurrent same-chat messages no longer wait on each
+                        //    other through the entire turn.
                         let penv = task_provider_env.read().await.clone();
                         let task_model_val = task_model.read().await.clone();
                         let images = if image_payloads.is_empty() {
@@ -2452,196 +2652,66 @@ async fn create_bot_instance<R: Runtime>(
                             Some(&image_payloads)
                         };
                         let allowed_snapshot = task_allowed_users.read().await.clone();
-                        let session_id = match stream_to_im(
+                        let bridge_ctx = task_adapter.bridge_context();
+                        match enqueue_to_sidecar(
                             &task_stream_client,
                             port,
                             &msg,
-                            task_adapter.as_ref(),
-                            &chat_id,
                             &task_perm,
                             penv.as_ref(),
                             task_model_val.as_deref(),
                             &task_runtime,
                             task_runtime_config.as_ref(),
                             images,
-                            &task_pending_approvals,
                             Some(&task_bot_id),
                             task_bot_name.as_deref(),
                             group_ctx.as_ref(),
                             Some(&allowed_snapshot),
+                            bridge_ctx,
                         )
                         .await
                         {
-                            Ok(sid) => {
+                            Ok(_session_hint) => {
                                 ulog_info!(
-                                    "[im] Stream complete for {} (session={})",
-                                    session_key,
-                                    sid.as_deref().unwrap_or("?"),
+                                    "[im] Enqueued requestId={} session_key={}",
+                                    request_id, session_key,
                                 );
-                                // Finalize AI Card for DingTalk (isFinalize: true)
-                                if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
-                                    dt.post_stream_cleanup(&chat_id).await;
-                                }
-                                sid
                             }
                             Err(e) => {
-                                ulog_error!("[im] Stream error for {}: {}", session_key, e);
-                                // Clean up any active AI Card on error (prevent zombie cards)
-                                if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
-                                    dt.post_stream_cleanup(&chat_id).await;
-                                }
+                                ulog_error!(
+                                    "[im] Enqueue failed requestId={} session_key={} err={}",
+                                    request_id, session_key, e,
+                                );
+                                // Clean up reply slot — no events will arrive for this request
+                                reply_router_arc.lock().await.unregister(&request_id);
+                                // Buffer for retry on transient errors
                                 if e.should_buffer() {
                                     task_buffer.lock().await.push(&msg);
                                 }
-                                // Format user-friendly error: SSE errors from Bun are already
-                                // localized via localizeImError, extract the inner message
-                                // instead of wrapping with "处理消息时出错" again.
-                                // RouteError::Response displays as "Sidecar returned {status}: {body}"
                                 let e_str = format!("{}", e);
                                 let user_msg = if e_str.starts_with("Sidecar returned ") {
-                                    // Extract body after "Sidecar returned NNN: "
                                     let inner = e_str.splitn(2, ": ").nth(1).unwrap_or(&e_str);
                                     format!("⚠️ {}", inner)
                                 } else {
                                     format!("⚠️ {}", e)
                                 };
-                                let _ = task_adapter
-                                    .send_message(&chat_id, &user_msg)
-                                    .await;
+                                let _ = task_adapter.send_message(&chat_id, &user_msg).await;
                                 task_adapter.ack_clear(&chat_id, &message_id).await;
-                                keepalive.abort();
+                                drop(_permit);
+                                drop(_peer_guard);
+                                drop(peer_lock);
                                 return;
                             }
                         };
 
-                        // 6. Clear ACK reaction
-                        task_adapter.ack_clear(&chat_id, &message_id).await;
-
-                        // 7. Update session state
-                        {
-                            let mut router = task_router.lock().await;
-                            router.record_response(&session_key, session_id.as_deref());
-                            // If Bun sidecar created a new session (e.g. provider switch),
-                            // upgrade the Rust-side session_id + Sidecar Manager key
-                            if let Some(new_sid) = session_id.as_deref() {
-                                router.upgrade_peer_session_id(
-                                    &session_key, new_sid, &task_manager,
-                                );
-                            }
-                        }
-
-                        // Update health
-                        task_health
-                            .set_last_message_at(chrono::Utc::now().to_rfc3339())
-                            .await;
-                        task_health
-                            .set_active_sessions(
-                                task_router.lock().await.active_sessions(),
-                            )
-                            .await;
-                        // Emit appropriate event based on agent_link
-                        {
-                            let link_guard = task_agent_link.read().await;
-                            if link_guard.is_some() {
-                                let _ = task_app.emit("agent:status-changed", json!({ "event": "sessions_updated" }));
-                            } else {
-                                let _ = task_app.emit("im:status-changed", json!({ "event": "sessions_updated" }));
-                            }
-                        }
-
-                        // 7b. Update agent lastActiveChannel (if this bot belongs to an agent)
-                        {
-                            let link_guard = task_agent_link.read().await;
-                            if let Some(ref link) = *link_guard {
-                                let now_str = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-                                let new_lac = LastActiveChannel {
-                                    channel_id: link.channel_id.clone(),
-                                    session_key: session_key.clone(),
-                                    last_active_at: now_str,
-                                };
-                                *link.last_active_channel.write().await = Some(new_lac);
-                                ulog_debug!(
-                                    "[agent] Updated lastActiveChannel: agent={}, channel={}, session={}",
-                                    link.agent_id, link.channel_id, session_key
-                                );
-                            }
-                        }
-
-                        // 8. Buffer replay (same session only — per-peer lock is held)
-                        let mut replayed = 0u32;
-                        loop {
-                            let maybe = task_buffer.lock().await.pop_for_session(&session_key);
-                            match maybe {
-                                Some(buffered) => {
-                                    let buf_chat_id = buffered.chat_id.clone();
-                                    let buf_msg = buffered.to_im_message();
-                                    let buf_allowed = task_allowed_users.read().await.clone();
-                                    match stream_to_im(
-                                        &task_stream_client,
-                                        port,
-                                        &buf_msg,
-                                        task_adapter.as_ref(),
-                                        &buf_chat_id,
-                                        &task_perm,
-                                        penv.as_ref(),
-                                        task_model_val.as_deref(),
-                                        &task_runtime,
-                                        task_runtime_config.as_ref(),
-                                        None, // buffered messages don't preserve attachments
-                                        &task_pending_approvals,
-                                        Some(&task_bot_id),
-                                        task_bot_name.as_deref(),
-                                        None, // buffered messages don't carry group context
-                                        Some(&buf_allowed),
-                                    )
-                                    .await
-                                    {
-                                        Ok(buf_sid) => {
-                                            // Finalize AI Card for DingTalk
-                                            if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
-                                                dt.post_stream_cleanup(&buf_chat_id).await;
-                                            }
-                                            let mut router = task_router.lock().await;
-                                            router.record_response(
-                                                &session_key,
-                                                buf_sid.as_deref(),
-                                            );
-                                            if let Some(sid) = buf_sid.as_deref() {
-                                                router.upgrade_peer_session_id(
-                                                    &session_key, sid, &task_manager,
-                                                );
-                                            }
-                                            drop(router);
-                                            replayed += 1;
-                                        }
-                                        Err(e) => {
-                                            // Clean up any active AI Card on error
-                                            if let AnyAdapter::Dingtalk(ref dt) = *task_adapter {
-                                                dt.post_stream_cleanup(&buf_chat_id).await;
-                                            }
-                                            if e.should_buffer() {
-                                                task_buffer.lock().await.push(&buf_msg);
-                                            }
-                                            break;
-                                        }
-                                    }
-                                }
-                                None => break,
-                            }
-                        }
-                        if replayed > 0 {
-                            ulog_info!("[im] Replayed {} buffered messages", replayed);
-                        }
-
-                        // Update buffer count in health
+                        // Update buffer count snapshot for health (cheap; no replay loop now)
                         task_health
                             .set_buffered_messages(task_buffer.lock().await.len())
                             .await;
 
-                        // Stream + buffer replay done — stop keepalive
-                        keepalive.abort();
-
-                        // Cleanup: release guards, then remove stale peer_lock entry
+                        // 8. Cleanup: release guards. peer_lock release here means concurrent
+                        //    same-chat messages can now interleave — Bug 1 (60min serialization)
+                        //    is gone. Stale peer_lock entries get reaped lazily.
                         drop(_permit);
                         drop(_peer_guard);
                         drop(peer_lock);
@@ -2787,6 +2857,17 @@ async fn create_bot_instance<R: Runtime>(
                             "[im] Processing loop shutting down, waiting for {} in-flight task(s)",
                             in_flight.len(),
                         );
+                        // C3 fix: cancel all ImEventConsumer tasks before exiting.
+                        // Tokio JoinHandles don't auto-cancel on drop — without
+                        // explicitly flipping `cancel: AtomicBool`, the long-poll
+                        // loops would keep reconnecting against a dead Sidecar port.
+                        {
+                            let consumers = im_consumers_for_loop.lock().await;
+                            for (key, handle) in consumers.iter() {
+                                handle.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                                ulog_debug!("[im] Cancelled ImEventConsumer for {} on shutdown", key);
+                            }
+                        }
                         // Drain remaining in-flight tasks before exiting
                         while let Some(result) = in_flight.join_next().await {
                             if let Err(e) = result {
@@ -2806,13 +2887,21 @@ async fn create_bot_instance<R: Runtime>(
     let app_for_idle = app_handle.clone();
     let mut idle_shutdown_rx = shutdown_rx.clone();
     let agent_id_for_idle = agent_id.clone();
+    let consumers_for_idle = Arc::clone(&im_consumers);
 
-    let _idle_handle = tokio::spawn(async move {
+    let _idle_handle = tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let collected = router_for_idle.lock().await.collect_idle_sessions(&manager_for_idle);
+                    let collected_keys = router_for_idle.lock().await.collect_idle_sessions(&manager_for_idle);
+                    // C3 fix: cancel ImEventConsumer for each collected session.
+                    // The Sidecar port has been released to 0; the long-poll loop
+                    // would otherwise hammer the dead port until backoff cap.
+                    for key in &collected_keys {
+                        drop_im_consumer(&consumers_for_idle, key).await;
+                    }
+                    let collected = collected_keys.len();
                     if collected > 0 {
                         // Notify UI — agent channels emit agent event, legacy emit im event
                         if agent_id_for_idle.is_some() {
@@ -2884,7 +2973,7 @@ async fn create_bot_instance<R: Runtime>(
         let hb_peer_locks = Arc::clone(&peer_locks);
         let hb_agent_id = agent_id.clone().unwrap_or_else(|| bot_id.to_string());
         let hb_workspace = default_workspace_str.clone();
-        let handle = tokio::spawn(async move {
+        let handle = tauri::async_runtime::spawn(async move {
             runner.run_loop(
                 hb_shutdown_rx,
                 wake_rx,
@@ -3066,46 +3155,88 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
     result
 }
 
-// ===== SSE Stream → IM Draft ====
+// ===== IM Pipeline v2 — Pattern C helpers =====
 
-/// Consume Sidecar SSE stream, managing draft message lifecycle for any IM platform.
-/// Group context passed to `stream_to_im` for group chat sessions (v0.1.28).
-struct GroupStreamContext {
-    group_name: String,
-    platform: ImPlatform,
-    activation: GroupActivation,
-    is_first_turn: bool,
-    pending_history: Option<String>,
-    tools_deny: Vec<String>,
-    is_mention: bool,
-    message_count: u32,
+/// Lazily ensure an `ImEventConsumer` task is running for `session_key`.
+/// Detects Sidecar rotation (port change) and respawns when needed.
+/// Returns the consumer handle so the caller can register a new ReplySlot.
+async fn ensure_im_consumer<A>(
+    consumers: &ImConsumers,
+    session_key: &str,
+    sidecar_port: u16,
+    sidecar_session_id: &str,
+    adapter: Arc<A>,
+    pending_approvals: PendingApprovals,
+    stream_client: Client,
+    on_terminal: Arc<dyn Fn(String, reply_router::TerminalOutcome) + Send + Sync>,
+) -> reply_router::SharedReplyRouter
+where
+    A: adapter::ImStreamAdapter + Send + Sync + 'static,
+{
+    let mut guard = consumers.lock().await;
+    if let Some(existing) = guard.get(session_key) {
+        if existing.sidecar_port == sidecar_port && !existing.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            return Arc::clone(&existing.reply_router);
+        }
+        // Sidecar rotated or consumer dead — cancel old before respawn.
+        existing.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        guard.remove(session_key);
+    }
+
+    let cancel: event_consumer::CancelFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reply_router = reply_router::shared_router(pending_approvals);
+    let join = event_consumer::spawn_consumer(
+        stream_client,
+        sidecar_port,
+        sidecar_session_id.to_string(),
+        Arc::clone(&reply_router),
+        adapter,
+        Arc::clone(&cancel),
+        on_terminal,
+    );
+    guard.insert(
+        session_key.to_string(),
+        ImConsumerHandle {
+            cancel,
+            reply_router: Arc::clone(&reply_router),
+            sidecar_port,
+            _join: join,
+        },
+    );
+    reply_router
 }
 
-/// Placeholder message sent when the AI's first response block is non-text (thinking/tool_use).
-/// Gives users immediate feedback that the AI is processing their message.
-const THINKING_PLACEHOLDER: &str = "思考中…";
+/// Cancel + remove a consumer. Wired into shutdown / idle-collect / runtime-drift
+/// (C3 fix): Tokio JoinHandles don't auto-cancel on drop, so the long-poll loop
+/// would keep reconnecting against a dead Sidecar port if the AtomicBool isn't
+/// flipped explicitly.
+async fn drop_im_consumer(consumers: &ImConsumers, session_key: &str) {
+    let mut guard = consumers.lock().await;
+    if let Some(handle) = guard.remove(session_key) {
+        handle.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
-/// Each text block → independent IM message (streamed draft edits).
-/// Returns sessionId on success.
-async fn stream_to_im<A: adapter::ImStreamAdapter>(
+/// POST /api/im/enqueue — synchronous enqueue, returns immediately.
+/// Replaces `stream_to_im` for the new IM Pipeline v2 protocol. peer_lock
+/// (held by the caller) wraps only this call (~ms), enabling concurrent
+/// in-flight messages on the same chat_id.
+async fn enqueue_to_sidecar(
     client: &Client,
     port: u16,
     msg: &ImMessage,
-    adapter: &A,
-    chat_id: &str,
     permission_mode: &str,
     provider_env: Option<&serde_json::Value>,
     model: Option<&str>,
     runtime: &str,
     runtime_config: Option<&serde_json::Value>,
     images: Option<&Vec<serde_json::Value>>,
-    pending_approvals: &PendingApprovals,
     bot_id: Option<&str>,
     bot_name: Option<&str>,
     group_context: Option<&GroupStreamContext>,
     allowed_users: Option<&[String]>,
+    adapter_bridge_context: Option<(u16, String, Vec<String>)>,
 ) -> Result<Option<String>, RouteError> {
-    // Build request body (same as original route_to_sidecar)
     let source_owned;
     let source: &str = match (&msg.platform, &msg.source_type) {
         (ImPlatform::Telegram, ImSourceType::Private) => "telegram_private",
@@ -3129,6 +3260,7 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         "sourceId": msg.chat_id,
         "senderName": msg.sender_name,
         "permissionMode": permission_mode,
+        "requestId": msg.request_id,
     });
     if !is_external_runtime_type(runtime) {
         if let Some(env) = provider_env {
@@ -3153,7 +3285,6 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
     if let Some(bn) = bot_name {
         body["botName"] = json!(bn);
     }
-    // Group context fields (v0.1.28)
     if let Some(gc) = group_context {
         body["sourceType"] = json!("group");
         body["groupName"] = json!(gc.group_name);
@@ -3177,40 +3308,32 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
             body["groupToolsDeny"] = json!(gc.tools_deny);
         }
     }
-    // Quoted reply body (from Bridge plugins, e.g. threaded reply in Feishu)
     if let Some(ref rtb) = msg.reply_to_body {
         if !rtb.is_empty() {
             body["replyToBody"] = json!(rtb);
         }
     }
-    // Group system prompt from Bridge plugin config
     if let Some(ref gsp) = msg.group_system_prompt {
         if !gsp.is_empty() {
             body["groupSystemPrompt"] = json!(gsp);
         }
     }
-    // Bridge plugin context — pass bridge port + tool groups to sidecar
-    if let Some((bridge_port, bridge_plugin_id, tool_groups)) = adapter.bridge_context() {
+    if let Some((bridge_port, bridge_plugin_id, tool_groups)) = adapter_bridge_context {
         body["bridgePort"] = json!(bridge_port);
         body["bridgePluginId"] = json!(bridge_plugin_id);
         body["bridgeEnabledToolGroups"] = json!(tool_groups);
         body["senderId"] = json!(msg.sender_id);
-        // ownerOnly check: sender is owner only if explicitly in allowed_users.
-        // Fail-closed: no whitelist or empty whitelist = no owner (ownerOnly tools blocked).
         let is_owner = match allowed_users {
             Some(users) if !users.is_empty() => users.contains(&msg.sender_id),
             _ => false,
         };
         body["senderIsOwner"] = json!(is_owner);
-        ulog_info!("[im-stream] Bridge context: port={}, plugin={}, groups={:?}", bridge_port, bridge_plugin_id, tool_groups);
-    } else {
-        ulog_info!("[im-stream] No bridge context (non-Bridge adapter)");
     }
-    let url = format!("http://127.0.0.1:{}/api/im/chat", port);
-    ulog_info!("[im-stream] POST {} (SSE)", url);
 
+    let url = format!("http://127.0.0.1:{}/api/im/enqueue", port);
     let response = client
         .post(&url)
+        .header("X-MyAgents-Request-Id", &msg.request_id)
         .json(&body)
         .send()
         .await
@@ -3222,568 +3345,38 @@ async fn stream_to_im<A: adapter::ImStreamAdapter>(
         return Err(RouteError::Response(status, error_text));
     }
 
-    // === Streaming protocol branch ===
-    // If the adapter supports the streaming protocol (e.g. CardKit), use
-    // the dedicated streaming flow instead of the edit-based draft flow.
-    if adapter.supports_streaming() {
-        return stream_to_im_streaming(adapter, chat_id, response, pending_approvals, port).await;
-    }
-
-    // === SSE stream consumption + multi-draft management ===
-    let mut byte_stream = response.bytes_stream();
-    let mut buffer = String::new();
-
-    // Current text block state (reset on each block-end)
-    let mut block_text = String::new();
-    let mut draft_id: Option<String> = None;
-    let mut last_edit = Instant::now();
-    let mut any_text_sent = false;
-
-    // Response-level placeholder state:
-    // - placeholder_id: message ID of "思考中…" sent when first block is non-text
-    //   (kept for cleanup on error/silent/no-response; NOT adopted as draft)
-    // - first_content_sent: true once user has seen any content (placeholder or real text)
-    let mut placeholder_id: Option<String> = None;
-    let mut first_content_sent = false;
-
-    let mut session_id: Option<String> = None;
-
-    while let Some(chunk_result) = byte_stream.next().await {
-        let chunk = chunk_result
-            .map_err(|e| RouteError::Unavailable(format!("SSE stream error: {}", e)))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(pos) = buffer.find("\n\n") {
-            let event_str: String = buffer.drain(..pos).collect();
-            buffer.drain(..2); // consume the "\n\n" delimiter
-
-            // Skip heartbeat comments
-            if event_str.starts_with(':') {
-                continue;
-            }
-
-            let data = extract_sse_data(&event_str);
-            if data.is_empty() {
-                continue;
-            }
-
-            let json_val: serde_json::Value = match serde_json::from_str(&data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            match json_val["type"].as_str().unwrap_or("") {
-                "partial" => {
-                    if let Some(text) = json_val["text"].as_str() {
-                        block_text = text.to_string();
-
-                        // First meaningful text in this block → create a new draft message.
-                        // Skip whitespace-only blocks (API spacer blocks before thinking).
-                        // Accumulate until sentence boundary or min length for meaningful first send.
-                        //
-                        // When !supports_edit (e.g., WeChat), skip draft creation and edit calls
-                        // entirely. Text accumulates in block_text and finalize_block sends it
-                        // once at block-end — no fragment, no wasted 501 roundtrips.
-                        if adapter.supports_edit() && draft_id.is_none() && !block_text.trim().is_empty() && has_sentence_boundary(&block_text) {
-                            // Send real content as a new draft message.
-                            // Placeholder (if any) stays as a separate "思考中…" message.
-                            let display = format_draft_text(&block_text, adapter.max_message_length());
-                            match adapter.send_message_returning_id(chat_id, &display).await {
-                                Ok(Some(id)) => {
-                                    draft_id = Some(id);
-                                    last_edit = Instant::now();
-                                }
-                                _ => {} // draft creation failed; block-end will send_message directly
-                            }
-                            first_content_sent = true;
-                        }
-
-                        // Throttled edit — re-evaluate interval dynamically so fallback
-                        // from 300ms→1000ms takes effect mid-stream.
-                        // Reset last_edit BEFORE await so cycle = max(throttle, edit_latency)
-                        // instead of throttle + edit_latency (important for Bridge path).
-                        if let Some(ref did) = draft_id {
-                            let throttle = Duration::from_millis(adapter.preferred_throttle_ms());
-                            if last_edit.elapsed() >= throttle {
-                                last_edit = Instant::now();
-                                let display = format_draft_text(&block_text, adapter.max_message_length());
-                                if let Err(e) = adapter.edit_message(chat_id, did, &display).await {
-                                    ulog_warn!("[im] Draft edit failed: {}", e);
-                                }
-                            }
-                        }
-                    }
-                }
-                "activity" => {
-                    // Non-text block started (thinking, tool_use).
-                    // If user hasn't seen any content yet, send a "thinking" placeholder
-                    // as a NEW message (not adopted as draft later). This ensures
-                    // immediate feedback even on platforms without edit support.
-                    if !first_content_sent {
-                        match adapter.send_message_returning_id(chat_id, THINKING_PLACEHOLDER).await {
-                            Ok(Some(id)) => {
-                                placeholder_id = Some(id);
-                            }
-                            Ok(None) => {
-                                // Adapter skipped send (e.g. DingTalk non-card) → force via send_message
-                                if let Err(e) = adapter.send_message(chat_id, THINKING_PLACEHOLDER).await {
-                                    ulog_warn!("[im-stream] send_message (thinking placeholder) failed: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                ulog_warn!("[im-stream] send_message_returning_id (thinking placeholder) failed: {}", e);
-                            }
-                        }
-                        first_content_sent = true;
-                    }
-                }
-                "block-end" => {
-                    let final_text = json_val["text"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| block_text.clone());
-                    // Skip whitespace-only blocks (API spacer blocks emitted before thinking)
-                    if final_text.trim().is_empty() {
-                        // Delete orphaned draft if one was created
-                        if let Some(ref did) = draft_id {
-                            if let Err(e) = adapter.delete_message(chat_id, did).await {
-                                ulog_warn!("[im-stream] delete_message (empty block draft) failed: {}", e);
-                            }
-                        }
-                    } else {
-                        finalize_block(adapter, chat_id, draft_id.clone(), &final_text).await;
-                        any_text_sent = true;
-                    }
-                    // Reset current block state
-                    block_text.clear();
-                    draft_id = None;
-                }
-                "complete" => {
-                    session_id = json_val["sessionId"].as_str().map(String::from);
-                    let silent = json_val["silent"].as_bool().unwrap_or(false);
-
-                    if silent {
-                        // Group "always" mode: AI decided not to reply (NO_REPLY)
-                        // Clean up draft/placeholder without sending anything
-                        if let Some(ref did) = draft_id {
-                            if let Err(e) = adapter.delete_message(chat_id, did).await {
-                                ulog_warn!("[im-stream] delete_message (silent draft) failed: {}", e);
-                            }
-                        }
-                        if let Some(ref pid) = placeholder_id {
-                            if let Err(e) = adapter.delete_message(chat_id, pid).await {
-                                ulog_warn!("[im-stream] delete_message (silent placeholder) failed: {}", e);
-                            }
-                        }
-                        return Ok(session_id);
-                    }
-
-                    // Flush any remaining block text (skip whitespace-only)
-                    if !block_text.trim().is_empty() {
-                        finalize_block(adapter, chat_id, draft_id.clone(), &block_text).await;
-                        any_text_sent = true;
-                    } else if let Some(ref did) = draft_id {
-                        if let Err(e) = adapter.delete_message(chat_id, did).await {
-                            ulog_warn!("[im-stream] delete_message (complete empty draft) failed: {}", e);
-                        }
-                    }
-                    if !any_text_sent {
-                        // Edit placeholder in-place (avoids Feishu "recall" notification).
-                        // Fall back to delete+send on platforms where edit is unsupported
-                        // (e.g., DingTalk without AI Card).
-                        if let Some(ref pid) = placeholder_id {
-                            if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
-                                if let Err(e) = adapter.delete_message(chat_id, pid).await {
-                                    ulog_warn!("[im-stream] delete_message (no-response placeholder) failed: {}", e);
-                                }
-                                if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                                    ulog_warn!("[im-stream] send_message (no response fallback) failed: {}", e);
-                                }
-                            }
-                        } else {
-                            if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                                ulog_warn!("[im-stream] send_message (no response) failed: {}", e);
-                            }
-                        }
-                    }
-                    return Ok(session_id);
-                }
-                "permission-request" => {
-                    let request_id = json_val["requestId"].as_str().unwrap_or("").to_string();
-                    let tool_name = json_val["toolName"].as_str().unwrap_or("unknown").to_string();
-                    let tool_input = json_val["input"].as_str().unwrap_or("").to_string();
-
-                    ulog_info!(
-                        "[im-stream] Permission request: tool={}, rid={}",
-                        tool_name,
-                        &request_id[..request_id.len().min(16)]
-                    );
-
-                    // Send interactive approval card/keyboard
-                    let card_msg_id = match adapter.send_approval_card(chat_id, &request_id, &tool_name, &tool_input).await {
-                        Ok(Some(mid)) => mid,
-                        Ok(None) => {
-                            ulog_warn!("[im-stream] Approval card sent but no message ID returned");
-                            String::new()
-                        }
-                        Err(e) => {
-                            ulog_error!("[im-stream] Failed to send approval card: {}", e);
-                            String::new()
-                        }
-                    };
-                    // Always insert pending approval so text fallback ("允许"/"拒绝") works
-                    {
-                        let mut guard = pending_approvals.lock().await;
-                        // Cleanup expired entries (Sidecar auto-denies after 10 min)
-                        let now = Instant::now();
-                        guard.retain(|_, p| now.duration_since(p.created_at) < Duration::from_secs(15 * 60));
-                        guard.insert(request_id, PendingApproval {
-                            sidecar_port: port,
-                            chat_id: chat_id.to_string(),
-                            card_message_id: card_msg_id,
-                            created_at: now,
-                        });
-                    }
-                    // SSE stream naturally pauses here — canUseTool Promise is blocking
-                }
-                "error" => {
-                    let error = json_val["error"]
-                        .as_str()
-                        .unwrap_or("Unknown error");
-                    // Delete current draft and placeholder if they exist
-                    if let Some(ref did) = draft_id {
-                        if let Err(e) = adapter.delete_message(chat_id, did).await {
-                            ulog_warn!("[im-stream] delete_message (error draft) failed: {}", e);
-                        }
-                    }
-                    if let Some(ref pid) = placeholder_id {
-                        if let Err(e) = adapter.delete_message(chat_id, pid).await {
-                            ulog_warn!("[im-stream] delete_message (error placeholder) failed: {}", e);
-                        }
-                    }
-                    // Don't send_message here — outer handler will do it
-                    return Err(RouteError::Response(500, error.to_string()));
-                }
-                _ => {} // Ignore unknown types
-            }
-        }
-    }
-
-    // Stream disconnected unexpectedly → flush any remaining text (skip whitespace-only)
-    if !block_text.trim().is_empty() {
-        finalize_block(adapter, chat_id, draft_id.clone(), &block_text).await;
-        any_text_sent = true;
-    } else if let Some(ref did) = draft_id {
-        if let Err(e) = adapter.delete_message(chat_id, did).await {
-            ulog_warn!("[im-stream] delete_message (disconnect draft) failed: {}", e);
-        }
-    }
-    if !any_text_sent {
-        // Edit placeholder in-place (avoids Feishu "recall" notification).
-        // Fall back to delete+send on platforms where edit is unsupported.
-        if let Some(ref pid) = placeholder_id {
-            if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
-                if let Err(e) = adapter.delete_message(chat_id, pid).await {
-                    ulog_warn!("[im-stream] delete_message (disconnect no-response placeholder) failed: {}", e);
-                }
-                if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                    ulog_warn!("[im-stream] send_message (disconnect no response fallback) failed: {}", e);
-                }
-            }
-        } else {
-            if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                ulog_warn!("[im-stream] send_message (disconnect no response) failed: {}", e);
-            }
-        }
-    }
-    Ok(session_id)
+    // Parse response: { success, requestId, accepted, sessionId }
+    let resp_body: serde_json::Value = response.json().await
+        .map_err(|e| RouteError::Unavailable(format!("enqueue parse: {}", e)))?;
+    Ok(resp_body["sessionId"].as_str().map(String::from))
 }
 
-/// Streaming-protocol variant of `stream_to_im`.
-///
-/// Uses `adapter.start_stream()` / `stream_chunk()` / `finalize_stream()` /
-/// `abort_stream()` instead of the edit-based draft message flow.
-/// Called only when `adapter.supports_streaming()` returns true.
-async fn stream_to_im_streaming<A: adapter::ImStreamAdapter>(
-    adapter: &A,
-    chat_id: &str,
-    response: reqwest::Response,
-    pending_approvals: &PendingApprovals,
-    sidecar_port: u16,
-) -> Result<Option<String>, RouteError> {
-    let mut byte_stream = response.bytes_stream();
-    let mut buffer = String::new();
+// ===== SSE Stream → IM Draft (legacy /api/im/chat path — deleted in C-7) ====
 
-    // Current stream state
-    let mut stream_id: Option<String> = None;
-    let mut block_text = String::new();
-    let mut sequence: u32 = 0;
-    let mut any_text_sent = false;
-    let mut first_content_sent = false;
-    // Placeholder message ID for cleanup on silent/error/no-response (mirrors stream_to_im)
-    let mut placeholder_id: Option<String> = None;
-    let mut session_id: Option<String> = None;
-
-    while let Some(chunk_result) = byte_stream.next().await {
-        let chunk = chunk_result
-            .map_err(|e| RouteError::Unavailable(format!("SSE stream error: {}", e)))?;
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-        while let Some(pos) = buffer.find("\n\n") {
-            let event_str: String = buffer.drain(..pos).collect();
-            buffer.drain(..2); // consume "\n\n"
-
-            if event_str.starts_with(':') {
-                continue;
-            }
-
-            let data = extract_sse_data(&event_str);
-            if data.is_empty() {
-                continue;
-            }
-
-            let json_val: serde_json::Value = match serde_json::from_str(&data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            match json_val["type"].as_str().unwrap_or("") {
-                "partial" => {
-                    if let Some(text) = json_val["text"].as_str() {
-                        block_text = text.to_string();
-
-                        if stream_id.is_none() && !block_text.trim().is_empty() && has_sentence_boundary(&block_text) {
-                            // First meaningful text → start the stream
-                            match adapter.start_stream(chat_id, &block_text).await {
-                                Ok(sid) if !sid.is_empty() => {
-                                    stream_id = Some(sid);
-                                    sequence = 1;
-                                    any_text_sent = true;
-                                    first_content_sent = true;
-                                }
-                                Ok(_) => {
-                                    ulog_warn!("[im-stream] start_stream returned empty stream_id");
-                                }
-                                Err(e) => {
-                                    ulog_warn!("[im-stream] start_stream failed: {}", e);
-                                }
-                            }
-                        } else if let Some(ref sid) = stream_id {
-                            // Subsequent chunk → push to stream
-                            sequence += 1;
-                            if let Err(e) = adapter.stream_chunk(chat_id, sid, &block_text, sequence, false).await {
-                                ulog_warn!("[im-stream] stream_chunk failed: {}", e);
-                            }
-                        }
-                    }
-                }
-                "activity" => {
-                    // Non-text block (thinking, tool_use).
-                    if let Some(ref sid) = stream_id {
-                        // Stream already active → send thinking indicator within stream
-                        sequence += 1;
-                        if let Err(e) = adapter.stream_chunk(chat_id, sid, "", sequence, true).await {
-                            ulog_warn!("[im-stream] stream_chunk (activity indicator) failed: {}", e);
-                        }
-                    } else if !first_content_sent {
-                        // No stream yet and user hasn't seen any content →
-                        // send placeholder as a standalone message for immediate feedback.
-                        // Track ID for cleanup on silent/error/no-response.
-                        match adapter.send_message_returning_id(chat_id, THINKING_PLACEHOLDER).await {
-                            Ok(Some(id)) => {
-                                placeholder_id = Some(id);
-                            }
-                            Ok(None) => {
-                                if let Err(e) = adapter.send_message(chat_id, THINKING_PLACEHOLDER).await {
-                                    ulog_warn!("[im-stream] send_message (streaming thinking placeholder) failed: {}", e);
-                                }
-                            }
-                            Err(e) => {
-                                ulog_warn!("[im-stream] send_message_returning_id (streaming thinking placeholder) failed: {}", e);
-                            }
-                        }
-                        first_content_sent = true;
-                    }
-                }
-                "block-end" => {
-                    let final_text = json_val["text"]
-                        .as_str()
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| block_text.clone());
-
-                    if !final_text.trim().is_empty() {
-                        if let Some(ref sid) = stream_id {
-                            // Finalize the stream with final content
-                            if let Err(e) = adapter.finalize_stream(chat_id, sid, &final_text).await {
-                                ulog_warn!("[im-stream] finalize_stream failed: {}", e);
-                            }
-                            any_text_sent = true;
-                        } else {
-                            // No stream was started (very fast response) → send directly
-                            if let Err(e) = adapter.send_message(chat_id, &final_text).await {
-                                ulog_warn!("[im-stream] send_message (streaming block-end direct) failed: {}", e);
-                            }
-                            any_text_sent = true;
-                        }
-                    } else if let Some(ref sid) = stream_id {
-                        // Whitespace-only block — abort the stream
-                        if let Err(e) = adapter.abort_stream(chat_id, sid).await {
-                            ulog_warn!("[im-stream] abort_stream (empty block) failed: {}", e);
-                        }
-                    }
-
-                    // Reset for next block
-                    block_text.clear();
-                    stream_id = None;
-                    sequence = 0;
-                }
-                "complete" => {
-                    session_id = json_val["sessionId"].as_str().map(String::from);
-                    let silent = json_val["silent"].as_bool().unwrap_or(false);
-
-                    if silent {
-                        // Group "always" mode: AI decided not to reply
-                        if let Some(ref sid) = stream_id {
-                            if let Err(e) = adapter.abort_stream(chat_id, sid).await {
-                                ulog_warn!("[im-stream] abort_stream (silent) failed: {}", e);
-                            }
-                        }
-                        if let Some(ref pid) = placeholder_id {
-                            if let Err(e) = adapter.delete_message(chat_id, pid).await {
-                                ulog_warn!("[im-stream] delete_message (streaming silent placeholder) failed: {}", e);
-                            }
-                        }
-                        return Ok(session_id);
-                    }
-
-                    // Flush remaining block text
-                    if !block_text.trim().is_empty() {
-                        if let Some(ref sid) = stream_id {
-                            if let Err(e) = adapter.finalize_stream(chat_id, sid, &block_text).await {
-                                ulog_warn!("[im-stream] final finalize_stream failed: {}", e);
-                            }
-                            any_text_sent = true;
-                        } else {
-                            if let Err(e) = adapter.send_message(chat_id, &block_text).await {
-                                ulog_warn!("[im-stream] send_message (streaming complete flush) failed: {}", e);
-                            }
-                            any_text_sent = true;
-                        }
-                    } else if let Some(ref sid) = stream_id {
-                        if let Err(e) = adapter.abort_stream(chat_id, sid).await {
-                            ulog_warn!("[im-stream] abort_stream (complete empty) failed: {}", e);
-                        }
-                    }
-
-                    if !any_text_sent {
-                        // Edit placeholder in-place if possible, otherwise delete + send
-                        if let Some(ref pid) = placeholder_id {
-                            if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
-                                let _ = adapter.delete_message(chat_id, pid).await;
-                                if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                                    ulog_warn!("[im-stream] send_message (streaming no response fallback) failed: {}", e);
-                                }
-                            }
-                        } else {
-                            if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                                ulog_warn!("[im-stream] send_message (streaming no response) failed: {}", e);
-                            }
-                        }
-                    }
-                    return Ok(session_id);
-                }
-                "permission-request" => {
-                    let request_id = json_val["requestId"].as_str().unwrap_or("").to_string();
-                    let tool_name = json_val["toolName"].as_str().unwrap_or("unknown").to_string();
-                    let tool_input = json_val["input"].as_str().unwrap_or("").to_string();
-
-                    ulog_info!(
-                        "[im-stream] Permission request (streaming): tool={}, rid={}",
-                        tool_name,
-                        &request_id[..request_id.len().min(16)]
-                    );
-
-                    let card_msg_id = match adapter.send_approval_card(chat_id, &request_id, &tool_name, &tool_input).await {
-                        Ok(Some(mid)) => mid,
-                        Ok(None) => String::new(),
-                        Err(e) => {
-                            ulog_error!("[im-stream] Failed to send approval card: {}", e);
-                            String::new()
-                        }
-                    };
-                    {
-                        let mut guard = pending_approvals.lock().await;
-                        let now = Instant::now();
-                        guard.retain(|_, p| now.duration_since(p.created_at) < Duration::from_secs(15 * 60));
-                        guard.insert(request_id, PendingApproval {
-                            sidecar_port,
-                            chat_id: chat_id.to_string(),
-                            card_message_id: card_msg_id,
-                            created_at: now,
-                        });
-                    }
-                }
-                "error" => {
-                    let error = json_val["error"].as_str().unwrap_or("Unknown error");
-                    // Abort any active stream
-                    if let Some(ref sid) = stream_id {
-                        if let Err(e) = adapter.abort_stream(chat_id, sid).await {
-                            ulog_warn!("[im-stream] abort_stream (error) failed: {}", e);
-                        }
-                    }
-                    if let Some(ref pid) = placeholder_id {
-                        if let Err(e) = adapter.delete_message(chat_id, pid).await {
-                            ulog_warn!("[im-stream] delete_message (streaming error placeholder) failed: {}", e);
-                        }
-                    }
-                    return Err(RouteError::Response(500, error.to_string()));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Stream disconnected unexpectedly
-    if !block_text.trim().is_empty() {
-        if let Some(ref sid) = stream_id {
-            if let Err(e) = adapter.finalize_stream(chat_id, sid, &block_text).await {
-                ulog_warn!("[im-stream] finalize_stream (disconnect) failed: {}", e);
-            }
-            any_text_sent = true;
-        } else {
-            if let Err(e) = adapter.send_message(chat_id, &block_text).await {
-                ulog_warn!("[im-stream] send_message (streaming disconnect flush) failed: {}", e);
-            }
-            any_text_sent = true;
-        }
-    } else if let Some(ref sid) = stream_id {
-        if let Err(e) = adapter.abort_stream(chat_id, sid).await {
-            ulog_warn!("[im-stream] abort_stream (disconnect) failed: {}", e);
-        }
-    }
-    if !any_text_sent {
-        if let Some(ref pid) = placeholder_id {
-            if adapter.edit_message(chat_id, pid, "(No response)").await.is_err() {
-                let _ = adapter.delete_message(chat_id, pid).await;
-                if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                    ulog_warn!("[im-stream] send_message (streaming disconnect no response fallback) failed: {}", e);
-                }
-            }
-        } else {
-            if let Err(e) = adapter.send_message(chat_id, "(No response)").await {
-                ulog_warn!("[im-stream] send_message (streaming disconnect no response) failed: {}", e);
-            }
-        }
-    }
-    Ok(session_id)
+/// Consume Sidecar SSE stream, managing draft message lifecycle for any IM platform.
+/// Group context passed to `stream_to_im` for group chat sessions (v0.1.28).
+pub(crate) struct GroupStreamContext {
+    pub(crate) group_name: String,
+    pub(crate) platform: ImPlatform,
+    pub(crate) activation: GroupActivation,
+    pub(crate) is_first_turn: bool,
+    pub(crate) pending_history: Option<String>,
+    pub(crate) tools_deny: Vec<String>,
+    pub(crate) is_mention: bool,
+    pub(crate) message_count: u32,
 }
+
+/// Placeholder message sent when the AI's first response block is non-text (thinking/tool_use).
+/// Gives users immediate feedback that the AI is processing their message.
+pub(crate) const THINKING_PLACEHOLDER: &str = "思考中…";
+
 
 /// Finalize a text block's draft message.
 /// Uses adapter.max_message_length() to determine the platform's limit.
 /// Detects draft mode from the draft_id string (`draft:xxx` prefix) rather than the adapter
 /// trait method — this is safe even if `draft_fallback` flips mid-stream, because the decision
 /// is based on the actual ID type of the current block, not global adapter state.
-async fn finalize_block<A: adapter::ImStreamAdapter>(
+pub(crate) async fn finalize_block<A: adapter::ImStreamAdapter>(
     adapter: &A,
     chat_id: &str,
     draft_id: Option<String>,
@@ -3835,7 +3428,7 @@ async fn finalize_block<A: adapter::ImStreamAdapter>(
 
 /// Format draft display text (truncate if needed for platform limit).
 /// `max_len` is the platform's message limit in bytes (e.g. 4096 for Telegram, 15000 for Feishu).
-fn format_draft_text(text: &str, max_len: usize) -> String {
+pub(crate) fn format_draft_text(text: &str, max_len: usize) -> String {
     // Reserve a small margin for the "..." truncation indicator
     let limit = max_len.saturating_sub(10);
     if text.len() > limit {
@@ -3853,7 +3446,7 @@ fn format_draft_text(text: &str, max_len: usize) -> String {
 /// Check if text has accumulated enough for a meaningful first send.
 /// Triggers on sentence-ending punctuation or minimum length threshold.
 /// Only affects first-send timing; subsequent edits use `preferred_throttle_ms`.
-fn has_sentence_boundary(text: &str) -> bool {
+pub(crate) fn has_sentence_boundary(text: &str) -> bool {
     const MIN_FIRST_SEND_LEN: usize = 20;
     if text.chars().count() >= MIN_FIRST_SEND_LEN {
         return true;
@@ -3889,19 +3482,9 @@ fn translate_plugin_command_desc(name: &str, desc: &str) -> String {
     }
 }
 
-/// Extract `data:` payload from SSE event string.
-fn extract_sse_data(event_str: &str) -> String {
-    event_str
-        .lines()
-        .filter(|line| line.starts_with("data:"))
-        .map(|line| {
-            line.strip_prefix("data: ")
-                .or_else(|| line.strip_prefix("data:"))
-                .unwrap_or("")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+// `extract_sse_data` was used by the legacy `stream_to_im[_streaming]` SSE
+// consumer. After Pattern C-7 deletion, the equivalent helper lives in
+// `event_consumer::extract_data` (used by the new long-poll consumer task).
 
 /// Generate a non-conflicting file path by appending _1, _2, etc.
 fn auto_rename_path(path: &std::path::Path) -> PathBuf {
@@ -4323,67 +3906,52 @@ fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
 fn persist_agent_config_patch(agent_id: &str, patch: &AgentConfigPatch) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
 
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
+    with_config_lock(&config_path, true, |config| {
+        let agents = config.get_mut("agents")
+            .and_then(|v| v.as_array_mut())
+            .ok_or_else(|| "[agent] No agents[] in config.json".to_string())?;
+        let agent = agents.iter_mut()
+            .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(agent_id))
+            .ok_or_else(|| format!("[agent] Agent {} not found in config.json", agent_id))?;
 
-    let agents = config.get_mut("agents")
-        .and_then(|v| v.as_array_mut())
-        .ok_or_else(|| "[agent] No agents[] in config.json".to_string())?;
-    let agent = agents.iter_mut()
-        .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(agent_id))
-        .ok_or_else(|| format!("[agent] Agent {} not found in config.json", agent_id))?;
+        // Apply patch fields
+        macro_rules! apply_field {
+            ($field:ident, $key:expr) => {
+                if let Some(ref val) = patch.$field {
+                    agent[$key] = serde_json::json!(val);
+                }
+            };
+        }
+        apply_field!(name, "name");
+        apply_field!(icon, "icon");
+        apply_field!(enabled, "enabled");
+        apply_field!(provider_id, "providerId");
+        apply_field!(model, "model");
+        apply_field!(provider_env_json, "providerEnvJson");
+        apply_field!(permission_mode, "permissionMode");
+        apply_field!(mcp_enabled_servers, "mcpEnabledServers");
+        apply_field!(runtime, "runtime");
+        apply_field!(setup_completed, "setupCompleted");
 
-    // Apply patch fields
-    macro_rules! apply_field {
-        ($field:ident, $key:expr) => {
-            if let Some(ref val) = patch.$field {
-                agent[$key] = serde_json::json!(val);
-            }
-        };
-    }
-    apply_field!(name, "name");
-    apply_field!(icon, "icon");
-    apply_field!(enabled, "enabled");
-    apply_field!(provider_id, "providerId");
-    apply_field!(model, "model");
-    apply_field!(provider_env_json, "providerEnvJson");
-    apply_field!(permission_mode, "permissionMode");
-    apply_field!(mcp_enabled_servers, "mcpEnabledServers");
-    apply_field!(runtime, "runtime");
-    apply_field!(setup_completed, "setupCompleted");
+        if let Some(ref runtime_config) = patch.runtime_config {
+            agent["runtimeConfig"] = runtime_config.clone();
+        }
 
-    if let Some(ref runtime_config) = patch.runtime_config {
-        agent["runtimeConfig"] = runtime_config.clone();
-    }
+        if let Some(ref channels) = patch.channels {
+            agent["channels"] = serde_json::to_value(channels)
+                .map_err(|e| format!("[agent] Failed to serialize channels: {}", e))?;
+        }
 
-    if let Some(ref channels) = patch.channels {
-        agent["channels"] = serde_json::to_value(channels)
-            .map_err(|e| format!("[agent] Failed to serialize channels: {}", e))?;
-    }
-
-    if let Some(ref hb_json) = patch.heartbeat_config_json {
-        if !hb_json.is_empty() && hb_json != "null" {
-            if let Ok(hb) = serde_json::from_str::<serde_json::Value>(hb_json) {
-                agent["heartbeat"] = hb;
+        if let Some(ref hb_json) = patch.heartbeat_config_json {
+            if !hb_json.is_empty() && hb_json != "null" {
+                if let Ok(hb) = serde_json::from_str::<serde_json::Value>(hb_json) {
+                    agent["heartbeat"] = hb;
+                }
             }
         }
-    }
-
-    // Atomic write: tmp → bak → rename
-    let serialized = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
-    std::fs::write(&tmp_path, &serialized)
-        .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
-    if config_path.exists() {
-        let _ = std::fs::copy(&config_path, &bak_path);
-    }
-    std::fs::rename(&tmp_path, &config_path)
-        .map_err(|e| format!("[agent] Failed to rename tmp → config: {}", e))?;
+        Ok(())
+    })?;
 
     ulog_info!("[agent] Persisted config patch for agent {}", agent_id);
     Ok(())
@@ -4597,7 +4165,7 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                     }
                 };
 
-                let hb_handle = tokio::spawn(async move {
+                let hb_handle = tauri::async_runtime::spawn(async move {
                     use heartbeat::is_in_active_hours;
 
                     let initial_interval = {
@@ -5226,17 +4794,11 @@ pub async fn cmd_im_conversations(
 // ===== Unified Config Commands (v0.1.26) =====
 
 /// Persist a partial patch to a single bot's entry in `~/.myagents/config.json`.
-/// Uses atomic write (.tmp.rust → .bak → rename). `None` = no change, `Some("")` = clear.
+/// Uses the shared config lock. `None` = no change, `Some("")` = clear.
 fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
-
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
+    with_config_lock(&config_path, true, |config| {
 
     // Find the bot/channel entry: search legacy imBotConfigs first, then agents[].channels[] (v0.1.42)
     // Use JSON Pointer path to locate the entry, then get a mutable reference.
@@ -5402,20 +4964,8 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
         }
     }
 
-    // Atomic write
-    let new_content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
-    std::fs::write(&tmp_path, &new_content)
-        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
-    if config_path.exists() {
-        let _ = std::fs::rename(&config_path, &bak_path);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-        if bak_path.exists() && !config_path.exists() {
-            let _ = std::fs::rename(&bak_path, &config_path);
-        }
-        return Err(format!("[im] Cannot rename tmp config: {}", e));
-    }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -5636,42 +5186,22 @@ async fn update_bot_config_internal<R: Runtime>(
 fn add_bot_config_to_disk(bot_config: &serde_json::Value) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
-
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
-
-    // Ensure imBotConfigs array exists
-    if config.get("imBotConfigs").is_none() {
-        config["imBotConfigs"] = serde_json::json!([]);
-    }
-    let bots = config.get_mut("imBotConfigs").unwrap().as_array_mut().unwrap();
-
-    // Upsert: if bot with same id exists, replace it; otherwise append
-    let bot_id = bot_config.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if let Some(pos) = bots.iter().position(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
-        bots[pos] = bot_config.clone();
-    } else {
-        bots.push(bot_config.clone());
-    }
-
-    // Atomic write
-    let new_content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
-    std::fs::write(&tmp_path, &new_content)
-        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
-    if config_path.exists() {
-        let _ = std::fs::rename(&config_path, &bak_path);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-        if bak_path.exists() && !config_path.exists() {
-            let _ = std::fs::rename(&bak_path, &config_path);
+    with_config_lock(&config_path, true, |config| {
+        // Ensure imBotConfigs array exists
+        if config.get("imBotConfigs").is_none() {
+            config["imBotConfigs"] = serde_json::json!([]);
         }
-        return Err(format!("[im] Cannot rename tmp config: {}", e));
-    }
+        let bots = config.get_mut("imBotConfigs").unwrap().as_array_mut().unwrap();
+
+        // Upsert: if bot with same id exists, replace it; otherwise append
+        let bot_id = bot_config.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(pos) = bots.iter().position(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
+            bots[pos] = bot_config.clone();
+        } else {
+            bots.push(bot_config.clone());
+        }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -5680,31 +5210,12 @@ fn add_bot_config_to_disk(bot_config: &serde_json::Value) -> Result<(), String> 
 fn remove_bot_config_from_disk(bot_id: &str) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
-    let tmp_path = config_path.with_extension("json.tmp.rust");
-    let bak_path = config_path.with_extension("json.bak");
-
-    let content = std::fs::read_to_string(&config_path)
-        .map_err(|e| format!("[im] Cannot read config.json: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("[im] Cannot parse config.json: {}", e))?;
-
-    if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
-        bots.retain(|b| b.get("id").and_then(|v| v.as_str()) != Some(bot_id));
-    }
-
-    let new_content = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("[im] Cannot serialize config: {}", e))?;
-    std::fs::write(&tmp_path, &new_content)
-        .map_err(|e| format!("[im] Cannot write tmp config: {}", e))?;
-    if config_path.exists() {
-        let _ = std::fs::rename(&config_path, &bak_path);
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, &config_path) {
-        if bak_path.exists() && !config_path.exists() {
-            let _ = std::fs::rename(&bak_path, &config_path);
+    with_config_lock(&config_path, true, |config| {
+        if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
+            bots.retain(|b| b.get("id").and_then(|v| v.as_str()) != Some(bot_id));
         }
-        return Err(format!("[im] Cannot rename tmp config: {}", e));
-    }
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -6307,7 +5818,7 @@ pub async fn cmd_start_agent_channel(
         let hb_config_arc = Arc::new(RwLock::new(hb_config));
         let hb_config_for_loop = Arc::clone(&hb_config_arc);
 
-        let hb_handle = tokio::spawn(async move {
+        let hb_handle = tauri::async_runtime::spawn(async move {
             use heartbeat::is_in_active_hours;
 
             let initial_interval = {
@@ -6867,33 +6378,19 @@ pub async fn cmd_create_agent(
     tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
         let config_path = home.join(".myagents").join("config.json");
-        let tmp_path = config_path.with_extension("json.tmp.rust");
-        let bak_path = config_path.with_extension("json.bak");
 
-        let content = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
-        let mut app_config: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
-
-        let agents = app_config.get_mut("agents")
-            .and_then(|v| v.as_array_mut());
-        let agent_value = serde_json::to_value(&config)
-            .map_err(|e| format!("[agent] Failed to serialize agent: {}", e))?;
-        if let Some(arr) = agents {
-            arr.push(agent_value);
-        } else {
-            app_config["agents"] = serde_json::json!([agent_value]);
-        }
-
-        let serialized = serde_json::to_string_pretty(&app_config)
-            .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
-        std::fs::write(&tmp_path, &serialized)
-            .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
-        if config_path.exists() {
-            let _ = std::fs::copy(&config_path, &bak_path);
-        }
-        std::fs::rename(&tmp_path, &config_path)
-            .map_err(|e| format!("[agent] Failed to rename: {}", e))?;
+        with_config_lock(&config_path, true, |app_config| {
+            let agents = app_config.get_mut("agents")
+                .and_then(|v| v.as_array_mut());
+            let agent_value = serde_json::to_value(&config)
+                .map_err(|e| format!("[agent] Failed to serialize agent: {}", e))?;
+            if let Some(arr) = agents {
+                arr.push(agent_value);
+            } else {
+                app_config["agents"] = serde_json::json!([agent_value]);
+            }
+            Ok(())
+        })?;
 
         Ok::<(), String>(())
     }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
@@ -6930,27 +6427,13 @@ pub async fn cmd_delete_agent(
     tokio::task::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or("[agent] Home dir not found")?;
         let config_path = home.join(".myagents").join("config.json");
-        let tmp_path = config_path.with_extension("json.tmp.rust");
-        let bak_path = config_path.with_extension("json.bak");
 
-        let content = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("[agent] Cannot read config.json: {}", e))?;
-        let mut app_config: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("[agent] Cannot parse config.json: {}", e))?;
-
-        if let Some(agents) = app_config.get_mut("agents").and_then(|v| v.as_array_mut()) {
-            agents.retain(|a| a.get("id").and_then(|v| v.as_str()) != Some(&aid));
-        }
-
-        let serialized = serde_json::to_string_pretty(&app_config)
-            .map_err(|e| format!("[agent] Failed to serialize config: {}", e))?;
-        std::fs::write(&tmp_path, &serialized)
-            .map_err(|e| format!("[agent] Failed to write tmp: {}", e))?;
-        if config_path.exists() {
-            let _ = std::fs::copy(&config_path, &bak_path);
-        }
-        std::fs::rename(&tmp_path, &config_path)
-            .map_err(|e| format!("[agent] Failed to rename: {}", e))?;
+        with_config_lock(&config_path, true, |app_config| {
+            if let Some(agents) = app_config.get_mut("agents").and_then(|v| v.as_array_mut()) {
+                agents.retain(|a| a.get("id").and_then(|v| v.as_str()) != Some(&aid));
+            }
+            Ok(())
+        })?;
 
         // Clean up agent data directory (~/.myagents/agents/{agentId}/)
         let agent_data_dir = home.join(".myagents").join("agents").join(&aid);

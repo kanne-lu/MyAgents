@@ -1,21 +1,15 @@
 @echo off
 :: myagents CLI wrapper for Windows cmd.exe
-:: Invokes the Bun script via the bundled Bun runtime
+:: Invokes the bundled Node.js runtime on myagents.js (esbuild output).
 setlocal
 
-:: Try bundled Bun first (highest priority in agent PATH)
-for %%b in (bun.exe) do (
+:: Use node from PATH first (the app injects its bundled Node.js dir)
+for %%b in (node.exe) do (
   if not "%%~$PATH:b"=="" (
     "%%~$PATH:b" "%~dp0myagents" %*
     exit /b %ERRORLEVEL%
   )
 )
 
-:: Fallback to user-installed Bun
-if exist "%USERPROFILE%\.bun\bin\bun.exe" (
-  "%USERPROFILE%\.bun\bin\bun.exe" "%~dp0myagents" %*
-  exit /b %ERRORLEVEL%
-)
-
-echo Error: Bun runtime not found. This CLI requires the MyAgents app to be running.
+echo Error: Node.js runtime not found. Launch MyAgents.app at least once to install its bundled Node, or install Node.js from https://nodejs.org.
 exit /b 3

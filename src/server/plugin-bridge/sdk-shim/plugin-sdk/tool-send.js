@@ -19,4 +19,4 @@ function extractToolSend(args, expectedAction = "sendMessage") {
   return { to, accountId, threadId };
 }
 
-module.exports = { extractToolSend };
+export { extractToolSend };

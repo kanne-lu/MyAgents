@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 
 use crate::sidecar::{self, ManagedSidecarManager, SidecarOwner};
 use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
+use crate::config_io::with_config_lock;
 
 use super::types::MemoryAutoUpdateConfig;
 
@@ -154,7 +155,7 @@ pub async fn check_and_spawn<R: Runtime>(
     let provider_env = Arc::clone(current_provider_env);
     let mcp_json = Arc::clone(mcp_servers_json);
 
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let count = run_batch(
             &qualifying,
             &agent_id_owned,
@@ -586,33 +587,24 @@ async fn update_config_field<R: Runtime>(
             .join(".myagents")
             .join("config.json");
 
-        let content = std::fs::read_to_string(&config_path)
-            .map_err(|e| format!("Read config: {}", e))?;
-        let mut config: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("Parse config: {}", e))?;
-
-        if let Some(agents) = config.get_mut("agents").and_then(|a| a.as_array_mut()) {
-            for agent in agents.iter_mut() {
-                if agent.get("id").and_then(|v| v.as_str()) == Some(&agent_id_owned) {
-                    let mau: MemoryAutoUpdateConfig = agent
-                        .get("memoryAutoUpdate")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let mut mau = mau;
-                    f(&mut mau);
-                    agent["memoryAutoUpdate"] = serde_json::to_value(&mau)
-                        .unwrap_or(serde_json::Value::Null);
-                    break;
+        with_config_lock(&config_path, false, |config| {
+            if let Some(agents) = config.get_mut("agents").and_then(|a| a.as_array_mut()) {
+                for agent in agents.iter_mut() {
+                    if agent.get("id").and_then(|v| v.as_str()) == Some(&agent_id_owned) {
+                        let mau: MemoryAutoUpdateConfig = agent
+                            .get("memoryAutoUpdate")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
+                        let mut mau = mau;
+                        f(&mut mau);
+                        agent["memoryAutoUpdate"] = serde_json::to_value(&mau)
+                            .unwrap_or(serde_json::Value::Null);
+                        break;
+                    }
                 }
             }
-        }
-
-        // Atomic write
-        let tmp_path = config_path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, serde_json::to_string_pretty(&config).unwrap_or_default())
-            .map_err(|e| format!("Write tmp: {}", e))?;
-        std::fs::rename(&tmp_path, &config_path)
-            .map_err(|e| format!("Rename: {}", e))?;
+            Ok(())
+        })?;
 
         Ok(())
     }).await;

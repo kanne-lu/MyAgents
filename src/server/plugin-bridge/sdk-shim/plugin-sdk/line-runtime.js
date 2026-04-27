@@ -1,5 +1,5 @@
 // AUTO-GENERATED STUB — do not edit manually.
-// Regenerate: bun scripts/generate-sdk-shims.ts
+// Regenerate: npm run generate:sdk-shims
 // Source: openclaw/src/plugin-sdk/line-runtime.ts
 
 const _warned = new Set();
@@ -7,54 +7,55 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/line-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
-function probeLineBot() { _w('probeLineBot'); return undefined; }
-function createQuickReplyItems() { _w('createQuickReplyItems'); return undefined; }
-function pushFlexMessage() { _w('pushFlexMessage'); return undefined; }
-function pushLocationMessage() { _w('pushLocationMessage'); return undefined; }
-function pushMessageLine() { _w('pushMessageLine'); return undefined; }
-function pushMessagesLine() { _w('pushMessagesLine'); return undefined; }
-function pushTemplateMessage() { _w('pushTemplateMessage'); return undefined; }
-function pushTextMessageWithQuickReplies() { _w('pushTextMessageWithQuickReplies'); return undefined; }
-function sendMessageLine() { _w('sendMessageLine'); return undefined; }
-function buildTemplateMessageFromPayload() { _w('buildTemplateMessageFromPayload'); return undefined; }
-const normalizeAllowFrom = undefined;
-const normalizeDmAllowFromWithStore = undefined;
-const isSenderAllowed = undefined;
-function firstDefined() { _w('firstDefined'); return undefined; }
-async function handleLineWebhookEvents() { _w('handleLineWebhookEvents'); return undefined; }
-function createLineWebhookReplayCache() { _w('createLineWebhookReplayCache'); return undefined; }
-async function buildLineMessageContext() { _w('buildLineMessageContext'); return undefined; }
-async function buildLinePostbackContext() { _w('buildLinePostbackContext'); return undefined; }
-function getLineSourceInfo() { _w('getLineSourceInfo'); return undefined; }
-function createLineBot() { _w('createLineBot'); return undefined; }
-function createLineWebhookCallback() { _w('createLineWebhookCallback'); return undefined; }
-async function downloadLineMedia() { _w('downloadLineMedia'); return undefined; }
-async function monitorLineProvider() { _w('monitorLineProvider'); return undefined; }
-function getLineRuntimeState() { _w('getLineRuntimeState'); return undefined; }
-
-module.exports = {
-  probeLineBot,
-  createQuickReplyItems,
-  pushFlexMessage,
-  pushLocationMessage,
-  pushMessageLine,
-  pushMessagesLine,
-  pushTemplateMessage,
-  pushTextMessageWithQuickReplies,
-  sendMessageLine,
-  buildTemplateMessageFromPayload,
-  normalizeAllowFrom,
-  normalizeDmAllowFromWithStore,
-  isSenderAllowed,
-  firstDefined,
-  handleLineWebhookEvents,
-  createLineWebhookReplayCache,
-  buildLineMessageContext,
-  buildLinePostbackContext,
-  getLineSourceInfo,
-  createLineBot,
-  createLineWebhookCallback,
-  downloadLineMedia,
-  monitorLineProvider,
-  getLineRuntimeState,
-};
+export const buildTemplateMessageFromPayload = undefined;
+export const cancelDefaultRichMenu = undefined;
+export const createActionCard = undefined;
+export const createAgendaCard = undefined;
+export const createAppleTvRemoteCard = undefined;
+export const createCarousel = undefined;
+export const createDefaultMenuConfig = undefined;
+export const createDeviceControlCard = undefined;
+export const createEventCard = undefined;
+export const createGridLayout = undefined;
+export const createImageCard = undefined;
+export const createInfoCard = undefined;
+export const createListCard = undefined;
+export const createMediaPlayerCard = undefined;
+export const createNotificationBubble = undefined;
+export const createQuickReplyItems = undefined;
+export const createReceiptCard = undefined;
+export const createRichMenu = undefined;
+export const createRichMenuAlias = undefined;
+export const datetimePickerAction = undefined;
+export const deleteRichMenu = undefined;
+export const deleteRichMenuAlias = undefined;
+export const downloadLineMedia = undefined;
+export const firstDefined = undefined;
+export const getDefaultRichMenuId = undefined;
+export const getRichMenu = undefined;
+export const getRichMenuIdOfUser = undefined;
+export const getRichMenuList = undefined;
+export const hasLineDirectives = undefined;
+export const isSenderAllowed = undefined;
+export const linkRichMenuToUser = undefined;
+export const linkRichMenuToUsers = undefined;
+export const messageAction = undefined;
+export const monitorLineProvider = undefined;
+export const normalizeAllowFrom = undefined;
+export const normalizeDmAllowFromWithStore = undefined;
+export const parseLineDirectives = undefined;
+export const postbackAction = undefined;
+export const probeLineBot = undefined;
+export const pushFlexMessage = undefined;
+export const pushLocationMessage = undefined;
+export const pushMessageLine = undefined;
+export const pushMessagesLine = undefined;
+export const pushTemplateMessage = undefined;
+export const pushTextMessageWithQuickReplies = undefined;
+export const sendMessageLine = undefined;
+export const setDefaultRichMenu = undefined;
+export const toFlexMessage = undefined;
+export const unlinkRichMenuFromUser = undefined;
+export const unlinkRichMenuFromUsers = undefined;
+export const uploadRichMenuImage = undefined;
+export const uriAction = undefined;

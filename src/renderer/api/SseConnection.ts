@@ -60,6 +60,7 @@ const JSON_EVENTS = new Set([
     'chat:api-retry', // SDK API retry status (v0.2.77+) — rate limit / transient error retrying
     'chat:permission-mode-changed', // Backend permission mode changed (plan/auto/etc.) — sync frontend UI
     'workspace:files-changed', // File watcher detected workspace file changes
+    'chat:attachments-filtered', // Sidecar stripped image/video/audio attachments because the resolved model lacks the modality (see modelSupportsModality)
 ]);
 
 // Event types that can be JSON or plain string

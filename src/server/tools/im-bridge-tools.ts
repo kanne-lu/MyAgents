@@ -1,9 +1,13 @@
 // IM Bot Bridge Tools — Dynamic MCP proxy for OpenClaw plugin tools
 // Fetches tool definitions from Bridge's /mcp/tools endpoint at context-set time,
 // then creates one MCP tool per plugin tool — transparent passthrough, no hardcoding.
+//
+// SDK + zod loaded lazily inside setImBridgeToolsContext() — plain IM sessions
+// never pull in this module's bulk unless a plugin bridge is actually attached.
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
+import { maybeSpill } from '../utils/large-value-store';
 
 type CallToolResult = {
   content: Array<{ type: 'text'; text: string }>;
@@ -16,16 +20,24 @@ type CallToolResult = {
 async function triggerAutoAuth(ctx: ImBridgeToolsContext): Promise<CallToolResult> {
   console.log('[im-bridge-tools] need_user_authorization detected, triggering auto-auth via feishu_auth command');
   try {
-    const resp = await fetch(`http://127.0.0.1:${ctx.bridgePort}/execute-command`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        command: 'feishu_auth',
-        args: '',
-        userId: ctx.senderId || '',
-        chatId: ctx.chatId || '',
-      }),
-    });
+    // Pattern 1: 15s cap on local 127.0.0.1 Bridge command call.
+    // Pattern 1 follow-up: derive parent signal from the active turn so a
+    // user stop releases this fetch immediately rather than waiting on the
+    // 15s ceiling.
+    const resp = await cancellableFetch(
+      `http://127.0.0.1:${ctx.bridgePort}/execute-command`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command: 'feishu_auth',
+          args: '',
+          userId: ctx.senderId || '',
+          chatId: ctx.chatId || '',
+        }),
+      },
+      { timeoutMs: 15_000, parentSignal: getCurrentTurnSignal() },
+    );
     if (!resp.ok) {
       const errText = await resp.text().catch(() => '');
       console.warn(`[im-bridge-tools] Auto-auth command failed (${resp.status}): ${errText}`);
@@ -74,8 +86,16 @@ interface ImBridgeToolsContext {
 
 let bridgeToolsContext: ImBridgeToolsContext | null = null;
 
-/** Cached dynamic MCP server — rebuilt when context changes */
-let dynamicServer: ReturnType<typeof createSdkMcpServer> | null = null;
+/** Cached dynamic MCP server — rebuilt when context changes.
+ *  Typed as `McpSdkServerConfigWithInstance | null` via type-only import
+ *  (erased at compile time → zero runtime cost). */
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
+let dynamicServer: McpSdkServerConfigWithInstance | null = null;
+/** Generation token — incremented whenever a new context is set so stale
+ *  async completions from a previous setImBridgeToolsContext call can be
+ *  detected and discarded. Prevents a narrow race where a new context is
+ *  set while the previous call's `await fetch(...)` is still in flight. */
+let contextGeneration = 0;
 
 /**
  * Set bridge tools context and dynamically create MCP server from plugin tools.
@@ -83,7 +103,23 @@ let dynamicServer: ReturnType<typeof createSdkMcpServer> | null = null;
  */
 export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promise<void> {
   bridgeToolsContext = ctx;
-  console.log(`[im-bridge-tools] Context set: bridge=${ctx.bridgePort}, groups=${ctx.enabledToolGroups.join(',')}, plugin=${ctx.pluginId}`);
+  // Clear the stale server object BEFORE the first await — otherwise
+  // buildSdkMcpServers() could see the new context paired with an old server
+  // (whose tool closures captured old plugin tool names) during the async gap.
+  dynamicServer = null;
+  const myGeneration = ++contextGeneration;
+  console.log(`[im-bridge-tools] Context set: bridge=${ctx.bridgePort}, groups=${ctx.enabledToolGroups.join(',')}, plugin=${ctx.pluginId}, gen=${myGeneration}`);
+
+  // SDK + zod imported here (not at module top) so plain IM sessions that
+  // never attach a plugin bridge pay zero cost for this module.
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
+
+  // Bail if a newer context was set while we were awaiting imports.
+  if (myGeneration !== contextGeneration) {
+    console.log(`[im-bridge-tools] Context superseded (gen ${myGeneration} → ${contextGeneration}), discarding`);
+    return;
+  }
 
   // Fetch tools from Bridge and build dynamic MCP server
   try {
@@ -91,10 +127,17 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
     const allGroups = [...new Set([...ctx.enabledToolGroups, 'interaction'])];
     const groups = allGroups.join(',');
     const url = `http://127.0.0.1:${ctx.bridgePort}/mcp/tools${groups ? `?groups=${groups}` : ''}`;
-    const resp = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
+    // Pattern 1: bound the local Bridge call. 15s = local 127.0.0.1 — anything
+    // longer means the Bridge is wedged. Without this an im-bridge tool turn
+    // could hang forever waiting on a stuck Bridge.
+    const resp = await cancellableFetch(
+      url,
+      { headers: { 'Content-Type': 'application/json' } },
+      { timeoutMs: 15_000 },
+    );
     if (!resp.ok) {
       console.warn(`[im-bridge-tools] Failed to fetch tools: ${resp.status}`);
-      dynamicServer = null;
+      if (myGeneration === contextGeneration) dynamicServer = null;
       return;
     }
 
@@ -105,15 +148,25 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
 
     if (!data.ok || !data.tools || data.tools.length === 0) {
       // Not an error — some plugins (e.g. WeChat) don't provide MCP tools.
-      // Use console.log instead of console.warn to avoid misleading [ERROR] in unified log
-      // (Bun stderr capture marks all console.warn output as ERROR level).
+      // Use console.log so the unified-log INFO/WARN/ERROR mapping matches
+      // intent (an empty tool list isn't a fault).
       console.log('[im-bridge-tools] No tools available from Bridge (plugin may not provide tools, this is normal)');
-      dynamicServer = null;
+      if (myGeneration === contextGeneration) dynamicServer = null;
       return;
     }
 
     // Create one MCP tool per plugin tool — transparent passthrough
     // Filter out tools with missing names, and ensure description is always a string
+    //
+    // W9 fix: capture the *current* context as `localCtx` at server-build time
+    // rather than dereferencing the module-global `bridgeToolsContext` inside
+    // each tool callback. Concurrent IM turns (Pipeline v2 protocol-split
+    // allows two messages from the same peer to be enqueued back-to-back) can
+    // overwrite the module-global with the next turn's identity while the
+    // previous turn's tool calls are still resolving — without per-server
+    // capture, an in-flight Feishu OAuth call could end up using the wrong
+    // sender open_id / chat_id / account_id.
+    const localCtx: ImBridgeToolsContext = ctx;
     const dynamicTools = data.tools.filter(t => t.name).map(pluginTool =>
       tool(
         pluginTool.name,
@@ -122,30 +175,33 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
         // The plugin's description already documents the expected parameters.
         { args: z.record(z.string(), z.any()).describe('Tool arguments as key-value pairs') },
         async (params: { args: Record<string, unknown> }): Promise<CallToolResult> => {
-          if (!bridgeToolsContext) {
-            return {
-              content: [{ type: 'text', text: 'Error: No Bridge context available.' }],
-              isError: true,
-            };
-          }
-
           try {
-            const callUrl = `http://127.0.0.1:${bridgeToolsContext.bridgePort}/mcp/call-tool`;
-            const callResp = await fetch(callUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                toolName: pluginTool.name,
-                args: params.args,
-                userId: bridgeToolsContext.senderId,
-                isOwner: bridgeToolsContext.isOwner ?? false,
-                enabledGroups: [...new Set([...bridgeToolsContext.enabledToolGroups, 'interaction'])],
-                // Ticket context for LarkTicket injection (Feishu OAuth auto-auth)
-                chatId: bridgeToolsContext.chatId,
-                chatType: bridgeToolsContext.sourceType === 'group' ? 'group' : 'p2p',
-                accountId: bridgeToolsContext.accountId,
-              }),
-            });
+            const callUrl = `http://127.0.0.1:${localCtx.bridgePort}/mcp/call-tool`;
+            // Pattern 1: 30s for plugin tool calls — they may hit remote APIs
+            // (Feishu, Lark, …) but should never hang indefinitely. The plugin
+            // itself is responsible for finer-grained timeouts; this is the
+            // outer guard.
+            // Pattern 1 follow-up: parent signal = active turn, so stop button
+            // releases this immediately even before the 30s ceiling.
+            const callResp = await cancellableFetch(
+              callUrl,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  toolName: pluginTool.name,
+                  args: params.args,
+                  userId: localCtx.senderId,
+                  isOwner: localCtx.isOwner ?? false,
+                  enabledGroups: [...new Set([...localCtx.enabledToolGroups, 'interaction'])],
+                  // Ticket context for LarkTicket injection (Feishu OAuth auto-auth)
+                  chatId: localCtx.chatId,
+                  chatType: localCtx.sourceType === 'group' ? 'group' : 'p2p',
+                  accountId: localCtx.accountId,
+                }),
+              },
+              { timeoutMs: 30_000, parentSignal: getCurrentTurnSignal() },
+            );
 
             if (!callResp.ok) {
               const text = await callResp.text();
@@ -158,8 +214,8 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
             const result = await callResp.json() as { ok: boolean; result?: unknown; error?: string };
             if (!result.ok) {
               // Auto-trigger OAuth for need_user_authorization (may come as Bridge-level error)
-              if (result.error?.includes('need_user_authorization') && bridgeToolsContext?.chatId) {
-                return await triggerAutoAuth(bridgeToolsContext);
+              if (result.error?.includes('need_user_authorization') && localCtx.chatId) {
+                return await triggerAutoAuth(localCtx);
               }
               return {
                 content: [{ type: 'text', text: `Tool error: ${result.error || 'unknown'}` }],
@@ -183,11 +239,32 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
             }
 
             // Auto-trigger OAuth when Feishu returns need_user_authorization.
-            if (resultText.includes('need_user_authorization') && bridgeToolsContext?.chatId) {
-              return await triggerAutoAuth(bridgeToolsContext);
+            if (resultText.includes('need_user_authorization') && localCtx.chatId) {
+              return await triggerAutoAuth(localCtx);
             }
 
-            return { content: [{ type: 'text', text: resultText }] };
+            // Pattern 2 §F — Cap large tool results. Anything over 256KB is
+            // spilled to ~/.myagents/refs/<id> and we return a preview-only
+            // tool result with a `@ref:<id>` marker pointing to the full body.
+            // Keeps a 10MB plugin response from blasting through SSE / IPC /
+            // disk in one go.
+            const spilled = await maybeSpill(resultText, {
+              mimetype: 'text/plain; charset=utf-8',
+              sessionId: localCtx.pluginId,
+            });
+            if ('inline' in spilled) {
+              return { content: [{ type: 'text', text: resultText }] };
+            }
+            // Returned a ref — show the preview to the SDK with an explicit
+            // pointer to the full body. The SDK can request the full ref
+            // through the proxyFetch path (renderer) or a future bridge
+            // helper if it needs the rest.
+            const previewText =
+              `${spilled.preview}\n\n…(truncated; ${spilled.sizeBytes} bytes total) ` +
+              `@ref:${spilled.id} (mimetype=${spilled.mimetype})`;
+            return {
+              content: [{ type: 'text', text: previewText }],
+            };
           } catch (err) {
             return {
               content: [{ type: 'text', text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
@@ -198,6 +275,12 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
       ),
     );
 
+    // Final generation check — a newer context may have been set during the
+    // fetch-tools round-trip. If so, don't publish this stale server.
+    if (myGeneration !== contextGeneration) {
+      console.log(`[im-bridge-tools] Context superseded post-fetch (gen ${myGeneration} → ${contextGeneration}), discarding`);
+      return;
+    }
     dynamicServer = createSdkMcpServer({
       name: 'im-bridge-tools',
       version: '1.0.0',
@@ -207,7 +290,11 @@ export async function setImBridgeToolsContext(ctx: ImBridgeToolsContext): Promis
     console.log(`[im-bridge-tools] Dynamic MCP server created with ${data.tools.length} tools: ${data.tools.map(t => t.name).join(', ')}`);
   } catch (err) {
     console.warn(`[im-bridge-tools] Failed to create dynamic server: ${err}`);
-    dynamicServer = null;
+    // Only clear if this call is still the current generation — otherwise
+    // we'd clobber a newer setup that superseded us.
+    if (myGeneration === contextGeneration) {
+      dynamicServer = null;
+    }
   }
 }
 
@@ -223,8 +310,9 @@ export function getImBridgeToolsContext(): ImBridgeToolsContext | null {
 
 /**
  * Get the dynamically created MCP server (null if no tools available).
- * Called by buildSdkMcpServers() in agent-session.ts.
+ * Called by buildSdkMcpServers() in agent-session.ts. The type-only import
+ * at the top of this file gives us a real SDK type with no runtime cost.
  */
-export function getImBridgeToolServer(): ReturnType<typeof createSdkMcpServer> | null {
+export function getImBridgeToolServer(): McpSdkServerConfigWithInstance | null {
   return dynamicServer;
 }

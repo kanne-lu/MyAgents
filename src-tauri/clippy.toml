@@ -1,0 +1,27 @@
+# MyAgents Rust lint policy
+#
+# Pit-of-success rule: ALL async tasks created in src-tauri MUST use
+# `tauri::async_runtime::spawn`. Calling `tokio::spawn` directly works in most
+# call sites — but silently aborts when the caller chain reaches Tauri's
+# `.setup()` callback or any tao ObjC FFI boundary (the runtime context is
+# absent there, the panic cannot unwind across the FFI border, and the process
+# aborts via `panic_cannot_unwind` in `did_finish_launching`).
+#
+# `tauri::async_runtime::spawn` lazy-inits the global runtime + enters its
+# context before delegating to `tokio::spawn`, so it works regardless of where
+# it's called from. Cost: one OnceLock check + a no-op enter when already in
+# context. Negligible.
+#
+# History: bitten twice. First time fixed `search/mod.rs::start_background_indexing`
+# (April 2025, see comment there). Second time fixed `logger.rs::init_buffered_writer`
+# (April 2026, see commit da8a08b). After the second hit, the rule moved from
+# "documented in two places" to "enforced by clippy".
+disallowed-methods = [
+    { path = "tokio::spawn", reason = "Use `tauri::async_runtime::spawn` — works regardless of caller context (.setup() callback / ObjC FFI boundary). See ARCHITECTURE.md `async runtime spawning` pit-of-success module." },
+    { path = "tokio::task::spawn", reason = "Same as `tokio::spawn` — use `tauri::async_runtime::spawn`." },
+]
+
+# `spawn_blocking` is intentionally NOT banned — both `tokio::task::spawn_blocking`
+# and `tauri::async_runtime::spawn_blocking` are equally safe outside an async
+# context (they just dispatch to the blocking thread pool, no reactor needed).
+# Existing call sites using `tokio::task::spawn_blocking` continue to work.

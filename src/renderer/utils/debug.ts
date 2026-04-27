@@ -24,7 +24,7 @@ declare const __DEBUG_MODE__: boolean;
 // Build-time version info for developer mode
 declare const __BUILD_VERSIONS__: {
     claudeAgentSdk: string;
-    bun: string;
+    node: string;
     tauri: string;
 };
 
@@ -61,7 +61,7 @@ export const DEBUG = isDebugMode();
  */
 export interface BuildVersions {
     claudeAgentSdk: string;
-    bun: string;
+    node: string;
     tauri: string;
 }
 

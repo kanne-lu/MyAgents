@@ -9,6 +9,178 @@ type SseClient = {
 
 const encoder = new TextEncoder();
 
+// ──────────────────────────────────────────────────────────────────────────
+// Pattern 2 §2.3.2 — Priority-aware SSE backpressure.
+//
+// The historical client.send() called controller.enqueue() unconditionally;
+// when the WebKit/Tauri downstream stalled (slow renderer, paused tab, frozen
+// proxy), Node's ReadableStreamDefaultController would hold every pending
+// chunk in memory forever. A long streaming session against a paused tab
+// would OOM the sidecar.
+//
+// Three priority tiers:
+//   - 'critical'    → must reach the client even under pressure (errors,
+//                     completions, init events). Wait briefly, then enqueue
+//                     anyway and emit a slow-client warning. NEVER dropped.
+//   - 'coalescible' → chunk-style deltas. When the queue is over the high-water
+//                     mark, the newest entry of the same event type replaces
+//                     the previous queued entry of the same type (we're going
+//                     to emit a tail-of-stream snapshot anyway).
+//   - 'droppable'   → telemetry, logs. Drop silently and bump a counter.
+//
+// Per-client bounded queue (`MAX_QUEUE_PER_CLIENT`) is a hard ceiling — once
+// the queue is full of critical entries, further critical entries still go
+// in (we'd rather burn memory than drop a completion event), but the slow
+// client is logged so operators can spot the wedge.
+// ──────────────────────────────────────────────────────────────────────────
+
+export type SseEventPriority = 'critical' | 'coalescible' | 'droppable';
+
+/**
+ * Default priority used when an event isn't listed in `SSE_EVENT_PRIORITIES`.
+ *
+ * Codex M9 fix: defaulting unknown events to 'coalescible' silently dropped
+ * unregistered structural / control events (`chat:tool-use-start`,
+ * `chat:content-block-stop`, `chat:message-sdk-uuid`, queue events…) under
+ * backpressure — invisible data loss for anything someone forgot to
+ * register. We now fail closed: unregistered events take the same priority
+ * as critical events and emit a one-shot warning with the event name so the
+ * regression is loud. Existing registered streaming deltas keep their
+ * 'coalescible' priority via SSE_EVENT_PRIORITIES below.
+ */
+const DEFAULT_PRIORITY: SseEventPriority = 'critical';
+const unknownEventWarned = new Set<string>();
+
+/**
+ * Data-driven priority table. Each callsite of `broadcast(event, ...)` picks
+ * up its priority from this map — adding a new event type to the codebase
+ * only requires registering it here, not threading priority through callers.
+ *
+ * Conventions:
+ *   - chunk/delta-style streaming events                   → 'coalescible'
+ *   - completion / error / init / permission gate events   → 'critical'
+ *   - log / telemetry chatter                              → 'droppable'
+ */
+export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = Object.freeze({
+  // Streaming deltas — coalescible (replace same-key tail under pressure).
+  'chat:message-chunk': 'coalescible',
+  'chat:thinking-chunk': 'coalescible',
+  'chat:tool-input-delta': 'coalescible',
+  'chat:tool-result-delta': 'coalescible',
+  'chat:subagent-tool-input-delta': 'coalescible',
+  'chat:subagent-tool-result-delta': 'coalescible',
+  // Debounced refresh signals — only the latest one matters, so safe
+  // to coalesce. Prevents file-watcher bursts (e.g. `git checkout`,
+  // `npm install` in workspace) from filling the critical queue.
+  'workspace:files-changed': 'coalescible',
+  // Logs / telemetry — droppable.
+  'chat:log': 'droppable',
+  'chat:logs': 'droppable',
+  'chat:debug-message': 'droppable',
+  // Critical — never drop or coalesce. Includes block-boundary / start
+  // markers, completion / error events, status updates, queue lifecycle,
+  // and renderer-driven request/response gates. The SDK emits these in
+  // tight bursts at turn start (system_init → status → thinking-start →
+  // content-block-stop → tool-use-start → …); coalescing any of them
+  // would corrupt the renderer's structural state machine.
+  'chat:system-init': 'critical',
+  'chat:system-status': 'critical',
+  'chat:status': 'critical',
+  'chat:init': 'critical',
+  'chat:api-retry': 'critical',
+  'chat:attachments-filtered': 'critical',
+  'chat:thinking-start': 'critical',
+  'chat:content-block-stop': 'critical',
+  'chat:message-sdk-uuid': 'critical',
+  'chat:message-replay': 'critical',
+  'chat:message-stopped': 'critical',
+  'chat:message-complete': 'critical',
+  'chat:message-error': 'critical',
+  'chat:agent-error': 'critical',
+  'chat:tool-use-start': 'critical',
+  'chat:tool-result-start': 'critical',
+  'chat:tool-result-complete': 'critical',
+  'chat:server-tool-use-start': 'critical',
+  'chat:subagent-tool-use': 'critical',
+  'chat:subagent-tool-result-start': 'critical',
+  'chat:subagent-tool-result-complete': 'critical',
+  'chat:permission-mode-changed': 'critical',
+  'chat:task-notification': 'critical',
+  'chat:task-started': 'critical',
+  'permission:request': 'critical',
+  'ask-user-question:request': 'critical',
+  'exit-plan-mode:request': 'critical',
+  'enter-plan-mode:request': 'critical',
+  'cron:task-exit-requested': 'critical',
+  'mcp:oauth-expired': 'critical',
+  'config:changed': 'critical',
+  'queue:added': 'critical',
+  'queue:started': 'critical',
+  'queue:cancelled': 'critical',
+});
+
+function resolvePriority(event: string): SseEventPriority {
+  const explicit = SSE_EVENT_PRIORITIES[event];
+  if (explicit) return explicit;
+  if (!unknownEventWarned.has(event)) {
+    unknownEventWarned.add(event);
+    console.warn(
+      `[sse] event "${event}" missing from SSE_EVENT_PRIORITIES — treating as critical. ` +
+        `Register it in src/server/sse.ts to silence and pick the correct priority.`,
+    );
+  }
+  return DEFAULT_PRIORITY;
+}
+
+const MAX_QUEUE_PER_CLIENT = 1000;
+/** Highwater for coalesce trigger — once queue depth exceeds this, coalescible
+ *  events start replacing same-type tails instead of appending. */
+const COALESCE_HIGH_WATER = 256;
+/** OOM defense — beyond this, even critical events get the slow client
+ *  force-closed rather than enqueued. PRD §2.3.2 contract: critical never
+ *  drops on the normal path, but a wedged renderer + buggy plugin emitting
+ *  many `chat:status` / `config:changed` (both critical) must not be allowed
+ *  to grow Node memory unboundedly. 10x MAX_QUEUE_PER_CLIENT gives plenty of
+ *  headroom for a recoverable burst while bounding the worst case. */
+const MAX_QUEUE_HARD_LIMIT = 10 * MAX_QUEUE_PER_CLIENT;
+/** How long a 'critical' enqueue waits for desiredSize to recover before
+ *  forcing through with a slow-client warning. PRD §2.3.2: "wait briefly,
+ *  then enqueue anyway". Used by the dispatch path to give downstream a
+ *  chance to drain before we bypass the soft cap. */
+const _CRITICAL_BACKOFF_MS = 100;
+
+interface SseMetrics {
+  /** Total dropped events broken down by event type. */
+  dropped: Record<string, number>;
+  /** Total slow-client critical force-throughs. */
+  slowConsumerEnqueue: number;
+  /** Coalesce-replace operations (kept as a sanity counter). */
+  coalesceReplace: number;
+}
+
+const SSE_METRICS_KEY = '__myagents_sse_metrics__';
+const sseMetrics: SseMetrics =
+  ((globalThis as Record<string, unknown>)[SSE_METRICS_KEY] as SseMetrics) ??
+  ((globalThis as Record<string, unknown>)[SSE_METRICS_KEY] = {
+    dropped: {},
+    slowConsumerEnqueue: 0,
+    coalesceReplace: 0,
+  } as SseMetrics);
+
+export function getSseMetrics(): Readonly<SseMetrics> {
+  // Shallow copy — exported for /api/admin diagnostics. The dropped table is
+  // a fresh object so callers can JSON.stringify without holding a live ref.
+  return {
+    dropped: { ...sseMetrics.dropped },
+    slowConsumerEnqueue: sseMetrics.slowConsumerEnqueue,
+    coalesceReplace: sseMetrics.coalesceReplace,
+  };
+}
+
+function bumpDropped(event: string): void {
+  sseMetrics.dropped[event] = (sseMetrics.dropped[event] ?? 0) + 1;
+}
+
 // 🔧 Fix: Use globalThis to ensure single clients Set even if module is loaded twice
 // (Per ChatGPT's suggestion to prevent module double-loading issues)
 const CLIENTS_KEY = '__myagents_sse_clients__';
@@ -201,7 +373,6 @@ function flushStreamingLogsForBoundary(event: string, data: unknown): void {
     }
     if ((type === 'thinking' || (!hasToolId && hasIndex)) && hasIndex) {
       flushStreamingLogAggregate(`chat:thinking-chunk|index:${index}`, event);
-      flushStreamingLogAggregate(`chat:thinking-delta|index:${index}`, event);
     }
     return;
   }
@@ -262,7 +433,7 @@ function heartbeatChunk(): Uint8Array {
 // High-frequency streaming events — aggregate console.log to reduce unified log noise.
 // These events fire per-token/per-delta and produce thousands of lines with little diagnostic value.
 const AGGREGATED_EVENTS = new Set([
-  'chat:message-chunk', 'chat:thinking-chunk', 'chat:thinking-delta',
+  'chat:message-chunk', 'chat:thinking-chunk',
   'chat:tool-input-delta', 'chat:tool-result-delta',
   'chat:subagent-tool-input-delta', 'chat:subagent-tool-result-delta',
 ]);
@@ -304,7 +475,7 @@ const chunkBuffers = new Map<string, { merged: string; timer: ReturnType<typeof 
 // flush so the consumer's strict ordering invariants hold.
 const NON_FLUSHING_EVENTS = new Set<string>(['chat:log']);
 
-// Coalesce buffer scope: module-level Map. Each Sidecar is one Bun process
+// Coalesce buffer scope: module-level Map. Each Sidecar is one Node process
 // serving a single session under the project's Tab-scoped Sidecar isolation
 // (see specs/ARCHITECTURE.md § "Tab-scoped 隔离"), so cross-session
 // mixing cannot happen here. If that invariant ever changes, key the buffer
@@ -380,8 +551,42 @@ export function createSseClient(onClose: (client: SseClient) => void): {
 } {
   let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
   let client: SseClient | null = null;
+  // `pending` holds payloads queued before the stream's start() handler hooks
+  // up the controller. `queue` is the post-start backpressure-aware buffer;
+  // its entries are tagged with the event name + priority so we can do
+  // priority-aware dispositions when downstream stalls.
   const pending: Uint8Array[] = [];
+  type QueueEntry = { event: string; priority: SseEventPriority; chunk: Uint8Array };
+  const queue: QueueEntry[] = [];
+  let slowConsumerLogged = false;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * Drain as many queued entries as `controller.desiredSize` permits. Called
+   * after every enqueue and after `pull()` (which fires when downstream
+   * actually consumed bytes — i.e. desiredSize bumped back into positive).
+   *
+   * `force=true` ignores the desiredSize hint and pushes everything through;
+   * used at close-time so a paused downstream still receives any tail of
+   * queued criticals before EOF.
+   */
+  const drainQueue = (force: boolean = false): void => {
+    if (!controller) return;
+    while (queue.length > 0) {
+      if (!force) {
+        const desired = controller.desiredSize;
+        if (desired === null || desired <= 0) break;
+      }
+      const entry = queue.shift()!;
+      try {
+        controller.enqueue(entry.chunk);
+      } catch {
+        // Controller closed — drop the rest; cancel handler will clean up.
+        queue.length = 0;
+        return;
+      }
+    }
+  };
 
   const stream = new ReadableStream<Uint8Array>({
     start(nextController) {
@@ -393,6 +598,10 @@ export function createSseClient(onClose: (client: SseClient) => void): {
         pending.length = 0;
       }
     },
+    pull() {
+      // Downstream consumed; try to flush any backlog we coalesced/queued.
+      drainQueue();
+    },
     cancel() {
       if (controller) {
         controller = null;
@@ -401,6 +610,7 @@ export function createSseClient(onClose: (client: SseClient) => void): {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
       }
+      queue.length = 0;
       if (client) {
         clients.delete(client);
         onClose(client);
@@ -410,16 +620,126 @@ export function createSseClient(onClose: (client: SseClient) => void): {
     }
   });
 
+  /**
+   * Decide and apply the disposition for an event under backpressure.
+   *
+   * Returns true if the entry was added to the live queue (or the controller
+   * directly), false if it was dropped.
+   */
+  const dispatchWithBackpressure = (event: string, payload: Uint8Array): boolean => {
+    const priority = resolvePriority(event);
+
+    if (!controller) {
+      // Pre-start: buffer raw payloads — start() flushes them.
+      pending.push(payload);
+      return true;
+    }
+
+    const desired = controller.desiredSize;
+
+    // Hot path: downstream is consuming, queue is empty.
+    if (queue.length === 0 && (desired === null || desired > 0)) {
+      try {
+        controller.enqueue(payload);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    // Either we already have a backlog, or downstream is paused. Time for
+    // priority-aware dispositions.
+
+    // Coalescible: if queue is hot, replace the previous same-type tail entry
+    // rather than letting the queue grow unbounded with stale chunks.
+    if (priority === 'coalescible' && queue.length >= COALESCE_HIGH_WATER) {
+      // Find the most recent same-event entry and replace its chunk in place.
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (queue[i].event === event) {
+          queue[i].chunk = payload;
+          sseMetrics.coalesceReplace += 1;
+          drainQueue();
+          return true;
+        }
+      }
+      // No prior same-type entry — fall through to normal append.
+    }
+
+    // Hard ceiling check.
+    //
+    // Fix #6 (review-by-cc + review-by-codex): critical events used to bypass
+    // MAX_QUEUE_PER_CLIENT *unboundedly* — a wedged renderer + buggy plugin
+    // emitting many critical events (e.g. chat:status / config:changed) could
+    // grow the queue forever, OOMing the sidecar. We now apply a secondary
+    // hard cap MAX_QUEUE_HARD_LIMIT (10x the soft cap). Beyond that, even
+    // critical events trigger a force-close on the slow client — better to
+    // evict than to OOM.
+    if (queue.length >= MAX_QUEUE_HARD_LIMIT) {
+      console.warn(
+        `[sse] hard cap exceeded, force-closing slow client ${client?.id ?? 'unknown'} (reason=oom-defense queue=${queue.length} event=${event})`,
+      );
+      // Evict immediately so subsequent broadcasts don't try to enqueue.
+      bumpDropped(event);
+      try { client?.close?.(); } catch { /* ignore */ }
+      return false;
+    }
+
+    if (queue.length >= MAX_QUEUE_PER_CLIENT) {
+      if (priority === 'critical') {
+        sseMetrics.slowConsumerEnqueue += 1;
+        if (!slowConsumerLogged) {
+          slowConsumerLogged = true;
+          console.warn(
+            `[sse] slow client ${client?.id ?? 'unknown'}: forcing critical ${event} through (queue=${queue.length})`,
+          );
+        }
+        // fall through to push
+      } else {
+        bumpDropped(event);
+        return false;
+      }
+    }
+
+    if (priority === 'droppable' && (desired !== null && desired <= 0)) {
+      bumpDropped(event);
+      return false;
+    }
+
+    queue.push({ event, priority, chunk: payload });
+
+    if (priority === 'critical' && (desired === null || desired > 0)) {
+      drainQueue();
+      return true;
+    }
+
+    if (priority === 'critical') {
+      // Fix #6: PRD §2.3.2 contract — when a critical event sees
+      // desiredSize<=0, "wait briefly" before forcing through. We can't
+      // synchronously await here (would block other broadcasts), but we
+      // schedule a deferred drainQueue() for ~CRITICAL_BACKOFF_MS in case
+      // downstream recovers. The event is already enqueued so it'll be
+      // delivered as soon as the controller has room (either via this
+      // timer's drain attempt, or via pull() if downstream consumes
+      // sooner). The slow-client log fires above when the queue actually
+      // fills.
+      const backoffTimer = setTimeout(() => {
+        try { drainQueue(); } catch { /* ignore */ }
+      }, _CRITICAL_BACKOFF_MS);
+      backoffTimer.unref?.();
+      drainQueue();
+      return true;
+    }
+
+    drainQueue();
+    return true;
+  };
+
   client = {
     id: randomUUID(),
     send: (event, data) => {
       try {
         const payload = formatSse(event, data);
-        if (!controller) {
-          pending.push(payload);
-          return;
-        }
-        controller.enqueue(payload);
+        dispatchWithBackpressure(event, payload);
       } catch {
         if (client) {
           clients.delete(client);
@@ -433,8 +753,14 @@ export function createSseClient(onClose: (client: SseClient) => void): {
       if (!controller) {
         return;
       }
+      // Force-flush any queued backlog before closing. Without `force`, a
+      // paused downstream (desiredSize ≤ 0) would lose tail criticals on EOF;
+      // here we want every queued event to land in the readable side's
+      // internal buffer so the consumer's last `read()`s return them.
+      try { drainQueue(true); } catch { /* ignore */ }
       controller.close();
       controller = null;
+      queue.length = 0;
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
@@ -478,8 +804,8 @@ export function createSseClient(onClose: (client: SseClient) => void): {
   // Solves the "late joiner" problem: a Tab connecting to a mid-flight IM session
   // immediately receives the current session state (e.g., chat:status → "running")
   // instead of appearing idle until the next live event.
-  // Delay is required: the Bun SSE stream buffers correctly, but the full chain is
-  // Bun → SSE bytes → Rust proxy parse → Tauri emit → React listener.
+  // Delay is required: the SSE stream (hono/node-server) buffers correctly, but the
+  // full chain is: Node Sidecar → SSE bytes → Rust proxy parse → Tauri emit → React listener.
   // React's useEffect registers the Tauri listener AFTER first render, so a synchronous
   // replay arrives before the listener is ready and gets silently dropped.
   // 200ms matches the log replay delay and gives React enough time to mount.

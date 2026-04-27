@@ -23,10 +23,16 @@ interface BugReportOverlayProps {
     providers: Provider[];
     apiKeys: Record<string, string>;
     providerVerifyStatus: Record<string, ProviderVerifyStatus>;
+    /** Helper Agent's persisted default — initial picker selection. */
+    initialProviderId?: string;
+    initialModel?: string;
+    /** Called when user picks a model so caller can persist to helper Agent. */
+    onModelChange?: (providerId: string, model: string) => void;
 }
 
 export default function BugReportOverlay({
     onClose, onNavigateToProviders, appVersion, providers, apiKeys, providerVerifyStatus,
+    initialProviderId, initialModel, onModelChange,
 }: BugReportOverlayProps) {
     // Cmd+W dismissal: z-[250] matches the component's CSS z-index
     useCloseLayer(() => { onClose(); return true; }, 250);
@@ -45,10 +51,22 @@ export default function BugReportOverlay({
     const fileInputRef = useRef<HTMLInputElement>(null);
     const { openPreview } = useImagePreview();
 
-    // Default selection: first available provider's primaryModel (computed once at mount)
-    const defaultProvider = () => providers.find(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
-    const [selectedProviderId, setSelectedProviderId] = useState<string>(() => defaultProvider()?.id ?? '');
-    const [selectedModel, setSelectedModel] = useState<string>(() => defaultProvider()?.primaryModel ?? '');
+    // Default selection: prefer the helper Agent's persisted default (if the
+    // chosen provider is currently usable); fall back to the first available
+    // provider's primaryModel. Computed once at mount — subsequent prop
+    // changes don't reset the picker mid-session.
+    const [picked, setPicked] = useState<{ providerId: string; model: string }>(() => {
+        if (initialProviderId && initialModel) {
+            const persisted = providers.find(p => p.id === initialProviderId);
+            if (persisted && isProviderAvailable(persisted, apiKeys, providerVerifyStatus)) {
+                return { providerId: persisted.id, model: initialModel };
+            }
+        }
+        const firstAvailable = providers.find(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
+        return { providerId: firstAvailable?.id ?? '', model: firstAvailable?.primaryModel ?? '' };
+    });
+    const selectedProviderId = picked.providerId;
+    const selectedModel = picked.model;
 
     const selectedProvider = providers.find(p => p.id === selectedProviderId);
 
@@ -298,9 +316,9 @@ export default function BugReportOverlay({
                                                             key={model.model}
                                                             type="button"
                                                             onClick={() => {
-                                                                setSelectedProviderId(provider.id);
-                                                                setSelectedModel(model.model);
+                                                                setPicked({ providerId: provider.id, model: model.model });
                                                                 setShowModelMenu(false);
+                                                                onModelChange?.(provider.id, model.model);
                                                             }}
                                                             className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
                                                                 isSelected

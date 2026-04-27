@@ -2,8 +2,9 @@
 // Self-implemented WebSocket protocol (no npm dependency)
 // In-process MCP server (same pattern as gemini-image-tool)
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+// SDK + zod loaded lazily inside createEdgeTtsServer() via dynamic import.
+// configureEdgeTts is a plain export that builtin-mcp-meta.ts references
+// via a lazy proxy — no eager SDK eval. No validate() (free service).
 import { existsSync , writeFileSync } from 'fs';
 import { ensureGitignorePattern } from '../utils/gitignore';
 import { join } from 'path';
@@ -11,6 +12,8 @@ import { homedir } from 'os';
 import { createHash, randomBytes, randomUUID } from 'crypto';
 import * as tls from 'tls';
 import { ensureDirSync } from '../utils/fs-utils';
+import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
 type CallToolResult = {
@@ -569,7 +572,15 @@ async function fetchVoices(): Promise<Voice[]> {
     return voicesCache.voices;
   }
   const url = `${VOICES_URL}?trustedclienttoken=${TRUSTED_CLIENT_TOKEN}`;
-  const res = await fetch(url);
+  // Pattern 1: 30s cap on remote Edge TTS voices API. Cached for 10 min so
+  // this only fires on cold cache; without a bound we'd hang the tool turn
+  // indefinitely if Microsoft's endpoint stalls.
+  // Pattern 1 follow-up: parent signal = active turn so stop releases this
+  // even before the 30s ceiling.
+  const res = await cancellableFetch(url, undefined, {
+    timeoutMs: 30_000,
+    parentSignal: getCurrentTurnSignal(),
+  });
   if (!res.ok) {
     throw new Error(`Voices API returned ${res.status}: ${await res.text().catch(() => '')}`);
   }
@@ -755,7 +766,9 @@ export async function synthesizePreview(params: {
 
 // ============= MCP Server =============
 
-function createEdgeTtsServer() {
+export async function createEdgeTtsServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
   return createSdkMcpServer({
     name: 'edge-tts',
     version: '1.0.0',
@@ -830,25 +843,19 @@ Use list_voices to discover voices for other languages.`,
   });
 }
 
-export const edgeTtsServer = createEdgeTtsServer();
+// ============= Configure =============
+// Light export — no SDK/zod dependency. Referenced lazily by builtin-mcp-meta.ts.
 
-// ============= Builtin MCP Registry =============
-
-import { registerBuiltinMcp } from './builtin-mcp-registry';
-
-registerBuiltinMcp('edge-tts', {
-  server: edgeTtsServer,
-
-  configure: (env, ctx) => {
-    setEdgeTtsConfig({
-      defaultVoice: env.EDGE_TTS_DEFAULT_VOICE || 'zh-CN-XiaoxiaoNeural',
-      defaultRate: env.EDGE_TTS_DEFAULT_RATE || '0%',
-      defaultVolume: env.EDGE_TTS_DEFAULT_VOLUME || '0%',
-      defaultPitch: env.EDGE_TTS_DEFAULT_PITCH || '+0Hz',
-      defaultOutputFormat: env.EDGE_TTS_DEFAULT_FORMAT || 'audio-24khz-48kbitrate-mono-mp3',
-      workspace: ctx.workspace,
-    });
-  },
-
-  // Free service, no validation needed
-});
+export function configureEdgeTts(
+  env: Record<string, string>,
+  ctx: { sessionId: string; workspace?: string },
+): void {
+  setEdgeTtsConfig({
+    defaultVoice: env.EDGE_TTS_DEFAULT_VOICE || 'zh-CN-XiaoxiaoNeural',
+    defaultRate: env.EDGE_TTS_DEFAULT_RATE || '0%',
+    defaultVolume: env.EDGE_TTS_DEFAULT_VOLUME || '0%',
+    defaultPitch: env.EDGE_TTS_DEFAULT_PITCH || '+0Hz',
+    defaultOutputFormat: env.EDGE_TTS_DEFAULT_FORMAT || 'audio-24khz-48kbitrate-mono-mp3',
+    workspace: ctx.workspace,
+  });
+}

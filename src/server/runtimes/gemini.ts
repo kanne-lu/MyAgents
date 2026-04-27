@@ -8,7 +8,7 @@
 // Session: session/new (fresh) / session/load (resume by sessionId)
 // Authentication: entirely delegated to the user's local gemini CLI state (we do NOT manage API keys)
 
-import { spawn, type Subprocess } from 'bun';
+import { spawn, type Subprocess, type SubprocessStdin } from '../utils/subprocess';
 import {
   writeFileSync,
   existsSync,
@@ -38,6 +38,8 @@ import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { resolveGeminiWorkspaceInstructions } from './workspace-instructions';
 import { broadcast } from '../sse';
 import { ensureDirSync } from '../utils/fs-utils';
+import { killWithEscalation } from './utils/kill-with-escalation';
+import { withLogContext } from '../logger-context';
 
 // ─── Tmp directory layout for system prompt files ───
 
@@ -280,13 +282,13 @@ class JsonRpcClient {
   private onNotification: ((method: string, params: unknown) => void) | null = null;
   private onServerRequest: ((id: number, method: string, params: unknown) => void) | null = null;
   private encoder = new TextEncoder();
-  private sink: { write(data: Uint8Array): number; flush(): void };
+  private sink: SubprocessStdin;
   private reading = false;
 
   constructor(private proc: Subprocess) {
     const stdin = proc.stdin;
-    if (!stdin || typeof stdin === 'number') throw new Error('stdin not available');
-    this.sink = stdin as { write(data: Uint8Array): number; flush(): void };
+    if (!stdin) throw new Error('stdin not available');
+    this.sink = stdin;
   }
 
   setNotificationHandler(h: (method: string, params: unknown) => void): void {
@@ -405,12 +407,8 @@ class JsonRpcClient {
   }
 
   private write(msg: unknown): void {
-    try {
-      this.sink.write(this.encoder.encode(JSON.stringify(msg) + '\n'));
-      this.sink.flush();
-    } catch {
-      /* stdin may be closed */
-    }
+    // Fire-and-forget; Node stdin buffer + Promise completion handle back-pressure.
+    void this.sink.write(this.encoder.encode(JSON.stringify(msg) + '\n')).catch(() => { /* stdin may be closed */ });
   }
 
   destroy(): void {
@@ -486,7 +484,7 @@ class GeminiProcess implements RuntimeProcess {
     throw new Error('Gemini uses JSON-RPC, not raw stdin. Use rpc.call() instead.');
   }
 
-  kill(signal?: number): void {
+  kill(signal?: NodeJS.Signals | number): void {
     if (this.exited) return;
     try {
       this.proc.kill(signal ?? 15);
@@ -501,15 +499,12 @@ class GeminiProcess implements RuntimeProcess {
     return code;
   }
 
-  closeStdin(): void {
+  async closeStdin(): Promise<void> {
     const stdin = this.proc.stdin;
-    if (!stdin || typeof stdin === 'number') return;
+    if (!stdin) return;
     try {
-      const sink = stdin as { end(): void };
-      sink.end();
-    } catch {
-      /* ignore */
-    }
+      await stdin.end();
+    } catch { /* already closed / EPIPE */ }
   }
 }
 
@@ -687,6 +682,10 @@ export class GeminiRuntime implements AgentRuntime {
       stdin: 'pipe',
       cwd: options.workspacePath,
       env: spawnEnv,
+      // Detached → child becomes its own pgroup leader on POSIX so
+      // killWithEscalation({ killTree: true }) below can reach all of
+      // gemini's tool-call subprocesses, not just the wrapper.
+      detached: true,
     });
 
     const geminiProc = new GeminiProcess(proc);
@@ -694,12 +693,14 @@ export class GeminiRuntime implements AgentRuntime {
     // 4. Wire up the event callback closure. sendMessage() reads this back through the
     //    process instance so it can emit turn_complete / usage from the RPC response.
     let sessionCompleteEmitted = false;
+    // Pattern 6: stamp `runtime: 'gemini'` ambient on every event delivery
+    // so nested console.* in onEvent / downstream handlers correlate.
     const wrappedOnEvent: UnifiedEventCallback = (event) => {
       if (event.kind === 'session_complete') {
         if (sessionCompleteEmitted) return;
         sessionCompleteEmitted = true;
       }
-      onEvent(event);
+      withLogContext({ runtime: 'gemini' }, () => onEvent(event));
     };
     geminiProc.wrappedOnEvent = wrappedOnEvent;
 
@@ -1036,18 +1037,25 @@ export class GeminiRuntime implements AgentRuntime {
       if (geminiProc.sessionId) {
         geminiProc.rpc.notify('session/cancel', { sessionId: geminiProc.sessionId });
       }
-      geminiProc.closeStdin();
+      await geminiProc.closeStdin();
     } catch {
       /* ignore */
     }
 
-    const killTimer = setTimeout(() => geminiProc.kill(), 3_000);
     try {
-      await geminiProc.waitForExit();
+      await killWithEscalation(geminiProc, {
+        gracefulMs: 3_000,
+        hardMs: 2_000,
+        killTree: true,
+        onStep: (step, info) => {
+          if (step === 'orphan') {
+            console.warn(`[gemini] Process pid=${info.pid} did not exit after SIGKILL; continuing with orphan risk`);
+          }
+        },
+      });
     } catch {
       /* ignore */
     } finally {
-      clearTimeout(killTimer);
       geminiProc.rpc.destroy();
     }
   }

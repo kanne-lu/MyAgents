@@ -1,0 +1,642 @@
+#![allow(dead_code)] // Wired up in Pattern C-6 (mod.rs spawn refactor).
+// IM Pipeline v2 — Pattern C: ReplyRouter
+//
+// Per peer_session reply state machine. Replaces the per-request SSE consumer
+// that lived inside `stream_to_im` (legacy /api/im/chat path). For each
+// in-flight requestId, holds a `ReplySlot` capturing block-text accumulator,
+// draft / placeholder message IDs, and stream protocol state. Events arrive
+// from `ImEventConsumer` (which long-polls /api/im/events), get routed by
+// requestId, mutate the slot, then dispatch the appropriate adapter call
+// (send / edit / finalize / abort).
+//
+// Architectural note: ReplyRouter is owned by a single `ImEventConsumer`
+// task, so all event handling is naturally serialized — adapter calls
+// (Telegram/Feishu/Bridge HTTP) get sequenced anyway by their underlying
+// transport, so per-event serialization adds no real latency cost. The
+// "concurrent in-flight requests" win comes from the protocol split (peer_lock
+// only covers /api/im/enqueue), not from parallelizing reply renders.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+use tokio::sync::Mutex;
+
+use crate::{ulog_info, ulog_warn, ulog_error};
+use super::adapter::{self, ImStreamAdapter};
+use super::types::ImSourceType;
+use super::{
+    PendingApproval, PendingApprovals, finalize_block, format_draft_text,
+    has_sentence_boundary, THINKING_PLACEHOLDER, GroupStreamContext,
+};
+
+/// Per-requestId reply state. Mirrors the locals previously declared at the
+/// top of `stream_to_im` / `stream_to_im_streaming`. One slot per in-flight
+/// IM user message.
+pub struct ReplySlot {
+    pub request_id: String,
+    pub chat_id: String,
+    /// Original IM message_id — used by adapter.ack_clear() on terminal.
+    pub message_id: String,
+    pub source_type: ImSourceType,
+    /// Whether the request is in group "always" mode (for NO_REPLY detection).
+    pub group_activation_always: bool,
+
+    // ── Edit-based protocol state (Telegram, Feishu, Dingtalk basic, Bridge) ──
+    pub block_text: String,
+    pub draft_id: Option<String>,
+    pub last_edit: Instant,
+    pub any_text_sent: bool,
+    pub placeholder_id: Option<String>,
+    pub first_content_sent: bool,
+    pub last_block_text: String,
+
+    // ── Streaming protocol state (Dingtalk AI Card / supports_streaming) ──
+    pub stream_id: Option<String>,
+    pub sequence: u32,
+
+    // Result session_id (carried out via 'complete' event for the caller)
+    pub completed_session_id: Option<String>,
+    /// Whether the slot has reached a terminal state (complete / error / cancelled).
+    pub is_done: bool,
+}
+
+impl ReplySlot {
+    pub fn new(
+        request_id: String,
+        chat_id: String,
+        message_id: String,
+        source_type: ImSourceType,
+        group_activation_always: bool,
+    ) -> Self {
+        Self {
+            request_id,
+            chat_id,
+            message_id,
+            source_type,
+            group_activation_always,
+            block_text: String::new(),
+            draft_id: None,
+            last_edit: Instant::now(),
+            any_text_sent: false,
+            placeholder_id: None,
+            first_content_sent: false,
+            last_block_text: String::new(),
+            stream_id: None,
+            sequence: 0,
+            completed_session_id: None,
+            is_done: false,
+        }
+    }
+}
+
+/// Per peer_session reply dispatcher. Maps requestId → slot, processes events
+/// from /api/im/events, calls adapter to render content. Owned by ImEventConsumer.
+pub struct ReplyRouter {
+    slots: HashMap<String, ReplySlot>,
+    pending_approvals: PendingApprovals,
+}
+
+impl ReplyRouter {
+    pub(crate) fn new(pending_approvals: PendingApprovals) -> Self {
+        Self { slots: HashMap::new(), pending_approvals }
+    }
+
+    /// Pre-register a slot when /api/im/enqueue accepts the request.
+    /// If a slot already exists (rare race — re-enqueue), it's preserved.
+    pub(crate) fn register(
+        &mut self,
+        request_id: String,
+        chat_id: String,
+        message_id: String,
+        source_type: ImSourceType,
+        group_ctx: Option<&GroupStreamContext>,
+    ) {
+        if self.slots.contains_key(&request_id) {
+            return;
+        }
+        let group_activation_always = matches!(
+            group_ctx.map(|g| &g.activation),
+            Some(super::types::GroupActivation::Always),
+        );
+        let slot = ReplySlot::new(request_id.clone(), chat_id, message_id, source_type, group_activation_always);
+        self.slots.insert(request_id, slot);
+    }
+
+    /// Dispatch a single event from /api/im/events to the matching slot.
+    ///
+    /// Returns `Some(TerminalOutcome)` when the slot reaches a terminal state
+    /// (caller can use this to record session_id, etc.). Returns `None` when
+    /// the slot stays alive. Post-stream hooks (ack_clear + post_stream_cleanup)
+    /// fire automatically on terminal so callers don't repeat the dance.
+    pub async fn dispatch<A: ImStreamAdapter>(
+        &mut self,
+        event: &Value,
+        adapter: &A,
+        sidecar_port: u16,
+    ) -> Option<TerminalOutcome> {
+        // Bus events have shape: { seq, requestId, type, data, ts }
+        let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        // C7 fix: session-level events (requestId=null) MUST be handled before the
+        // requestId-scoped routing below. The legacy code returned None on null
+        // requestId, silently dropping `gap` (eviction / cross-generation reset)
+        // and any future system-wide events the bus introduces.
+        let request_id_opt = event.get("requestId").and_then(|v| v.as_str());
+        if request_id_opt.is_none() || request_id_opt == Some("") {
+            self.handle_session_event(event_type, event, adapter).await;
+            return None;
+        }
+        let request_id = request_id_opt.unwrap().to_string();
+
+        if !self.slots.contains_key(&request_id) {
+            ulog_warn!(
+                "[reply-router] Dropped event for unregistered requestId={} type={}",
+                request_id, event_type,
+            );
+            return None;
+        }
+
+        let (chat_id, message_id, already_done) = {
+            let slot = self.slots.get(&request_id).expect("checked above");
+            (slot.chat_id.clone(), slot.message_id.clone(), slot.is_done)
+        };
+        if already_done {
+            return None;
+        }
+
+        let outcome = if adapter.supports_streaming() {
+            self.dispatch_streaming(event_type, event, &request_id, adapter, sidecar_port).await
+        } else {
+            self.dispatch_edit_based(event_type, event, &request_id, adapter, sidecar_port).await
+        };
+
+        // Pattern C: terminal cleanup hooks. Fire AFTER inner dispatch completes
+        // (slot is_done set, last edit/finalize already done) and BEFORE the
+        // caller unregister + on_terminal callback runs. Keeps the protocol-
+        // specific cleanup (DingTalk AI Card finalize) and ACK reaction clear
+        // in one place — adapter calls can be retired later without touching
+        // every call site.
+        if outcome.is_some() {
+            adapter.post_stream_cleanup(&chat_id).await;
+            adapter::ImAdapter::ack_clear(adapter, &chat_id, &message_id).await;
+        }
+
+        outcome
+    }
+
+    async fn dispatch_edit_based<A: ImStreamAdapter>(
+        &mut self,
+        event_type: &str,
+        event: &Value,
+        request_id: &str,
+        adapter: &A,
+        sidecar_port: u16,
+    ) -> Option<TerminalOutcome> {
+        let slot = self.slots.get_mut(request_id)?;
+        let chat_id = slot.chat_id.clone();
+        let data = event.get("data");
+
+        match event_type {
+            // Bus emits 'delta' (per-token streaming text). The accumulated text
+            // arrives via separate state — the legacy SSE protocol used 'partial'
+            // with full text. Bus events deliver the delta only; we accumulate.
+            "delta" => {
+                let chunk = data.and_then(|v| v.as_str()).unwrap_or("");
+                if chunk.is_empty() {
+                    return None;
+                }
+                slot.block_text.push_str(chunk);
+
+                // First meaningful text → create draft message (if adapter supports edit)
+                if adapter.supports_edit()
+                    && slot.draft_id.is_none()
+                    && !slot.block_text.trim().is_empty()
+                    && has_sentence_boundary(&slot.block_text)
+                {
+                    let display = format_draft_text(&slot.block_text, adapter.max_message_length());
+                    if let Ok(Some(id)) = adapter.send_message_returning_id(&chat_id, &display).await {
+                        slot.draft_id = Some(id);
+                        slot.last_edit = Instant::now();
+                    }
+                    slot.first_content_sent = true;
+                }
+
+                // Throttled edit
+                if let Some(ref did) = slot.draft_id {
+                    let throttle = Duration::from_millis(adapter.preferred_throttle_ms());
+                    if slot.last_edit.elapsed() >= throttle {
+                        slot.last_edit = Instant::now();
+                        let display = format_draft_text(&slot.block_text, adapter.max_message_length());
+                        let _ = adapter.edit_message(&chat_id, did, &display).await;
+                    }
+                }
+                None
+            }
+
+            "block-end" => {
+                // Producer (agent-session.ts) emits `block-end` with `data: ''`
+                // (no payload — the SDK's content_block_stop carries no text).
+                // Empty `data` means "use the slot's accumulated text"; the
+                // legacy `unwrap_or_else` fallback only fired on `None`, so
+                // `Some("")` slipped through as `final_text = ""` → trim empty
+                // → abort_stream (which renders `[Aborted]` on Feishu lark
+                // streaming sessions). Treat empty string as "not provided".
+                let final_text = data
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| slot.block_text.clone());
+                if final_text.trim().is_empty() {
+                    if let Some(ref did) = slot.draft_id {
+                        let _ = adapter.delete_message(&chat_id, did).await;
+                    }
+                } else {
+                    finalize_block(adapter, &chat_id, slot.draft_id.clone(), &final_text).await;
+                    slot.any_text_sent = true;
+                }
+                slot.last_block_text = std::mem::take(&mut slot.block_text);
+                slot.draft_id = None;
+                None
+            }
+
+            "complete" => {
+                // C5 fix: bus emits 'complete' with `data` = the SDK's result text
+                // (legacy 'partial-then-complete' would carry the result string),
+                // NOT a session_id. The session_id for record_response is taken from
+                // the peer_session, not from the event payload. Returning None here
+                // tells the caller "use the existing peer_session_id".
+                let trimmed_last = slot.last_block_text.trim();
+                let is_no_reply = (slot.group_activation_always || matches!(slot.source_type, ImSourceType::Group))
+                    && (trimmed_last == "<NO_REPLY>" || trimmed_last == "NO_REPLY");
+
+                if is_no_reply {
+                    if let Some(ref did) = slot.draft_id {
+                        let _ = adapter.delete_message(&chat_id, did).await;
+                    }
+                    if let Some(ref pid) = slot.placeholder_id {
+                        let _ = adapter.delete_message(&chat_id, pid).await;
+                    }
+                    slot.is_done = true;
+                    return Some(TerminalOutcome { session_id: None, silent: true });
+                }
+
+                // Flush any remaining block text
+                if !slot.block_text.trim().is_empty() {
+                    finalize_block(adapter, &chat_id, slot.draft_id.clone(), &slot.block_text.clone()).await;
+                    slot.any_text_sent = true;
+                } else if let Some(ref did) = slot.draft_id {
+                    let _ = adapter.delete_message(&chat_id, did).await;
+                }
+                if !slot.any_text_sent {
+                    if let Some(ref pid) = slot.placeholder_id {
+                        if adapter.edit_message(&chat_id, pid, "(No response)").await.is_err() {
+                            let _ = adapter.delete_message(&chat_id, pid).await;
+                            let _ = adapter.send_message(&chat_id, "(No response)").await;
+                        }
+                    } else {
+                        let _ = adapter.send_message(&chat_id, "(No response)").await;
+                    }
+                }
+                slot.is_done = true;
+                Some(TerminalOutcome { session_id: None, silent: false })
+            }
+
+            "permission-request" => {
+                let raw = data.and_then(|v| v.as_str()).unwrap_or("");
+                let json_payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+                let perm_request_id = json_payload["requestId"].as_str().unwrap_or("").to_string();
+                let tool_name = json_payload["toolName"].as_str().unwrap_or("unknown").to_string();
+                let tool_input_str = match json_payload["input"] {
+                    Value::String(ref s) => s.clone(),
+                    Value::Null => String::new(),
+                    ref other => serde_json::to_string(other).unwrap_or_default(),
+                };
+                ulog_info!(
+                    "[reply-router] Permission request: tool={}, rid={}",
+                    tool_name,
+                    &perm_request_id[..perm_request_id.len().min(16)],
+                );
+                let card_msg_id = match adapter.send_approval_card(&chat_id, &perm_request_id, &tool_name, &tool_input_str).await {
+                    Ok(Some(mid)) => mid,
+                    Ok(None) => String::new(),
+                    Err(e) => {
+                        ulog_error!("[reply-router] Failed to send approval card: {}", e);
+                        String::new()
+                    }
+                };
+                {
+                    let mut guard = self.pending_approvals.lock().await;
+                    let now = Instant::now();
+                    guard.retain(|_, p| now.duration_since(p.created_at) < Duration::from_secs(15 * 60));
+                    guard.insert(perm_request_id, PendingApproval {
+                        sidecar_port,
+                        chat_id: chat_id.clone(),
+                        card_message_id: card_msg_id,
+                        created_at: now,
+                    });
+                }
+                None
+            }
+
+            "activity" => {
+                // Non-text block (thinking / tool_use). Show placeholder if user
+                // hasn't seen any content yet.
+                if !slot.first_content_sent && slot.placeholder_id.is_none() {
+                    if let Ok(Some(id)) = adapter.send_message_returning_id(&chat_id, THINKING_PLACEHOLDER).await {
+                        slot.placeholder_id = Some(id);
+                    }
+                    slot.first_content_sent = true;
+                }
+                None
+            }
+
+            "error" | "cancelled" => {
+                let msg = data.and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                if let Some(ref did) = slot.draft_id {
+                    let _ = adapter.delete_message(&chat_id, did).await;
+                }
+                if let Some(ref pid) = slot.placeholder_id {
+                    let _ = adapter.delete_message(&chat_id, pid).await;
+                }
+                // W4 fix: cancel reason ('user' / 'timeout' / etc.) is an internal
+                // CancelReason enum string — never surface it raw to chat. Show a
+                // localized line; reason stays in logs.
+                let user_msg = if event_type == "cancelled" {
+                    "🛑 已取消".to_string()
+                } else {
+                    format!("⚠️ {}", msg)
+                };
+                let _ = adapter.send_message(&chat_id, &user_msg).await;
+                slot.is_done = true;
+                Some(TerminalOutcome { session_id: None, silent: false })
+            }
+
+            _ => None, // unknown event type — ignore
+        }
+    }
+
+    async fn dispatch_streaming<A: ImStreamAdapter>(
+        &mut self,
+        event_type: &str,
+        event: &Value,
+        request_id: &str,
+        adapter: &A,
+        sidecar_port: u16,
+    ) -> Option<TerminalOutcome> {
+        let slot = self.slots.get_mut(request_id)?;
+        let chat_id = slot.chat_id.clone();
+        let data = event.get("data");
+
+        match event_type {
+            "delta" => {
+                let chunk = data.and_then(|v| v.as_str()).unwrap_or("");
+                if chunk.is_empty() {
+                    return None;
+                }
+                slot.block_text.push_str(chunk);
+
+                if slot.stream_id.is_none()
+                    && !slot.block_text.trim().is_empty()
+                    && has_sentence_boundary(&slot.block_text)
+                {
+                    if let Ok(sid) = adapter.start_stream(&chat_id, &slot.block_text).await {
+                        if !sid.is_empty() {
+                            slot.stream_id = Some(sid);
+                            slot.sequence = 1;
+                            slot.any_text_sent = true;
+                            slot.first_content_sent = true;
+                        }
+                    }
+                } else if let Some(ref sid) = slot.stream_id {
+                    slot.sequence += 1;
+                    let _ = adapter.stream_chunk(&chat_id, sid, &slot.block_text, slot.sequence, false).await;
+                }
+                None
+            }
+
+            "activity" => {
+                if let Some(ref sid) = slot.stream_id {
+                    slot.sequence += 1;
+                    let _ = adapter.stream_chunk(&chat_id, sid, "", slot.sequence, true).await;
+                } else if !slot.first_content_sent {
+                    if let Ok(Some(id)) = adapter.send_message_returning_id(&chat_id, THINKING_PLACEHOLDER).await {
+                        slot.placeholder_id = Some(id);
+                    }
+                    slot.first_content_sent = true;
+                }
+                None
+            }
+
+            "block-end" => {
+                // Same fallback semantics as the edit-based path: producer
+                // emits `block-end` with empty `data` — fall back to the slot
+                // accumulator. Without this filter, every block-end aborted
+                // the active stream → Feishu lark card showed `[Aborted]`.
+                let final_text = data
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| slot.block_text.clone());
+                if !final_text.trim().is_empty() {
+                    if let Some(ref sid) = slot.stream_id {
+                        let _ = adapter.finalize_stream(&chat_id, sid, &final_text).await;
+                        slot.any_text_sent = true;
+                    } else {
+                        let _ = adapter.send_message(&chat_id, &final_text).await;
+                        slot.any_text_sent = true;
+                    }
+                } else if let Some(ref sid) = slot.stream_id {
+                    let _ = adapter.abort_stream(&chat_id, sid).await;
+                }
+                slot.last_block_text = std::mem::take(&mut slot.block_text);
+                slot.stream_id = None;
+                slot.sequence = 0;
+                None
+            }
+
+            "complete" => {
+                // C5 fix: see edit-based path. session_id NOT taken from event payload.
+                let trimmed_last = slot.last_block_text.trim();
+                let is_no_reply = slot.group_activation_always
+                    && (trimmed_last == "<NO_REPLY>" || trimmed_last == "NO_REPLY");
+                if is_no_reply {
+                    if let Some(ref sid) = slot.stream_id {
+                        let _ = adapter.abort_stream(&chat_id, sid).await;
+                    }
+                    if let Some(ref pid) = slot.placeholder_id {
+                        let _ = adapter.delete_message(&chat_id, pid).await;
+                    }
+                    slot.is_done = true;
+                    return Some(TerminalOutcome { session_id: None, silent: true });
+                }
+
+                if !slot.block_text.trim().is_empty() {
+                    if let Some(ref sid) = slot.stream_id {
+                        let _ = adapter.finalize_stream(&chat_id, sid, &slot.block_text.clone()).await;
+                    } else {
+                        let _ = adapter.send_message(&chat_id, &slot.block_text.clone()).await;
+                    }
+                    slot.any_text_sent = true;
+                } else if let Some(ref sid) = slot.stream_id {
+                    let _ = adapter.abort_stream(&chat_id, sid).await;
+                }
+                if !slot.any_text_sent {
+                    if let Some(ref pid) = slot.placeholder_id {
+                        if adapter.edit_message(&chat_id, pid, "(No response)").await.is_err() {
+                            let _ = adapter.delete_message(&chat_id, pid).await;
+                            let _ = adapter.send_message(&chat_id, "(No response)").await;
+                        }
+                    } else {
+                        let _ = adapter.send_message(&chat_id, "(No response)").await;
+                    }
+                }
+                slot.is_done = true;
+                Some(TerminalOutcome { session_id: None, silent: false })
+            }
+
+            "permission-request" => {
+                // Same as edit-based path
+                let raw = data.and_then(|v| v.as_str()).unwrap_or("");
+                let json_payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+                let perm_request_id = json_payload["requestId"].as_str().unwrap_or("").to_string();
+                let tool_name = json_payload["toolName"].as_str().unwrap_or("unknown").to_string();
+                let tool_input_str = match json_payload["input"] {
+                    Value::String(ref s) => s.clone(),
+                    Value::Null => String::new(),
+                    ref other => serde_json::to_string(other).unwrap_or_default(),
+                };
+                let card_msg_id = adapter
+                    .send_approval_card(&chat_id, &perm_request_id, &tool_name, &tool_input_str)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                {
+                    let mut guard = self.pending_approvals.lock().await;
+                    let now = Instant::now();
+                    guard.retain(|_, p| now.duration_since(p.created_at) < Duration::from_secs(15 * 60));
+                    guard.insert(perm_request_id, PendingApproval {
+                        sidecar_port,
+                        chat_id: chat_id.clone(),
+                        card_message_id: card_msg_id,
+                        created_at: now,
+                    });
+                }
+                None
+            }
+
+            "error" | "cancelled" => {
+                let msg = data.and_then(|v| v.as_str()).unwrap_or("Unknown error");
+                if let Some(ref sid) = slot.stream_id {
+                    let _ = adapter.abort_stream(&chat_id, sid).await;
+                }
+                if let Some(ref pid) = slot.placeholder_id {
+                    let _ = adapter.delete_message(&chat_id, pid).await;
+                }
+                // W4 fix: cancel reason ('user' / 'timeout' / etc.) is an internal
+                // CancelReason enum string — never surface it raw to chat. Show a
+                // localized line; reason stays in logs.
+                let user_msg = if event_type == "cancelled" {
+                    "🛑 已取消".to_string()
+                } else {
+                    format!("⚠️ {}", msg)
+                };
+                let _ = adapter.send_message(&chat_id, &user_msg).await;
+                slot.is_done = true;
+                Some(TerminalOutcome { session_id: None, silent: false })
+            }
+
+            _ => None,
+        }
+    }
+
+    /// Handle bus session-level events (requestId=null) — primarily `gap`
+    /// (ImEventBus ring eviction or cross-generation reset). Currently
+    /// surfaces a single user-visible warning to ALL active slots when a gap
+    /// is observed; in practice IM volumes don't trigger eviction often.
+    async fn handle_session_event<A: ImStreamAdapter>(
+        &mut self,
+        event_type: &str,
+        event: &Value,
+        adapter: &A,
+    ) {
+        if event_type != "gap" {
+            return; // unknown session-level event — ignore
+        }
+        let dropped_seqs = event
+            .get("data")
+            .and_then(|d| d.get("droppedSeqs"))
+            .and_then(|s| s.as_array())
+            .and_then(|arr| {
+                let lo = arr.first().and_then(|v| v.as_u64())?;
+                let hi = arr.get(1).and_then(|v| v.as_u64())?;
+                Some((lo, hi))
+            });
+        let reason = event
+            .get("data")
+            .and_then(|d| d.get("reason"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("eviction");
+        ulog_warn!(
+            "[reply-router] gap event observed reason={} dropped={:?} active_slots={}",
+            reason, dropped_seqs, self.slots.len(),
+        );
+        // For each active slot, surface a one-line warning so the user
+        // doesn't see partial replies as truthful complete content. Skip
+        // already-done slots (their UI is finalized).
+        let chat_ids: Vec<String> = self
+            .slots
+            .values()
+            .filter(|s| !s.is_done)
+            .map(|s| s.chat_id.clone())
+            .collect();
+        let prefix = if reason == "session-reset" {
+            "⚠️ 会话已重置，部分回复未送达"
+        } else {
+            "⚠️ 部分流式内容丢失（事件队列溢出）"
+        };
+        // De-dup chat_ids — multiple slots in the same chat get one warning each.
+        let mut seen = std::collections::HashSet::new();
+        for chat_id in chat_ids {
+            if seen.insert(chat_id.clone()) {
+                let _ = adapter.send_message(&chat_id, prefix).await;
+            }
+        }
+    }
+
+    /// Drop a slot after handling its terminal event. Caller invokes after
+    /// processing TerminalOutcome.
+    pub fn unregister(&mut self, request_id: &str) {
+        self.slots.remove(request_id);
+    }
+
+    /// Diagnostic.
+    pub fn slot_count(&self) -> usize {
+        self.slots.len()
+    }
+}
+
+/// Returned by `dispatch` when a slot reaches a terminal state.
+#[derive(Debug)]
+pub struct TerminalOutcome {
+    /// Sidecar's session_id from the 'complete' event payload, if any.
+    pub session_id: Option<String>,
+    /// Group "always" mode NO_REPLY → don't surface to the user (silent close).
+    pub silent: bool,
+}
+
+/// Thin wrapper enabling sharing a `ReplyRouter` across `ImEventConsumer`
+/// reconnect cycles via Arc<Mutex<...>>. Each `dispatch` call is brief
+/// (one event), so contention is negligible.
+pub type SharedReplyRouter = Arc<Mutex<ReplyRouter>>;
+
+pub(crate) fn shared_router(pending_approvals: PendingApprovals) -> SharedReplyRouter {
+    Arc::new(Mutex::new(ReplyRouter::new(pending_approvals)))
+}
+
+// Allow `adapter` module to be referenced — keeps cargo check happy if no other
+// reference exists in this file (currently used via type imports above).
+#[allow(unused_imports)]
+use adapter::ImStreamAdapter as _ImStreamAdapter;

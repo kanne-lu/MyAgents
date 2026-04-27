@@ -1,0 +1,444 @@
+# Pit-of-Success 模块完整规范
+
+> "正确路径默认化"——把容易踩的坑做成"不可能写错"。本文档汇总所有 helper 层的 Problem / Surface / Invariants / Don't 四要素规范。
+
+CLAUDE.md 的 Pit-of-Success 红线总表是这些模块的**速查索引**；本文档是**完整 spec**，包含 API surface、不变量、踩坑根因、迁移指南。
+
+## 目录
+
+**Rust 层（早期 v0.1.x）**
+- [`local_http`](#local_http) — 防系统代理拦截 localhost
+- [`process_cmd`](#process_cmd) — 防 Windows 控制台窗口弹出
+- [`proxy_config`](#proxy_config) — 子进程 NO_PROXY 注入
+- [`system_binary`](#system_binary) — 系统工具查找（Finder PATH 缺失）
+- [`normalize_external_path`](#normalize_external_path) — Windows `\\?\` 长路径前缀剥离
+- [`tauri::async_runtime::spawn`](#async_runtime) — 防 macOS startup-abort
+- [Session watcher](#session-watcher) — 文件系统观察索引
+
+**v0.2.0 结构性重构**
+- [`withConfigLock` / `with_config_lock`](#withconfiglock) — config.json 跨进程串行写入
+- [`withFileLock` / `with_file_lock`](#withfilelock) — 单写者文件原子性
+- [`killWithEscalation`](#killwithescalation) — 子进程 stop 升级链
+- [`withAbortSignal` / `cancellableFetch`](#cancellation) — 统一 cancel 协议
+- [`maybeSpill` + `/refs/:id` + SSE 优先级](#maybespill) — 大 payload 分流
+- [`withLogContext` + ALS pipeline](#withlogcontext) — 自动注入 correlation
+- [`DeferredInitState` + readiness endpoints](#deferredinitstate) — 三分健康探针
+
+**Node.js 辅助层**
+- [`fs-utils`](#fs-utils) — 跨平台 mkdir / 目录判定
+- [`subprocess`](#subprocess) — Node 子进程 stream 形态适配
+- [`file-response`](#file-response) — 流式 HTTP 文件响应
+
+**结构性其他**
+- [Builtin MCP 懒加载](#builtin-mcp) — META/INSTANCE 两层架构
+- [snapshot helpers](#snapshot-helpers) — owned vs live-follow 命名分裂
+- [legacy CronTask CAS upgrade](#legacy-cas) — 幂等迁移
+
+---
+
+<a id="local_http"></a>
+## `local_http` (`src-tauri/src/local_http.rs`)
+
+**Problem.** 用户系统代理（Clash / V2Ray）配置不完善时会拦截 `127.0.0.1`，应用内 Sidecar / admin-api / cron-tool / bridge-tools 等 localhost 通信被代理拦下 → 502 / connection refused。每个 reqwest 调用点都需要 `.no_proxy()`，集中维护成本高。
+
+**Surface.**
+- `crate::local_http::builder()` — 异步 reqwest::ClientBuilder，预置 `.no_proxy()`
+- `blocking_builder()` — 同步孪生
+- `json_client()` — 默认 JSON 头
+- `sse_client()` — SSE 连接（无超时 + Accept: text/event-stream）
+
+**Invariants enforced.**
+- 所有连接 localhost 的 reqwest 都通过 helper，不会忘记加 `.no_proxy()`
+- proxy_config 不存在副作用——helper 不读取系统代理环境变量
+
+**Don't.** 任何 `reqwest::Client::builder()` / `reqwest::Client::new()` 直接连 `127.0.0.1`。即使是 "看起来一定不会被拦"的环境也禁止——出问题难以排查。
+
+---
+
+<a id="process_cmd"></a>
+## `process_cmd` (`src-tauri/src/process_cmd.rs`)
+
+**Problem.** Windows 上 GUI 应用（Tauri）启动子进程（node.exe Sidecar / Plugin Bridge / npm install）默认会弹出黑色控制台窗口。每个 spawn 点都需要加 `CREATE_NO_WINDOW` 标志，集中维护成本高。
+
+**Surface.** `crate::process_cmd::new(program)` — 返回 `std::process::Command`，已注入 Windows `CREATE_NO_WINDOW` 标志。
+
+**Invariants enforced.** 与 `local_http` 相同 pit-of-success 模式：默认安全。
+
+**Don't.** 裸 `std::process::Command::new()`。
+
+**例外（已内联处理或不适用）：**
+- `#[cfg(windows)]` 守卫内的系统工具命令（taskkill / powershell / wmic）
+- `commands.rs` 的 OS opener（open / explorer / xdg-open）和 Unix pgrep——用户可见的系统命令，无需隐藏
+- `terminal.rs` 的 PTY 进程由 `portable-pty` 的 `CommandBuilder` + `slave.spawn_command()` 管理，不走 `std::process::Command`
+- `cli.rs` 的 Node CLI spawn——CLI 模式 NEEDS 控制台显示 stdout/stderr
+
+---
+
+<a id="proxy_config"></a>
+## `proxy_config` (`src-tauri/src/proxy_config.rs`)
+
+**Problem.** Node.js 20+ 的 `fetch()`（undici）会读取 `HTTP_PROXY` 环境变量。如果 Tauri 子进程从父进程继承了 `HTTP_PROXY`（用户系统配置），Sidecar 内部的 localhost 通信（admin-api、cron-tool、bridge-tools 等）会被系统代理拦截 → 502。
+
+**Surface.** `crate::proxy_config::apply_to_subprocess(&mut cmd)`
+
+**Invariants enforced.**
+- 用户配置代理时注入 `HTTP_PROXY` + `NO_PROXY`（保护 localhost 列表）
+- 用户未配置时不污染子进程环境，但**始终**注入 `NO_PROXY` 保护 localhost
+- 与 `local_http` 形成纵深防御——即使 Rust 层忘记 `.no_proxy()`，Node 子进程内的 localhost 通信仍受 `NO_PROXY` 保护
+
+**Don't.** 手动 `cmd.env("HTTP_PROXY", ...)` 或 `cmd.env_remove("HTTP_PROXY")`。
+
+完整代理策略详见 `proxy_config.md`。
+
+---
+
+<a id="system_binary"></a>
+## `system_binary` (`src-tauri/src/system_binary.rs`)
+
+**Problem.** macOS 上从 Finder 启动的 Tauri 应用，PATH 不包含 `/opt/homebrew/bin`、`/usr/local/bin` 等用户工具路径，`which::which("pgrep")` 会失败。
+
+**Surface.** `crate::system_binary::find(name)` — 在标准系统路径列表中查找。
+
+**Don't.** 裸 `which::which()` 查找系统工具。
+
+---
+
+<a id="normalize_external_path"></a>
+## `normalize_external_path` (`src-tauri/src/sidecar.rs`)
+
+**Problem.** Windows 上 Tauri 2 的 `app_handle.path().resource_dir()`、Rust 的 `std::env::current_exe()` / `std::fs::canonicalize()` 返回的 `PathBuf` 带有 `\\?\` 长路径前缀（NT namespace `extended-length path`）。Rust 自家的 `fs::*` 接受这种形式，但**任何把路径带出 Rust 的边界都会炸**：
+
+- Node `fileURLToPath` → `ERR_INVALID_FILE_URL_PATH: must be absolute`（`file://///?/C:/...` 不合规）
+- npm / Bun / 子进程的 cwd 或 arg → 部分版本静默挂起或路径解析失败
+- 拼成日志 / 配置时人眼难读
+
+v0.2.0 Windows 版的 IM Bot 全部启动失败就是这个 trap：`find_tsx_runtime_loader` 的结果直接用来生成 Node `--import file:///...` URL，前缀没剥导致 Plugin Bridge 启动即 crash，30 次 health check 全过不去。
+
+**Surface.** `crate::sidecar::normalize_external_path(path: PathBuf) -> PathBuf` —— Windows 上 strip `\\?\` 前缀，其他平台 no-op。
+
+**调用边界规则（关键）.** **不是所有路径都要 normalize**：
+
+- 纯 Rust fs 操作（`fs::copy` / `read_to_string` / `copy_dir_recursive` 等）→ 不需要，stdlib 自己处理 `\\?\`
+- 路径要传给 Node / npm / 子进程 spawn arg / cwd → **必须 normalize**
+- 路径要拼成 file URL / log / 配置 / IPC 序列化 → **必须 normalize**
+
+口诀：**路径"出 Rust"的那一刻 normalize**，不是路径产生时也不是消费时——明确的边界规则比"防御性 normalize"更经得起未来扩展。
+
+**Don't.** 把 `resource_dir()` / `current_exe()` / `canonicalize()` 的结果直接喂给 Node / npm / URL / 子进程 arg。也不要在每个 call site 重新发明 `s.strip_prefix("\\\\?\\")`——`path_to_file_url` 之类纯格式化函数应保持纯净，由调用方在边界 normalize。
+
+---
+
+<a id="async_runtime"></a>
+## `tauri::async_runtime::spawn` + `clippy.toml` ban
+
+**Problem.** `tokio::spawn` 在 Tauri 的 `.setup()` 回调（运行在 tao `did_finish_launching` ObjC FFI 边界内）没有 reactor，panic 跨 FFI 不能 unwind → `panic_cannot_unwind` → 进程 abort。crash 信号是 main thread + `Mutex::lock::fail` + `panic_in_cleanup`，**无 panic 消息**（panic 在 logger 起来之前就发生）—— 极难排查。
+
+**Surface.**
+- `tauri::async_runtime::spawn(future)` — 自带 lazy-init 全局 runtime + `enter()` guard，任何上下文都安全
+- `tauri::async_runtime::spawn_blocking(closure)` — 不在禁单内（无需 reactor）
+
+**Invariants enforced.** `src-tauri/clippy.toml` 用 `disallowed-methods` 编译期硬封禁 `tokio::spawn` / `tokio::task::spawn` —— `cargo clippy` 直接拦下。新代码**不可能**写错。
+
+**Don't.** 裸 `tokio::spawn` / `tokio::task::spawn`。
+
+---
+
+<a id="session-watcher"></a>
+## Session watcher (`src-tauri/src/search/session_watcher.rs`)
+
+**Problem.** Session 索引需要在每个写者（Sidecar / CLI / 迁移）都通知索引层。新写者忘记调用通知 → 索引漂移。
+
+**Surface.** `notify-debouncer-full` 5s 滑动去抖观察 `~/.myagents/sessions/`，**任何**写入者的变更都自动流入索引。
+
+**Invariants enforced.** 索引一致性由"观察结果目录"保证，与写入路径解耦。
+
+**Don't.** 在写入路径里硬编码"通知索引"调用——这种约束无法在编译期保证。
+
+完整搜索架构详见 `search_architecture.md`。
+
+---
+
+<a id="withconfiglock"></a>
+## `withConfigLock` / `with_config_lock` (Pattern 1, v0.2.0)
+
+**Problem.** `~/.myagents/config.json` 被三方独立写者（renderer plugin-fs / Node admin API / Rust IM commands）read-modify-write，无任何协调；并发写 rename 上"最后一名 wins"，用户密钥/设置静默丢失。
+
+**Surface.**
+- Node `withConfigLock(fn)` / `atomicModifyConfig(fn)` (`src/server/utils/admin-config.ts`)：async
+- Rust `with_config_lock(fn)` (`src-tauri/src/config_io.rs`)：同步，内部走 `with_file_lock_blocking`
+- Renderer `withConfigLock(fn)` (`src/renderer/config/services/configStore.ts`)：async，`cmd_fsync_path` 调 Rust 完成 fsync
+
+**Invariants enforced.**
+- 三端共享同一个 `config.json.lock` lockdir（atomic mkdir 协议）
+- 协议：lock → re-read → mutate → tmp write → fsync → rename → fsync parent dir → release
+- Stale recovery 跨运行时——renderer 信任自己的 mtime（1× threshold），node/rust owner 用 4× threshold（renderer 无法 probe pid liveness）
+- Owner sentinel `<runtime>:<pid>:<startMs>`，release 前校验 owner 防止"暂停过 staleMs 后误删继任者"
+
+**Don't.**
+- 任何 `config.json` 写入用裸 `tmp + rename`（绕过锁）
+- Renderer 直接 `writeFile(config.json, ...)`
+- Rust 旧的"自己用 std fs 写"路径——全部要走 `with_config_lock`
+
+---
+
+<a id="withfilelock"></a>
+## `withFileLock` / `with_file_lock` (Pattern 2, v0.2.0)
+
+**Problem.** 单写者文件（`cron_tasks.json` / `sessions/*.jsonl` / `mcp-oauth state`）裸 append 或 read-modify-write，应用内多 owner 并发触发 race；之前用 `Atomics.wait` 同步 busy-wait 阻塞 event loop。
+
+**Surface.**
+- Node `withFileLock(targetPath, fn, { staleMs })` (`src/server/utils/file-lock.ts`)：async；抛 `FileBusyError`
+- Rust `with_file_lock(path, fn)` (`src-tauri/src/utils/file_lock.rs`)：async via `spawn_blocking`
+- Rust `with_file_lock_blocking(path, fn)`：同步孪生（给 `config_io` 的现有同步 API 用）
+
+**Invariants enforced.**
+- Atomic-mkdir-based 协议，跨进程互斥
+- Owner sentinel `<runtime>:<pid>:<startMs>`，stale recovery 通过 `/proc/<pid>/stat`(Linux) 或 `ps -p ... -o lstart=`(macOS) 检测 pid reuse；Windows fallback 到 age-only
+- Rust 端 parser 支持 2-tuple（旧）和 3-tuple（新）owner，混部署期不会误删 live lock
+- `delay()` **不** `unref`——unref 会让进程在 acquire 等待中提前退出
+- Async 实现，零 sync busy-wait
+
+**Don't.**
+- 任何单写者文件用裸 append
+- 用 `Atomics.wait` / CPU spin / `while (Date.now() < end)` 做阻塞等待
+- 自己手写 lockdir 协议
+
+---
+
+<a id="killwithescalation"></a>
+## `killWithEscalation` (Pattern 3, v0.2.0)
+
+**Problem.** 三个外部 runtime adapter（claude-code / codex / gemini）之前共用反模式：SIGTERM + 短 wait + 无界 `waitForExit()`。子进程拒收 SIGTERM 时 sidecar 永久卡死，每条 stop 路径都中招（用户停止、模型切换、权限切换、runtime 切换）。
+
+**Surface.** `killWithEscalation(child, { gracefulMs, hardMs, label })` (`src/server/runtimes/utils/kill-with-escalation.ts`) — 返回 `Promise<void>`。
+
+**Invariants enforced.**
+- 升级链：SIGTERM → 等 `gracefulMs` → SIGKILL → 等 `hardMs` → orphan-log
+- 硬截止：worst case `gracefulMs + hardMs` 内必返回
+- 永不抛——所有失败路径降级为 orphan log
+- 三个 runtime 的 stop 路径 + `external-session.ts` 的 catch-fallback SIGTERM 全部走它
+
+**Don't.**
+- 任何子 sidecar / agent 的 stop 用裸 `setTimeout + child.kill('SIGTERM')` + `await waitForExit`
+- 自己手写 escalation 倒计时
+
+---
+
+<a id="cancellation"></a>
+## `withAbortSignal` / `cancellableFetch` / `withBoundedTimeout` / `anySignal` (Pattern 4, v0.2.0)
+
+**Problem.** 工具 / bridge 大量裸 `fetch()` 无 AbortSignal，下游卡住 → tool turn 永久 hang；OpenAI bridge 的 `AbortController` 只覆盖 headers 阶段；SSE proxy 有"客户端断开但 SDK 仍在烧 token"的孤儿态。
+
+**Surface.** (`src/server/utils/cancellation.ts`)
+- `CancelReason` 枚举：`'user' | 'timeout' | 'upstream' | 'shutdown' | 'error'`
+- `withAbortSignal(op, { signal, timeoutMs, reason })` —— 组合外部 signal + timeout 跑 op
+- `anySignal(...signals)` —— 多 signal 合并，存在时委托 `AbortSignal.any`，否则 polyfill
+- `cancellableDelay(ms, signal)` —— 可取消的 sleep
+- `withBoundedTimeout(p, ms)` —— bound Promise 等待但不 reject；late op rejection 静默吞掉
+- `cancellableFetch(url, init, { timeoutMs, signal })` —— 上层 fetch 便利层
+
+**Invariants enforced.**
+- 每条 cancellable 资源（stream / fetch / process / 子进程）都有 bounded-time `cancel(reason)` 路径
+- 所有工具 fetch（im-bridge / im-cron / im-media / edge-tts / plugin-bridge compat）都迁到 `cancellableFetch`，带显式超时
+- `withBoundedTimeout` 的 `void p.catch(() => undefined)` 防止 timeout 后的 unhandledRejection
+
+**Don't.**
+- 写新的 fetch / stream pump 不带 AbortSignal
+- 自己手写 `AbortController` + `setTimeout` 的 dance
+
+---
+
+<a id="maybespill"></a>
+## `maybeSpill` + `/refs/:id` + SSE 优先级队列 (Pattern 5, v0.2.0)
+
+**Problem.** 大 payload（图片、长 tool result、巨型 HTTP 响应）直接走 SSE/IPC JSON channel，OOM、UI 线程被 base64 阻塞、慢 client 无界排队拖死 sidecar。
+
+**Surface.**
+- Node `maybeSpill(value, { mimetype, sessionId, ownerTag })` (`src/server/utils/large-value-store.ts`) —— ≤256KB 返 inline，超阈值写到 `~/.myagents/refs/<id>` 返 `LargeValueRef { id, preview, mimetype, sizeBytes, ttlMs }`（1h TTL，8KB head preview）
+- `fetchRef(id)` / `getRefStreamPath(id)` —— 消费方拉回
+- `/refs/:id` HTTP 路由 —— 流式 `createReadStream`，绕过 deferred-init gate，id 限 `^[a-f0-9]{8,32}$`
+- `clearExpiredRefs` / `clearSessionRefs` + 60s `startRefsGc` 后台清理；session reset 联动
+- Rust `sse_proxy.rs` 的 `should_stream_spill`：边读边决定（>1MiB 或 explicit Content-Length 超阈值即 spill 到 ref），不再依赖 Content-Length 必填
+- SSE 三档优先级（`src/server/sse.ts`）：
+  - **critical**（errors / status / message-stopped 等）
+  - **coalescible**（chunk / delta，同类合并替换）
+  - **droppable**（log）
+  - per-client 软上限 1000、硬上限 10×；critical 突破硬上限强制断开慢 client
+
+**Invariants enforced.**
+- 大 payload 不进 SSE / IPC base64，全部走 ref
+- Bridge tool result 经 `maybeSpill` 再交给 SDK，超阈值替换为 `@ref:<id>` marker
+- OpenAI bridge / `/chat/stream` 用 pull-driven `ReadableStream`，consumer pace 决定 pull 节奏（避免 controller 内部 queue 无界增长）
+- Renderer 检到 `ref_url` 直接 fetch ref 跳过 `atob`
+
+**Don't.**
+- 任何超 256KB 的值直接 `JSON.stringify` 进 SSE / IPC
+- 自己手写 base64 round-trip
+- 新加 `controller.enqueue` 不过 priority gate
+
+---
+
+<a id="withlogcontext"></a>
+## `withLogContext` + AsyncLocalStorage logger pipeline (Pattern 6, v0.2.0)
+
+**Problem.** 日志按 sessionId/tabId/turnId/runtime 关联缺失；为补 correlation 改 932 个 `console.*` 调用是 cost-prohibitive；同时 `appendFileSync` 同步落盘阻塞 event loop。
+
+**Surface.**
+- `withLogContext({ sessionId, tabId, turnId, runtime, requestId, ownerId }, fn)` (`src/server/utils/logger-context.ts`) —— 进入 ALS frame
+- HTTP 中间件从 `X-MyAgents-Tab-Id` / `X-MyAgents-Session-Id` 头自动起 frame；renderer `proxyFetch` 自动盖头
+- SDK turn 用 module-level 的 ambient TLS（`Map<sessionId|ownerId, LogContext>`，**不是** singleton）—— 因为 persistent `messageGenerator` 会 yield 出 ALS frame
+- Runtime adapter 在事件处理路径外层包 `withLogContext({ runtime })`
+- `LogEntry` schema 增 6 个可选 correlation 字段；`console.*` capture 自动注入
+- `UnifiedLogger` (`src/server/utils/UnifiedLogger.ts`) in-memory bounded queue（1000）+ 100ms async flusher + 50MB per-file rotation + 500MB per-dir cap + drop counter + 进程退出 hooks 同步 flush
+- Rust 端 `ulog_*!` macro 增 kv-pair arms，932 个 legacy 调用零迁移；底层换成 tokio task + bounded mpsc(1024) + 200ms flush tick
+
+**Invariants enforced.**
+- 所有 `console.*` 在合适的 boundary 内调用（HTTP middleware / SDK turn / runtime spawn 已包好），就自动带 correlation——零 call-site migration
+- Ambient store 按 `sessionId|ownerId` 隔离，同 sidecar 内多 owner 不互踩
+- 同步落盘绝迹（`grep appendFileSync UnifiedLogger.ts` 应为空）
+
+**Don't.**
+- 写新的"跨进程 trace"需求时改 `console.*` 加前缀
+- 引入并行的 `sendLog` 通道
+- 用 process-singleton 存 correlation
+
+**ADR：不替换为 pino / tracing-appender。** 决策理由见 `decision_logger_library.md`。
+
+---
+
+<a id="deferredinitstate"></a>
+## `DeferredInitState` + readiness endpoints (Pattern 7, v0.2.0)
+
+**Problem.** 单一 `healthy` 信号让 renderer 在 sidecar deferred init 还在跑时就以为可用——首次发消息卡住、route 用 `await __myagentsDeferredInit` 无限等。
+
+**Surface.**
+- `DeferredInitState` 状态机（`src/server/readiness-state.ts`）：`pending → phase(<name>) → ready` 或 `→ failed { phase, error, retryable }`
+- Phases: `cleanup / skill-seed / socks-bridge / sdk-init / external-runtime-restore`
+- `GET /health` —— liveness alias（旧 watchdog 兼容）
+- `GET /health/live` —— 显式 liveness
+- `GET /health/ready` —— 200 only when `state=ready`；503 + `{ state, phase?, error?, retryable? }` + `Retry-After: 1` 否则
+- `GET /health/functional` —— sidecar 等同 ready；plugin bridge 检"过去 60s 是否成功 forward 到 Rust"
+- `POST /health/ready/retry` —— 重置 `failed → pending`
+- Route gate 改成查状态机返结构化 503，不再 await indefinitely 或 rethrow
+- Rust `wait_for_readiness`（30s timeout / 250ms cadence）wired 到 `ensure_session_sidecar`，启动 loading 自然覆盖 warm-up
+
+**Invariants enforced.**
+- Liveness ≠ readiness ≠ functional——三个语义独立
+- Renderer loading 挂 ready 信号，不挂 liveness
+- Watchdog 用 ready，404 fallback 到 `/health`（rollout 安全）
+- Failed init 不再静默 poison 所有 route，error+phase 暴露在响应体里
+
+**Don't.**
+- 把 readiness 等同于 liveness
+- 新加 route 用 `await __myagentsDeferredInit`（已下线）
+- Renderer loading 挂 `/health`
+
+---
+
+<a id="fs-utils"></a>
+## `fs-utils` (`src/server/utils/fs-utils.ts`)
+
+**Problem.** Windows junction / POSIX symlink-to-dir 上 `Dirent.isDirectory()` 返回 false，每个扫目录的代码都要手写 fallback。
+
+**Surface.** `ensureDirSync` / `ensureDir` / `isDirEntry`
+
+---
+
+<a id="subprocess"></a>
+## `subprocess` (`src/server/utils/subprocess.ts`)
+
+**Problem.** Node `child_process.spawn` 的 stream 形态需要适配：`exited` Promise 触发时机、stdin 背压、stdout 是否 cached Web Stream 等。
+
+**Surface.** spawn 兼容 adapter：
+- `exited` Promise 在 `'close'` 而非 `'exit'`（stdio 已 drain）
+- stdin.write 用 Node callback 驱动避免背压 hang
+- 保留 spawn error
+- cached `Readable.toWeb` stream
+- 配套 `fireAndForget()` helper（open / explorer / xdg-open 等一次性 spawn）
+
+**Invariants enforced.** 单一 spawn 入口，不在每处重写 stream-shape 差异。
+
+---
+
+<a id="file-response"></a>
+## `file-response` (`src/server/utils/file-response.ts`)
+
+**Problem.** Node 没有 `new Response(Bun.file(p))` 这种文件直接转 Response 的便利构造，每个 HTTP 路由返回文件都要内联 `fs.readFile + new Response`。
+
+**Surface.**
+- `fileResponse(p, { contentType })` — 用 `createReadStream + Readable.toWeb` 生成流式 Web Response
+- `sniffMime(path)` — ext→MIME 映射
+
+---
+
+<a id="builtin-mcp"></a>
+## Builtin MCP 懒加载架构
+
+**Problem.** 6 个 in-process 内置 MCP（cron-tools / im-cron / im-media / generative-ui / gemini-image / edge-tts）顶层 import `@anthropic-ai/claude-agent-sdk`（~900KB）+ `zod/v4`（~470KB）+ per-tool schema 构造 → Sidecar 冷启动每次付 ~500-1000ms zod schema 构造税，即使用户压根没启用这个 MCP。
+
+**Architecture: 两层 META / INSTANCE**
+
+- **META 层** (`src/server/tools/builtin-mcp-meta.ts`)：每个 MCP 登记一个 `{ id, load: async () => ... }` 工厂。**模块加载时只存函数引用**，不 eval 任何 tool 代码。
+- **INSTANCE 层** (`src/server/tools/builtin-mcp-registry.ts::getBuiltinMcpInstance(id)`)：按需触发 factory，SDK + zod + per-tool schema 构造全部在此发生。**首次 call 付 100-400ms，后续缓存命中 0ms。** Promise 失败自动 evict，防止 poisoned cache。
+- **Settings UI 的 MCP 列表**从静态 `PRESET_MCP_SERVERS`（`src/renderer/config/types.ts`）读取，**不依赖** INSTANCE 层。关闭某个 builtin = 不传给 SDK ≠ 不创建。
+
+**新增 builtin MCP 流程：**
+1. 新建 `src/server/tools/xxx-tool.ts`，导出 `async function createXxxServer()`。**SDK/zod 的 value import 必须在 factory 内部 `await import(...)`**，顶层只能 light 依赖 + `import type`。
+2. 在 `src/server/tools/builtin-mcp-meta.ts` 加：
+   ```ts
+   registerBuiltinMcpMeta({
+     id,
+     load: async () => {
+       const m = await import('./xxx-tool');
+       return { server: await m.createXxxServer() };
+     }
+   })
+   ```
+3. 用户可开关的 MCP（Settings 可见）：另导出 `configureXxx` + `validateXxx`（纯 JS，不 import SDK/zod），在 META 的 load() 里一并返回。
+
+**Invariants enforced.** ESLint `@typescript-eslint/no-restricted-imports` 规则（作用域 `src/server/tools/*.ts`）禁止顶层 value-import SDK/zod（`allowTypeImports: true` 保留 type-only 零成本）。**破坏这条规则 → lint 立即报错**。
+
+**Don't.** 顶层 `import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'` 或 `import { z } from 'zod/v4'` 在 `src/server/tools/*.ts`。
+
+---
+
+<a id="snapshot-helpers"></a>
+## Session Config Snapshot Helpers
+
+**Problem.** Tab/Cron/Background 与 IM/Agent Channel 对 config 变更的感知策略不同——前者要冻结快照（Agent 配置变更不影响已开 session），后者要 live follow（每条消息都按当前配置 resolve）。如果用一个 snapshot helper + 布尔参数，调用方容易忘记某个分支。
+
+**Surface.** 两个**独立命名函数**：
+- `snapshotForOwnedSession(agent)` —— 冻结 `model / permissionMode / mcpEnabledServers / providerId / providerEnvJson / runtime`
+- `snapshotForImSession(agent)` —— 只记录 `runtime`（runtime drift 触发 session fork）
+
+**Invariants enforced.** 任何新增字段都必须在两处显式处理，无法"忘记"。读侧用 `resolveSessionConfig(sessionMeta, ownerKind)` (`src/server/utils/resolve-session-config.ts`) 统一消费——owned session 走 meta 冻结值，IM session 走 live agent；meta 缺失时 fallback 到 agent config，向后兼容老 session。
+
+**Don't.** 用一个布尔参数分派两种语义。
+
+详见 PRD（本地）`prd_0.1.69_session_config_snapshot.md`。
+
+---
+
+<a id="legacy-cas"></a>
+## Legacy CronTask CAS Upgrade (`legacy_upgrade.rs`)
+
+**Problem.** 早期版本的独立 CronTask 在首次加载时被检测为 "legacy"，自动升级成带 Task 的结构。多 Sidecar 启动时并发跑同一升级路径 → 重复创建 Task。
+
+**Surface.** `set_task_id(cron_id, new_task_id, require_null=true)` CAS（compare-and-swap）。
+
+**Invariants enforced.**
+- 幂等：已升级过的 cron 会被 CAS short-circuit 跳过
+- Rollback：Task 创建成功但 CAS 失败 → 回滚 Task；CAS 成功后 Rename 失败 → CAS 回滚 + Task 删除
+- 状态保留：running cron → Running task、已自然结束 → Done、用户手动停的 → Stopped；audit 记 `actor=System, source=Migration`
+
+**Don't.** "先创建 Task 再写 cron.task_id"——并发时会重复。MUST 用 CAS。
+
+---
+
+## 与文档的协作关系
+
+- **CLAUDE.md** —— 红线总表里每条对应本文档某个 anchor。AI 读 CLAUDE.md 知道"不要这么做"，需要细节时跳本文档。
+- **ARCHITECTURE.md** —— Pit-of-Success 索引节列出本文档所有模块名 + 一句话职责。
+- **本文档** —— 完整 spec、API surface、不变量、踩坑根因。
+
+新增 helper 时同步更新三处：本文档（spec）+ CLAUDE.md（红线表一行）+ ARCHITECTURE.md（索引一行）。

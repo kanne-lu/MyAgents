@@ -1,10 +1,18 @@
 /**
- * Frontend Logger - Intercepts console.log/error/warn/debug in React
+ * Frontend Logger — Pattern 6 (Renderer correlation + bounded global store).
  *
- * Features:
- * - Dispatches custom events for TabProvider to display in UnifiedLogsPanel
- * - Batches logs and sends to backend for file persistence
- * - Uses debounce to reduce API calls
+ * Single global `FrontendLogStore` (module-level ring buffer + listeners)
+ * replaces the old "every TabProvider keeps its own 3000-entry copy" model.
+ * Tabs subscribe to the global store with a tab-id filter — no duplication.
+ *
+ * `console.*` interception is unchanged (statutory entry pattern from
+ * `unified_logging.md` §最佳实践 #1). Each captured entry stamps
+ * `tabId` from the active tab (set by TabProvider via setCurrentTabId)
+ * before being persisted to disk and pushed to the store.
+ *
+ * Bounded:
+ *  - Global ring buffer: 5000 entries (drops oldest)
+ *  - Persistence batch buffer: 50 entries (existing)
  */
 
 import type { LogEntry, LogLevel } from '@/types/log';
@@ -21,8 +29,142 @@ const originalConsole = {
 // Track initialization state
 let initialized = false;
 
-// Custom event name for React logs
+// Custom event name for React logs (kept for back-compat with code that still
+// listens via window event; the global store is the canonical source going
+// forward).
 export const REACT_LOG_EVENT = 'myagents:react-log';
+
+// ── Pattern 6: active tab tracking (FIXED — focus-aware registry) ─────
+// Previously this was a single `currentTabId` overwritten by whichever tab
+// mounted last. With multiple tabs mounted concurrently, captured console.*
+// logs were stamped with the wrong tabId. We now keep a registry of mounted
+// tabs + a "focused" pointer; capture reads from the focused entry. Each
+// tab mounts via setCurrentTabId(tabId) which adds it to the registry, and
+// unmounts via setCurrentTabId(undefined) (called from the same tab's
+// cleanup) which removes the matching entry.
+const mountedTabIds = new Set<string>();
+let focusedTabId: string | undefined;
+// Last-resort fallback for legacy callers — preserves old "last mounted
+// wins" behavior when no focus event has fired yet (cold start before any
+// focus listener attaches).
+let lastMountedTabId: string | undefined;
+
+/**
+ * Mount or unmount a tab in the active-tab registry. Pass `undefined` to
+ * unmount the most recently mounted tab (legacy 1-arg shape; rarely needed —
+ * the focus-aware variant `setCurrentTabId(tabId, mounted=true|false)` is
+ * preferred). The "currently active tab" is the one with focus, or the
+ * last-mounted as fallback.
+ */
+export function setCurrentTabId(tabId: string | undefined, mounted: boolean = true): void {
+    if (tabId === undefined) {
+        // Legacy unmount-all path: shouldn't be hit in current code, but kept
+        // for safety — clearing without a specific id is never the right thing.
+        return;
+    }
+    if (mounted) {
+        mountedTabIds.add(tabId);
+        lastMountedTabId = tabId;
+        // First mount → claim focus until something else explicitly does.
+        if (!focusedTabId || !mountedTabIds.has(focusedTabId)) {
+            focusedTabId = tabId;
+        }
+    } else {
+        mountedTabIds.delete(tabId);
+        if (focusedTabId === tabId) {
+            focusedTabId = lastMountedTabId && mountedTabIds.has(lastMountedTabId)
+                ? lastMountedTabId
+                : (mountedTabIds.values().next().value as string | undefined);
+        }
+        if (lastMountedTabId === tabId) {
+            // Pick any remaining mounted tab as the new "last".
+            lastMountedTabId = mountedTabIds.values().next().value as string | undefined;
+        }
+    }
+}
+
+/** Mark `tabId` as currently focused — called by TabProvider when its tab gains focus. */
+export function setFocusedTabId(tabId: string | undefined): void {
+    if (tabId === undefined) {
+        // Don't clobber focusedTabId on blur — keep the last-focused as the
+        // best guess. App-level captures still work via the fallback chain.
+        return;
+    }
+    focusedTabId = tabId;
+    if (!mountedTabIds.has(tabId)) {
+        // Belt-and-suspenders: a tab that focuses without first mounting
+        // should be added so capture still works.
+        mountedTabIds.add(tabId);
+        lastMountedTabId = tabId;
+    }
+}
+
+function resolveActiveTabId(): string | undefined {
+    if (focusedTabId && mountedTabIds.has(focusedTabId)) return focusedTabId;
+    if (lastMountedTabId && mountedTabIds.has(lastMountedTabId)) return lastMountedTabId;
+    // Last resort — any mounted tab. Avoids "no tab id at all" when something
+    // logs before any focus/mount sequence stabilises.
+    return mountedTabIds.values().next().value as string | undefined;
+}
+
+// ── Pattern 6: global log store (bounded ring buffer + listeners) ─────
+const STORE_CAPACITY = 5000;
+
+type LogStoreListener = (entry: LogEntry) => void;
+
+interface FrontendLogStore {
+    entries: LogEntry[];
+    listeners: Set<LogStoreListener>;
+}
+
+const store: FrontendLogStore = {
+    entries: [],
+    listeners: new Set(),
+};
+
+function pushToStore(entry: LogEntry): void {
+    store.entries.push(entry);
+    if (store.entries.length > STORE_CAPACITY) {
+        store.entries.splice(0, store.entries.length - STORE_CAPACITY);
+    }
+    for (const l of store.listeners) {
+        try { l(entry); } catch { /* ignore listener errors */ }
+    }
+}
+
+/**
+ * Subscribe to ALL log entries pushed to the global store. Returns the
+ * unsubscribe function. Pass `tabFilter` to only receive entries whose
+ * `tabId` matches (or entries with no tabId, which are global) — that's
+ * how TabProvider replaces its old per-tab 3000-entry copy.
+ */
+export function subscribeFrontendLogs(
+    listener: LogStoreListener,
+    tabFilter?: string,
+): () => void {
+    const wrapped: LogStoreListener = tabFilter
+        ? (e) => { if (!e.tabId || e.tabId === tabFilter) listener(e); }
+        : listener;
+    store.listeners.add(wrapped);
+    return () => { store.listeners.delete(wrapped); };
+}
+
+/**
+ * Snapshot of the current store contents, optionally filtered by tab. Used
+ * when a tab mounts and wants to backfill recent history.
+ */
+export function snapshotFrontendLogs(tabFilter?: string): LogEntry[] {
+    if (!tabFilter) return store.entries.slice();
+    return store.entries.filter(e => !e.tabId || e.tabId === tabFilter);
+}
+
+export function clearFrontendLogs(tabFilter?: string): void {
+    if (!tabFilter) {
+        store.entries.length = 0;
+        return;
+    }
+    store.entries = store.entries.filter(e => e.tabId && e.tabId !== tabFilter);
+}
 
 // Log buffer for batching
 const logBuffer: LogEntry[] = [];
@@ -168,9 +310,19 @@ function createAndDispatch(level: LogLevel, args: unknown[]): void {
     level,
     message,
     timestamp: localTimestamp(),
+    // Pattern 6: stamp tabId from the focus-aware registry. Outside any
+    // tab, leave undefined → entries appear as global (every tab's
+    // filtered subscription includes them). Replaces the old "last mounted
+    // wins" singleton which mis-tagged logs in multi-tab sessions.
+    tabId: resolveActiveTabId(),
   };
 
-  // Dispatch custom event for TabProvider to listen (for UI display)
+  // Push to global store (bounded ring + listeners). Replaces the old
+  // "each TabProvider keeps its own 3000-entry copy" model.
+  pushToStore(entry);
+
+  // Back-compat: also dispatch the legacy CustomEvent so any consumer
+  // that hasn't migrated to subscribeFrontendLogs() still gets the entry.
   window.dispatchEvent(new CustomEvent(REACT_LOG_EVENT, { detail: entry }));
 
   // Add to buffer for persistence (cap when circuit is broken to prevent memory leak)

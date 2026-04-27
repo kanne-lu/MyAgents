@@ -22,6 +22,7 @@ import {
 } from 'react';
 import { ChevronDown, ChevronUp, Hash, PenLine } from 'lucide-react';
 import { thoughtCreate } from '@/api/taskCenter';
+import { track } from '@/analytics';
 import Tip from '@/components/Tip';
 import { Popover } from '@/components/ui/Popover';
 import {
@@ -30,6 +31,7 @@ import {
   splitWithTagHighlights,
   tagBodyEndOffset,
 } from '@/utils/parseThoughtTags';
+import { stripMacFunctionKeys } from '@/utils/macFunctionKeyFilter';
 import type { Thought } from '@/../shared/types/thought';
 
 export interface ThoughtInputHandle {
@@ -100,6 +102,37 @@ const VARIANTS: Record<ThoughtInputVariant, {
     toolbarButtonPaddingClass: 'p-2',
   },
 };
+
+/**
+ * Single source of truth for every CSS class that decides where a glyph
+ * lands. The mirror `<div>` and the user-facing `<textarea>` MUST have
+ * identical wrap geometry — if any of these tokens drift between the
+ * two layers (e.g. someone adds `tracking-tight` to the textarea but
+ * forgets the mirror), text wraps at a different character and the
+ * textarea's caret floats into "mystery whitespace" after the last
+ * visible mirror glyph (regression scenario from cross-review M9).
+ *
+ * Pulled out into a function so both call sites pass the same `theme`
+ * + `showExpandToggle` and end up with byte-equivalent output.
+ */
+function MIRROR_TEXTAREA_SHARED_CLASS(
+  theme: (typeof VARIANTS)[ThoughtInputVariant],
+  showExpandToggle: boolean,
+): string {
+  return `${theme.innerPaddingClass} ${theme.textareaClass}${showExpandToggle ? ' pr-10' : ''}`;
+}
+
+/**
+ * Inline styles whose presence (or absence) likewise affects wrap
+ * geometry. Both layers spread this object so the textarea can
+ * additionally pin `WebkitTextFillColor: 'transparent'` and its
+ * own min/maxHeight without forking the shared keys.
+ */
+const MIRROR_TEXTAREA_SHARED_STYLE = {
+  fontFamily: 'inherit',
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'break-word',
+} as const;
 
 interface Props {
   onCreated?: (t: Thought) => void;
@@ -294,7 +327,11 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-      const next = e.target.value;
+      // Strip macOS function-key private-use codepoints that WebKit leaks
+      // into the input value when an arrow key is pressed at a boundary
+      // (cursor at 0 pressing ←, or cursor at end pressing →). See
+      // `utils/macFunctionKeyFilter.ts` for the full rationale.
+      const next = stripMacFunctionKeys(e.target.value);
       setValue(next);
       recomputeTagMenu(next, e.target.selectionStart ?? next.length);
     },
@@ -351,6 +388,10 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     setError(null);
     try {
       const t = await thoughtCreate({ content });
+      track('thought_create', {
+        source: 'desktop',
+        location: variant === 'launcher' ? 'launcher' : 'task_center',
+      });
       setValue('');
       setTagMenu(null);
       onCreated?.(t);
@@ -359,7 +400,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
     } finally {
       setBusy(false);
     }
-  }, [value, busy, onCreated]);
+  }, [value, busy, onCreated, variant]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -420,29 +461,45 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             aria-hidden
             className="pointer-events-none absolute inset-0 overflow-hidden"
           >
-            <div
-              ref={overlayInnerRef}
-              className={`${theme.outerPaddingClass} ${theme.innerPaddingClass} ${theme.textareaClass} text-[var(--ink)]`}
-              style={{
-                fontFamily: 'inherit',
-                whiteSpace: 'pre-wrap',
-                overflowWrap: 'break-word',
-                willChange: 'transform',
-              }}
-            >
-              {segments.map((seg, i) =>
-                seg.type === 'tag' ? (
-                  <span
-                    key={i}
-                    className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
-                  >
-                    {seg.value}
-                  </span>
-                ) : (
-                  <span key={i}>{seg.value}</span>
-                ),
-              )}
-              {value.endsWith('\n') && '\u200b'}
+            {/* `paddingWrapper` reproduces the outer's padding INSIDE the
+                clip box so the inner text-rendering area exactly matches
+                the textarea's bounding box. Without this layer the inner
+                used the full clip-box width while the textarea used
+                (clip-box - outer-padding); any additional textarea-only
+                padding (notably `pr-10` for the expand-toggle in
+                launcher mode) made the two layers wrap at different
+                characters and the caret would float into "mystery"
+                whitespace after the visible mirror text. */}
+            <div className={theme.outerPaddingClass}>
+              <div
+                ref={overlayInnerRef}
+                // `MIRROR_TEXTAREA_SHARED_CLASS` carries every Tailwind/
+                // CSS-token decision that affects glyph layout — padding
+                // inside the box, font size, line-height, conditional
+                // `pr-10` for the expand toggle. The textarea below
+                // applies the EXACT same class (plus its own appearance/
+                // background overrides) so any future style change here
+                // hits both layers in lockstep.
+                className={`${MIRROR_TEXTAREA_SHARED_CLASS(theme, showExpandToggle)} text-[var(--ink)]`}
+                style={{
+                  ...MIRROR_TEXTAREA_SHARED_STYLE,
+                  willChange: 'transform', // mirror translateY(-scrollTop) GPU hint
+                }}
+              >
+                {segments.map((seg, i) =>
+                  seg.type === 'tag' ? (
+                    <span
+                      key={i}
+                      className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]"
+                    >
+                      {seg.value}
+                    </span>
+                  ) : (
+                    <span key={i}>{seg.value}</span>
+                  ),
+                )}
+                {value.endsWith('\n') && '\u200b'}
+              </div>
             </div>
           </div>
           <textarea
@@ -486,11 +543,16 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
             // click area so content can't overlap the toggle button
             // (matches SimpleChatInput's `pr-8` but one size larger to
             // accommodate the toggle's larger hit box).
-            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] placeholder:[-webkit-text-fill-color:var(--ink-muted)] focus:outline-none ${theme.innerPaddingClass} ${theme.textareaClass} ${showExpandToggle ? 'pr-10' : ''}`}
+            // Textarea-specific classes (block layout, transparency to let
+            // the mirror layer show through, caret/placeholder colour) +
+            // `MIRROR_TEXTAREA_SHARED_CLASS` so geometry stays pinned to
+            // the mirror. Editing the geometry props here without also
+            // updating the shared helper would re-create the wrap-mismatch
+            // / caret-floating-on-mystery-whitespace bug.
+            className={`block relative w-full resize-none overflow-y-auto bg-transparent text-transparent caret-[var(--ink)] placeholder:text-[var(--ink-muted)] placeholder:[-webkit-text-fill-color:var(--ink-muted)] focus:outline-none ${MIRROR_TEXTAREA_SHARED_CLASS(theme, showExpandToggle)}`}
             style={{
-              fontFamily: 'inherit',
+              ...MIRROR_TEXTAREA_SHARED_STYLE,
               WebkitTextFillColor: 'transparent',
-              overflowWrap: 'break-word',
               minHeight: `${textareaMinHeightPx}px`,
               maxHeight: `${textareaMaxHeightPx}px`,
             }}

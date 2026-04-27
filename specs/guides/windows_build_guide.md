@@ -439,4 +439,4 @@ ERROR : Failed to copy: AccessDenied
 
 - [macOS 构建与发布指南](./build_and_release_guide.md) - macOS 版本构建流程
 - [自动更新系统](../tech_docs/auto_update.md) - 更新机制详解
-- [Bun Sidecar 打包](../tech_docs/bundled_bun.md) - 运行时打包机制
+- [Node.js Sidecar 打包](../tech_docs/bundled_node.md) - 运行时打包机制

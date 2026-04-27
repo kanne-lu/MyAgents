@@ -5,14 +5,14 @@
  * Provides play/stop control and state callbacks for UI updates.
  *
  * In Tauri: reads file via Rust command → base64 → blob URL (avoids asset protocol scope issues).
- * In browser: uses direct URL to Bun sidecar's /api/audio endpoint.
+ * In browser: uses direct URL to the Node Sidecar's /api/audio endpoint.
  */
 import { isTauriEnvironment } from '@/utils/browserMock';
 
 /**
  * Read a local file via Rust and return a blob URL.
  * Works around Tauri asset protocol scope restrictions on workspace directories.
- * In browser dev mode, returns a direct URL to the Bun sidecar endpoint.
+ * In browser dev mode, returns a direct URL to the Node Sidecar endpoint.
  */
 export async function readLocalFileAsBlobUrl(
   filePath: string,

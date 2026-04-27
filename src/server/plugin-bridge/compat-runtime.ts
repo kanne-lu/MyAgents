@@ -15,7 +15,8 @@ import { join, basename, extname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFile, readFile } from 'fs/promises';
 import { ensureDir } from '../utils/fs-utils';
-import { registerPendingDispatch, type PendingDispatchCallbacks } from './pending-dispatch';
+import { registerPendingDispatch, rejectPendingDispatch, type PendingDispatchCallbacks } from './pending-dispatch';
+import { cancellableFetch } from '../utils/cancellation';
 
 // ===== Media extraction utilities =====
 
@@ -178,7 +179,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
   // Shim compat version — must match the version in sdk-shim/package.json.
   // Plugins check api.runtime.version (e.g. weixin's assertHostCompatibility)
   // to verify the host supports the required SDK surface.
-  const SHIM_COMPAT_VERSION = '2026.4.9';
+  const SHIM_COMPAT_VERSION = '2026.4.24';
 
   const runtime = {
     /** Update the plugin ID after registration */
@@ -370,8 +371,16 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           console.log(`[compat-timing] dispatchReplyFromConfig PROTOCOL path: chatId=${chatId} len=${text.length} attachments=${mediaAttachments.length}`);
 
-          // POST the inbound message to Rust BEFORE registering pending dispatch,
-          // so that if the POST fails we don't leave an orphaned pending dispatch
+          // Codex H12 fix: register the pending dispatch BEFORE POSTing to
+          // Rust. The previous order (POST → register) had a race window —
+          // if Rust accepted the message and the bridge started emitting
+          // /start-stream / /stream-chunk faster than this Node task could
+          // re-enter the event loop, those callbacks hit `getPendingDispatch`
+          // before our register completed → fell into the fallback CardKit
+          // path → orphaned stream / mismatched output. Tradeoff: a POST
+          // failure now leaves a transient pending dispatch, which we
+          // explicitly reject below.
+          const completionPromise = registerPendingDispatch(chatId, callbacks);
           try {
             const resp = await fetch(`${rustBaseUrl}/api/im-bridge/message`, {
               method: 'POST',
@@ -398,13 +407,15 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
               const body = await resp.text();
               throw new Error(`Rust returned ${resp.status}: ${body}`);
             }
+            // Pattern 4: record a successful forward for /health/functional.
+            (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt = Date.now();
           } catch (err) {
             console.error(`[compat-timing] Rust POST FAILED in protocol path (+${Date.now() - t0}ms):`, err);
+            // POST failed — explicitly reject the dispatch we just registered
+            // so it doesn't sit in the map until its 10-minute timeout.
+            rejectPendingDispatch(chatId, err instanceof Error ? err : new Error(String(err)));
             throw err;
           }
-
-          // Register pending dispatch AFTER successful POST (no leak on failure)
-          const completionPromise = registerPendingDispatch(chatId, callbacks);
 
           // Block until AI response completes (resolved by /finalize-stream or /abort-stream)
           try {
@@ -500,35 +511,49 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher ENTER: sender=${senderId} chat=${chatId} len=${text.length} attachments=${mediaAttachments.length}`);
 
           try {
-            const resp = await fetch(`${rustBaseUrl}/api/im-bridge/message`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                botId,
-                pluginId: currentPluginId,
-                senderId,
-                senderName: senderName || undefined,
-                text,
-                chatType: chatType === 'group' ? 'group' : 'direct',
-                chatId,
-                messageId: messageId || undefined,
-                groupId: groupId || undefined,
-                isMention,
-                groupName: groupName || undefined,
-                threadId: threadId || undefined,
-                replyToBody: replyToBody || undefined,
-                groupSystemPrompt: groupSystemPrompt || undefined,
-                attachments: mediaAttachments.length > 0 ? mediaAttachments : undefined,
-              }),
-            });
+            // Pattern 1: 5s cap on the local management API call. Plugin
+            // dispatch is on the inbound-message hot path — a wedged Rust
+            // management API would otherwise hang the plugin's promise
+            // forever and back-pressure the channel. On timeout the plugin
+            // sees a structured error rather than a silent hang.
+            const resp = await cancellableFetch(
+              `${rustBaseUrl}/api/im-bridge/message`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  botId,
+                  pluginId: currentPluginId,
+                  senderId,
+                  senderName: senderName || undefined,
+                  text,
+                  chatType: chatType === 'group' ? 'group' : 'direct',
+                  chatId,
+                  messageId: messageId || undefined,
+                  groupId: groupId || undefined,
+                  isMention,
+                  groupName: groupName || undefined,
+                  threadId: threadId || undefined,
+                  replyToBody: replyToBody || undefined,
+                  groupSystemPrompt: groupSystemPrompt || undefined,
+                  attachments: mediaAttachments.length > 0 ? mediaAttachments : undefined,
+                }),
+              },
+              { timeoutMs: 5_000 },
+            );
 
             console.log(`[compat-timing] Rust POST completed (+${Date.now() - t0}ms) status=${resp.status}`);
             if (!resp.ok) {
               const body = await resp.text();
               console.error(`[compat-runtime] Rust returned ${resp.status}: ${body}`);
+            } else {
+              // Pattern 4: record a successful forward for /health/functional.
+              (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt = Date.now();
             }
           } catch (err) {
-            console.error(`[compat-timing] Rust POST FAILED (+${Date.now() - t0}ms):`, err);
+            const isTimeout = err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+            const reason = isTimeout ? 'timeout' : 'error';
+            console.warn(`[compat-runtime] Rust POST FAILED (reason=${reason}, +${Date.now() - t0}ms): ${err instanceof Error ? err.message : String(err)}`);
           }
 
           // Do NOT call the deliver callback — AI reply comes back via /send-text

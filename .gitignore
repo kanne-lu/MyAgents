@@ -5,8 +5,10 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Lockfiles (project uses Bun)
-package-lock.json
+# Lockfiles — v0.2.0+ uses npm (package-lock.json is committed).
+# Any residual bun.lock from pre-0.2.0 checkout is ignored so local installs
+# don't leave stray files in the tree.
+bun.lock
 
 # Vite
 .vite/
@@ -50,9 +52,15 @@ npm-debug.log*
 src-tauri/target/
 src-tauri/binaries/
 src-tauri/resources/server-dist.js
-src-tauri/resources/plugin-bridge-dist.js
+src-tauri/resources/server-dist.js.map
+src-tauri/resources/plugin-bridge-dist.mjs
+src-tauri/resources/plugin-bridge-dist.mjs.map
 src-tauri/resources/claude-agent-sdk
+src-tauri/resources/cli/myagents.js
+src-tauri/resources/cli/myagents.cmd
 src-tauri/resources/agent-browser-cli
+src-tauri/resources/sharp-runtime
+src-tauri/resources/tsx-runtime
 src-tauri/resources/nodejs/*
 !src-tauri/resources/nodejs/.gitkeep
 src-tauri/resources/vcruntime140.dll

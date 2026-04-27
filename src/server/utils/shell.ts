@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFile } from 'child_process';
 import { join } from 'path';
 import { readdirSync, existsSync } from 'fs';
 
@@ -92,71 +92,52 @@ function getFallbackPaths(): string[] {
     return paths.filter(Boolean);
 }
 
+/**
+ * Builds the "fallback PATH": platform fallback directories ∪ process.env.PATH.
+ * Pure string construction, always fast. Used on first access (before the
+ * async shell-interactive detection completes) and as baseline prefix even
+ * after detection — detected entries are appended, not replaced.
+ */
+function buildFallbackPath(): string {
+    const fallback = getFallbackPaths().join(PATH_SEPARATOR);
+    const existing = process.env[PATH_KEY] || process.env.PATH || '';
+    return existing ? `${fallback}${PATH_SEPARATOR}${existing}` : fallback;
+}
+
+// Populated lazily with the fallback PATH on first sync read.
 let cachedPath: string | null = null;
+// Set once the async interactive-shell detection completes. Appended to
+// the fallback PATH to form the enriched cached value.
+let detectedUserPath: string | null = null;
+// Promise guard — ensures exactly one concurrent execFile to the shell.
+let warmupInFlight: Promise<void> | null = null;
 
 /**
- * Detects the user's full shell PATH.
- * Essential for GUI apps (like Tauri) on macOS which don't inherit the user's shell environment.
+ * Synchronous PATH getter. Non-blocking by design:
+ *   - First call returns the fallback PATH immediately
+ *   - If background warmup has completed, returns fallback + detected user PATH
+ *   - Never calls execSync (which would block the Node event loop and starve
+ *     TCP accept during sidecar startup — measured 4-5s hang on slow .zshrc)
+ *
+ * Call `warmupShellPath()` once at process startup to kick off the async
+ * interactive-shell detection. Callers that need the *detected* PATH (not just
+ * fallback) and can wait should use `ensureShellPath()`.
  */
 export function getShellPath(): string {
-    if (cachedPath) return cachedPath;
-
-    const fallback = getFallbackPaths().join(PATH_SEPARATOR);
-
-    // On Windows, just use existing PATH with fallback paths prepended
-    if (isWindows) {
-        const existing = process.env[PATH_KEY] || process.env.PATH || '';
-        cachedPath = existing ? `${fallback}${PATH_SEPARATOR}${existing}` : fallback;
-        console.log('[shell] Windows PATH configured');
+    if (cachedPath && detectedUserPath === null) {
+        // Fallback-only cache. Return it; warmup may still be pending.
         return cachedPath;
     }
-
-    // macOS/Linux: Detect shell PATH by spawning an interactive login shell.
-    //
-    // Why `-i` (interactive) is required:
-    //   zsh -l -c  → non-interactive login → sources .zprofile but NOT .zshrc
-    //   zsh -i -l -c → interactive login  → sources .zprofile AND .zshrc
-    // NVM/fnm/pnpm etc. are almost always loaded in .zshrc, so without `-i` their
-    // paths are missing — exactly the user's bug report (claude/codex "not installed").
-    //
-    // Marker extraction: `-i` can produce extra output (MOTD, prompt frameworks like
-    // p10k/oh-my-zsh, conda banners). We wrap $PATH in unique markers and extract
-    // only the content between them, making us immune to noisy .zshrc output.
-    //
-    // Safety: stdin is /dev/null (interactive shell gets EOF → exits), timeout guards
-    // against .zshrc that launches tmux/screen. Fallback paths provide a safety net.
-    try {
-        const shell = process.env.SHELL || '/bin/zsh';
-        const marker = `__MYAGENTS_PATH_${process.pid}__`;
-        // NOTE: Must use ${PATH} (braced) — unbraced $PATH__MARKER__ is parsed as one
-        // variable name by the shell because underscores are valid in identifiers.
-        const raw = execSync(`${shell} -i -l -c 'echo "${marker}\${PATH}${marker}"'`, {
-            encoding: 'utf-8',
-            timeout: 3000,
-            stdio: ['ignore', 'pipe', 'ignore']
-        });
-
-        const match = raw.match(new RegExp(`${marker}(.+?)${marker}`));
-        if (match && match[1].length > 10) {
-            const detectedPath = match[1];
-            console.log('[shell] Detected user PATH via interactive shell');
-            cachedPath = `${fallback}${PATH_SEPARATOR}${detectedPath}`;
-            return cachedPath;
-        }
-    } catch (error) {
-        console.warn('[shell] Failed to detect shell PATH via interactive shell:', error);
+    if (cachedPath && detectedUserPath) {
+        return cachedPath;
     }
-
-    // Fallback
-    console.log('[shell] Using fallback PATH construction ONLY');
-    const existing = process.env[PATH_KEY] || process.env.PATH || '';
-    cachedPath = existing ? `${fallback}${PATH_SEPARATOR}${existing}` : fallback;
-    console.log('[shell] Fallback PATH:', cachedPath);
-    return cachedPath!;
+    cachedPath = buildFallbackPath();
+    return cachedPath;
 }
 
 /**
- * Returns an environment object with the corrected PATH
+ * Returns an environment object with the corrected PATH.
+ * Sync — uses whatever PATH `getShellPath()` can return right now.
  */
 export function getShellEnv(): Record<string, string> {
     const path = getShellPath();
@@ -168,4 +149,91 @@ export function getShellEnv(): Record<string, string> {
     delete env.Path;
     env[PATH_KEY] = path;
     return env;
+}
+
+/**
+ * Awaitable PATH getter — waits for the interactive-shell detection if it's
+ * still in flight, then returns the enriched PATH. Falls back to the sync
+ * PATH on Windows or if detection failed.
+ *
+ * Use this from async user-initiated flows (e.g. MCP verify) where we'd rather
+ * wait ~1-3s for a complete PATH than miss a user-installed binary.
+ */
+export async function ensureShellPath(): Promise<string> {
+    if (warmupInFlight) await warmupInFlight;
+    return getShellPath();
+}
+
+/**
+ * Kick off interactive-shell PATH detection in the background.
+ *
+ * Why not synchronous (the way this used to work):
+ *   User shells with heavy .zshrc (oh-my-zsh, p10k, conda, etc.) can take
+ *   3-5 seconds to spawn interactively. execSync would block the Node event
+ *   loop for that entire duration — and since Node's HTTP accept is serviced
+ *   on the event loop, TCP connections from Rust's health check were silently
+ *   queued. Sidecar startup appeared frozen until the shell returned.
+ *
+ * Now: `execFile` is used with a Promise-wrapped callback, so detection runs
+ * asynchronously without blocking. Startup is instant; detection finishes
+ * whenever the shell returns (or times out).
+ *
+ * Safe to call multiple times — subsequent calls no-op while the first
+ * detection is in flight or after it has completed.
+ */
+export function warmupShellPath(): Promise<void> {
+    if (warmupInFlight) return warmupInFlight;
+    if (detectedUserPath !== null) return Promise.resolve(); // already done
+
+    // Windows: no interactive-shell detection, just prime the fallback cache.
+    if (isWindows) {
+        detectedUserPath = '';
+        cachedPath = buildFallbackPath();
+        console.log('[shell] Windows PATH configured (fallback only)');
+        return Promise.resolve();
+    }
+
+    warmupInFlight = new Promise<void>((resolve) => {
+        const shell = process.env.SHELL || '/bin/zsh';
+        const marker = `__MYAGENTS_PATH_${process.pid}__`;
+        const cmd = `echo "${marker}\${PATH}${marker}"`;
+
+        // -i interactive + -l login → sources both .zprofile and .zshrc (where
+        // NVM/fnm/pnpm typically live). Marker isolates $PATH from noisy output
+        // (MOTD, p10k banners, conda activation msgs).
+        execFile(
+            shell,
+            ['-i', '-l', '-c', cmd],
+            {
+                encoding: 'utf-8',
+                timeout: 5000,
+                maxBuffer: 1024 * 1024,
+            },
+            (error, stdout) => {
+                try {
+                    if (error) {
+                        console.warn(
+                            '[shell] Interactive PATH detection failed, staying on fallback:',
+                            error.message,
+                        );
+                        return;
+                    }
+                    const match = stdout.match(new RegExp(`${marker}(.+?)${marker}`));
+                    if (match && match[1].length > 10) {
+                        detectedUserPath = match[1];
+                        cachedPath = `${buildFallbackPath()}${PATH_SEPARATOR}${detectedUserPath}`;
+                        console.log('[shell] Detected user PATH via interactive shell');
+                    }
+                } finally {
+                    // Make sure we don't leave warmupInFlight dangling; future
+                    // sync callers still work off the fallback even if detection
+                    // produced nothing useful.
+                    detectedUserPath = detectedUserPath ?? '';
+                    warmupInFlight = null;
+                    resolve();
+                }
+            },
+        );
+    });
+    return warmupInFlight;
 }

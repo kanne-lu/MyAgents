@@ -33,8 +33,11 @@ const SOURCE_COLORS: Record<LogSource, string> = {
     react: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
 };
 
+// v0.2.0+: Sidecar runs on Node.js; the LogSource discriminant key `'bun'`
+// is kept for historical log-file compatibility (pre-0.2.0 unified logs on
+// disk use this key), but the UI label is "NODE".
 const SOURCE_LABELS: Record<LogSource, string> = {
-    bun: 'BUN',
+    bun: 'NODE',
     rust: 'RUST',
     react: 'REACT',
 };
@@ -46,7 +49,7 @@ const MAX_DISPLAY_LOGS = 3000;
 const SOURCE_FILTERS: { value: LogSource | 'all'; label: string }[] = [
     { value: 'all', label: 'ALL' },
     { value: 'react', label: 'REACT' },
-    { value: 'bun', label: 'BUN' },
+    { value: 'bun', label: 'NODE' },
     { value: 'rust', label: 'RUST' },
 ];
 
@@ -91,7 +94,7 @@ function highlightText(text: string, query: string): React.ReactNode {
 
 export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: UnifiedLogsPanelProps) {
     useCloseLayer(() => { if (!isVisible) return false; onClose(); return true; }, 50);
-    // All logs (React + Bun + Rust) now come from sseLogs prop via TabProvider
+    // All logs (React + Node + Rust) now come from sseLogs prop via TabProvider
     const [filter, setFilter] = useState<LogSource | 'all'>('all');
     const [levelFilter, setLevelFilter] = useState<LogLevel | 'all'>('all');
     const [hideFilters, setHideFilters] = useState<Set<HideFilter>>(new Set(DEFAULT_HIDE_FILTERS));

@@ -28,6 +28,10 @@ pub struct SessionIndex {
     reader: IndexReader,
     writer: StdMutex<IndexWriter>,
     fields: SessionFields,
+    /// Pattern 3 §3.2.4 / D.4 — directory holding the Tantivy index plus
+    /// per-session `<sessionId>.offset` sidecar files used for incremental
+    /// indexing (see `reindex_session_incremental`).
+    index_dir: PathBuf,
 }
 
 impl SessionIndex {
@@ -117,7 +121,36 @@ impl SessionIndex {
             reader,
             writer: StdMutex::new(writer),
             fields,
+            index_dir,
         })
+    }
+
+    /// Pattern 3 §3.2.4 / D.4 — read the byte offset stored in
+    /// `<index_dir>/offsets/<sessionId>.offset`. `0` means "never indexed
+    /// before" (or sidecar missing).
+    fn read_session_offset(&self, session_id: &str) -> u64 {
+        let path = self.index_dir.join("offsets").join(format!("{}.offset", session_id));
+        match fs::read_to_string(&path) {
+            Ok(s) => s.trim().parse::<u64>().unwrap_or(0),
+            Err(_) => 0,
+        }
+    }
+
+    /// Persist the byte offset reached during the last incremental index pass.
+    fn write_session_offset(&self, session_id: &str, offset: u64) {
+        let dir = self.index_dir.join("offsets");
+        if fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let path = dir.join(format!("{}.offset", session_id));
+        let _ = fs::write(&path, offset.to_string());
+    }
+
+    /// Drop the per-session offset sidecar. Used when a full rebuild is
+    /// performed (delete + reindex) so future appends start fresh.
+    fn drop_session_offset(&self, session_id: &str) {
+        let path = self.index_dir.join("offsets").join(format!("{}.offset", session_id));
+        let _ = fs::remove_file(&path);
     }
 
     /// Index all sessions from disk. Returns the number of sessions indexed.
@@ -160,6 +193,12 @@ impl SessionIndex {
                 continue;
             }
             count += 1;
+            // Pattern 3 §D.4 — record the byte offset reached so subsequent
+            // watcher-triggered reindex calls can take the incremental path.
+            let jsonl_path = sessions_dir.join(format!("{}.jsonl", session_id));
+            if let Ok(meta) = jsonl_path.metadata() {
+                self.write_session_offset(session_id, meta.len());
+            }
         }
 
         if count > 0 {
@@ -173,8 +212,49 @@ impl SessionIndex {
         Ok(count)
     }
 
-    /// Re-index a single session (delete all docs for it, then re-add).
+    /// Re-index a session incrementally.
+    ///
+    /// **Pattern 3 §3.2.4 / D.4 — delete-and-rebuild was O(session) per
+    /// append.** We now keep a `<index_dir>/offsets/<sessionId>.offset`
+    /// sidecar file that tracks the byte offset of the JSONL we have already
+    /// indexed. On each watcher tick:
+    ///   - If a saved offset exists and the JSONL file is at-least-as-big,
+    ///     read only the bytes from `offset..end` and index the new messages
+    ///     (parsed line-by-line). The title doc is upserted via
+    ///     `delete_term` on `<sessionId>_title` before re-adding.
+    ///   - Otherwise (no offset recorded, or the file shrank — likely a
+    ///     rewind/truncation), fall back to delete-all + full reindex and
+    ///     reset the offset.
     pub fn reindex_session(&self, session_id: &str, sessions_dir: &Path) -> Result<(), String> {
+        let jsonl_path = sessions_dir.join(format!("{}.jsonl", session_id));
+        let saved_offset = self.read_session_offset(session_id);
+        let current_size = jsonl_path.metadata().map(|m| m.len()).unwrap_or(0);
+
+        // Fast path: incremental tail-read. Only safe when:
+        //   - we have a saved offset, AND
+        //   - the file has only grown, AND
+        //   - we are not at byte 0 (offset 0 + grown = first index → full path)
+        if saved_offset > 0 && current_size >= saved_offset {
+            if current_size == saved_offset {
+                // No new bytes — title-only update (sessions.json edit). Take
+                // the cheap path: update the title doc only.
+                return self.update_session_title_only(session_id, sessions_dir);
+            }
+            return self.append_session_messages(session_id, sessions_dir, saved_offset, current_size);
+        }
+
+        // Fall back to full rebuild (corrupt offset, rewind, first index).
+        self.drop_session_offset(session_id);
+        self.full_reindex_session(session_id, sessions_dir)?;
+        if current_size > 0 {
+            self.write_session_offset(session_id, current_size);
+        }
+        Ok(())
+    }
+
+    /// Full delete-and-rebuild path. Reserved for first index, rewind, and
+    /// recovery from a corrupted offset sidecar.
+    fn full_reindex_session(&self, session_id: &str, sessions_dir: &Path) -> Result<(), String> {
         let mut writer = self
             .writer
             .lock()
@@ -203,6 +283,170 @@ impl SessionIndex {
         Ok(())
     }
 
+    /// Append-only path: read JSONL bytes in `[from, to)` and add a doc per
+    /// new message line. Assumes line boundaries are aligned with `from`
+    /// (true because `saveSessionMessages` is append-only of complete lines
+    /// terminated by `\n` — our writer flushes a full batch at a time).
+    /// Title doc is left untouched; if `sessions.json` changed independently
+    /// the watcher classifies that as `SessionsJson` and triggers
+    /// `update_session_title_only` separately.
+    fn append_session_messages(
+        &self,
+        session_id: &str,
+        sessions_dir: &Path,
+        from: u64,
+        to: u64,
+    ) -> Result<(), String> {
+        let jsonl_path = sessions_dir.join(format!("{}.jsonl", session_id));
+        let bytes = match fs::read(&jsonl_path) {
+            Ok(b) => b,
+            Err(e) => return Err(format!("read jsonl failed: {}", e)),
+        };
+        let to = to.min(bytes.len() as u64);
+        if from >= to {
+            return Ok(());
+        }
+        let slice = &bytes[from as usize..to as usize];
+        let chunk = match std::str::from_utf8(slice) {
+            Ok(s) => s,
+            Err(_) => {
+                // Multi-byte split right at `from` — fall back to full rebuild.
+                self.drop_session_offset(session_id);
+                self.full_reindex_session(session_id, sessions_dir)?;
+                self.write_session_offset(session_id, bytes.len() as u64);
+                return Ok(());
+            }
+        };
+
+        // We need the session metadata (title, agent_dir, etc.) for the
+        // doc fields — re-read sessions.json once.
+        let data_dir = sessions_dir.parent().unwrap_or(Path::new("."));
+        let sessions_file = data_dir.join("sessions.json");
+        let meta_raw = fs::read_to_string(&sessions_file).unwrap_or_default();
+        let sessions_json: Vec<serde_json::Value> =
+            serde_json::from_str(&meta_raw).unwrap_or_default();
+        let meta = match sessions_json.iter().find(|s| {
+            s.get("id").and_then(|v| v.as_str()) == Some(session_id)
+        }) {
+            Some(m) => m.clone(),
+            None => return Ok(()), // session not in metadata yet — skip
+        };
+        let title = meta.get("title").and_then(|v| v.as_str()).unwrap_or("(无标题)");
+        let agent_dir = meta.get("agentDir").and_then(|v| v.as_str()).unwrap_or("");
+        let last_active_at = meta.get("lastActiveAt").and_then(|v| v.as_str()).unwrap_or("");
+        let source = meta
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("desktop");
+        let message_count = meta
+            .get("stats")
+            .and_then(|s| s.get("messageCount"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("writer mutex poisoned: {}", e))?;
+
+        let f = &self.fields;
+        for line in chunk.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let msg: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            let msg_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let timestamp = msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+            let text = extract_text_content(&msg);
+            if text.is_empty() {
+                continue;
+            }
+            let _ = writer.add_document(doc!(
+                f.session_id => session_id,
+                f.message_id => msg_id,
+                f.agent_dir => agent_dir,
+                f.role => role,
+                f.title => title,
+                f.content => text.as_str(),
+                f.timestamp => timestamp,
+                f.last_active_at => last_active_at,
+                f.source => source,
+                f.message_count => message_count,
+            ));
+        }
+
+        writer.commit().map_err(|e| format!("commit failed: {}", e))?;
+        drop(writer);
+        self.reader.reload().map_err(|e| format!("reload failed: {}", e))?;
+        // Persist new offset only after a successful commit.
+        self.write_session_offset(session_id, to);
+        Ok(())
+    }
+
+    /// Title / metadata-only refresh: delete the `<sessionId>_title` doc and
+    /// re-add it from `sessions.json`. Used when sessions.json metadata
+    /// changes without any JSONL append (e.g. user edited the title).
+    fn update_session_title_only(
+        &self,
+        session_id: &str,
+        sessions_dir: &Path,
+    ) -> Result<(), String> {
+        let data_dir = sessions_dir.parent().unwrap_or(Path::new("."));
+        let sessions_file = data_dir.join("sessions.json");
+        let meta_raw = fs::read_to_string(&sessions_file).unwrap_or_default();
+        let sessions_json: Vec<serde_json::Value> =
+            serde_json::from_str(&meta_raw).unwrap_or_default();
+        let meta = match sessions_json.iter().find(|s| {
+            s.get("id").and_then(|v| v.as_str()) == Some(session_id)
+        }) {
+            Some(m) => m.clone(),
+            None => return Ok(()),
+        };
+
+        let f = &self.fields;
+        let title = meta.get("title").and_then(|v| v.as_str()).unwrap_or("(无标题)");
+        let agent_dir = meta.get("agentDir").and_then(|v| v.as_str()).unwrap_or("");
+        let last_active_at = meta.get("lastActiveAt").and_then(|v| v.as_str()).unwrap_or("");
+        let source = meta.get("source").and_then(|v| v.as_str()).unwrap_or("desktop");
+        let message_count = meta
+            .get("stats")
+            .and_then(|s| s.get("messageCount"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| format!("writer mutex poisoned: {}", e))?;
+
+        // Delete existing title doc only (message docs untouched).
+        writer.delete_term(Term::from_field_text(
+            f.message_id,
+            &format!("{}_title", session_id),
+        ));
+        let _ = writer.add_document(doc!(
+            f.session_id => session_id,
+            f.message_id => format!("{}_title", session_id),
+            f.agent_dir => agent_dir,
+            f.role => "title",
+            f.title => title,
+            f.content => title,
+            f.timestamp => last_active_at,
+            f.last_active_at => last_active_at,
+            f.source => source,
+            f.message_count => message_count,
+        ));
+        writer.commit().map_err(|e| format!("commit failed: {}", e))?;
+        drop(writer);
+        self.reader.reload().map_err(|e| format!("reload failed: {}", e))?;
+        Ok(())
+    }
+
     /// Delete all documents for a session.
     pub fn delete_session(&self, session_id: &str) -> Result<(), String> {
         let mut writer = self
@@ -214,6 +458,9 @@ impl SessionIndex {
         writer.commit().map_err(|e| format!("commit failed: {}", e))?;
         drop(writer);
         self.reader.reload().map_err(|e| format!("reload failed: {}", e))?;
+        // Pattern 3 §D.4 — drop the offset sidecar so a re-created session
+        // with the same id starts indexing from byte 0.
+        self.drop_session_offset(session_id);
         Ok(())
     }
 

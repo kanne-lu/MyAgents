@@ -87,7 +87,7 @@ function recordPendingHistoryEntryIfEnabled(params) {
   return recordPendingHistoryEntry(params);
 }
 
-module.exports = {
+export {
   DEFAULT_GROUP_HISTORY_LIMIT,
   buildHistoryContext,
   buildHistoryContextFromEntries,

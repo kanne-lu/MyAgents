@@ -126,7 +126,7 @@ export function isEnabled(): boolean {
 
 /**
  * Write analytics config to ~/.myagents/analytics_config.json
- * so that Bun Sidecar can send server-side events (e.g. ai_turn_complete)
+ * so that the Node Sidecar can send server-side events (e.g. ai_turn_complete)
  */
 async function writeAnalyticsConfigForSidecar(): Promise<void> {
   if (!isTauriEnvironment()) return;

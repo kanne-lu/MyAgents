@@ -7,7 +7,7 @@
  * Run: bun test src/server/__tests__/provider-anthropic.test.ts
  */
 
-import { describe, it, expect, beforeAll } from 'bun:test';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   PROVIDERS,
   TEST_TIMEOUT,

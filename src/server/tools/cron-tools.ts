@@ -1,8 +1,12 @@
 // Custom MCP Tools for Cron Task Management
-// Uses Claude Agent SDK's createSdkMcpServer for in-process tool definitions
-
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+// Uses Claude Agent SDK's createSdkMcpServer for in-process tool definitions.
+//
+// Top-level imports are intentionally SDK/zod-free — the SDK + zod are
+// loaded inside createCronToolsServer() via dynamic import so that modules
+// importing only the context helpers (setCronTaskContext / getCronTaskContext
+// / CRON_TASK_EXIT_TEXT / ...) don't pay the ~300-500ms SDK+zod eval cost.
+// Lazy load is wired through builtin-mcp-meta.ts; the actual server is
+// instantiated on-demand at buildSdkMcpServers() time.
 import { broadcast } from '../sse';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
@@ -164,10 +168,13 @@ async function exitCronTaskHandler(args: { reason: string }): Promise<CallToolRe
 }
 
 /**
- * Create the cron tools MCP server
- * This server provides tools for AI to interact with the cron task system
+ * Create the cron tools MCP server. Async — SDK + zod are dynamic-imported
+ * inside so top-level import of this file stays cheap. Called from
+ * builtin-mcp-meta.ts via the META factory at buildSdkMcpServers() time.
  */
-export function createCronToolsServer() {
+export async function createCronToolsServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
   return createSdkMcpServer({
     name: 'cron-tools',
     version: '1.0.0',
@@ -193,12 +200,6 @@ IMPORTANT: This tool can only be used during scheduled task execution, and only 
     ]
   });
 }
-
-/**
- * Get the cron tools server for use in agent session
- * Returns the server config that can be passed to mcpServers option
- */
-export const cronToolsServer = createCronToolsServer();
 
 /**
  * MCP tool name for exit_cron_task

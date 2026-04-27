@@ -11,6 +11,7 @@
  */
 
 import type { McpServerDefinition } from '../renderer/config/types';
+import { PRESET_PROVIDERS } from '../renderer/config/types';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
   loadConfig,
@@ -27,6 +28,13 @@ import {
   type AgentConfigSlim,
   type ChannelConfigSlim,
 } from './utils/admin-config';
+import { cancellableFetch } from './utils/cancellation';
+
+// Localhost loopback timeout for management / sidecar self-calls.
+// 10s is generous for an in-process Rust handler or a same-process Hono
+// route — anything slower means the backend is wedged, in which case we'd
+// rather surface a CLI error than hang the user's terminal indefinitely.
+const ADMIN_LOOPBACK_TIMEOUT_MS = 10_000;
 import { existsSync , writeFileSync, unlinkSync } from 'fs';
 import { ensureDirSync } from './utils/fs-utils';
 import { resolve } from 'path';
@@ -52,9 +60,26 @@ import {
 } from '../shared/types/runtime';
 import { getExternalRuntime, isRuntimeSupported } from './runtimes/factory';
 import { queryRuntimeModels } from './runtimes/external-session';
+import { trackServer } from './analytics';
+
+/**
+ * Infer the analytics `source` for a CLI-originated request.
+ *
+ * - `MYAGENTS_PORT` is injected into AI subproc env by `buildClaudeSessionEnv()`
+ *   (cli_architecture.md). When it's set, the caller is an AI agent invoking
+ *   the CLI as a tool (`cli_agent`). Otherwise it's the user typing in their
+ *   terminal (`cli`).
+ *
+ * Same logic that `handleTaskUpdateStatus` already uses for the persisted
+ * `actor` field — extracted so every CLI handler can tag analytics events
+ * consistently without re-deriving the heuristic.
+ */
+function cliSource(): 'cli' | 'cli_agent' {
+  return process.env.MYAGENTS_PORT ? 'cli_agent' : 'cli';
+}
 
 // ---------------------------------------------------------------------------
-// Management API forwarding (Bun Sidecar → Rust)
+// Management API forwarding (Node Sidecar → Rust)
 // ---------------------------------------------------------------------------
 
 const MGMT_PORT = process.env.MYAGENTS_MANAGEMENT_PORT;
@@ -65,7 +90,7 @@ async function managementApi(
   body?: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   if (!MGMT_PORT) {
-    // Happens when the Bun Sidecar is up but the Rust-side Management API
+    // Happens when the Node Sidecar is up but the Rust-side Management API
     // isn't — during app cold boot, after a crashed restart, or in the
     // standalone dev sidecar used for CLI smoke tests. Returning the hint
     // alongside the error lets `wrapMgmtResponse` propagate it to the CLI
@@ -88,7 +113,7 @@ async function managementApi(
     options.body = JSON.stringify(body);
   }
   try {
-    const resp = await fetch(url, options);
+    const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
     return resp.json() as Promise<Record<string, unknown>>;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -125,7 +150,7 @@ async function sidecarSelf(
     options.body = JSON.stringify(body);
   }
   try {
-    const resp = await fetch(url, options);
+    const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
     const json = await resp.json() as Record<string, unknown>;
     return { status: resp.status, json };
   } catch (err) {
@@ -303,10 +328,10 @@ export function handleMcpShow(payload: { id?: string }): AdminResponse {
   };
 }
 
-export function handleMcpAdd(payload: {
+export async function handleMcpAdd(payload: {
   server: Partial<McpServerDefinition>;
   dryRun?: boolean;
-}): AdminResponse {
+}): Promise<AdminResponse> {
   const { dryRun } = payload;
   const s = payload.server;
 
@@ -349,7 +374,7 @@ export function handleMcpAdd(payload: {
     return { success: true, dryRun: true, preview: server };
   }
 
-  atomicModifyConfig(c => ({
+  await atomicModifyConfig(c => ({
     ...c,
     mcpServers: [...(c.mcpServers || []).filter(x => x.id !== server.id), server],
   }));
@@ -362,7 +387,7 @@ export function handleMcpAdd(payload: {
   };
 }
 
-export function handleMcpRemove(payload: { id: string }): AdminResponse {
+export async function handleMcpRemove(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
@@ -374,7 +399,7 @@ export function handleMcpRemove(payload: { id: string }): AdminResponse {
     return { success: false, error: `Cannot remove built-in MCP server '${id}'. Only custom servers can be removed.` };
   }
 
-  atomicModifyConfig(c => {
+  await atomicModifyConfig(c => {
     const servers = (c.mcpServers || []).filter(s => s.id !== id);
     const enabled = (c.mcpEnabledServers || []).filter(s => s !== id);
     const envOverrides = { ...(c.mcpServerEnv || {}) };
@@ -388,7 +413,7 @@ export function handleMcpRemove(payload: { id: string }): AdminResponse {
   return { success: true, data: { id }, hint: 'Server removed.' };
 }
 
-export function handleMcpEnable(payload: { id: string; scope?: string }): AdminResponse {
+export async function handleMcpEnable(payload: { id: string; scope?: string }): Promise<AdminResponse> {
   const { id, scope = 'both' } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
@@ -399,7 +424,7 @@ export function handleMcpEnable(payload: { id: string; scope?: string }): AdminR
   }
 
   if (scope === 'global' || scope === 'both') {
-    atomicModifyConfig(c => {
+    await atomicModifyConfig(c => {
       const enabled = new Set(c.mcpEnabledServers || []);
       enabled.add(id);
       return { ...c, mcpEnabledServers: Array.from(enabled) };
@@ -415,12 +440,12 @@ export function handleMcpEnable(payload: { id: string; scope?: string }): AdminR
   return { success: true, data: { id, scope: scopeLabel }, hint: `Enabled ${id} (${scopeLabel}).` };
 }
 
-export function handleMcpDisable(payload: { id: string; scope?: string }): AdminResponse {
+export async function handleMcpDisable(payload: { id: string; scope?: string }): Promise<AdminResponse> {
   const { id, scope = 'both' } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
   if (scope === 'global' || scope === 'both') {
-    atomicModifyConfig(c => {
+    await atomicModifyConfig(c => {
       const enabled = new Set(c.mcpEnabledServers || []);
       enabled.delete(id);
       return { ...c, mcpEnabledServers: Array.from(enabled) };
@@ -435,11 +460,11 @@ export function handleMcpDisable(payload: { id: string; scope?: string }): Admin
   return { success: true, data: { id } };
 }
 
-export function handleMcpEnv(payload: {
+export async function handleMcpEnv(payload: {
   id: string;
   action: 'set' | 'get' | 'delete';
   env?: Record<string, string>;
-}): AdminResponse {
+}): Promise<AdminResponse> {
   const { id, action, env } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
@@ -458,7 +483,7 @@ export function handleMcpEnv(payload: {
     if (!env || Object.keys(env).length === 0) {
       return { success: false, error: 'No environment variables provided' };
     }
-    atomicModifyConfig(c => {
+    await atomicModifyConfig(c => {
       const mcpServerEnv = { ...(c.mcpServerEnv || {}) };
       mcpServerEnv[id] = { ...(mcpServerEnv[id] || {}), ...env };
       return { ...c, mcpServerEnv };
@@ -471,7 +496,7 @@ export function handleMcpEnv(payload: {
     if (!env || Object.keys(env).length === 0) {
       return { success: false, error: 'No keys specified for deletion' };
     }
-    atomicModifyConfig(c => {
+    await atomicModifyConfig(c => {
       const mcpServerEnv = { ...(c.mcpServerEnv || {}) };
       if (mcpServerEnv[id]) {
         // Deep-copy per-server env to avoid mutating the original config object
@@ -510,19 +535,36 @@ export async function handleMcpTest(payload: { id: string }): Promise<AdminRespo
     return { success: false, error: `MCP server '${id}' has no URL configured` };
   }
 
-  // Built-in MCP: delegate to registry
+  // Built-in MCP: delegate to registry.
+  // getBuiltinMcpInstance() force-loads the tool module (SDK+zod+server
+  // construction) on first hit; it returns undefined only when the id isn't
+  // registered in META. META is registered via agent-session.ts's side-effect
+  // import of './tools/builtin-mcp-meta', which already ran before any admin
+  // handler can fire — no need to force-import META here.
   if (server.command === '__builtin__') {
+    const { getBuiltinMcpInstance } = await import('./tools/builtin-mcp-registry');
+    const entryPromise = getBuiltinMcpInstance(server.id);
+    if (!entryPromise) {
+      return { success: false, error: `Built-in MCP '${server.id}' not registered` };
+    }
+    // Don't swallow factory/import errors — a failing `myagents mcp test` must
+    // surface as "failure" so users/agents diagnose the actual issue instead of
+    // getting a false "validated" green light while the session keeps breaking.
     try {
-      const { getBuiltinMcp } = await import('./tools/builtin-mcp-registry');
-      const entry = getBuiltinMcp(server.id);
-      if (entry?.validate) {
+      const entry = await entryPromise;
+      if (entry.validate) {
         const validationError = await entry.validate(server.env || {});
         if (validationError) {
           const errMsg = typeof validationError === 'string' ? validationError : JSON.stringify(validationError);
           return { success: false, error: errMsg };
         }
       }
-    } catch { /* registry not loaded */ }
+    } catch (err) {
+      return {
+        success: false,
+        error: `Built-in MCP '${server.id}' load failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
     return { success: true, data: { id, type: 'builtin' }, hint: 'Built-in MCP validated.' };
   }
 
@@ -715,13 +757,12 @@ export function handleModelList(): AdminResponse {
   const apiKeys = config.providerApiKeys ?? {};
   const verifyStatus = config.providerVerifyStatus ?? {};
 
-  // Load preset providers
-  let presetProviders: Array<Record<string, unknown>> = [];
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PRESET_PROVIDERS } = require('../renderer/config/types');
-    presetProviders = PRESET_PROVIDERS ?? [];
-  } catch { /* ignore */ }
+  // Load preset providers (statically imported — see top of file).
+  // Cast via `unknown` because `Provider` doesn't carry a string index
+  // signature; the downstream loop accesses fields by name through `String(p.id)`
+  // and `p.config as Record<string, unknown> | undefined`, which works on
+  // both shapes uniformly.
+  const presetProviders: Array<Record<string, unknown>> = (PRESET_PROVIDERS ?? []) as unknown as Array<Record<string, unknown>>;
 
   // Load custom providers
   const customProviders = loadCustomProviderFiles();
@@ -745,12 +786,12 @@ export function handleModelList(): AdminResponse {
   return { success: true, data };
 }
 
-export function handleModelSetKey(payload: { id: string; apiKey: string }): AdminResponse {
+export async function handleModelSetKey(payload: { id: string; apiKey: string }): Promise<AdminResponse> {
   const { id, apiKey } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
   if (!apiKey) return { success: false, error: 'Missing required field: apiKey' };
 
-  atomicModifyConfig(c => ({
+  await atomicModifyConfig(c => ({
     ...c,
     providerApiKeys: { ...(c.providerApiKeys || {}), [id]: apiKey },
   }));
@@ -759,11 +800,11 @@ export function handleModelSetKey(payload: { id: string; apiKey: string }): Admi
   return { success: true, data: { id }, hint: `API key saved for ${id}.` };
 }
 
-export function handleModelSetDefault(payload: { id: string }): AdminResponse {
+export async function handleModelSetDefault(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
-  atomicModifyConfig(c => ({
+  await atomicModifyConfig(c => ({
     ...c,
     defaultProviderId: id,
   }));
@@ -807,7 +848,7 @@ export async function handleModelVerify(payload: { id: string; model?: string })
 
     if (result.success) {
       // Persist verify status
-      atomicModifyConfig(c => ({
+      await atomicModifyConfig(c => ({
         ...c,
         providerVerifyStatus: {
           ...(c.providerVerifyStatus ?? {}),
@@ -898,7 +939,7 @@ export function handleModelAdd(payload: {
   };
 }
 
-export function handleModelRemove(payload: { id: string }): AdminResponse {
+export async function handleModelRemove(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
   if (!isValidId(id)) return { success: false, error: 'Invalid id: only alphanumeric, hyphens, and underscores allowed' };
@@ -915,7 +956,7 @@ export function handleModelRemove(payload: { id: string }): AdminResponse {
   }
 
   // Clean up API key and verify status
-  atomicModifyConfig(c => {
+  await atomicModifyConfig(c => {
     const apiKeys = { ...(c.providerApiKeys ?? {}) };
     delete apiKeys[id];
     const verifyStatus = { ...(c.providerVerifyStatus ?? {}) };
@@ -951,17 +992,17 @@ export function handleAgentList(): AdminResponse {
   return { success: true, data: agents };
 }
 
-export function handleAgentEnable(payload: { id: string }): AdminResponse {
+export async function handleAgentEnable(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   return modifyAgent(id, agent => ({ ...agent, enabled: true }), 'enable');
 }
 
-export function handleAgentDisable(payload: { id: string }): AdminResponse {
+export async function handleAgentDisable(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   return modifyAgent(id, agent => ({ ...agent, enabled: false }), 'disable');
 }
 
-export function handleAgentSet(payload: { id: string; key: string; value: unknown }): AdminResponse {
+export async function handleAgentSet(payload: { id: string; key: string; value: unknown }): Promise<AdminResponse> {
   const { id, key, value } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
   if (!key) return { success: false, error: 'Missing required field: key' };
@@ -988,10 +1029,10 @@ export function handleAgentChannelList(payload: { agentId: string }): AdminRespo
   })) };
 }
 
-export function handleAgentChannelAdd(payload: {
+export async function handleAgentChannelAdd(payload: {
   agentId: string;
   channel: Record<string, unknown>;
-}): AdminResponse {
+}): Promise<AdminResponse> {
   const { agentId, channel } = payload;
   if (!agentId) return { success: false, error: 'Missing required field: agentId' };
   if (!channel.type) return { success: false, error: 'Missing required field: channel.type' };
@@ -1005,21 +1046,47 @@ export function handleAgentChannelAdd(payload: {
     enabled: channel.enabled !== undefined ? !!channel.enabled : true,
   };
 
-  return modifyAgent(agentId, agent => ({
+  const result = await modifyAgent(agentId, agent => ({
     ...agent,
     channels: [...(agent.channels ?? []), newChannel],
   }), 'channel-add');
+  if (result.success) {
+    trackServer('agent_channel_create', {
+      source: cliSource(),
+      platform: newChannel.type,
+    });
+  }
+  return result;
 }
 
-export function handleAgentChannelRemove(payload: { agentId: string; channelId: string }): AdminResponse {
+export async function handleAgentChannelRemove(payload: { agentId: string; channelId: string }): Promise<AdminResponse> {
   const { agentId, channelId } = payload;
   if (!agentId) return { success: false, error: 'Missing required field: agentId' };
   if (!channelId) return { success: false, error: 'Missing required field: channelId' };
 
-  return modifyAgent(agentId, agent => ({
+  // Capture platform BEFORE the channel is removed — once `modifyAgent`
+  // commits, the channel is gone and we can't read its type. Best-effort:
+  // if the lookup fails (agent missing, channel missing) we still attempt
+  // the remove and report `platform: 'unknown'` rather than skipping
+  // analytics entirely.
+  let platform = 'unknown';
+  try {
+    const config = loadConfig();
+    const agent = (config.agents ?? []).find(a => a.id === agentId);
+    const ch = agent?.channels?.find(c => c.id === channelId);
+    if (ch?.type) platform = ch.type;
+  } catch {
+    // Silent — analytics must not affect the main flow.
+  }
+
+  const result = await modifyAgent(agentId, agent => ({
     ...agent,
     channels: (agent.channels ?? []).filter(ch => ch.id !== channelId),
   }), 'channel-remove');
+  if (result.success) {
+    trackServer('agent_channel_remove', { source: cliSource(), platform });
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,7 +1108,7 @@ export function handleConfigGet(payload: { key: string }): AdminResponse {
   return { success: true, data: { key, value: redacted } };
 }
 
-export function handleConfigSet(payload: { key: string; value: unknown; dryRun?: boolean }): AdminResponse {
+export async function handleConfigSet(payload: { key: string; value: unknown; dryRun?: boolean }): Promise<AdminResponse> {
   const { key, value, dryRun } = payload;
   if (!key) return { success: false, error: 'Missing required field: key' };
 
@@ -1061,7 +1128,7 @@ export function handleConfigSet(payload: { key: string; value: unknown; dryRun?:
     return { success: true, dryRun: true, preview: { key, value } };
   }
 
-  atomicModifyConfig(c => setNestedValue(c, key, value));
+  await atomicModifyConfig(c => setNestedValue(c, key, value));
   broadcast('config:changed', { section: 'config', action: 'set', key });
   return { success: true, data: { key }, hint: `Config '${key}' updated.` };
 }
@@ -1534,7 +1601,15 @@ export async function handleTaskCreateDirect(
   const overridden = computeOverriddenFields(payload);
   const resp = await managementApi('/api/task/create-direct', 'POST', payload);
   const wrapped = wrapMgmtResponse(resp);
-  return enrichTaskCreateResponse(wrapped, payload, overridden);
+  const enriched = enrichTaskCreateResponse(wrapped, payload, overridden);
+  if (enriched.success) {
+    trackServer('task_create', {
+      source: cliSource(),
+      origin: 'manual',
+      has_workspace: typeof payload.workspacePath === 'string' && payload.workspacePath.length > 0,
+    });
+  }
+  return enriched;
 }
 
 export async function handleTaskCreateFromAlignment(
@@ -1546,17 +1621,63 @@ export async function handleTaskCreateFromAlignment(
   const overridden = computeOverriddenFields(payload);
   const resp = await managementApi('/api/task/create-from-alignment', 'POST', payload);
   const wrapped = wrapMgmtResponse(resp);
-  return enrichTaskCreateResponse(wrapped, payload, overridden);
+  const enriched = enrichTaskCreateResponse(wrapped, payload, overridden);
+  if (enriched.success) {
+    trackServer('task_create', {
+      source: cliSource(),
+      origin: 'thought_dispatch',
+      has_workspace: typeof payload.workspacePath === 'string' && payload.workspacePath.length > 0,
+    });
+  }
+  return enriched;
+}
+
+/**
+ * Read the task's `sessionIds.length` from Rust before kicking off a run.
+ * Returns `null` if the read fails — analytics call sites then fall back to
+ * `null` for `run_count` so we don't fabricate a count. Best-effort: a
+ * failed pre-fetch does NOT abort the run itself.
+ */
+async function fetchTaskSessionCount(id: string): Promise<number | null> {
+  try {
+    const resp = await managementApi(`/api/task/get${qsFrom({ id })}`);
+    if (!resp.ok) return null;
+    const task = (resp as Record<string, unknown>).task as Record<string, unknown> | undefined;
+    const sessions = task?.sessionIds;
+    return Array.isArray(sessions) ? sessions.length : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function handleTaskRun(payload: { id: string }): Promise<AdminResponse> {
+  // Fetch run count BEFORE the run so the analytics value matches the GUI's
+  // `task.sessionIds.length + 1` semantic (i.e. "if this run succeeds, it'll
+  // be the Nth"). Doing it after would over-count by 1 since the run
+  // appends a new sessionId.
+  const priorCount = await fetchTaskSessionCount(payload.id);
   const resp = await managementApi('/api/task/run', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  if (wrapped.success) {
+    trackServer('task_run', {
+      source: cliSource(),
+      run_count: priorCount !== null ? priorCount + 1 : null,
+    });
+  }
+  return wrapped;
 }
 
 export async function handleTaskRerun(payload: { id: string }): Promise<AdminResponse> {
+  const priorCount = await fetchTaskSessionCount(payload.id);
   const resp = await managementApi('/api/task/rerun', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  if (wrapped.success) {
+    trackServer('task_run', {
+      source: cliSource(),
+      run_count: priorCount !== null ? priorCount + 1 : null,
+    });
+  }
+  return wrapped;
 }
 
 /**
@@ -1646,7 +1767,14 @@ export async function handleTaskUpdateStatus(
     payload.source = 'cli';
   }
   const resp = await managementApi('/api/task/update-status', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  // Only `stopped` counts as a "stop" event in analytics terms — other
+  // status transitions (running/done/blocked/etc) flow through the same
+  // endpoint but aren't user-initiated stops.
+  if (wrapped.success && payload.status === 'stopped') {
+    trackServer('task_stop', { source: cliSource() });
+  }
+  return wrapped;
 }
 
 export async function handleTaskAppendSession(payload: {
@@ -1666,8 +1794,32 @@ export async function handleTaskArchive(payload: {
 }
 
 export async function handleTaskDelete(payload: { id: string }): Promise<AdminResponse> {
+  // Fetch the task's status BEFORE the delete so we can report it in the
+  // analytics event. Best-effort — if the read fails (e.g. id doesn't exist),
+  // we still attempt the delete and just report `status: 'unknown'`. We
+  // accept the extra round-trip because delete is a low-frequency action
+  // and the status field is the most useful dimension for understanding
+  // what users are pruning (orphan todos vs. completed work etc.).
+  let status = 'unknown';
+  try {
+    const fetched = await managementApi(`/api/task/get${qsFrom({ id: payload.id })}`);
+    if (fetched.ok) {
+      const task = (fetched as Record<string, unknown>).task as
+        | Record<string, unknown>
+        | undefined;
+      if (task && typeof task.status === 'string') {
+        status = task.status;
+      }
+    }
+  } catch {
+    // Silent — analytics must not affect the main flow.
+  }
   const resp = await managementApi('/api/task/delete', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  if (wrapped.success) {
+    trackServer('task_delete', { source: cliSource(), status });
+  }
+  return wrapped;
 }
 
 /**
@@ -1721,7 +1873,13 @@ export async function handleThoughtCreate(payload: {
   images?: string[];
 }): Promise<AdminResponse> {
   const resp = await managementApi('/api/thought/create', 'POST', payload);
-  return wrapMgmtResponse(resp);
+  const wrapped = wrapMgmtResponse(resp);
+  if (wrapped.success) {
+    // No `location` for CLI — the field is GUI-specific (launcher vs
+    // task_center surface). Set to null so the column type stays uniform.
+    trackServer('thought_create', { source: cliSource(), location: null });
+  }
+  return wrapped;
 }
 
 // ---------------------------------------------------------------------------
@@ -2496,7 +2654,7 @@ function hintForMissingRuntime(runtime: RuntimeType): string {
 // ---------------------------------------------------------------------------
 // Task-creation pre-flight validation (v0.1.69+)
 //
-// Reject bad runtime/model/permissionMode overrides *here* in Bun admin-api,
+// Reject bad runtime/model/permissionMode overrides *here* in Node admin-api,
 // before the payload hits Rust. Three reasons:
 //   1. We have first-class access to `RuntimeFactory.detect()` / queryModels,
 //      Rust does not.
@@ -2827,11 +2985,11 @@ function getCurrentWorkspacePath(): string | undefined {
 }
 
 /** Modify an agent in config by ID */
-function modifyAgent(
+async function modifyAgent(
   id: string,
   modifier: (agent: AgentConfigSlim) => AgentConfigSlim,
   action: string,
-): AdminResponse {
+): Promise<AdminResponse> {
   // Pre-check existence (fast-fail before acquiring write)
   const config = loadConfig();
   if (!(config.agents ?? []).some(a => a.id === id)) {
@@ -2839,7 +2997,7 @@ function modifyAgent(
   }
 
   // Find by ID inside the modifier to avoid TOCTOU stale-index bugs
-  atomicModifyConfig(c => {
+  await atomicModifyConfig(c => {
     const updated = [...(c.agents ?? [])];
     const freshIdx = updated.findIndex(a => a.id === id);
     if (freshIdx < 0) return c; // agent disappeared between reads — no-op

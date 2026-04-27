@@ -7,8 +7,10 @@ import {
     writeTextFile,
     remove,
     rename,
+    stat,
 } from '@tauri-apps/plugin-fs';
-import { homeDir, join } from '@tauri-apps/api/path';
+import { homeDir, join, dirname } from '@tauri-apps/api/path';
+import { invoke } from '@tauri-apps/api/core';
 import { isBrowserDevMode } from '@/utils/browserMock';
 import { stripBom } from '../../../shared/utils';
 
@@ -29,7 +31,20 @@ export function createAsyncLock() {
 }
 
 export const withProjectsLock = createAsyncLock();
-export const withConfigLock = createAsyncLock();
+const withConfigProcessLock = createAsyncLock();
+
+const CONFIG_LOCK_TIMEOUT_MS = 5000;
+const CONFIG_LOCK_POLL_MS = 50;
+const CONFIG_LOCK_STALE_MS = 30000;
+
+export class ConfigBusyError extends Error {
+    readonly code = 'CONFIG_BUSY';
+
+    constructor(message = 'Config busy: could not acquire config.json.lock within 5000ms; retry') {
+        super(message);
+        this.name = 'ConfigBusyError';
+    }
+}
 
 // ============= Constants =============
 
@@ -37,6 +52,15 @@ export const CONFIG_DIR_NAME = '.myagents';
 export const CONFIG_FILE = 'config.json';
 export const PROJECTS_FILE = 'projects.json';
 export const PROVIDERS_DIR = 'providers';
+
+export async function withConfigLock<T>(fn: () => Promise<T>): Promise<T> {
+    return withConfigProcessLock(async () => {
+        await ensureConfigDir();
+        const dir = await getConfigDir();
+        const configPath = await join(dir, CONFIG_FILE);
+        return withFileLock(configPath, fn);
+    });
+}
 
 // ============= Safe File I/O Utilities =============
 
@@ -59,6 +83,7 @@ export async function safeWriteJson(filePath: string, data: unknown): Promise<vo
 
     // 1. Write new data to .tmp
     await writeTextFile(tmpPath, content);
+    await fsyncPath(tmpPath, false);
 
     // 2. Backup current file → .bak (best-effort, copy preserves main)
     try {
@@ -74,6 +99,7 @@ export async function safeWriteJson(filePath: string, data: unknown): Promise<vo
 
     // 3. Atomic overwrite: .tmp → target (main file is never absent)
     await rename(tmpPath, filePath);
+    await fsyncPath(await dirname(filePath), true);
 }
 
 /**
@@ -138,4 +164,131 @@ export async function ensureConfigDir(): Promise<void> {
     if (!(await exists(providersDir))) {
         await mkdir(providersDir, { recursive: true });
     }
+}
+
+async function withFileLock<T>(filePath: string, fn: () => Promise<T>): Promise<T> {
+    const lockDir = filePath + '.lock';
+    await acquireFileLock(lockDir);
+    try {
+        return await fn();
+    } finally {
+        await releaseFileLock(lockDir);
+    }
+}
+
+async function acquireFileLock(lockDir: string): Promise<void> {
+    const start = Date.now();
+    while (true) {
+        try {
+            await mkdir(lockDir);
+            try {
+                await writeTextFile(await join(lockDir, 'owner'), `renderer:${Date.now()}\n`);
+            } catch {
+                // Owner file is diagnostic only.
+            }
+            return;
+        } catch {
+            // mkdir failed — lock dir already exists. Try stale-recovery before
+            // sleeping. The renderer can't observe other processes' pids, so it
+            // relies on the renderer-written owner timestamp (`renderer:<ts>`)
+            // and falls through to age-based break for non-renderer owners (a
+            // node/rust crash leaves a long-stale dir; 30s is generous).
+            if (await tryBreakStaleLock(lockDir)) {
+                continue;
+            }
+
+            if (Date.now() - start >= CONFIG_LOCK_TIMEOUT_MS) {
+                throw new ConfigBusyError();
+            }
+            await delay(CONFIG_LOCK_POLL_MS);
+        }
+    }
+}
+
+/**
+ * Decide whether a lock with the given age (ms) and owner string should be
+ * forcibly broken.
+ *
+ * The renderer can't probe Node/Rust pid liveness directly (it's sandboxed in
+ * Tauri's WebView), so for non-renderer owners the best it can do is age-only
+ * break. We use a more conservative threshold (4× staleMs) for those owners
+ * to avoid breaking a slow-but-live writer — Node/Rust recover their own stale
+ * locks much faster on the next acquire, and at worst we race with their
+ * recovery and the loser just retries.
+ *
+ * Trade-off: if a sidecar / Rust process truly crashes mid-write, the renderer
+ * will block for ~4× staleMs before recovering. That's acceptable because (a)
+ * sidecar crashes are rare, and (b) on next sidecar restart the Node-side
+ * helper observes its own dead pid and breaks the lock immediately.
+ */
+function shouldBreakStaleLock(ageMs: number, owner: string, staleMs: number): boolean {
+    if (owner.startsWith('renderer:')) {
+        return ageMs > staleMs; // we trust mtime for our own runtime.
+    }
+    if (owner.startsWith('node:') || owner.startsWith('rust:')) {
+        // Node/Rust owners: pid-liveness probe not available from the renderer.
+        // Use a 4× threshold to be conservative.
+        return ageMs > staleMs * 4;
+    }
+    return false; // unknown owner format — never break, surface as timeout.
+}
+
+async function tryBreakStaleLock(lockDir: string): Promise<boolean> {
+    let owner = '';
+    try {
+        owner = (await readTextFile(await join(lockDir, 'owner'))).trim();
+    } catch {
+        // No owner file — fall back to "exists but no metadata" → don't break.
+        return false;
+    }
+
+    // Compute age. For renderer:<ts> owners we have an embedded timestamp
+    // (used as a fast path). For node:/rust: owners we read mtime from the
+    // lockdir itself. In all cases the owner string also gates whether we're
+    // willing to break this kind of owner at all.
+    let ageMs: number | null = null;
+    const rendererMatch = /^renderer:(\d+)$/.exec(owner);
+    if (rendererMatch) {
+        const ts = Number(rendererMatch[1]);
+        if (Number.isFinite(ts)) ageMs = Date.now() - ts;
+    }
+    if (ageMs === null) {
+        try {
+            const info = await stat(lockDir);
+            if (info.mtime instanceof Date) {
+                ageMs = Date.now() - info.mtime.getTime();
+            }
+        } catch {
+            // Lock dir disappeared between EEXIST and stat — caller will retry mkdir.
+            return true;
+        }
+    }
+    if (ageMs === null) return false;
+
+    if (!shouldBreakStaleLock(ageMs, owner, CONFIG_LOCK_STALE_MS)) return false;
+
+    console.warn(`[configStore] Breaking stale lock ${lockDir} (age=${ageMs}ms owner=${owner})`);
+    try {
+        await remove(lockDir, { recursive: true });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function releaseFileLock(lockDir: string): Promise<void> {
+    try {
+        await remove(lockDir, { recursive: true });
+    } catch {
+        // Best-effort unlock. Timeout errors on future acquisitions make this visible.
+    }
+}
+
+async function fsyncPath(path: string, directory: boolean): Promise<void> {
+    if (isBrowserDevMode()) return;
+    await invoke('cmd_fsync_path', { path, directory });
+}
+
+function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }

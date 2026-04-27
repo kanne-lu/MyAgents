@@ -127,11 +127,11 @@ impl HealthManager {
     pub fn start_persist_loop(
         &self,
         mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> tauri::async_runtime::JoinHandle<()> {
         let state = Arc::clone(&self.state);
         let persist_path = self.persist_path.clone();
 
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut tick = interval(Duration::from_secs(PERSIST_INTERVAL_SECS));
 
             loop {

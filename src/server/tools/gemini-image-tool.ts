@@ -2,14 +2,19 @@
 // Uses Shadow Session to maintain Gemini multi-turn context (contents[] + thought_signature)
 // In-process MCP server (same pattern as cron-tools / im-media)
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
-import { existsSync , writeFileSync, readFileSync } from 'fs';
+// SDK + zod are loaded lazily inside createGeminiImageServer() via dynamic
+// import. configure/validate are plain exports that builtin-mcp-meta.ts
+// pulls in on-demand via a proxy load(), so they never force SDK eval
+// either. See builtin-mcp-meta.ts for registration.
+import { existsSync , writeFileSync, readFileSync, statSync } from 'fs';
+import { promises as fsp } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { ensureGitignorePattern } from '../utils/gitignore';
 import { randomUUID } from 'crypto';
 import { ensureDirSync } from '../utils/fs-utils';
+import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 
 // MCP Tool Result type (matches @modelcontextprotocol/sdk/types.js CallToolResult)
 type CallToolResult = {
@@ -177,30 +182,63 @@ function addModelTurn(ctx: ImageContext, parts: GeminiPartPersisted[]): void {
 }
 
 /**
- * Build full Gemini contents[] for API call.
- * Temporarily loads image base64 from disk for history turns.
+ * Pattern 3 §D.5 — total byte cap on image history sent to the API.
+ * Beyond this we drop the oldest images first (keeping their text turns)
+ * so a long edit history doesn't grow the request indefinitely.
  */
-function buildContentsForApi(ctx: ImageContext): GeminiContent[] {
+const GEMINI_IMAGE_HISTORY_BYTE_CAP = 20 * 1024 * 1024; // 20 MiB
+
+/**
+ * Build full Gemini contents[] for API call.
+ *
+ * Pattern 3 §D.5 — async + bounded.
+ *  - Reads image bytes via `fs.promises.readFile` so we don't block the
+ *    event loop on disk I/O for multi-MB context turns.
+ *  - Walks turns from newest → oldest, summing on-disk byte sizes; once
+ *    `GEMINI_IMAGE_HISTORY_BYTE_CAP` is reached, drops image parts from
+ *    older turns (text parts kept). Newest images are always preserved.
+ */
+async function buildContentsForApi(ctx: ImageContext): Promise<GeminiContent[]> {
+  // First pass (newest → oldest): decide which image parts survive the cap.
+  const includeImage: boolean[][] = ctx.turns.map((t) => t.parts.map(() => false));
+  let bytesUsed = 0;
+  for (let ti = ctx.turns.length - 1; ti >= 0; ti--) {
+    const turn = ctx.turns[ti];
+    for (let pi = 0; pi < turn.parts.length; pi++) {
+      const part = turn.parts[pi];
+      if (!part.imageRef) continue;
+      if (!existsSync(part.imageRef)) continue;
+      let size = 0;
+      try { size = statSync(part.imageRef).size; } catch { continue; }
+      if (bytesUsed + size > GEMINI_IMAGE_HISTORY_BYTE_CAP) continue;
+      includeImage[ti][pi] = true;
+      bytesUsed += size;
+    }
+  }
+
   const contents: GeminiContent[] = [];
-
-  for (const turn of ctx.turns) {
+  for (let ti = 0; ti < ctx.turns.length; ti++) {
+    const turn = ctx.turns[ti];
     const parts: GeminiPart[] = [];
-
-    for (const part of turn.parts) {
-      if (part.imageRef && existsSync(part.imageRef)) {
-        // Load image from disk as base64
-        const imgBuffer = readFileSync(part.imageRef);
-        const base64 = imgBuffer.toString('base64');
-        const apiPart: GeminiPart = {
-          inline_data: {
-            mime_type: part.mime_type || 'image/png',
-            data: base64,
-          },
-        };
-        if (part.thought_signature) {
-          apiPart.thought_signature = part.thought_signature;
+    for (let pi = 0; pi < turn.parts.length; pi++) {
+      const part = turn.parts[pi];
+      if (part.imageRef && includeImage[ti][pi]) {
+        try {
+          const imgBuffer = await fsp.readFile(part.imageRef);
+          const base64 = imgBuffer.toString('base64');
+          const apiPart: GeminiPart = {
+            inline_data: {
+              mime_type: part.mime_type || 'image/png',
+              data: base64,
+            },
+          };
+          if (part.thought_signature) {
+            apiPart.thought_signature = part.thought_signature;
+          }
+          parts.push(apiPart);
+        } catch (err) {
+          console.warn(`[gemini-image] failed to load image ${part.imageRef}:`, err);
         }
-        parts.push(apiPart);
       } else if (part.text !== undefined) {
         const apiPart: GeminiPart = { text: part.text };
         if (part.thought_signature) {
@@ -209,7 +247,6 @@ function buildContentsForApi(ctx: ImageContext): GeminiContent[] {
         parts.push(apiPart);
       }
     }
-
     if (parts.length > 0) {
       contents.push({ role: turn.role, parts });
     }
@@ -218,22 +255,37 @@ function buildContentsForApi(ctx: ImageContext): GeminiContent[] {
   return contents;
 }
 
-function persistContext(ctx: ImageContext): void {
-  try {
-    const dir = getContextsDir();
-    const filePath = join(dir, `${ctx.sessionId}.json`);
+// Pattern 3 §D.5 — debounce context rewrites.
+// Each persist call previously read+parse+stringify+write the entire
+// session-wide JSON every edit. For a multi-turn editing session this
+// rewrites the same file many times in quick succession; coalesce the
+// writes to one per second per (sessionId).
+const persistDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const PERSIST_DEBOUNCE_MS = 1000;
 
-    // Load existing file to merge (multiple contexts per session)
-    let allContexts: Record<string, ImageContext> = {};
-    if (existsSync(filePath)) {
-      const raw = readFileSync(filePath, 'utf-8');
-      allContexts = JSON.parse(raw);
+function persistContext(ctx: ImageContext): void {
+  const key = ctx.sessionId;
+  const existing = persistDebounceTimers.get(key);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    persistDebounceTimers.delete(key);
+    try {
+      const dir = getContextsDir();
+      const filePath = join(dir, `${ctx.sessionId}.json`);
+
+      // Load existing file to merge (multiple contexts per session)
+      let allContexts: Record<string, ImageContext> = {};
+      if (existsSync(filePath)) {
+        const raw = readFileSync(filePath, 'utf-8');
+        allContexts = JSON.parse(raw);
+      }
+      allContexts[ctx.id] = ctx;
+      writeFileSync(filePath, JSON.stringify(allContexts, null, 2));
+    } catch (err) {
+      console.error(`[gemini-image] Failed to persist context ${ctx.id}:`, err);
     }
-    allContexts[ctx.id] = ctx;
-    writeFileSync(filePath, JSON.stringify(allContexts, null, 2));
-  } catch (err) {
-    console.error(`[gemini-image] Failed to persist context ${ctx.id}:`, err);
-  }
+  }, PERSIST_DEBOUNCE_MS);
+  persistDebounceTimers.set(key, timer);
 }
 
 function loadContexts(sessionId: string): void {
@@ -305,17 +357,17 @@ async function callGeminiApi(
   // Retry loop with exponential backoff
   let lastError: Error | null = null;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    const controller = new AbortController();
-    const timeoutHandle = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
     try {
-      const response = await fetch(url, {
+      // Pattern 1 fix #10: migrated to cancellableFetch — same parent-signal
+      // semantics as the four already-migrated tools.
+      // Pattern 1 follow-up: parent signal = active turn so a renderer stop
+      // releases the in-flight Gemini API call immediately rather than
+      // waiting on API_TIMEOUT_MS.
+      const response = await cancellableFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutHandle);
+      }, { timeoutMs: API_TIMEOUT_MS, parentSignal: getCurrentTurnSignal() });
 
       if (!response.ok) {
         const errorBody = await response.text();
@@ -342,7 +394,6 @@ async function callGeminiApi(
 
       return await response.json() as GeminiResponse;
     } catch (err) {
-      clearTimeout(timeoutHandle);
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error('Gemini API request timed out (300s)');
       }
@@ -451,7 +502,7 @@ async function generateImageHandler(args: {
     addUserTurn(ctx, args.prompt);
 
     // Build contents for API
-    const contents = buildContentsForApi(ctx);
+    const contents = await buildContentsForApi(ctx);
 
     console.log(`[gemini-image] generate_image: ctx=${ctx.id}, prompt="${args.prompt.length > 80 ? args.prompt.slice(0, 80) + '...' : args.prompt}"`);
 
@@ -570,7 +621,7 @@ async function editImageHandler(args: {
       // Add current instruction
       addUserTurn(newCtx, args.instruction);
 
-      const contents = buildContentsForApi(newCtx);
+      const contents = await buildContentsForApi(newCtx);
       const response = await callGeminiApi(contents, {
         model: geminiImageConfig.model,
         aspectRatio: newCtx.config.aspectRatio,
@@ -613,7 +664,7 @@ async function editImageHandler(args: {
 
     console.log(`[gemini-image] edit_image: ctx=${ctx.id}, edit #${editCount + 1}, instruction="${args.instruction.length > 80 ? args.instruction.slice(0, 80) + '...' : args.instruction}"`);
 
-    const contents = buildContentsForApi(ctx);
+    const contents = await buildContentsForApi(ctx);
     const response = await callGeminiApi(contents, {
       model: geminiImageConfig.model,
       aspectRatio: ctx.config.aspectRatio,
@@ -679,7 +730,9 @@ async function editImageHandler(args: {
 
 // ============= MCP Server =============
 
-export function createGeminiImageServer() {
+export async function createGeminiImageServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
   return createSdkMcpServer({
     name: 'gemini-image',
     version: '1.0.0',
@@ -725,71 +778,73 @@ You MUST provide the contextId from a previous generate_image or edit_image resu
   });
 }
 
-export const geminiImageServer = createGeminiImageServer();
-
-// ============= Builtin MCP Registry =============
-
-import { registerBuiltinMcp } from './builtin-mcp-registry';
+// ============= Configure / Validate (light — no SDK/zod dependency) =============
+// These are exported as plain named exports so that builtin-mcp-meta.ts can
+// reference them via dynamic import without pulling in the SDK. `configure`
+// is called at session start (via buildSdkMcpServers); `validate` is called
+// when the user clicks Test/Enable in Settings.
 
 // Cache for verified API key + baseUrl pair (avoids re-validation on every enable toggle)
 let verifiedCacheKey = '';
 
-registerBuiltinMcp('gemini-image', {
-  server: geminiImageServer,
+export function configureGeminiImage(
+  env: Record<string, string>,
+  ctx: { sessionId: string; workspace?: string },
+): void {
+  setGeminiImageConfig({
+    apiKey: env.GEMINI_API_KEY || '',
+    baseUrl: env.GEMINI_BASE_URL || '',
+    model: env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image',
+    defaultAspectRatio: env.GEMINI_DEFAULT_ASPECT_RATIO || 'auto',
+    defaultImageSize: env.GEMINI_DEFAULT_IMAGE_SIZE || 'auto',
+    thinkingLevel: env.GEMINI_THINKING_LEVEL || 'auto',
+    searchGrounding: env.GEMINI_SEARCH_GROUNDING === 'true',
+    maxContextTurns: parseInt(env.MAX_CONTEXT_TURNS || '20', 10),
+    sessionId: ctx.sessionId,
+    workspace: ctx.workspace,
+  });
+}
 
-  configure: (env, ctx) => {
-    setGeminiImageConfig({
-      apiKey: env.GEMINI_API_KEY || '',
-      baseUrl: env.GEMINI_BASE_URL || '',
-      model: env.GEMINI_IMAGE_MODEL || 'gemini-2.5-flash-image',
-      defaultAspectRatio: env.GEMINI_DEFAULT_ASPECT_RATIO || 'auto',
-      defaultImageSize: env.GEMINI_DEFAULT_IMAGE_SIZE || 'auto',
-      thinkingLevel: env.GEMINI_THINKING_LEVEL || 'auto',
-      searchGrounding: env.GEMINI_SEARCH_GROUNDING === 'true',
-      maxContextTurns: parseInt(env.MAX_CONTEXT_TURNS || '20', 10),
-      sessionId: ctx.sessionId,
-      workspace: ctx.workspace,
+export async function validateGeminiImage(
+  env: Record<string, string>,
+): Promise<{ type: string; message: string } | null> {
+  const apiKey = env.GEMINI_API_KEY?.trim();
+  if (!apiKey) {
+    return { type: 'runtime_error', message: '请先配置 Gemini API Key' };
+  }
+
+  const baseUrl = env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com/v1beta';
+
+  // Skip if this key+baseUrl pair was already verified
+  const cacheKey = `${apiKey}@${baseUrl}`;
+  if (cacheKey === verifiedCacheKey) return null;
+  try {
+    console.log('[api/mcp/enable] Verifying Gemini API key...');
+    // Pattern 1 fix #10: migrated to cancellableFetch — bounded 15s timeout.
+    const resp = await cancellableFetch(`${baseUrl}/models?key=${apiKey}`, undefined, {
+      timeoutMs: 15_000,
     });
-  },
-
-  validate: async (env) => {
-    const apiKey = env.GEMINI_API_KEY?.trim();
-    if (!apiKey) {
-      return { type: 'runtime_error', message: '请先配置 Gemini API Key' };
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      let msg = `API Key 验证失败 (HTTP ${resp.status})`;
+      try {
+        const parsed = JSON.parse(body);
+        if (parsed.error?.message) msg = parsed.error.message;
+      } catch { /* not JSON */ }
+      console.error(`[api/mcp/enable] Gemini key verification failed: ${msg}`);
+      return { type: 'runtime_error', message: msg };
     }
-
-    const baseUrl = env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com/v1beta';
-
-    // Skip if this key+baseUrl pair was already verified
-    const cacheKey = `${apiKey}@${baseUrl}`;
-    if (cacheKey === verifiedCacheKey) return null;
-    try {
-      console.log('[api/mcp/enable] Verifying Gemini API key...');
-      const resp = await fetch(`${baseUrl}/models?key=${apiKey}`, {
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!resp.ok) {
-        const body = await resp.text().catch(() => '');
-        let msg = `API Key 验证失败 (HTTP ${resp.status})`;
-        try {
-          const parsed = JSON.parse(body);
-          if (parsed.error?.message) msg = parsed.error.message;
-        } catch { /* not JSON */ }
-        console.error(`[api/mcp/enable] Gemini key verification failed: ${msg}`);
-        return { type: 'runtime_error', message: msg };
-      }
-      verifiedCacheKey = cacheKey;
-      console.log('[api/mcp/enable] Gemini API key verified successfully');
-      return null;
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[api/mcp/enable] Gemini key verification error: ${errMsg}`);
-      return {
-        type: 'connection_failed',
-        message: errMsg.includes('abort') || errMsg.includes('timeout')
-          ? '连接 Gemini API 超时，请检查网络或 Base URL'
-          : `连接失败: ${errMsg}`,
-      };
-    }
-  },
-});
+    verifiedCacheKey = cacheKey;
+    console.log('[api/mcp/enable] Gemini API key verified successfully');
+    return null;
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    console.error(`[api/mcp/enable] Gemini key verification error: ${errMsg}`);
+    return {
+      type: 'connection_failed',
+      message: errMsg.includes('abort') || errMsg.includes('timeout')
+        ? '连接 Gemini API 超时，请检查网络或 Base URL'
+        : `连接失败: ${errMsg}`,
+    };
+  }
+}

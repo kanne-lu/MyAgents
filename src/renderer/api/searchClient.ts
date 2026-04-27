@@ -2,7 +2,7 @@
  * searchClient.ts — Search API abstraction layer.
  *
  * Search is a Tauri-only feature. It calls the Rust `SearchEngine` directly
- * via Tauri IPC — there is no Bun Sidecar path. Browser dev mode
+ * via Tauri IPC — there is no Node Sidecar path. Browser dev mode
  * (`start_dev.sh`) does not ship a search fallback; the UI entry points are
  * gated so the buttons don't appear outside Tauri.
  */

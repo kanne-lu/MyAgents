@@ -106,7 +106,7 @@ const MemoChild = memo(function Child(props) { ... }, (prev, next) => {
 - `setTabs(prev => prev.map(...))` 会保留未变更 item 的对象引用，使 `prev.data === next.data` 生效
 - 仅影响特定子组件类型的 prop，用条件表达式限制传递范围
 
-## 扩展模式（v0.1.53+）
+## 扩展模式
 
 ### 模式 A：多 Ref 同步稳定复杂依赖
 

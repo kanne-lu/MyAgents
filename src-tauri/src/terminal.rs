@@ -21,7 +21,7 @@ use std::sync::Arc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use tauri::async_runtime::JoinHandle;
 
 use crate::{ulog_info, ulog_error};
 
@@ -127,7 +127,10 @@ pub async fn cmd_terminal_create(
     let emit_id = id.clone();
     let app_clone = app.clone();
     let manager_for_reader: Arc<TerminalManager> = state.inner().clone();
-    let reader_task = tokio::task::spawn_blocking(move || {
+    // Use `tauri::async_runtime::spawn_blocking` so the returned handle's type
+    // matches the struct field (`tauri::async_runtime::JoinHandle<()>`); see
+    // `clippy.toml` for the project-wide async-spawn rule.
+    let reader_task = tauri::async_runtime::spawn_blocking(move || {
         terminal_read_loop(reader, &emit_id, &app_clone, manager_for_reader);
     });
 

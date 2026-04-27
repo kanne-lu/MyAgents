@@ -153,7 +153,7 @@ function formatResolvedUnresolvedNote(params) {
   ].filter(Boolean).join('\n');
 }
 
-module.exports = {
+export {
   DEFAULT_ACCOUNT_ID,
   normalizeAccountId,
   formatCliCommand,

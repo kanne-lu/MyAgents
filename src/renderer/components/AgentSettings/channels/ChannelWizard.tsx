@@ -553,7 +553,7 @@ export default function ChannelWizard({
             await startChannel(channelCfg);
 
             if (isMountedRef.current) {
-                track('agent_channel_create', { platform });
+                track('agent_channel_create', { source: 'desktop', platform });
                 toastRef.current.success('Channel 启动成功，请完成用户绑定');
                 setStep(bindingStep); // Advance to binding step
             }
@@ -640,7 +640,7 @@ export default function ChannelWizard({
                             await refreshConfig();
                         }
                         if (isMountedRef.current) {
-                            track('agent_channel_create', { platform });
+                            track('agent_channel_create', { source: 'desktop', platform });
                             toastRef.current.success('扫码登录成功');
                             setStep(2);
                         }
@@ -822,7 +822,7 @@ export default function ChannelWizard({
         await patchAgentConfig(agent.id, { channels: updatedChannels });
         await refreshConfig();
 
-        track('agent_channel_create', { platform });
+        track('agent_channel_create', { source: 'desktop', platform });
         if (isMountedRef.current) onComplete(channelId);
     }, [agent.id, agent.channels, channelId, allowedUsers, platform, onComplete, refreshConfig]);
 

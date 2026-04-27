@@ -4,7 +4,7 @@
 
 import { createRequire } from 'module';
 import { existsSync } from 'fs';
-import { join } from 'path';
+import { dirname, join } from 'path';
 import {
   query,
   type SDKMessage,
@@ -44,25 +44,33 @@ interface ContentBlock {
 // ===== SDK Path Resolution =====
 
 /**
- * Resolve the path to Claude Agent SDK CLI
- * Same logic as agent-session.ts
+ * Resolve Claude Code native binary for test runs.
+ * SDK 0.2.113+ ships per-platform native binary instead of cli.js.
+ * Mirrors agent-session.ts resolveClaudeCodeCli() (kept in sync).
  */
 export function resolveClaudeCodeCli(): string {
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const { platform, arch } = process;
+  let triple: string;
+  if (platform === 'darwin') triple = arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64';
+  else if (platform === 'win32') triple = arch === 'arm64' ? 'win32-arm64' : 'win32-x64';
+  else if (platform === 'linux') {
+    const report = process.report?.getReport?.() as { header?: { glibcVersionRuntime?: string } } | undefined;
+    const base = arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
+    triple = report?.header?.glibcVersionRuntime ? base : `${base}-musl`;
+  } else {
+    throw new Error(`Unsupported platform: ${platform}-${arch}`);
+  }
+
+  const platformPkg = `@anthropic-ai/claude-agent-sdk-${triple}`;
   try {
-    const cliPath = requireModule.resolve('@anthropic-ai/claude-agent-sdk/cli.js');
-    if (cliPath.includes('app.asar')) {
-      const unpackedPath = cliPath.replace('app.asar', 'app.asar.unpacked');
-      if (existsSync(unpackedPath)) {
-        return unpackedPath;
-      }
-    }
-    return cliPath;
+    const manifestPath = requireModule.resolve(`${platformPkg}/package.json`);
+    const candidate = join(dirname(manifestPath), `claude${ext}`);
+    if (existsSync(candidate)) return candidate;
+    throw new Error(`Binary missing at ${candidate}`);
   } catch (error) {
-    // Fallback for bundled environment
-    const bundledPath = join(process.cwd(), 'claude-agent-sdk', 'cli.js');
-    if (existsSync(bundledPath)) {
-      return bundledPath;
-    }
+    const bundledPath = join(process.cwd(), 'claude-agent-sdk', `claude${ext}`);
+    if (existsSync(bundledPath)) return bundledPath;
     throw error;
   }
 }
@@ -187,7 +195,6 @@ export async function runTestQuery(options: TestQueryOptions): Promise<TestQuery
       model: provider.model,
       settingSources,
       pathToClaudeCodeExecutable: cliPath,
-      executable: 'bun',
       env,
       cwd,
       permissionMode: 'bypassPermissions',

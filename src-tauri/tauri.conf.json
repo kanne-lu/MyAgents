@@ -1,13 +1,13 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MyAgents",
-  "version": "0.1.70",
+  "version": "0.2.0",
   "identifier": "com.myagents.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev:web",
-    "beforeBuildCommand": "npm run build:web"
+    "beforeBuildCommand": "npm run build:web && npm run build:server && npm run build:bridge && npm run build:cli"
   },
   "app": {
     "windows": [
@@ -41,7 +41,9 @@
     "targets": [
       "dmg",
       "app",
-      "nsis"
+      "nsis",
+      "appimage",
+      "deb"
     ],
     "createUpdaterArtifacts": "v1Compatible",
     "icon": [
@@ -53,21 +55,21 @@
     ],
     "resources": {
       "../src-tauri/resources/server-dist.js": "server-dist.js",
-      "../src-tauri/resources/plugin-bridge-dist.js": "plugin-bridge-dist.js",
+      "../src-tauri/resources/plugin-bridge-dist.mjs": "plugin-bridge-dist.mjs",
       "../src/server/plugin-bridge/sdk-shim": "plugin-bridge-sdk-shim",
       "../src-tauri/resources/claude-agent-sdk": "claude-agent-sdk",
-      "../src-tauri/resources/agent-browser-cli": "agent-browser-cli",
+      "../src-tauri/resources/sharp-runtime": "sharp-runtime",
+      "../src-tauri/resources/tsx-runtime": "tsx-runtime",
       "../src-tauri/resources/nodejs": "nodejs",
       "../src/shared": "shared",
       "../bundled-skills": "bundled-skills",
       "../bundled-agents": "bundled-agents",
-      "../src/cli": "cli",
+      "../src-tauri/resources/cli": "cli",
       "../mino": "mino",
       "infoplist/en.lproj/InfoPlist.strings": "en.lproj/InfoPlist.strings",
       "infoplist/zh-Hans.lproj/InfoPlist.strings": "zh-Hans.lproj/InfoPlist.strings"
     },
     "externalBin": [
-      "binaries/bun",
       "binaries/cuse"
     ],
     "macOS": {

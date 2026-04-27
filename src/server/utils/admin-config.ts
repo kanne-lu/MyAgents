@@ -6,13 +6,26 @@
  * Atomicity is guaranteed by write-to-tmp → rename pattern.
  */
 
-import { readFileSync, writeFileSync, copyFileSync, existsSync, renameSync , readdirSync } from 'fs';
+import {
+  readFileSync,
+  writeFileSync,
+  copyFileSync,
+  existsSync,
+  renameSync,
+  readdirSync,
+  openSync,
+  fsyncSync,
+  closeSync,
+  unlinkSync,
+} from 'fs';
 import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
 import type { McpServerDefinition } from '../../renderer/config/types';
+import { PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../renderer/config/types';
 import type { SessionMetadata } from '../types/session';
 import { ensureDirSync } from './fs-utils';
+import { withFileLock, FileBusyError } from './file-lock';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -30,6 +43,18 @@ function getConfigPath(): string {
 
 function getProjectsPath(): string {
   return resolve(getConfigDir(), 'projects.json');
+}
+
+const CONFIG_LOCK_TIMEOUT_MS = 5000;
+const CONFIG_LOCK_STALE_MS = 30000;
+
+export class ConfigBusyError extends Error {
+  readonly code = 'CONFIG_BUSY';
+
+  constructor(message = 'Config busy: could not acquire config.json.lock within 5000ms; retry') {
+    super(message);
+    this.name = 'ConfigBusyError';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -116,12 +141,15 @@ export function loadConfig(): AdminAppConfig {
 }
 
 /**
- * Atomic read-modify-write on config.json.
- * Pattern: read → modify → write .tmp → backup .bak → rename .tmp → target
+ * Cross-process serialized read-modify-write on config.json.
+ * Pattern: lock → read fresh → modify → write .tmp → fsync → backup .bak → rename → fsync dir.
+ *
+ * Async because acquiring the cross-process lockdir polls with `await delay()` —
+ * never a sync busy-wait or `Atomics.wait` (Pattern 5 §5.3.4.a).
  */
-export function atomicModifyConfig(
-  modifier: (config: AdminAppConfig) => AdminAppConfig
-): AdminAppConfig {
+export async function withConfigLock(
+  modifier: (config: AdminAppConfig) => AdminAppConfig | Promise<AdminAppConfig>
+): Promise<AdminAppConfig> {
   const configPath = getConfigPath();
   const configDir = getConfigDir();
 
@@ -130,19 +158,68 @@ export function atomicModifyConfig(
     ensureDirSync(configDir);
   }
 
-  const config = loadConfig();
-  const modified = modifier(config);
+  try {
+    return await withFileLock(
+      {
+        lockPath: configPath + '.lock',
+        timeoutMs: CONFIG_LOCK_TIMEOUT_MS,
+        staleMs: CONFIG_LOCK_STALE_MS,
+      },
+      async () => {
+        const config = loadConfig();
+        const before = JSON.stringify(config);
+        const modified = await modifier(config);
 
-  const tmpPath = configPath + '.tmp';
-  const bakPath = configPath + '.bak';
+        if (JSON.stringify(modified) === before) {
+          return modified;
+        }
 
-  writeFileSync(tmpPath, JSON.stringify(modified, null, 2), 'utf-8');
-  if (existsSync(configPath)) {
-    try { copyFileSync(configPath, bakPath); } catch { /* best-effort backup */ }
+        const tmpPath = configPath + '.tmp';
+        const bakPath = configPath + '.bak';
+
+        writeFileSynced(tmpPath, JSON.stringify(modified, null, 2));
+        if (existsSync(configPath)) {
+          try { copyFileSync(configPath, bakPath); } catch { /* best-effort backup */ }
+        }
+        renameSync(tmpPath, configPath);
+        fsyncDir(configDir);
+
+        return modified;
+      }
+    );
+  } catch (err) {
+    if (err instanceof FileBusyError) {
+      throw new ConfigBusyError();
+    }
+    throw err;
   }
-  renameSync(tmpPath, configPath);
+}
 
-  return modified;
+export async function atomicModifyConfig(
+  modifier: (config: AdminAppConfig) => AdminAppConfig | Promise<AdminAppConfig>
+): Promise<AdminAppConfig> {
+  return withConfigLock(modifier);
+}
+
+function writeFileSynced(path: string, content: string): void {
+  const fd = openSync(path, 'w', 0o600);
+  try {
+    writeFileSync(fd, content, 'utf-8');
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function fsyncDir(dir: string): void {
+  if (process.platform === 'win32') return;
+  let fd: number | null = null;
+  try {
+    fd = openSync(dir, 'r');
+    fsyncSync(fd);
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,29 +241,30 @@ export function saveProjects(projects: ProjectSlim[]): void {
   const path = getProjectsPath();
   const tmpPath = path + '.tmp';
   writeFileSync(tmpPath, JSON.stringify(projects, null, 2), 'utf-8');
-  renameSync(tmpPath, path);
+  // Pattern 5 fix #13: if rename fails (e.g. permission denied, target on a
+  // different filesystem), the .tmp file used to persist forever. Wrap so a
+  // failure cleans up the artifact before rethrowing.
+  try {
+    renameSync(tmpPath, path);
+  } catch (err) {
+    try { unlinkSync(tmpPath); } catch { /* ignore — tmp may not exist */ }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
 // MCP helpers (preset + custom merge, matching renderer/config/services/mcpService.ts)
 // ---------------------------------------------------------------------------
 
-/** Preset MCP servers — imported at call time to avoid circular deps */
+/** Preset MCP servers (statically imported — see top of file) */
 function getPresetMcpServers(): McpServerDefinition[] {
-  // Inline the preset list import to avoid pulling in the full types module at module load
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PRESET_MCP_SERVERS } = require('../../renderer/config/types');
-    // Filter out presets whose `platforms` field doesn't include the host —
-    // keeps platform-specific presets (e.g. cuse on darwin/win32) invisible
-    // everywhere on unsupported hosts (catalogue, validation, effective
-    // MCP lists, `myagents mcp list`).
-    return (PRESET_MCP_SERVERS as McpServerDefinition[]).filter(p =>
-      !p.platforms || p.platforms.includes(process.platform)
-    );
-  } catch {
-    return [];
-  }
+  // Filter out presets whose `platforms` field doesn't include the host —
+  // keeps platform-specific presets (e.g. cuse on darwin/win32) invisible
+  // everywhere on unsupported hosts (catalogue, validation, effective
+  // MCP lists, `myagents mcp list`).
+  return (PRESET_MCP_SERVERS as McpServerDefinition[]).filter(p =>
+    !p.platforms || p.platforms.includes(process.platform)
+  );
 }
 
 /**
@@ -264,15 +342,12 @@ export function getProvidersDir(): string {
 
 /** Find a provider by ID: checks PRESET_PROVIDERS first, then custom files in ~/.myagents/providers/ */
 export function findProvider(id: string): Record<string, unknown> | null {
-  // Check presets first
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { PRESET_PROVIDERS } = require('../../renderer/config/types');
-    const preset = (PRESET_PROVIDERS as Array<Record<string, unknown>>)?.find(
-      (p: Record<string, unknown>) => p.id === id
-    );
-    if (preset) return preset;
-  } catch { /* ignore */ }
+  // Check presets first (statically imported — see top of file).
+  // Cast via `unknown` because Provider lacks a string index signature.
+  const preset = (PRESET_PROVIDERS as unknown as Array<Record<string, unknown>>)?.find(
+    (p: Record<string, unknown>) => p.id === id
+  );
+  if (preset) return preset;
 
   // Check custom providers
   try {
@@ -432,8 +507,14 @@ export interface WorkspaceResolvedConfig {
 export function resolveWorkspaceConfig(
   agentDir: string,
   sessionMeta?: SessionMetadata | null,
+  options?: { includeMcp?: boolean },
 ): WorkspaceResolvedConfig {
   const config = loadConfig();
+  // MCP resolution is the expensive part here (walks all agents, intersects
+  // enable sets, builds McpServerDefinition from disk). Desktop Tab sessions
+  // don't need it — the frontend's /api/mcp/set is authoritative — so callers
+  // can short-circuit via `{ includeMcp: false }` to skip it entirely.
+  const includeMcp = options?.includeMcp !== false;
 
   // Normalize path separators for cross-platform matching
   const normalizedDir = agentDir.replace(/\\/g, '/');
@@ -449,15 +530,17 @@ export function resolveWorkspaceConfig(
   // server list, intersect with the global-enabled set so users disabling a server
   // globally still wins (security stays at the global lever, locked sessions just
   // pin their feature surface).
-  let mcpServers: McpServerDefinition[];
-  if (sessionMeta?.mcpEnabledServers) {
-    const allServers = getAllMcpServers(config);
-    const globalEnabled = new Set(getEnabledMcpServerIds(config));
-    const sessionEnabled = new Set(sessionMeta.mcpEnabledServers);
-    mcpServers = allServers.filter(s => globalEnabled.has(s.id) && sessionEnabled.has(s.id));
-  } else {
-    // Lazy fallback for legacy / IM sessions — uses project ∩ global as before.
-    mcpServers = getEffectiveMcpServers(agentDir);
+  let mcpServers: McpServerDefinition[] = [];
+  if (includeMcp) {
+    if (sessionMeta?.mcpEnabledServers) {
+      const allServers = getAllMcpServers(config);
+      const globalEnabled = new Set(getEnabledMcpServerIds(config));
+      const sessionEnabled = new Set(sessionMeta.mcpEnabledServers);
+      mcpServers = allServers.filter(s => globalEnabled.has(s.id) && sessionEnabled.has(s.id));
+    } else {
+      // Lazy fallback for legacy / IM sessions — uses project ∩ global as before.
+      mcpServers = getEffectiveMcpServers(agentDir);
+    }
   }
 
   // --- Resolve Provider ---

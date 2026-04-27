@@ -11,8 +11,6 @@ try {
     $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
     Set-Location $ProjectDir
 
-    $BunVersion = "1.3.6"
-
     Write-Host "`n=========================================" -ForegroundColor Blue
     Write-Host "  MyAgents Windows 开发环境初始化" -ForegroundColor Green
     Write-Host "=========================================`n" -ForegroundColor Blue
@@ -44,52 +42,6 @@ try {
         }
         Write-Host "  $Name 安装完成" -ForegroundColor Green
         return $true
-    }
-
-    function Get-BunBinary {
-        $BinariesDir = Join-Path $ProjectDir "src-tauri\binaries"
-        if (-not (Test-Path $BinariesDir)) {
-            New-Item -ItemType Directory -Path $BinariesDir -Force | Out-Null
-        }
-
-        Write-Host "下载 Bun 运行时 (v$BunVersion)..." -ForegroundColor Blue
-
-        $WinFile = Join-Path $BinariesDir "bun-x86_64-pc-windows-msvc.exe"
-        # Always re-download: the output filename doesn't encode build variant (baseline vs AVX2),
-        # so we can't tell if an existing file is the correct baseline build.
-        if (Test-Path $WinFile) {
-            Remove-Item -Force $WinFile
-        }
-        if (-not (Test-Path $WinFile)) {
-            Write-Host "  下载 Windows x64 版本 (baseline)..." -ForegroundColor Cyan
-            $TempZip = Join-Path $env:TEMP "bun-windows.zip"
-            $TempDir = Join-Path $env:TEMP "bun-windows-extract"
-
-            try {
-                # Use baseline build (SSE2-only) for maximum compatibility with VMs and older CPUs.
-                # The standard bun-windows-x64.zip requires AVX2 which many VMs don't support,
-                # causing STATUS_ACCESS_VIOLATION (0xC0000005) crashes.
-                $DownloadUrl = "https://github.com/oven-sh/bun/releases/download/bun-v$BunVersion/bun-windows-x64-baseline.zip"
-                Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempZip -UseBasicParsing
-
-                if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
-                Expand-Archive -Path $TempZip -DestinationPath $TempDir -Force
-
-                $ExtractedBun = Join-Path $TempDir "bun-windows-x64-baseline\bun.exe"
-                if (Test-Path $ExtractedBun) {
-                    Copy-Item -Path $ExtractedBun -Destination $WinFile -Force
-                    Write-Host "  OK - Windows x64" -ForegroundColor Green
-                } else {
-                    throw "bun.exe not found after extraction"
-                }
-            } finally {
-                if (Test-Path $TempZip) { Remove-Item -Force $TempZip }
-                if (Test-Path $TempDir) { Remove-Item -Recurse -Force $TempDir }
-            }
-        } else {
-            Write-Host "  OK - Windows x64 (already exists)" -ForegroundColor Green
-        }
-        Write-Host "OK - Bun runtime ready" -ForegroundColor Green
     }
 
     function Get-GitInstaller {
@@ -277,8 +229,9 @@ try {
 
         Write-Host "提取 VC++ Runtime DLL (app-local deployment)..." -ForegroundColor Blue
 
-        # Bun on Windows requires VCRUNTIME140.dll
-        # App-local deployment: copy DLL alongside bun.exe so users don't need VC++ Redistributable installed
+        # Native binaries (SDK Claude, cuse, etc.) on Windows may require VCRUNTIME140.dll.
+        # App-local deployment: copy DLLs into resources/ so end users don't need to install
+        # VC++ Redistributable separately.
         $dlls = @("vcruntime140.dll", "vcruntime140_1.dll")
         foreach ($dll in $dlls) {
             $destFile = Join-Path $ResourcesDir $dll
@@ -379,16 +332,6 @@ try {
         }
     }
 
-    # Bun
-    if (-not (Test-Dependency "Bun" "bun --version" "")) {
-        if ($HasWinget) {
-            Install-WithWinget "Bun" "Oven-sh.Bun"
-            $NeedRestart = $true
-        } else {
-            Write-Host "    请安装: https://bun.sh" -ForegroundColor Yellow
-        }
-    }
-
     # Rust + Cargo
     if (-not (Test-Dependency "Rust" "rustc --version" "")) {
         if ($HasWinget) {
@@ -428,7 +371,6 @@ try {
     # Final check — all must be present now
     $Missing = $false
     if (-not (Test-Dependency "Node.js" "node --version" "")) { $Missing = $true }
-    if (-not (Test-Dependency "Bun" "bun --version" "")) { $Missing = $true }
     if (-not (Test-Dependency "Rust" "rustc --version" "")) { $Missing = $true }
     if (-not (Test-Dependency "Cargo" "cargo --version" "")) { $Missing = $true }
     if (-not (Test-MSVC)) { $Missing = $true }
@@ -440,29 +382,26 @@ try {
         exit 1
     }
 
-    Write-Host "`nStep 2/9: 下载 Bun 运行时" -ForegroundColor Blue
-    Get-BunBinary
-
-    Write-Host "`nStep 3/9: 下载 Node.js 运行时 (MCP Server / 社区工具)" -ForegroundColor Blue
+    Write-Host "`nStep 2/8: 下载 Node.js 运行时 (Sidecar + MCP Server + 社区工具统一 runtime)" -ForegroundColor Blue
     Get-NodeJSBinary
 
-    Write-Host "`nStep 4/9: 下载 Git 安装包 (用于 NSIS 打包)" -ForegroundColor Blue
+    Write-Host "`nStep 3/8: 下载 Git 安装包 (用于 NSIS 打包)" -ForegroundColor Blue
     Get-GitInstaller
 
-    Write-Host "`nStep 5/9: 提取 VC++ Runtime DLL" -ForegroundColor Blue
+    Write-Host "`nStep 4/8: 提取 VC++ Runtime DLL" -ForegroundColor Blue
     Get-VCRuntime
 
-    Write-Host "`nStep 6/9: 安装前端依赖" -ForegroundColor Blue
-    & bun install
+    Write-Host "`nStep 5/8: 安装前端/后端依赖" -ForegroundColor Blue
+    & npm install
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "前端依赖安装失败" -ForegroundColor Red
+        Write-Host "依赖安装失败" -ForegroundColor Red
         Write-Host "`n按回车键退出..." -ForegroundColor Yellow
         Read-Host
         exit 1
     }
-    Write-Host "OK - 前端依赖安装完成" -ForegroundColor Green
+    Write-Host "OK - 依赖安装完成" -ForegroundColor Green
 
-    Write-Host "`nStep 7/9: 下载 Rust 依赖" -ForegroundColor Blue
+    Write-Host "`nStep 6/8: 下载 Rust 依赖" -ForegroundColor Blue
     Write-Host "  正在下载 Rust 依赖包，请稍候..." -ForegroundColor Cyan
     Push-Location (Join-Path $ProjectDir "src-tauri")
     & cargo fetch
@@ -478,7 +417,7 @@ try {
 
     # 准备默认工作区 (mino) — 每次拉取最新版本
     # .git 不保留：避免 Tauri 资源打包权限问题 + rerun-if-changed 性能问题
-    Write-Host "`nStep 8/9: 准备默认工作区 (mino)" -ForegroundColor Blue
+    Write-Host "`nStep 7/8: 准备默认工作区 (mino)" -ForegroundColor Blue
     $MinoDir = Join-Path $ProjectDir "mino"
     if (Test-Path $MinoDir) {
         Remove-Item -Recurse -Force $MinoDir
@@ -497,7 +436,7 @@ try {
     }
     Write-Host "OK - mino 默认工作区已就绪" -ForegroundColor Green
 
-    Write-Host "`nStep 9/9: 初始化完成!" -ForegroundColor Blue
+    Write-Host "`nStep 8/8: 初始化完成!" -ForegroundColor Blue
     Write-Host "`n=========================================" -ForegroundColor Green
     Write-Host "  开发环境准备就绪!" -ForegroundColor Green
     Write-Host "=========================================`n" -ForegroundColor Green

@@ -11,8 +11,9 @@
 //   Agent SDK buffers MCP tool input_json_delta until tool execution completes,
 //   preventing real-time streaming. Text output (chat:message-chunk) streams token-by-token.
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+// SDK + zod loaded lazily inside createGenerativeUiServer() via dynamic
+// import — see builtin-mcp-meta.ts for registration. buildReadMeContent()
+// uses only string ops so staying at top level is cost-free.
 
 // ===================================================================
 // Design Guideline Sections (loaded on-demand by widget_read_me)
@@ -376,7 +377,9 @@ Call with the module(s) most relevant to your planned widget. You can request mu
 // MCP Server
 // ===================================================================
 
-export function createGenerativeUiServer() {
+export async function createGenerativeUiServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
   return createSdkMcpServer({
     name: 'generative-ui',
     version: '1.0.0',
@@ -399,5 +402,3 @@ export function createGenerativeUiServer() {
     ],
   });
 }
-
-export const generativeUiServer = createGenerativeUiServer();

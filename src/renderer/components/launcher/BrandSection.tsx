@@ -17,6 +17,7 @@ import ModeSegment, { type InputMode } from '@/components/task-center/ModeSegmen
 import RecentThoughtsRow from '@/components/task-center/RecentThoughtsRow';
 import { ThoughtInput, type ThoughtInputHandle } from '@/components/task-center/ThoughtInput';
 import { useToast } from '@/components/Toast';
+import { track } from '@/analytics';
 import { thoughtList, taskCenterAvailable } from '@/api/taskCenter';
 import { useThoughtTagCandidates } from '@/hooks/useThoughtTagCandidates';
 import { hasOverlayLayer } from '@/utils/closeLayer';
@@ -172,7 +173,24 @@ export default memo(function BrandSection({
     // the keyboard paths (Tab / Cmd+Shift+T toggle). Without this the
     // two call sites diverged on `setMode(next)` vs `setMode((m) => …)`
     // and future work added to one would silently skip the other.
+    //
+    // `modeRef` mirrors `mode` so we can read the current value outside
+    // a setState updater — track() fires once per real switch, even though
+    // React strict-mode invokes the updater function twice.
+    const modeRef = useRef<InputMode>(mode);
+    useEffect(() => {
+        modeRef.current = mode;
+    }, [mode]);
     const setModeAndFocus = useCallback((next: InputMode | 'toggle') => {
+        const prev = modeRef.current;
+        const resolved: InputMode =
+            next === 'toggle' ? (prev === 'task' ? 'thought' : 'task') : next;
+        if (resolved !== prev) {
+            track('launcher_mode_switch', {
+                to: resolved,
+                via: next === 'toggle' ? 'shortcut' : 'click',
+            });
+        }
         if (next === 'toggle') {
             setMode((m) => (m === 'task' ? 'thought' : 'task'));
         } else {

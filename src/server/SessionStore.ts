@@ -14,7 +14,7 @@
  * - Concurrent safety: append is atomic on most filesystems
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, statSync, rmdirSync, renameSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, appendFileSync, statSync, renameSync } from 'fs';
 import { homedir } from 'os';
 import { join } from 'path';
 
@@ -22,12 +22,17 @@ import type { SessionMetadata, SessionData, SessionMessage, SessionStats } from 
 import { createSessionMetadata, generateSessionTitle } from './types/session';
 import { stripBom } from '../shared/utils';
 import { ensureDirSync } from './utils/fs-utils';
+import { withFileLock } from './utils/file-lock';
 
 const MYAGENTS_DIR = join(homedir(), '.myagents');
 const SESSIONS_FILE = join(MYAGENTS_DIR, 'sessions.json');
 const SESSIONS_DIR = join(MYAGENTS_DIR, 'sessions');
 const ATTACHMENTS_DIR = join(MYAGENTS_DIR, 'attachments');
 const SESSIONS_TMP_FILE = join(MYAGENTS_DIR, 'sessions.json.tmp');
+const SESSIONS_LOCK_FILE = join(MYAGENTS_DIR, 'sessions.lock');
+const SESSIONS_LOCK_DIR = join(MYAGENTS_DIR, 'session-locks');
+const LOCK_TIMEOUT_MS = 5000;
+const LOCK_STALE_MS = 30000;
 
 /**
  * Line count cache for JSONL files
@@ -66,88 +71,42 @@ function clearLineCountCache(sessionId: string): void {
 }
 
 /**
- * File locking for sessions.json concurrent access safety.
+ * File locking for sessions.json + per-session JSONL concurrent access safety.
  *
- * Uses directory creation (mkdir) as an atomic lock operation (cross-platform).
+ * Pattern 5 §5.4 invariant: no synchronous event-loop blocking. We use the
+ * shared async {@link withFileLock} helper (atomic mkdir lock, polled with
+ * setTimeout — never Atomics.wait, never busy-spin). This forces all writer
+ * paths in SessionStore to be async, and callers cascade `await` accordingly.
  *
- * Design rationale for synchronous locking:
- * - Each Chat Tab has its own Sidecar process; cross-process contention is rare
- * - sessions.json writes happen infrequently (session create, stats update, title update)
- * - The lock hold time is very short (~1ms for a JSON write)
- * - Making this async would cascade through persistMessagesToStorage → handleMessageComplete,
- *   requiring a large refactor with minimal practical benefit
- * - The retry loop uses a short busy-wait (10ms intervals, 3 retries) as a pragmatic trade-off:
- *   worst case blocks the event loop for ~30ms, which is unnoticeable in practice
+ * Stale-recovery rules (delegated to withFileLock):
+ *   - lockdir owner file format: `node:<pid>` / `rust:<pid>` / `renderer:<ts>`
+ *   - lockdir age > LOCK_STALE_MS AND owner pid dead → broken automatically.
+ *   - renderer:* owners (no observable pid) → age-only break.
+ *
+ * Lock hold time is ~1ms per call (single append + sessions.json stats update).
  */
-const SESSIONS_LOCK_FILE = join(MYAGENTS_DIR, 'sessions.lock');
-const LOCK_MAX_RETRIES = 3;    // Max retry attempts before giving up
-const LOCK_RETRY_MS = 10;      // Short busy-wait between retries
-const LOCK_STALE_MS = 30000;   // Consider lock stale after 30 seconds
-
-/**
- * Acquire lock for sessions.json modification.
- * Returns true if lock acquired, false if all retries exhausted.
- */
-function acquireSessionsLock(): boolean {
-    for (let attempt = 0; attempt <= LOCK_MAX_RETRIES; attempt++) {
-        try {
-            // mkdir is atomic - fails if directory already exists
-            mkdirSync(SESSIONS_LOCK_FILE);
-            return true;
-        } catch {
-            // Lock exists — check if it's stale (e.g., process crashed while holding lock)
-            try {
-                const stat = statSync(SESSIONS_LOCK_FILE);
-                const lockAge = Date.now() - stat.mtimeMs;
-                if (lockAge > LOCK_STALE_MS) {
-                    console.warn(`[SessionStore] Releasing stale lock (age: ${lockAge}ms)`);
-                    releaseSessionsLock();
-                    continue; // Retry immediately after clearing stale lock
-                }
-            } catch {
-                // Lock was released between our check and stat — retry immediately
-                continue;
-            }
-
-            // Brief busy-wait before retry. Acceptable because:
-            // 1. Lock hold time is ~1ms (just a JSON write)
-            // 2. Max total busy-wait is LOCK_MAX_RETRIES * LOCK_RETRY_MS = 30ms
-            // 3. Cross-process contention is rare in practice
-            if (attempt < LOCK_MAX_RETRIES) {
-                const end = Date.now() + LOCK_RETRY_MS;
-                while (Date.now() < end) { /* busy-wait */ }
-            }
-        }
-    }
-
-    console.error('[SessionStore] Failed to acquire lock after retries');
-    return false;
+async function withSessionsLock<T>(fn: () => Promise<T>): Promise<T> {
+    return withFileLock(
+        { lockPath: SESSIONS_LOCK_FILE, timeoutMs: LOCK_TIMEOUT_MS, staleMs: LOCK_STALE_MS },
+        fn,
+    );
 }
 
 /**
- * Release sessions.json lock
+ * Per-session JSONL writer lock. Serializes append + rewind on
+ * `<session>.jsonl` against any other writer (cross-tab cron, background
+ * completion, future multi-owner cases).
  */
-function releaseSessionsLock(): void {
-    try {
-        rmdirSync(SESSIONS_LOCK_FILE);
-    } catch {
-        // Lock already released or doesn't exist
+async function withSessionFileLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+    const safeId = sessionId.replace(/[^a-zA-Z0-9-]/g, '_');
+    if (!existsSync(SESSIONS_LOCK_DIR)) {
+        try { mkdirSync(SESSIONS_LOCK_DIR, { recursive: true }); } catch { /* ignore — withFileLock will surface acquire failures */ }
     }
-}
-
-/**
- * Execute a function with sessions.json lock held.
- * Ensures lock is always released, even if fn throws.
- */
-function withSessionsLock<T>(fn: () => T): T {
-    if (!acquireSessionsLock()) {
-        throw new Error('[SessionStore] Could not acquire lock for sessions.json');
-    }
-    try {
-        return fn();
-    } finally {
-        releaseSessionsLock();
-    }
+    const lockPath = join(SESSIONS_LOCK_DIR, `${safeId}.jsonl.lock`);
+    return withFileLock(
+        { lockPath, timeoutMs: LOCK_TIMEOUT_MS, staleMs: LOCK_STALE_MS },
+        fn,
+    );
 }
 
 /**
@@ -335,10 +294,10 @@ export function getSessionMetadata(sessionId: string): SessionMetadata | null {
 /**
  * Save session metadata (create or update)
  */
-export function saveSessionMetadata(session: SessionMetadata): void {
+export async function saveSessionMetadata(session: SessionMetadata): Promise<void> {
     ensureStorageDir();
 
-    withSessionsLock(() => {
+    await withSessionsLock(async () => {
         const all = getAllSessionMetadata();
 
         // Safety check: if the file exists on disk but getAllSessionMetadata returned [],
@@ -373,10 +332,10 @@ export function saveSessionMetadata(session: SessionMetadata): void {
 /**
  * Delete session metadata and data
  */
-export function deleteSession(sessionId: string): boolean {
+export async function deleteSession(sessionId: string): Promise<boolean> {
     ensureStorageDir();
 
-    return withSessionsLock(() => {
+    return withSessionsLock(async () => {
         // Remove from metadata
         const all = getAllSessionMetadata();
         const filtered = all.filter(s => s.id !== sessionId);
@@ -470,16 +429,20 @@ export function calculateSessionStats(messages: SessionMessage[]): SessionStats 
 }
 
 /**
- * Append a single message to session (O(1) operation)
+ * Append a single message to session (O(1) operation).
+ * Serialized against `saveSessionMessages` and `rewindMessages` via the
+ * per-session JSONL lock (Pattern 5 §5.3.3).
  */
-export function appendSessionMessage(sessionId: string, message: SessionMessage): void {
+export async function appendSessionMessage(sessionId: string, message: SessionMessage): Promise<void> {
     ensureStorageDir();
 
     const filePath = getSessionFilePath(sessionId);
 
     try {
-        const line = JSON.stringify(message) + '\n';
-        appendFileSync(filePath, line, 'utf-8');
+        await withSessionFileLock(sessionId, async () => {
+            const line = JSON.stringify(message) + '\n';
+            appendFileSync(filePath, line, 'utf-8');
+        });
     } catch (error) {
         console.error('[SessionStore] Failed to append message:', error);
     }
@@ -492,86 +455,91 @@ export function appendSessionMessage(sessionId: string, message: SessionMessage)
  * The stats update is performed inside withSessionsLock to prevent TOCTOU races
  * where another process could modify sessions.json between our read and write.
  */
-export function saveSessionMessages(sessionId: string, messages: SessionMessage[]): void {
+export async function saveSessionMessages(sessionId: string, messages: SessionMessage[]): Promise<void> {
     ensureStorageDir();
 
     const filePath = getSessionFilePath(sessionId);
     const legacyPath = getLegacySessionFilePath(sessionId);
 
     try {
-        // Get existing message count (use cached line count for performance)
-        let existingCount = 0;
+        // Pattern 5: serialize JSONL append/rewrite against any other writer of the
+        // same session (cross-tab cron, background completion). Lock hold time is
+        // ~1ms per call (single append + sessions.json stats update).
+        await withSessionFileLock(sessionId, async () => {
+            // Get existing message count (use cached line count for performance)
+            let existingCount = 0;
 
-        if (existsSync(filePath)) {
-            existingCount = getCachedLineCount(sessionId, filePath);
-        } else if (existsSync(legacyPath)) {
-            // Migrate first, then get count from new file
-            migrateToJsonl(sessionId);
-            existingCount = getCachedLineCount(sessionId, filePath);
-        }
+            if (existsSync(filePath)) {
+                existingCount = getCachedLineCount(sessionId, filePath);
+            } else if (existsSync(legacyPath)) {
+                // Migrate first, then get count from new file
+                migrateToJsonl(sessionId);
+                existingCount = getCachedLineCount(sessionId, filePath);
+            }
 
-        // Detect rewind truncation: in-memory messages shrank (e.g., after rewind)
-        // Must rewrite entire JSONL file to match the truncated state
-        if (messages.length < existingCount) {
-            console.log(`[SessionStore] Rewind detected: messages.length=${messages.length} < existingCount=${existingCount}, rewriting JSONL for session ${sessionId}`);
-            const fullContent = messages.map(msg => JSON.stringify(msg)).join('\n') + (messages.length > 0 ? '\n' : '');
-            writeFileSync(filePath, fullContent, 'utf-8');
-            lineCountCache.set(sessionId, messages.length);
+            // Detect rewind truncation: in-memory messages shrank (e.g., after rewind)
+            // Must rewrite entire JSONL file to match the truncated state
+            if (messages.length < existingCount) {
+                console.log(`[SessionStore] Rewind detected: messages.length=${messages.length} < existingCount=${existingCount}, rewriting JSONL for session ${sessionId}`);
+                const fullContent = messages.map(msg => JSON.stringify(msg)).join('\n') + (messages.length > 0 ? '\n' : '');
+                writeFileSync(filePath, fullContent, 'utf-8');
+                lineCountCache.set(sessionId, messages.length);
 
-            // Recalculate full stats after rewrite
-            const fullStats = calculateSessionStats(messages);
-            withSessionsLock(() => {
-                const session = getSessionMetadata(sessionId);
-                if (!session) return;
-                const all = getAllSessionMetadata();
-                const index = all.findIndex(s => s.id === sessionId);
-                if (index >= 0) {
-                    all[index] = { ...session, stats: fullStats };
-                    atomicWriteSessionsFile(JSON.stringify(all, null, 2));
-                }
-            });
-            return;
-        }
+                // Recalculate full stats after rewrite
+                const fullStats = calculateSessionStats(messages);
+                await withSessionsLock(async () => {
+                    const session = getSessionMetadata(sessionId);
+                    if (!session) return;
+                    const all = getAllSessionMetadata();
+                    const index = all.findIndex(s => s.id === sessionId);
+                    if (index >= 0) {
+                        all[index] = { ...session, stats: fullStats };
+                        atomicWriteSessionsFile(JSON.stringify(all, null, 2));
+                    }
+                });
+                return;
+            }
 
-        // Only append new messages
-        const newMessages = messages.slice(existingCount);
+            // Only append new messages
+            const newMessages = messages.slice(existingCount);
 
-        if (newMessages.length > 0) {
-            // Append to JSONL file (no lock needed — per-session files are written by a single Sidecar)
-            const linesToAppend = newMessages.map(msg => JSON.stringify(msg)).join('\n') + '\n';
-            appendFileSync(filePath, linesToAppend, 'utf-8');
-            incrementLineCount(sessionId, newMessages.length);
-            console.log(`[SessionStore] Appended ${newMessages.length} new messages (total: ${messages.length})`);
+            if (newMessages.length > 0) {
+                // Append to JSONL file under the per-session lock acquired above.
+                const linesToAppend = newMessages.map(msg => JSON.stringify(msg)).join('\n') + '\n';
+                appendFileSync(filePath, linesToAppend, 'utf-8');
+                incrementLineCount(sessionId, newMessages.length);
+                console.log(`[SessionStore] Appended ${newMessages.length} new messages (total: ${messages.length})`);
 
-            // Update stats in sessions.json atomically (read + calculate + write under lock)
-            const incrementalStats = calculateSessionStats(newMessages);
-            withSessionsLock(() => {
-                // Read metadata inside the lock to prevent TOCTOU race
-                const session = getSessionMetadata(sessionId);
-                if (!session) return;
+                // Update stats in sessions.json atomically (read + calculate + write under lock)
+                const incrementalStats = calculateSessionStats(newMessages);
+                await withSessionsLock(async () => {
+                    // Read metadata inside the lock to prevent TOCTOU race
+                    const session = getSessionMetadata(sessionId);
+                    if (!session) return;
 
-                const existingStats = session.stats ?? {
-                    messageCount: 0,
-                    totalInputTokens: 0,
-                    totalOutputTokens: 0,
-                };
-                const updatedStats: SessionStats = {
-                    messageCount: existingStats.messageCount + incrementalStats.messageCount,
-                    totalInputTokens: existingStats.totalInputTokens + incrementalStats.totalInputTokens,
-                    totalOutputTokens: existingStats.totalOutputTokens + incrementalStats.totalOutputTokens,
-                    totalCacheReadTokens: ((existingStats.totalCacheReadTokens ?? 0) + (incrementalStats.totalCacheReadTokens ?? 0)) || undefined,
-                    totalCacheCreationTokens: ((existingStats.totalCacheCreationTokens ?? 0) + (incrementalStats.totalCacheCreationTokens ?? 0)) || undefined,
-                };
+                    const existingStats = session.stats ?? {
+                        messageCount: 0,
+                        totalInputTokens: 0,
+                        totalOutputTokens: 0,
+                    };
+                    const updatedStats: SessionStats = {
+                        messageCount: existingStats.messageCount + incrementalStats.messageCount,
+                        totalInputTokens: existingStats.totalInputTokens + incrementalStats.totalInputTokens,
+                        totalOutputTokens: existingStats.totalOutputTokens + incrementalStats.totalOutputTokens,
+                        totalCacheReadTokens: ((existingStats.totalCacheReadTokens ?? 0) + (incrementalStats.totalCacheReadTokens ?? 0)) || undefined,
+                        totalCacheCreationTokens: ((existingStats.totalCacheCreationTokens ?? 0) + (incrementalStats.totalCacheCreationTokens ?? 0)) || undefined,
+                    };
 
-                // Write directly (we already hold the lock — don't call saveSessionMetadata which would deadlock)
-                const all = getAllSessionMetadata();
-                const index = all.findIndex(s => s.id === sessionId);
-                if (index >= 0) {
-                    all[index] = { ...session, stats: updatedStats };
-                    atomicWriteSessionsFile(JSON.stringify(all, null, 2));
-                }
-            });
-        }
+                    // Write directly (we already hold the lock — don't call saveSessionMetadata which would deadlock)
+                    const all = getAllSessionMetadata();
+                    const index = all.findIndex(s => s.id === sessionId);
+                    if (index >= 0) {
+                        all[index] = { ...session, stats: updatedStats };
+                        atomicWriteSessionsFile(JSON.stringify(all, null, 2));
+                    }
+                });
+            }
+        });
     } catch (error) {
         console.error('[SessionStore] Failed to save session messages:', error);
     }
@@ -584,7 +552,7 @@ export function saveSessionMessages(sessionId: string, messages: SessionMessage[
  * /sessions/:id endpoint can persist model / permissionMode / MCP / provider
  * onto an existing session without replaying the full SessionMetadata blob.
  */
-export function updateSessionMetadata(
+export async function updateSessionMetadata(
     sessionId: string,
     updates: Partial<Pick<SessionMetadata,
         | 'title'
@@ -605,14 +573,14 @@ export function updateSessionMetadata(
         | 'providerEnvJson'
         | 'configSnapshotAt'
     >>
-): SessionMetadata | null {
+): Promise<SessionMetadata | null> {
     const session = getSessionMetadata(sessionId);
     if (!session) {
         return null;
     }
 
     const updated = { ...session, ...updates };
-    saveSessionMetadata(updated);
+    await saveSessionMetadata(updated);
     return updated;
 }
 
@@ -625,9 +593,9 @@ export function updateSessionMetadata(
  * `utils/session-snapshot.ts` so a new field added later cannot silently bypass
  * snapshot capture (PRD §6.2 pit-of-success).
  */
-export function createSession(agentDir: string, snapshot?: Partial<SessionMetadata>): SessionMetadata {
+export async function createSession(agentDir: string, snapshot?: Partial<SessionMetadata>): Promise<SessionMetadata> {
     const session = createSessionMetadata(agentDir, snapshot);
-    saveSessionMetadata(session);
+    await saveSessionMetadata(session);
     console.log(`[SessionStore] Created session ${session.id} for ${agentDir} runtime=${session.runtime} configSnapshot=${session.configSnapshotAt ? 'yes' : 'no'}`);
     return session;
 }
@@ -635,14 +603,14 @@ export function createSession(agentDir: string, snapshot?: Partial<SessionMetada
 /**
  * Update session title from first message if needed
  */
-export function updateSessionTitleFromMessage(sessionId: string, message: string): void {
+export async function updateSessionTitleFromMessage(sessionId: string, message: string): Promise<void> {
     const session = getSessionMetadata(sessionId);
     if (!session || session.title !== 'New Chat') {
         return;
     }
 
     const title = generateSessionTitle(message);
-    updateSessionMetadata(sessionId, { title, titleSource: 'default' });
+    await updateSessionMetadata(sessionId, { title, titleSource: 'default' });
 }
 
 /**

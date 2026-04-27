@@ -1,10 +1,14 @@
 // Cron Tool — AI-driven scheduled task management for all Sidecar sessions
 // Supports both IM Bot sessions (with delivery) and regular Chat sessions
-// Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for cron task CRUD
-
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+// Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for cron task CRUD.
+//
+// SDK + zod are imported inside createImCronToolServer() via dynamic import
+// so that modules needing only context helpers (getImCronContext /
+// setSessionCronContext / ...) don't pay the ~300-500ms SDK+zod eval cost.
+// Lazy instantiation wiring lives in builtin-mcp-meta.ts.
 import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
+import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -88,7 +92,14 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
     options.body = JSON.stringify(body);
   }
 
-  const resp = await fetch(url, options);
+  // Pattern 1: 15s cap on local management API calls. The Rust management
+  // server is co-resident; >15s means it's wedged.
+  // Pattern 1 follow-up: parent signal = active turn so stop releases this
+  // even before the 15s ceiling.
+  const resp = await cancellableFetch(url, options, {
+    timeoutMs: 15_000,
+    parentSignal: getCurrentTurnSignal(),
+  });
   return resp.json();
 }
 
@@ -100,7 +111,11 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
  * Returns an error CallToolResult if verification fails, or null if OK.
  */
 async function verifyTaskOwnership(taskId: string, action: string): Promise<CallToolResult | null> {
-  const ctx = imCronContext || sessionCronContext;
+  // W9 fix: snapshot the IM context once per ownership check — see comment in
+  // imCronToolHandler. Two reads of `imCronContext` could observe different
+  // values if a concurrent /api/im/enqueue ran between them.
+  const im = imCronContext;
+  const ctx = im || sessionCronContext;
   if (!ctx) {
     return {
       content: [{ type: 'text', text: `Error: No cron context available. Cannot ${action} tasks without session context.` }],
@@ -109,8 +124,8 @@ async function verifyTaskOwnership(taskId: string, action: string): Promise<Call
   }
 
   // Build query: IM sessions filter by botId, desktop sessions by workspace
-  const query = imCronContext
-    ? `?sourceBotId=${encodeURIComponent(imCronContext.botId)}`
+  const query = im
+    ? `?sourceBotId=${encodeURIComponent(im.botId)}`
     : `?workspacePath=${encodeURIComponent(ctx.workspacePath)}`;
 
   const result = await managementApi(`/api/cron/list${query}`) as {
@@ -130,30 +145,20 @@ async function verifyTaskOwnership(taskId: string, action: string): Promise<Call
 
 // ===== Tool handler =====
 
-const scheduleSchema = z.discriminatedUnion('kind', [
-  z.object({
-    kind: z.literal('at'),
-    at: z.string().describe('ISO-8601 datetime for one-shot execution, e.g. "2024-12-01T14:30:00+08:00"'),
-  }),
-  z.object({
-    kind: z.literal('every'),
-    minutes: z.number().min(5).describe('Interval in minutes (minimum 5)'),
-  }),
-  z.object({
-    kind: z.literal('cron'),
-    expr: z.string().describe('Cron expression, e.g. "0 9 * * *" for daily 9 AM'),
-    tz: z.string().optional().describe('IANA timezone, e.g. "Asia/Shanghai"'),
-  }),
-  z.object({
-    kind: z.literal('loop'),
-  }).describe('Ralph Loop: completion-triggered infinite loop. AI finishes → 3s buffer → execute again. Always uses single_session. Stops after 10 consecutive failures.'),
-]);
+// Schedule config type — mirror of the zod schema built inside the factory.
+// Defined as a plain TS union so top-level handler/formatter code can reference
+// it without pulling in zod at module-eval time.
+type ScheduleConfig =
+  | { kind: 'at'; at: string }
+  | { kind: 'every'; minutes: number }
+  | { kind: 'cron'; expr: string; tz?: string }
+  | { kind: 'loop' };
 
 async function imCronToolHandler(args: {
   action: 'list' | 'add' | 'update' | 'remove' | 'run' | 'runs' | 'status' | 'wake' | 'channels';
   job?: {
     name?: string;
-    schedule: z.infer<typeof scheduleSchema>;
+    schedule: ScheduleConfig;
     message: string;
     sessionTarget?: 'new_session' | 'single_session';
     deliverTo?: string;
@@ -162,7 +167,7 @@ async function imCronToolHandler(args: {
   patch?: {
     name?: string;
     message?: string;
-    schedule?: z.infer<typeof scheduleSchema>;
+    schedule?: ScheduleConfig;
     intervalMinutes?: number;
   };
   limit?: number;
@@ -175,6 +180,15 @@ async function imCronToolHandler(args: {
     };
   }
 
+  // W9 fix: take a single snapshot of the IM context at the top of the
+  // handler. The module-global `imCronContext` is overwritten on every
+  // /api/im/enqueue, so for a multi-chat bot a concurrent enqueue from a
+  // different chat can change the context between two field reads inside
+  // this handler — leading to the cron task being tagged with one chat's
+  // botId and another chat's chatId. The local snapshot is stable for the
+  // duration of this tool call regardless of what the next enqueue does.
+  const im = imCronContext;
+
   try {
     switch (args.action) {
       case 'add': {
@@ -185,8 +199,9 @@ async function imCronToolHandler(args: {
           };
         }
 
-        // Resolve context: prefer IM context, fall back to session context
-        const addCtx = imCronContext || sessionCronContext;
+        // Resolve context: prefer IM context (snapshot taken above), fall
+        // back to session context.
+        const addCtx = im || sessionCronContext;
         if (!addCtx) {
           return {
             content: [{ type: 'text', text: 'Error: No cron context available. Cannot create scheduled tasks without session context.' }],
@@ -231,8 +246,8 @@ async function imCronToolHandler(args: {
         // --- Delivery resolution (3-tier priority) ---
         // Always set sourceBotId when in IM context, regardless of deliverTo target.
         // This ensures IM-created tasks remain listable/updatable from the originating IM session.
-        if (imCronContext) {
-          createPayload.sourceBotId = imCronContext.botId;
+        if (im) {
+          createPayload.sourceBotId = im.botId;
         }
 
         let deliveryDesc = '';
@@ -257,12 +272,12 @@ async function imCronToolHandler(args: {
             platform: target.platform,
           };
           deliveryDesc = ` Results will be delivered to ${target.name} (${target.platform}).`;
-        } else if (imCronContext) {
+        } else if (im) {
           // 2. Auto: IM session → deliver back to source chat
           createPayload.delivery = {
-            botId: imCronContext.botId,
-            chatId: imCronContext.chatId,
-            platform: imCronContext.platform,
+            botId: im.botId,
+            chatId: im.chatId,
+            platform: im.platform,
           };
           deliveryDesc = ` Results will be delivered to this chat.`;
         }
@@ -281,7 +296,7 @@ async function imCronToolHandler(args: {
             schedule: args.job.schedule,
             scheduleDesc: scheduleDescription,
             nextExecutionAt: result.nextExecutionAt,
-            deliverTo: args.job.deliverTo || (imCronContext ? imCronContext.botId : null),
+            deliverTo: args.job.deliverTo || (im ? im.botId : null),
             message: `Scheduled task created. ${scheduleDescription}${deliveryDesc}`,
           };
           return {
@@ -296,9 +311,9 @@ async function imCronToolHandler(args: {
 
       case 'list': {
         // Filter by sourceBotId for IM sessions, by workspace for desktop sessions
-        const listCtx = imCronContext || sessionCronContext;
-        const query = imCronContext
-          ? `?sourceBotId=${encodeURIComponent(imCronContext.botId)}`
+        const listCtx = im || sessionCronContext;
+        const query = im
+          ? `?sourceBotId=${encodeURIComponent(im.botId)}`
           : listCtx?.workspacePath
             ? `?workspacePath=${encodeURIComponent(listCtx.workspacePath)}`
             : '';
@@ -469,9 +484,9 @@ async function imCronToolHandler(args: {
 
       case 'status': {
         // For IM sessions, filter by botId; for desktop sessions, filter by workspace
-        const statusCtx = imCronContext || sessionCronContext;
-        const statusQuery = imCronContext
-          ? `?botId=${encodeURIComponent(imCronContext.botId)}`
+        const statusCtx = im || sessionCronContext;
+        const statusQuery = im
+          ? `?botId=${encodeURIComponent(im.botId)}`
           : statusCtx?.workspacePath
             ? `?workspacePath=${encodeURIComponent(statusCtx.workspacePath)}`
             : '';
@@ -490,14 +505,14 @@ async function imCronToolHandler(args: {
       }
 
       case 'wake': {
-        if (!imCronContext) {
+        if (!im) {
           return {
             content: [{ type: 'text', text: 'Error: "wake" action is only available in IM Bot sessions.' }],
             isError: true,
           };
         }
         const resp = await managementApi('/api/im/wake', 'POST', {
-          botId: imCronContext.botId,
+          botId: im.botId,
           text: args.text || undefined,
         }) as { ok: boolean; error?: string };
 
@@ -541,7 +556,7 @@ async function imCronToolHandler(args: {
   }
 }
 
-function formatSchedule(schedule: z.infer<typeof scheduleSchema>): string {
+function formatSchedule(schedule: ScheduleConfig): string {
   switch (schedule.kind) {
     case 'at':
       return `One-shot at ${schedule.at}`;
@@ -556,7 +571,29 @@ function formatSchedule(schedule: z.infer<typeof scheduleSchema>): string {
 
 // ===== Server creation =====
 
-export function createImCronToolServer() {
+export async function createImCronToolServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
+  // scheduleSchema must live inside the factory — it references `z` which is
+  // only in scope here after the dynamic import completes.
+  const scheduleSchema = z.discriminatedUnion('kind', [
+    z.object({
+      kind: z.literal('at'),
+      at: z.string().describe('ISO-8601 datetime for one-shot execution, e.g. "2024-12-01T14:30:00+08:00"'),
+    }),
+    z.object({
+      kind: z.literal('every'),
+      minutes: z.number().min(5).describe('Interval in minutes (minimum 5)'),
+    }),
+    z.object({
+      kind: z.literal('cron'),
+      expr: z.string().describe('Cron expression, e.g. "0 9 * * *" for daily 9 AM'),
+      tz: z.string().optional().describe('IANA timezone, e.g. "Asia/Shanghai"'),
+    }),
+    z.object({
+      kind: z.literal('loop'),
+    }).describe('Ralph Loop: completion-triggered infinite loop. AI finishes → 3s buffer → execute again. Always uses single_session. Stops after 10 consecutive failures.'),
+  ]);
   return createSdkMcpServer({
     name: 'im-cron',
     version: '1.0.0',
@@ -615,4 +652,3 @@ Each task runs independently in a new AI session (except "loop" which uses singl
   });
 }
 
-export const imCronToolServer = createImCronToolServer();

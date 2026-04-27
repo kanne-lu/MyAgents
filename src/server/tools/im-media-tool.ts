@@ -1,9 +1,10 @@
 // IM Bot Media Tool — AI-driven media sending for IM Bots
-// Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for file upload/send
-
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod/v4';
+// Uses Rust Management API (via MYAGENTS_MANAGEMENT_PORT) for file upload/send.
+// SDK + zod loaded lazily inside createImMediaToolServer() — see
+// builtin-mcp-meta.ts for registration.
 import { assertSafeFilePath } from '../utils/safe-file-path';
+import { cancellableFetch } from '../utils/cancellation';
+import { getCurrentTurnSignal } from '../utils/turn-abort';
 
 // MCP Tool Result type
 type CallToolResult = {
@@ -61,7 +62,14 @@ async function managementApi(path: string, method: 'GET' | 'POST' = 'GET', body?
     options.body = JSON.stringify(body);
   }
 
-  const resp = await fetch(url, options);
+  // Pattern 1: 30s cap. Media send may transit larger payloads (file upload
+  // → IM platform → confirm), so a longer ceiling than the plain CRUD case.
+  // Pattern 1 follow-up: parent signal = active turn so stop releases this
+  // even before the 30s ceiling.
+  const resp = await cancellableFetch(url, options, {
+    timeoutMs: 30_000,
+    parentSignal: getCurrentTurnSignal(),
+  });
   return resp.json();
 }
 
@@ -78,7 +86,13 @@ async function sendMediaHandler(args: {
     };
   }
 
-  if (!imMediaContext) {
+  // W9 fix: snapshot the IM context once at the start of the handler. The
+  // module-global `imMediaContext` is overwritten on every /api/im/enqueue
+  // (incl. multi-chat bots), so two reads inside this handler can otherwise
+  // observe different (botId, chatId) pairs and deliver the file to the
+  // wrong peer.
+  const ctx = imMediaContext;
+  if (!ctx) {
     return {
       content: [{ type: 'text', text: 'Error: No IM context available. This tool can only be used within an IM Bot session.' }],
       isError: true,
@@ -90,10 +104,10 @@ async function sendMediaHandler(args: {
   // for older call sites that haven't been updated yet. Prompt-injected AI
   // must not exfiltrate ~/.ssh/id_rsa etc. through an IM chat peer.
   let safeFilePath = args.file_path;
-  if (imMediaContext.workspacePath) {
+  if (ctx.workspacePath) {
     try {
       safeFilePath = assertSafeFilePath(args.file_path, {
-        workspacePath: imMediaContext.workspacePath,
+        workspacePath: ctx.workspacePath,
       });
     } catch (err) {
       return {
@@ -105,9 +119,9 @@ async function sendMediaHandler(args: {
 
   try {
     const result = await managementApi('/api/im/send-media', 'POST', {
-      botId: imMediaContext.botId,
-      chatId: imMediaContext.chatId,
-      platform: imMediaContext.platform,
+      botId: ctx.botId,
+      chatId: ctx.chatId,
+      platform: ctx.platform,
       filePath: safeFilePath,
       caption: args.caption,
     }) as { ok: boolean; fileName?: string; fileSize?: number; error?: string };
@@ -136,7 +150,9 @@ async function sendMediaHandler(args: {
 
 // ===== Server creation =====
 
-export function createImMediaToolServer() {
+export async function createImMediaToolServer() {
+  const { createSdkMcpServer, tool } = await import('@anthropic-ai/claude-agent-sdk');
+  const { z } = await import('zod/v4');
   return createSdkMcpServer({
     name: 'im-media',
     version: '1.0.0',
@@ -170,4 +186,3 @@ Do NOT use this tool for intermediate work files — only for files the user exp
   });
 }
 
-export const imMediaToolServer = createImMediaToolServer();

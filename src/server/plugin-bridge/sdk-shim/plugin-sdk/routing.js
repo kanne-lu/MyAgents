@@ -183,7 +183,7 @@ function resolveGatewayMessageChannel(raw) {
   return normalizeMessageChannel(raw);
 }
 
-module.exports = {
+export {
   // routing/session-key
   buildAgentMainSessionKey,
   DEFAULT_ACCOUNT_ID,

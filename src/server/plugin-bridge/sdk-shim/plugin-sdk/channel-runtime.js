@@ -198,7 +198,7 @@ function waitUntilAbort(signal, onAbort) {
   });
 }
 
-module.exports = {
+export {
   // chat-type
   normalizeChatType,
   // reply-prefix

@@ -1,5 +1,5 @@
 // AUTO-GENERATED STUB — do not edit manually.
-// Regenerate: bun scripts/generate-sdk-shims.ts
+// Regenerate: npm run generate:sdk-shims
 // Source: openclaw/src/plugin-sdk/security-runtime.ts
 
 const _warned = new Set();
@@ -7,48 +7,56 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/security-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
-function buildUntrustedChannelMetadata() { _w('buildUntrustedChannelMetadata'); return undefined; }
-async function readStoreAllowFromForDmPolicy() { _w('readStoreAllowFromForDmPolicy'); return undefined; }
-async function resolveDmAllowState() { _w('resolveDmAllowState'); return undefined; }
-function resolvePinnedMainDmOwnerFromAllowlist() { _w('resolvePinnedMainDmOwnerFromAllowlist'); return undefined; }
-function resolveEffectiveAllowFromLists() { _w('resolveEffectiveAllowFromLists'); return undefined; }
-function resolveDmGroupAccessDecision() { _w('resolveDmGroupAccessDecision'); return undefined; }
-function resolveDmGroupAccessWithLists() { _w('resolveDmGroupAccessWithLists'); return undefined; }
-function resolveDmGroupAccessWithCommandGate() { _w('resolveDmGroupAccessWithCommandGate'); return undefined; }
-const DM_GROUP_ACCESS_REASON = undefined;
-function detectSuspiciousPatterns() { _w('detectSuspiciousPatterns'); return undefined; }
-function resolveHookExternalContentSource() { _w('resolveHookExternalContentSource'); return undefined; }
-function mapHookExternalContentSource() { _w('mapHookExternalContentSource'); return undefined; }
-function wrapExternalContent() { _w('wrapExternalContent'); return undefined; }
-function buildSafeExternalPrompt() { _w('buildSafeExternalPrompt'); return undefined; }
-function isExternalHookSession() { _w('isExternalHookSession'); return false; }
-function getHookType() { _w('getHookType'); return undefined; }
-function wrapWebContent() { _w('wrapWebContent'); return undefined; }
-function testRegexWithBoundedInput() { _w('testRegexWithBoundedInput'); return undefined; }
-function hasNestedRepetition() { _w('hasNestedRepetition'); return false; }
-function compileSafeRegexDetailed() { _w('compileSafeRegexDetailed'); return undefined; }
-function compileSafeRegex() { _w('compileSafeRegex'); return undefined; }
-
-module.exports = {
-  buildUntrustedChannelMetadata,
-  readStoreAllowFromForDmPolicy,
-  resolveDmAllowState,
-  resolvePinnedMainDmOwnerFromAllowlist,
-  resolveEffectiveAllowFromLists,
-  resolveDmGroupAccessDecision,
-  resolveDmGroupAccessWithLists,
-  resolveDmGroupAccessWithCommandGate,
-  DM_GROUP_ACCESS_REASON,
-  detectSuspiciousPatterns,
-  resolveHookExternalContentSource,
-  mapHookExternalContentSource,
-  wrapExternalContent,
-  buildSafeExternalPrompt,
-  isExternalHookSession,
-  getHookType,
-  wrapWebContent,
-  testRegexWithBoundedInput,
-  hasNestedRepetition,
-  compileSafeRegexDetailed,
-  compileSafeRegex,
-};
+export function collectConditionalChannelFieldAssignments() { _w('collectConditionalChannelFieldAssignments'); return []; }
+export function collectNestedChannelFieldAssignments() { _w('collectNestedChannelFieldAssignments'); return []; }
+export function collectSimpleChannelFieldAssignments() { _w('collectSimpleChannelFieldAssignments'); return []; }
+export function getChannelRecord() { _w('getChannelRecord'); return undefined; }
+export function getChannelSurface() { _w('getChannelSurface'); return undefined; }
+export function hasConfiguredSecretInputValue() { _w('hasConfiguredSecretInputValue'); return false; }
+export function isBaseFieldActiveForChannelSurface() { _w('isBaseFieldActiveForChannelSurface'); return false; }
+export function normalizeSecretStringValue() { _w('normalizeSecretStringValue'); return ""; }
+export function resolveChannelAccountSurface() { _w('resolveChannelAccountSurface'); return undefined; }
+export function collectNestedChannelTtsAssignments() { _w('collectNestedChannelTtsAssignments'); return []; }
+export function createResolverContext() { _w('createResolverContext'); return undefined; }
+export function pushAssignment() { _w('pushAssignment'); return undefined; }
+export function pushWarning() { _w('pushWarning'); return undefined; }
+export function pushInactiveSurfaceWarning() { _w('pushInactiveSurfaceWarning'); return undefined; }
+export function collectSecretInputAssignment() { _w('collectSecretInputAssignment'); return []; }
+export function applyResolvedAssignments() { _w('applyResolvedAssignments'); return undefined; }
+export function hasOwnProperty() { _w('hasOwnProperty'); return false; }
+export function isEnabledFlag() { _w('isEnabledFlag'); return false; }
+export function isChannelAccountEffectivelyEnabled() { _w('isChannelAccountEffectivelyEnabled'); return false; }
+export function isNonEmptyString() { _w('isNonEmptyString'); return false; }
+export function parseEnvValue() { _w('parseEnvValue'); return undefined; }
+export function normalizePositiveInt() { _w('normalizePositiveInt'); return ""; }
+export function parseDotPath() { _w('parseDotPath'); return undefined; }
+export function toDotPath() { _w('toDotPath'); return undefined; }
+export function ensureDirForFile() { _w('ensureDirForFile'); return undefined; }
+export function writeJsonFileSecure() { _w('writeJsonFileSecure'); return undefined; }
+export function readTextFileIfExists() { _w('readTextFileIfExists'); return undefined; }
+export function writeTextFileAtomic() { _w('writeTextFileAtomic'); return undefined; }
+export function isRecord() { _w('isRecord'); return false; }
+export function buildUntrustedChannelMetadata() { _w('buildUntrustedChannelMetadata'); return undefined; }
+export function evaluateSupplementalContextVisibility() { _w('evaluateSupplementalContextVisibility'); return undefined; }
+export function shouldIncludeSupplementalContext() { _w('shouldIncludeSupplementalContext'); return false; }
+export function filterSupplementalContextItems() { _w('filterSupplementalContextItems'); return undefined; }
+export async function readStoreAllowFromForDmPolicy() { _w('readStoreAllowFromForDmPolicy'); return undefined; }
+export async function resolveDmAllowState() { _w('resolveDmAllowState'); return undefined; }
+export function resolvePinnedMainDmOwnerFromAllowlist() { _w('resolvePinnedMainDmOwnerFromAllowlist'); return undefined; }
+export function resolveEffectiveAllowFromLists() { _w('resolveEffectiveAllowFromLists'); return undefined; }
+export function resolveDmGroupAccessDecision() { _w('resolveDmGroupAccessDecision'); return undefined; }
+export function resolveDmGroupAccessWithLists() { _w('resolveDmGroupAccessWithLists'); return undefined; }
+export function resolveDmGroupAccessWithCommandGate() { _w('resolveDmGroupAccessWithCommandGate'); return undefined; }
+export const DM_GROUP_ACCESS_REASON = undefined;
+export function detectSuspiciousPatterns() { _w('detectSuspiciousPatterns'); return undefined; }
+export function wrapExternalContent() { _w('wrapExternalContent'); return undefined; }
+export function buildSafeExternalPrompt() { _w('buildSafeExternalPrompt'); return undefined; }
+export function getHookType() { _w('getHookType'); return undefined; }
+export function wrapWebContent() { _w('wrapWebContent'); return undefined; }
+export function isExternalHookSession() { _w('isExternalHookSession'); return false; }
+export function mapHookExternalContentSource() { _w('mapHookExternalContentSource'); return undefined; }
+export function resolveHookExternalContentSource() { _w('resolveHookExternalContentSource'); return undefined; }
+export function testRegexWithBoundedInput() { _w('testRegexWithBoundedInput'); return undefined; }
+export function hasNestedRepetition() { _w('hasNestedRepetition'); return false; }
+export function compileSafeRegexDetailed() { _w('compileSafeRegexDetailed'); return undefined; }
+export function compileSafeRegex() { _w('compileSafeRegex'); return undefined; }

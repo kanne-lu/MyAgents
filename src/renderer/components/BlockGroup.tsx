@@ -45,26 +45,29 @@ const BlockGroup = memo(function BlockGroup({
             />
           ))}
 
-          {/* Middle: collapsible zone — same CSS Grid animation as ProcessRow */}
-          <div
-            className="grid transition-[grid-template-rows] duration-200 ease-out"
-            style={{ gridTemplateRows: shouldFold ? '0fr' : '1fr' }}
-          >
-            <div className="overflow-hidden">
-              {blocks.slice(VISIBLE_HEAD, -VISIBLE_TAIL).map((block, i) => {
-                const index = VISIBLE_HEAD + i;
-                return (
-                  <ProcessRow
-                    key={index}
-                    block={block}
-                    index={index}
-                    totalBlocks={blocks.length}
-                    isStreaming={isStreamingActive}
-                  />
-                );
-              })}
+          {/* Middle: collapsible zone — Pattern 3 §3.2.3 (Collapse = unmount).
+              Folded rows are not rendered at all; previously they mounted
+              behind `gridTemplateRows: 0fr` and burned re-render cost on
+              every streaming delta. The fold-bar below replaces them when
+              `shouldFold` is true; tail rows always stay mounted. */}
+          {!shouldFold && (
+            <div className="grid grid-rows-[1fr] transition-[grid-template-rows] duration-200 ease-out">
+              <div className="overflow-hidden">
+                {blocks.slice(VISIBLE_HEAD, -VISIBLE_TAIL).map((block, i) => {
+                  const index = VISIBLE_HEAD + i;
+                  return (
+                    <ProcessRow
+                      key={index}
+                      block={block}
+                      index={index}
+                      totalBlocks={blocks.length}
+                      isStreaming={isStreamingActive}
+                    />
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Fold bar: inversely animated — appears as middle collapses */}
           <div

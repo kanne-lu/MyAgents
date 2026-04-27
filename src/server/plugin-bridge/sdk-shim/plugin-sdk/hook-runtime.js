@@ -1,5 +1,5 @@
 // AUTO-GENERATED STUB — do not edit manually.
-// Regenerate: bun scripts/generate-sdk-shims.ts
+// Regenerate: npm run generate:sdk-shims
 // Source: openclaw/src/plugin-sdk/hook-runtime.ts
 
 const _warned = new Set();
@@ -7,58 +7,30 @@ function _w(fn) {
   if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/hook-runtime.' + fn + '() not implemented in Bridge mode'); }
 }
 
-function fireAndForgetHook() { _w('fireAndForgetHook'); return undefined; }
-async function triggerInternalHook() { _w('triggerInternalHook'); return undefined; }
-function registerInternalHook() { _w('registerInternalHook'); return undefined; }
-function unregisterInternalHook() { _w('unregisterInternalHook'); return undefined; }
-function clearInternalHooks() { _w('clearInternalHooks'); return undefined; }
-function getRegisteredEventKeys() { _w('getRegisteredEventKeys'); return undefined; }
-function hasInternalHookListeners() { _w('hasInternalHookListeners'); return false; }
-function createInternalHookEvent() { _w('createInternalHookEvent'); return undefined; }
-function isAgentBootstrapEvent() { _w('isAgentBootstrapEvent'); return false; }
-function isGatewayStartupEvent() { _w('isGatewayStartupEvent'); return false; }
-function isMessageReceivedEvent() { _w('isMessageReceivedEvent'); return false; }
-function isMessageSentEvent() { _w('isMessageSentEvent'); return false; }
-function isMessageTranscribedEvent() { _w('isMessageTranscribedEvent'); return false; }
-function isMessagePreprocessedEvent() { _w('isMessagePreprocessedEvent'); return false; }
-function isSessionPatchEvent() { _w('isSessionPatchEvent'); return false; }
-function deriveInboundMessageHookContext() { _w('deriveInboundMessageHookContext'); return undefined; }
-function buildCanonicalSentMessageHookContext() { _w('buildCanonicalSentMessageHookContext'); return undefined; }
-function toPluginMessageContext() { _w('toPluginMessageContext'); return undefined; }
-function toPluginInboundClaimContext() { _w('toPluginInboundClaimContext'); return undefined; }
-function toPluginInboundClaimEvent() { _w('toPluginInboundClaimEvent'); return undefined; }
-function toPluginMessageReceivedEvent() { _w('toPluginMessageReceivedEvent'); return undefined; }
-function toPluginMessageSentEvent() { _w('toPluginMessageSentEvent'); return undefined; }
-function toInternalMessageReceivedContext() { _w('toInternalMessageReceivedContext'); return undefined; }
-function toInternalMessageTranscribedContext() { _w('toInternalMessageTranscribedContext'); return undefined; }
-function toInternalMessagePreprocessedContext() { _w('toInternalMessagePreprocessedContext'); return undefined; }
-function toInternalMessageSentContext() { _w('toInternalMessageSentContext'); return undefined; }
-
-module.exports = {
-  fireAndForgetHook,
-  triggerInternalHook,
-  registerInternalHook,
-  unregisterInternalHook,
-  clearInternalHooks,
-  getRegisteredEventKeys,
-  hasInternalHookListeners,
-  createInternalHookEvent,
-  isAgentBootstrapEvent,
-  isGatewayStartupEvent,
-  isMessageReceivedEvent,
-  isMessageSentEvent,
-  isMessageTranscribedEvent,
-  isMessagePreprocessedEvent,
-  isSessionPatchEvent,
-  deriveInboundMessageHookContext,
-  buildCanonicalSentMessageHookContext,
-  toPluginMessageContext,
-  toPluginInboundClaimContext,
-  toPluginInboundClaimEvent,
-  toPluginMessageReceivedEvent,
-  toPluginMessageSentEvent,
-  toInternalMessageReceivedContext,
-  toInternalMessageTranscribedContext,
-  toInternalMessagePreprocessedContext,
-  toInternalMessageSentContext,
-};
+export function fireAndForgetHook() { _w('fireAndForgetHook'); return undefined; }
+export async function triggerInternalHook() { _w('triggerInternalHook'); return undefined; }
+export function registerInternalHook() { _w('registerInternalHook'); return undefined; }
+export function unregisterInternalHook() { _w('unregisterInternalHook'); return undefined; }
+export function clearInternalHooks() { _w('clearInternalHooks'); return undefined; }
+export function setInternalHooksEnabled() { _w('setInternalHooksEnabled'); return undefined; }
+export function getRegisteredEventKeys() { _w('getRegisteredEventKeys'); return undefined; }
+export function hasInternalHookListeners() { _w('hasInternalHookListeners'); return false; }
+export function createInternalHookEvent() { _w('createInternalHookEvent'); return undefined; }
+export function isAgentBootstrapEvent() { _w('isAgentBootstrapEvent'); return false; }
+export function isGatewayStartupEvent() { _w('isGatewayStartupEvent'); return false; }
+export function isMessageReceivedEvent() { _w('isMessageReceivedEvent'); return false; }
+export function isMessageSentEvent() { _w('isMessageSentEvent'); return false; }
+export function isMessageTranscribedEvent() { _w('isMessageTranscribedEvent'); return false; }
+export function isMessagePreprocessedEvent() { _w('isMessagePreprocessedEvent'); return false; }
+export function isSessionPatchEvent() { _w('isSessionPatchEvent'); return false; }
+export function deriveInboundMessageHookContext() { _w('deriveInboundMessageHookContext'); return undefined; }
+export function buildCanonicalSentMessageHookContext() { _w('buildCanonicalSentMessageHookContext'); return undefined; }
+export function toPluginMessageContext() { _w('toPluginMessageContext'); return undefined; }
+export function toPluginInboundClaimContext() { _w('toPluginInboundClaimContext'); return undefined; }
+export function toPluginInboundClaimEvent() { _w('toPluginInboundClaimEvent'); return undefined; }
+export function toPluginMessageReceivedEvent() { _w('toPluginMessageReceivedEvent'); return undefined; }
+export function toPluginMessageSentEvent() { _w('toPluginMessageSentEvent'); return undefined; }
+export function toInternalMessageReceivedContext() { _w('toInternalMessageReceivedContext'); return undefined; }
+export function toInternalMessageTranscribedContext() { _w('toInternalMessageTranscribedContext'); return undefined; }
+export function toInternalMessagePreprocessedContext() { _w('toInternalMessagePreprocessedContext'); return undefined; }
+export function toInternalMessageSentContext() { _w('toInternalMessageSentContext'); return undefined; }

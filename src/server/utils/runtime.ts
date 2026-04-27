@@ -33,15 +33,11 @@ function isWindows(): boolean {
 }
 
 /**
- * Get the bun executable name based on platform
- */
-function getBunExecutableName(): string {
-  return isWindows() ? 'bun.exe' : 'bun';
-}
-
-/**
- * Get bundled bun paths inside the app bundle.
- * These are the primary paths we check first.
+ * Historical note: v0.1.x shipped with bundled Bun; this file used to expose
+ * `getBundledBunPaths()`, `getBundledBunDir()`, `getSystemBunPaths()`, and
+ * `isBunRuntime()`. v0.2.0 removed Bun from the app bundle — all runtime
+ * lookups now go through Node.js helpers below (`getBundledNodePath`,
+ * `getBundledNodeDir`, `getSystemNpxPaths`, etc.).
  *
  * Directory structure:
  * - Windows: Flat structure, bun.exe and server-dist.js in same directory
@@ -55,100 +51,10 @@ function getBunExecutableName(): string {
  *   ├── MacOS/bun         <- bundled bun
  *   └── Resources/server-dist.js  <- scriptDir
  */
-function getBundledBunPaths(): string[] {
-  const scriptDir = getScriptDir();
-  const bunExe = getBunExecutableName();
-
-  if (isWindows()) {
-    // Windows: Flat structure - bun.exe is in the same directory as server-dist.js
-    // scriptDir = C:\Users\xxx\AppData\Local\MyAgents (installation directory)
-    return [
-      resolve(scriptDir, bunExe),
-      resolve(scriptDir, 'bun-x86_64-pc-windows-msvc.exe'),
-    ];
-  }
-
-  // macOS: bun is in Contents/MacOS
-  // In bundled app: scriptDir = .../Contents/Resources
-  // So MacOS is at .../Contents/MacOS
-  return [
-    resolve(scriptDir, '..', 'MacOS', 'bun'),
-  ];
-}
-
-/**
- * Get the directory containing bundled bun executable.
- * Returns null if bundled bun is not found.
- *
- * This is used by agent-session.ts to add the bundled bun directory to PATH.
- */
-export function getBundledBunDir(): string | null {
-  const scriptDir = getScriptDir();
-  const bunExe = getBunExecutableName();
-
-  if (isWindows()) {
-    // Windows: Check same directory as server-dist.js
-    const bunPath = resolve(scriptDir, bunExe);
-    if (existsSync(bunPath)) {
-      return scriptDir;
-    }
-    // Also check for alternative bun naming
-    const altBunPath = resolve(scriptDir, 'bun-x86_64-pc-windows-msvc.exe');
-    if (existsSync(altBunPath)) {
-      return scriptDir;
-    }
-  } else {
-    // macOS: Check Contents/MacOS directory
-    const macOSDir = resolve(scriptDir, '..', 'MacOS');
-    const bunPath = resolve(macOSDir, 'bun');
-    if (existsSync(bunPath)) {
-      return macOSDir;
-    }
-  }
-
-  return null;
-}
-
-/**
- * Get system bun paths (user-installed).
- */
-function getSystemBunPaths(): string[] {
-  const paths: string[] = [];
-
-  if (isWindows()) {
-    // Windows paths
-    const userProfile = process.env.USERPROFILE;
-    const localAppData = process.env.LOCALAPPDATA;
-    const programFiles = process.env.PROGRAMFILES;
-
-    if (userProfile) {
-      paths.push(resolve(userProfile, '.bun', 'bin', 'bun.exe'));
-    }
-    if (localAppData) {
-      paths.push(resolve(localAppData, 'bun', 'bin', 'bun.exe'));
-    }
-    if (programFiles) {
-      paths.push(resolve(programFiles, 'bun', 'bun.exe'));
-    }
-  } else {
-    // Unix paths (macOS/Linux)
-    const homeDir = process.env.HOME;
-
-    // User's bun installation
-    if (homeDir) {
-      paths.push(`${homeDir}/.bun/bin/bun`);
-    }
-
-    // macOS Homebrew paths
-    paths.push('/opt/homebrew/bin/bun');
-
-    // Linux paths
-    paths.push('/usr/local/bin/bun');
-    paths.push('/usr/bin/bun');
-  }
-
-  return paths;
-}
+// v0.2.0: Bun path-discovery helpers removed. MyAgents no longer bundles Bun;
+// the SDK's own native binary contains its embedded Bun (SDK-team managed,
+// unreachable to us). All bundled-runtime lookups now go through
+// getBundledNodePath() / getBundledNodeDir() below.
 
 /**
  * Get system node paths (user-installed).
@@ -276,49 +182,28 @@ export function getBundledNodePath(): string | null {
 }
 
 /**
- * Check if a path is a bun executable (not just contains 'bun' in path).
- */
-export function isBunRuntime(runtimePath: string): boolean {
-  // Get the executable name from the path (handle both / and \ separators)
-  const separator = isWindows() ? /[\\/]/ : /\//;
-  const parts = runtimePath.split(separator);
-  const execName = (parts.pop() || '').toLowerCase();
-  // Check if the executable name is 'bun' or 'bun.exe' or starts with 'bun-'
-  return execName === 'bun' || execName === 'bun.exe' || execName.startsWith('bun-');
-}
-
-/**
- * Get the path to a JavaScript runtime (bun or node).
+ * Get the path to the JavaScript runtime used to execute our own scripts
+ * (sidecar entrypoint, plugin bridge, etc.).
  *
- * Priority order:
- * 1. Bundled bun (inside app bundle /Contents/MacOS/bun)
- * 2. System bun (~/.bun/bin/bun, /opt/homebrew/bin/bun)
- * 3. System node (various paths)
+ * Priority:
+ *   1. Bundled Node.js (app-local — guarantees a matching version)
+ *   2. System Node.js (user-maintained, usually newer patch version)
+ *   3. Literal "node" (last resort — relies on $PATH)
  *
- * This ensures MCP and other features work without requiring Node.js.
- *
- * @returns Absolute path to the runtime, or 'node' as fallback
+ * v0.2.0+: Bun is no longer a candidate. The SDK carries its own runtime
+ * inside the native binary; everything else runs on Node.js.
  */
 export function getBundledRuntimePath(): string {
-  // Try bundled bun first
-  const bundledBun = findExistingPath(getBundledBunPaths());
-  if (bundledBun) {
-    return bundledBun;
+  const bundledNode = getBundledNodePath();
+  if (bundledNode) {
+    return bundledNode;
   }
 
-  // Try system bun
-  const systemBun = findExistingPath(getSystemBunPaths());
-  if (systemBun) {
-    return systemBun;
-  }
-
-  // Try system node
   const systemNode = findExistingPath(getSystemNodePaths());
   if (systemNode) {
     return systemNode;
   }
 
-  // Last resort fallback - rely on PATH
   return 'node';
 }
 
@@ -373,37 +258,41 @@ export function getBundledCusePath(): string | null {
 }
 
 /**
- * Get the path to the bundled agent-browser CLI entry point (agent-browser.js).
+ * Get the absolute path to the bundled sharp module's CommonJS entry (`lib/index.js`).
+ *
+ * sharp ships per-platform native addons (`@img/sharp-<triple>/sharp.node`) that
+ * esbuild cannot bundle, so we install sharp into a dedicated `sharp-runtime/`
+ * node_modules tree and load it at runtime via absolute-path dynamic import.
+ * Sharp's internal `require('./libvips')` and `require('@img/sharp-<triple>/sharp.node')`
+ * both resolve correctly because Node walks up from the loaded entry file to
+ * find `sharp-runtime/node_modules/`.
  *
  * Search order:
- * 1. Production (macOS): Contents/Resources/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
- * 2. Production (Windows): <install-dir>/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
- * 3. Development: <project-root>/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
- * 4. User-local install: ~/.myagents/agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
+ * 1. Production (macOS):   Contents/Resources/sharp-runtime/node_modules/sharp/lib/index.js
+ * 2. Production (Windows): <install-dir>/sharp-runtime/node_modules/sharp/lib/index.js
+ * 3. Development:          <project-root>/node_modules/sharp/lib/index.js  (top-level dep)
  *
- * @returns Absolute path to agent-browser.js, or null if not found
+ * @returns Absolute path to sharp's lib/index.js, or null if not found.
  */
-export function getAgentBrowserCliPath(): string | null {
-  const relPath = join('agent-browser-cli', 'node_modules', 'agent-browser', 'bin', 'agent-browser.js');
+export function getBundledSharpEntryPoint(): string | null {
+  const relBundled = join('sharp-runtime', 'node_modules', 'sharp', 'lib', 'index.js');
   const scriptDir = getScriptDir();
 
-  // Production: agent-browser-cli is alongside server-dist.js in Resources
-  const prodPath = resolve(scriptDir, relPath);
+  // Production layout: sharp-runtime is alongside server-dist.js in Resources
+  const prodPath = resolve(scriptDir, relBundled);
   if (existsSync(prodPath)) return prodPath;
 
-  // Development: walk up from scriptDir to find agent-browser-cli at project root
+  // Development: use the top-level node_modules install from `npm install sharp`.
+  // Walk up from scriptDir to project root.
+  const relDev = join('node_modules', 'sharp', 'lib', 'index.js');
   let dir = scriptDir;
-  for (let i = 0; i < 5; i++) {
-    const devPath = resolve(dir, relPath);
+  for (let i = 0; i < 6; i++) {
+    const devPath = resolve(dir, relDev);
     if (existsSync(devPath)) return devPath;
+    // Also check for sharp-runtime under src-tauri/resources/ during dev builds
+    const devBundled = resolve(dir, 'src-tauri', 'resources', relBundled);
+    if (existsSync(devBundled)) return devBundled;
     dir = dirname(dir);
-  }
-
-  // User-local: auto-installed to ~/.myagents/agent-browser-cli/
-  const homeDir = process.env.HOME || process.env.USERPROFILE;
-  if (homeDir) {
-    const userPath = resolve(homeDir, '.myagents', relPath);
-    if (existsSync(userPath)) return userPath;
   }
 
   return null;
@@ -417,36 +306,29 @@ export function getAgentBrowserCliPath(): string | null {
  * 2. System bun
  * 3. System npm (if user has Node.js)
  *
- * @returns { command: string, installArgs: (pkg: string) => string[], type: 'bun' | 'npm' }
+ * @returns { command: string, installArgs: (pkg: string) => string[], type: 'npm' }
  */
 export function getPackageManagerPath(): {
   command: string;
   installArgs: (packageName: string) => string[];
-  type: 'bun' | 'npm';
+  type: 'npm';
 } {
-  // Try bundled bun first
-  const bundledBun = findExistingPath(getBundledBunPaths());
-  if (bundledBun) {
-    console.log(`[runtime] Using bundled bun: ${bundledBun}`);
-    return {
-      command: bundledBun,
-      installArgs: (pkg) => ['add', pkg],
-      type: 'bun' as const,
-    };
+  // Priority: bundled npm → system npm → fallback to PATH.
+  // v0.2.0+: Bun removed from bundle; `bun add` path no longer considered.
+  const bundledNodeDir = getBundledNodeDir();
+  if (bundledNodeDir) {
+    const npmExe = isWindows() ? 'npm.cmd' : 'npm';
+    const bundledNpm = resolve(bundledNodeDir, npmExe);
+    if (existsSync(bundledNpm)) {
+      console.log(`[runtime] Using bundled npm: ${bundledNpm}`);
+      return {
+        command: bundledNpm,
+        installArgs: (pkg) => ['install', pkg],
+        type: 'npm' as const,
+      };
+    }
   }
 
-  // Try system bun
-  const systemBun = findExistingPath(getSystemBunPaths());
-  if (systemBun) {
-    console.log(`[runtime] Using system bun: ${systemBun}`);
-    return {
-      command: systemBun,
-      installArgs: (pkg) => ['add', pkg],
-      type: 'bun' as const,
-    };
-  }
-
-  // Fallback to npm (requires Node.js)
   const systemNpm = findExistingPath(getSystemNpmPaths());
   if (systemNpm) {
     console.log(`[runtime] Using system npm: ${systemNpm}`);
@@ -457,8 +339,7 @@ export function getPackageManagerPath(): {
     };
   }
 
-  // Last resort - try npm from PATH
-  console.warn('[runtime] No bundled runtime found, falling back to npm from PATH');
+  console.warn('[runtime] No bundled or system npm found, falling back to "npm" from PATH');
   return {
     command: 'npm',
     installArgs: (pkg) => ['install', pkg],

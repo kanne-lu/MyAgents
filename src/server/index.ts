@@ -1,8 +1,70 @@
-import { appendFileSync, copyFileSync, cpSync, existsSync, linkSync, readlinkSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
-import { copyFile as copyFileAsync, readdir as readdirAsync, rename, rm, stat } from 'fs/promises';
+import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
+import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, readFile, rename, rm, stat, writeFile } from 'fs/promises';
+import { spawn as subprocessSpawn, fireAndForget } from './utils/subprocess';
+import { fileResponse, sniffMime } from './utils/file-response';
+import { serve as honoServe } from '@hono/node-server';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
+
+/**
+ * Hard upper bound on a single multipart request body (aggregate of all files
+ * + text fields). Sidecar lives on 127.0.0.1 so the threat model is mostly
+ * local WebView / same-machine callers, but we still gate to prevent runaway
+ * uploads from OOM-ing the Node.js heap. Node's standard `Request.formData()`
+ * buffers the entire body before resolving — there is no streaming multipart
+ * parser in the Web API — so this cap must be enforced via Content-Length
+ * BEFORE calling `.formData()`.
+ */
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB
+
+/**
+ * Check request Content-Length against MAX_UPLOAD_BYTES.
+ * Returns a 413 Response to hand back, or null when within budget.
+ * Missing Content-Length is treated as unknown — we still allow `.formData()`
+ * to run, but callers should prefer Content-Length-aware clients.
+ */
+function rejectIfOversizedUpload(request: Request): Response | null {
+  const lenHeader = request.headers.get('content-length');
+  if (!lenHeader) return null;
+  const len = Number(lenHeader);
+  if (Number.isFinite(len) && len > MAX_UPLOAD_BYTES) {
+    return jsonResponse(
+      { error: `Upload too large (${len} bytes > ${MAX_UPLOAD_BYTES} limit).` },
+      413,
+    );
+  }
+  return null;
+}
+
+/**
+ * Write an incoming Web `File` (multipart upload) to disk via streaming.
+ *
+ * NOTE: Node's `Request.formData()` already buffers the full body before
+ * resolving the FormData — `file.stream()` here is reading from an
+ * in-memory Blob, not from the live socket. The pipeline-to-disk still
+ * helps by avoiding an extra `arrayBuffer() + Buffer.from()` copy, but
+ * it does NOT bound memory during the parse itself. That bound is
+ * enforced by `rejectIfOversizedUpload()` at the route edge.
+ *
+ * On error mid-pipeline, the partially-written destination is removed so
+ * callers don't observe half-files on disk.
+ */
+async function streamUploadToFile(file: File, destination: string): Promise<void> {
+  const webStream = file.stream() as unknown as ReadableStream<Uint8Array>;
+  const nodeReadable = Readable.fromWeb(webStream as unknown as import('node:stream/web').ReadableStream<Uint8Array>);
+  try {
+    await pipeline(nodeReadable, createWriteStream(destination));
+  } catch (err) {
+    await rm(destination, { force: true }).catch(() => { /* best-effort cleanup */ });
+    throw err;
+  }
+}
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
-import AdmZip from 'adm-zip';
+import { randomUUID } from 'crypto';
+// adm-zip lazy-loaded at its one call site below (/api/skill/upload with zip
+// content) — saves ~30ms of module-init cost when users never upload skills.
 import {
   BUILTIN_SLASH_COMMANDS,
   parseSkillFrontmatter,
@@ -34,35 +96,60 @@ import {
   CRON_TASK_EXIT_REASON_PATTERN,
 } from './tools/cron-tools';
 import { setImCronContext } from './tools/im-cron-tool';
-import {
-  handleSkillList, handleSkillInfo, handleSkillAdd, handleSkillRemove, handleSkillToggle, handleSkillSync,
-  handleMcpList, handleMcpShow, handleMcpAdd, handleMcpRemove, handleMcpEnable, handleMcpDisable, handleMcpEnv, handleMcpTest,
-  handleMcpOAuthDiscover, handleMcpOAuthStart, handleMcpOAuthStatus, handleMcpOAuthRevoke,
-  handleModelList, handleModelAdd, handleModelRemove, handleModelSetKey, handleModelSetDefault, handleModelVerify,
-  handleAgentList, handleAgentShow, handleAgentEnable, handleAgentDisable, handleAgentSet,
-  handleAgentChannelList, handleAgentChannelAdd, handleAgentChannelRemove,
-  handleRuntimeList, handleRuntimeDescribe,
-  handleConfigGet, handleConfigSet, handleStatus, handleReload, handleHelp,
-  handleVersion,
-  handleCronList, handleCronCreate, handleCronStop, handleCronStart, handleCronDelete, handleCronUpdate, handleCronRuns, handleCronStatus,
-  handleCronExit, handleImSendMedia, handleReadme,
-  handlePluginList, handlePluginInstall, handlePluginUninstall,
-  handleAgentRuntimeStatus,
-  handleTaskList, handleTaskGet, handleTaskCreateDirect, handleTaskCreateFromAlignment,
-  handleTaskUpdateStatus, handleTaskAppendSession,
-  handleTaskArchive, handleTaskDelete, handleTaskRun, handleTaskRerun,
-  handleTaskReadDoc, handleTaskWriteDoc,
-  handleThoughtList, handleThoughtCreate,
-} from './admin-api';
+// admin-api module (~2900 lines, depends on zod + full config/session/cron surface)
+// is lazy-loaded on first /api/admin/* hit to shave ~150ms off sidecar cold
+// start. All handlers are only used inside routeAdminApi() below.
+type AdminApiModule = typeof import('./admin-api');
+let _adminApi: Promise<AdminApiModule> | null = null;
+const getAdminApi = (): Promise<AdminApiModule> => (_adminApi ??= import('./admin-api'));
 import { setImMediaContext } from './tools/im-media-tool';
 import { setImBridgeToolsContext } from './tools/im-bridge-tools';
-import { getBuiltinMcp } from './tools/builtin-mcp-registry';
-// NOTE: builtin MCP side-effect imports (registerBuiltinMcp calls) live in agent-session.ts,
-// which is imported by this file — no need to duplicate them here.
+import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
+// NOTE: builtin MCP META is auto-registered when agent-session.ts side-effect-imports
+// './tools/builtin-mcp-meta'. No duplicate import needed here.
 
 // ============= CRASH DIAGNOSTICS =============
-// File-based logging to capture crashes before process dies
-const CRASH_LOG = join(tmpdir(), 'myagents-crash.log');
+// Pattern 6 §6.3.6: crash logs live under ~/.myagents/logs/crash/ (NOT tmpdir,
+// so they're inside the unified log export bundle). Each crash gets its own
+// file; we keep the most recent CRASH_LOG_MAX_FILES and evict oldest.
+const CRASH_LOG_DIR = join(homedir(), '.myagents', 'logs', 'crash');
+const CRASH_LOG_MAX_FILES = 20;
+// Per-process crash log path: a single file per sidecar lifetime, holding all
+// the lifecycle/error events for THIS process. The filename uses the start
+// time so we can sort/evict by name. We append throughout the process.
+const CRASH_LOG_FILE = (() => {
+  try {
+    if (!existsSync(CRASH_LOG_DIR)) {
+      // Best-effort directory creation. recursive:true handles parent dirs.
+      // Don't reach for ensureDirSync — this IIFE runs during module init
+      // before some helper's transitive deps are guaranteed warm.
+      mkdirSync(CRASH_LOG_DIR, { recursive: true });
+    }
+  } catch { /* fall through; later writes will retry */ }
+  const ts = new Date().toISOString().replace(/[:]/g, '-');
+  return join(CRASH_LOG_DIR, `${ts}.log`);
+})();
+
+function evictOldCrashLogs(): void {
+  try {
+    if (!existsSync(CRASH_LOG_DIR)) return;
+    const entries = readdirSync(CRASH_LOG_DIR)
+      .filter(f => f.endsWith('.log'))
+      .map(f => {
+        const p = join(CRASH_LOG_DIR, f);
+        try {
+          return { path: p, mtimeMs: statSync(p).mtimeMs };
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is { path: string; mtimeMs: number } => x !== null)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
+    for (const e of entries.slice(CRASH_LOG_MAX_FILES)) {
+      try { unlinkSync(e.path); } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
 
 function crashLog(prefix: string, ...args: unknown[]) {
   try {
@@ -71,7 +158,22 @@ function crashLog(prefix: string, ...args: unknown[]) {
       if (typeof a === 'object') return JSON.stringify(a);
       return String(a);
     }).join(' ');
-    appendFileSync(CRASH_LOG, `[${new Date().toISOString()}] ${prefix} ${msg}\n`);
+    appendFileSync(CRASH_LOG_FILE, `[${new Date().toISOString()}] ${prefix} ${msg}\n`);
+  } catch { /* ignore */ }
+}
+
+/**
+ * On a hard crash (uncaughtException / unhandledRejection / fatal signal),
+ * snapshot the last ~200 unified log lines into the crash file so post-mortem
+ * has cross-process context, not just the bare error.
+ */
+function dumpCrashContext(reason: string): void {
+  try {
+    const lines = getRecentLogLines(200);
+    if (lines.length === 0) return;
+    const banner = `\n--- crash context (${reason}, last ${lines.length} unified lines) ---\n`;
+    appendFileSync(CRASH_LOG_FILE, banner + lines.join('') + '--- end crash context ---\n');
+    evictOldCrashLogs();
   } catch { /* ignore */ }
 }
 
@@ -88,23 +190,25 @@ process.on('beforeExit', (code) => {
 
 process.on('uncaughtException', (err) => {
   crashLog('UNCAUGHT_EXCEPTION', err);
+  dumpCrashContext('uncaughtException');
   console.error('[process] uncaughtException:', err);
 });
 
 process.on('unhandledRejection', (reason) => {
   crashLog('UNHANDLED_REJECTION', reason);
+  dumpCrashContext('unhandledRejection');
   console.error('[process] unhandledRejection:', reason);
 });
 
 process.on('SIGTERM', () => {
   crashLog('SIGNAL', 'SIGTERM');
-  console.error('[process] SIGTERM received, shutting down...');
+  console.log('[process] SIGTERM received, shutting down...');
   process.exit(0);  // Trigger SDK's process.on('exit') handler → SIGTERM CLI subprocess
 });
 
 process.on('SIGINT', () => {
   crashLog('SIGNAL', 'SIGINT');
-  console.error('[process] SIGINT received, shutting down...');
+  console.log('[process] SIGINT received, shutting down...');
   process.exit(0);
 });
 
@@ -124,6 +228,7 @@ import {
   getSystemInitInfo,
   initializeAgent,
   interruptCurrentResponse,
+  isTurnInFlight,
   getStreamingAssistantId,
   switchToSession,
   setMcpServers,
@@ -132,7 +237,7 @@ import {
   setSessionModel,
   resetSession,
   waitForSessionIdle,
-  setImStreamCallback,
+  cancelImRequest,
   setGroupToolsDeny,
   setInteractionScenario,
   resetInteractionScenario,
@@ -150,8 +255,7 @@ import {
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull, isSkillBlockedOnPlatform } from './utils/platform';
-import { getScriptDir, getAgentBrowserCliPath, getBundledRuntimePath, getPackageManagerPath } from './utils/runtime';
-import { ensureBrowserStealthConfig } from './utils/browser-stealth';
+import { getScriptDir } from './utils/runtime';
 import { buildDirectoryTree, expandDirectory } from './dir-info';
 import {
   createSession,
@@ -168,14 +272,33 @@ import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
-import { initLogger, getLoggerDiagnostics } from './logger';
+import { initLogger, getLoggerDiagnostics, withLogContext } from './logger';
+import {
+  buildGateResponseBody,
+  buildReadyResponseBody,
+  markDeferredInitFailed,
+  markDeferredInitReady,
+  setDeferredInitPhase,
+} from './readiness-state';
 import { cleanupOldLogs } from './AgentLogger';
-import { cleanupOldUnifiedLogs, appendUnifiedLogBatch } from './UnifiedLogger';
-import { broadcast, createSseClient, getClients } from './sse';
+import { cleanupOldUnifiedLogs, appendUnifiedLogBatch, getRecentLogLines } from './UnifiedLogger';
+import { createSseClient, getClients } from './sse';
+import { imEventBus } from './utils/im-event-bus';
+import { imRequestRegistry } from './utils/im-request-registry';
+import type { CancelReason } from './utils/cancellation';
 import { checkAnthropicSubscription, getGitBranch, verifyProviderViaSdk, verifySubscription } from './provider-verify';
-import { createBridgeHandler } from './openai-bridge';
+// openai-bridge is lazy-loaded via ensureBridgeHandler() below — only users on
+// OpenAI-protocol providers (DeepSeek/Moonshot/etc.) ever hit /v1/messages, so
+// most sessions never need to pay the 2.6k-line module's init cost.
+import type { BridgeHandler } from './openai-bridge/handler';
 import { registerBridgeSeedFn } from './bridge-cache';
-import { generateTitle, generateTitleExternal } from './title-generator';
+// title-generator is dynamically imported in the /api/title-generate handler
+// below — it value-imports the Claude Agent SDK + claude-code/codex/gemini
+// runtime classes, all of which are large. Pulling that into the Tier 0
+// startup graph delayed `/health` bind on cold start (cf. v0.2.0 Tier 0
+// goals) and crashed the sidecar before it could serve a 503 if the SDK
+// native binary failed to load. The handler is in the post-bind path, so
+// dynamic-import there is free.
 import {
   shouldUseExternalRuntime,
   sendExternalMessage,
@@ -188,7 +311,7 @@ import {
   getRuntimePermissionModes,
   getActiveRuntimeType,
   restoreExternalSessionState,
-  setExternalImStreamCallback,
+  cancelExternalImRequest,
   waitForExternalSessionIdle,
   getLastExternalAssistantText,
   setExternalModel,
@@ -200,6 +323,7 @@ import {
   getExternalSessionId,
   getExternalLiveAssistantMessage,
   prewarmExternalSession,
+  awaitExternalSessionStarting,
 } from './runtimes/external-session';
 import type { ImagePayload } from './runtimes/types';
 import { VALID_RUNTIMES } from '../shared/types/runtime';
@@ -462,6 +586,10 @@ const SYSTEM_SKILLS: readonly string[] = [
   'task-implement',
   'ultra-research',
   'download-anything',
+  // v8: see commands.rs::SYSTEM_SKILLS — agent-browser promoted to system
+  // skill so existing users get the updated self-install SKILL.md after
+  // the bundled CLI is removed.
+  'agent-browser',
 ];
 
 /**
@@ -537,21 +665,18 @@ function seedBundledSkills(): void {
 }
 
 /**
- * Generate wrapper script for agent-browser CLI in ~/.myagents/bin/.
- * This makes `agent-browser` available as a bare command in SDK subprocess PATH.
- * The wrapper delegates to `{bun} {agent-browser.js}`.
- */
-const AGENT_BROWSER_VERSION = '0.15.1';
-
-/**
- * Clean up stale Playwright MCP profile artifacts left by v0.1.30.
+ * Clean up stale Playwright MCP profile lock files left by a crashed Chromium.
  *
- * v0.1.30 had a bug where ~/.myagents/bin (containing a node→bun shim) was added to
- * global PATH, breaking playwright-core's WebSocket transport. This caused Chrome to
- * launch but hang on the CDP connection, eventually timing out and leaving stale
- * SingletonLock/SingletonSocket files in the profile directory.
+ * Independent of the agent-browser bundle removal — this exists because
+ * Chromium leaves SingletonLock / SingletonSocket / SingletonCookie files in
+ * the user-data-dir when the process crashes (or the OS kills it on app exit
+ * without a clean shutdown). Subsequent Chromium launches with the same
+ * user-data-dir refuse to start with "ProfileInUse" until the locks clear.
  *
- * This cleanup runs once at startup to recover from that state.
+ * Playwright's own startup mostly handles this, but the legacy
+ * `~/.playwright-mcp-profile/` directory pre-dates Playwright MCP's improved
+ * recovery paths and we've seen real "Chromium hangs forever" reports tied to
+ * stale locks here. Cheap idempotent cleanup at sidecar boot.
  */
 function cleanupStalePlaywrightProfile(): void {
   try {
@@ -563,8 +688,8 @@ function cleanupStalePlaywrightProfile(): void {
 
     if (!existsSync(lockPath)) return;
 
-    // macOS/Linux: SingletonLock is a symlink containing "hostname-pid"
-    // Windows: SingletonLock is a regular file containing "hostname-pid"
+    // SingletonLock content: "hostname-pid" (POSIX symlink target on macOS/Linux,
+    // regular file content on Windows).
     let linkTarget: string;
     try {
       linkTarget = readlinkSync(lockPath);
@@ -572,363 +697,34 @@ function cleanupStalePlaywrightProfile(): void {
       try {
         linkTarget = readFileSync(lockPath, 'utf-8').trim();
       } catch {
-        return; // Can't read lock content, skip cleanup
+        return; // Can't read — bail
       }
     }
 
-    // Format: "hostname-pid" (e.g., "Ethan.local-82424")
     const pidMatch = linkTarget.match(/-(\d+)$/);
     if (!pidMatch) return;
-
     const pid = parseInt(pidMatch[1], 10);
 
-    // Check if the process is still alive
+    // Probe pid liveness; if the process is alive, leave its locks alone.
     try {
-      process.kill(pid, 0); // Signal 0 = just check if process exists
-      // Process is alive — don't remove the lock
+      process.kill(pid, 0);
       return;
     } catch {
-      // Process is dead — safe to clean up
+      // Process is dead → safe to clean up
     }
 
-    // Remove stale lock files
-    const staleFiles = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
-    for (const file of staleFiles) {
+    for (const file of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) {
       const filePath = join(profileDir, file);
       try {
         if (existsSync(filePath)) {
           unlinkSync(filePath);
         }
-      } catch { /* ignore cleanup errors */ }
+      } catch { /* best effort */ }
     }
 
-    console.log(`[startup] Cleaned up stale Playwright MCP profile lock (pid ${pid} no longer running)`);
+    console.log(`[startup] Cleaned up stale Playwright MCP profile lock (pid ${pid} dead)`);
   } catch (err) {
-    // Non-critical — don't block startup
     console.warn('[startup] Playwright profile cleanup failed:', err);
-  }
-}
-
-/**
- * One-time migration: extract cookies from Chromium profile (~/.playwright-mcp-profile/)
- * into Playwright storage-state JSON (~/.myagents/browser-storage-state.json).
- *
- * Runs when the old profile exists but the new storage-state file does not.
- * This preserves login state when upgrading from persistent-profile to isolated mode.
- *
- * Only cookies are migrated (from SQLite). localStorage lives in LevelDB and is
- * too complex to extract statically — ~90% of login state is cookie-based anyway.
- */
-function migrateProfileToStorageState(): void {
-  try {
-    const home = getHomeDirOrNull();
-    if (!home) return;
-
-    const profileDir = join(home, '.playwright-mcp-profile');
-    const myagentsDir = join(home, '.myagents');
-    const storageStatePath = join(myagentsDir, 'browser-storage-state.json');
-
-    // Only migrate once: old profile exists AND new file does not
-    if (!existsSync(profileDir) || existsSync(storageStatePath)) return;
-
-    const cookiesDbPath = join(profileDir, 'Default', 'Cookies');
-    if (!existsSync(cookiesDbPath)) {
-      console.log('[migration] No Cookies DB found in profile, skipping migration');
-      return;
-    }
-
-    // Use bun:sqlite to read Chromium's Cookies SQLite database
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Database } = require('bun:sqlite');
-    const db = new Database(cookiesDbPath, { readonly: true });
-
-    const sameSiteMap: Record<number, string> = { 0: 'None', 1: 'Lax', 2: 'Strict' };
-
-    // Chrome epoch: microseconds since 1601-01-01 00:00:00 UTC
-    // Unix epoch conversion: subtract 11644473600 seconds, divide by 1000000
-    const CHROME_EPOCH_OFFSET = 11644473600;
-
-    // Filter out cookies with empty value — on macOS/Windows, Chromium encrypts cookie
-    // values (stored in encrypted_value column, decrypted via OS keychain). The plaintext
-    // `value` column is empty for these. We can only migrate unencrypted cookies.
-    const rows = db.query(
-      `SELECT host_key, name, value, path, expires_utc, is_httponly, is_secure, samesite
-       FROM cookies
-       WHERE length(name) > 0 AND length(value) > 0`
-    ).all() as Array<{
-      host_key: string; name: string; value: string; path: string;
-      expires_utc: number; is_httponly: number; is_secure: number; samesite: number;
-    }>;
-
-    db.close();
-
-    if (rows.length === 0) {
-      console.log('[migration] Cookies DB is empty, skipping migration');
-      return;
-    }
-
-    const cookies = rows.map(row => ({
-      name: row.name,
-      value: row.value,
-      domain: row.host_key,
-      path: row.path || '/',
-      expires: row.expires_utc > 0
-        ? Math.floor(row.expires_utc / 1000000) - CHROME_EPOCH_OFFSET
-        : -1,
-      httpOnly: !!row.is_httponly,
-      secure: !!row.is_secure,
-      sameSite: sameSiteMap[row.samesite] ?? 'None',
-    }));
-
-    const storageState = { cookies, origins: [] as Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }> };
-
-    ensureDirSync(myagentsDir);
-    writeFileSync(storageStatePath, JSON.stringify(storageState, null, 2));
-    console.log(`[migration] Migrated ${cookies.length} cookies from Chrome profile to ${storageStatePath}`);
-    console.log('[migration] Old profile at ~/.playwright-mcp-profile/ can be safely deleted');
-  } catch (err) {
-    // Non-critical — don't block startup
-    console.warn('[migration] Profile-to-storage-state migration failed:', err);
-  }
-}
-
-/**
- * Write the agent-browser wrapper script to ~/.myagents/bin/.
- * Returns true on success.
- *
- * Architecture: "self-contained wrapper + scoped shims"
- * - ~/.myagents/bin/       → user-facing commands (safe for global PATH)
- * - ~/.myagents/shims/     → internal runtime shims (NEVER in global PATH)
- *
- * The wrapper script prepends shims/ to its own PATH before exec, so the
- * `node → bun` shim is only visible to agent-browser's subprocess tree —
- * it never leaks to Playwright MCP or other tools.
- */
-function writeAgentBrowserWrapper(cliPath: string): boolean {
-  const bunPath = getBundledRuntimePath();
-  const homeDir = getHomeDirOrNull();
-  if (!homeDir) {
-    console.warn('[agent-browser] Home directory not found, skipping wrapper setup');
-    return false;
-  }
-  const binDir = join(homeDir, '.myagents', 'bin');
-  const shimsDir = join(homeDir, '.myagents', 'shims');
-  ensureDirSync(binDir);
-  ensureDirSync(shimsDir);
-
-  // POSIX sh: escape backslash, double-quote, dollar, backtick inside double-quoted strings
-  const shellEscape = (s: string) => s.replace(/([\\"`$])/g, '\\$1');
-  const isWin = process.platform === 'win32';
-
-  // --- agent-browser wrapper (self-contained: sets up shims PATH internally) ---
-  if (isWin) {
-    // Windows needs TWO wrappers (like npm global installs):
-    // 1. .cmd for cmd.exe / PowerShell
-    // 2. extensionless POSIX sh for Git Bash (SDK uses Git Bash on Windows)
-    const safeBun = bunPath.replace(/"/g, '""');
-    const safeCli = cliPath.replace(/"/g, '""');
-    const safeShims = shimsDir.replace(/"/g, '""');
-    writeFileSync(join(binDir, 'agent-browser.cmd'),
-      `@set "PATH=${safeShims};%PATH%"\r\n@"${safeBun}" "${safeCli}" %*\r\n`);
-    writeFileSync(join(binDir, 'agent-browser'),
-      `#!/bin/sh\nexport PATH="${shellEscape(shimsDir)}:$PATH"\nexec "${shellEscape(bunPath)}" "${shellEscape(cliPath)}" "$@"\n`);
-  } else {
-    writeFileSync(join(binDir, 'agent-browser'),
-      `#!/bin/sh\nexport PATH="${shellEscape(shimsDir)}:$PATH"\nexec "${shellEscape(bunPath)}" "${shellEscape(cliPath)}" "$@"\n`,
-      { mode: 0o755 });
-  }
-  console.log(`[agent-browser] Wrapper created: ${join(binDir, 'agent-browser')}${isWin ? ' (.cmd + sh)' : ''}`);
-
-  // --- node shim in ~/.myagents/shims/ (NOT in global PATH) ---
-  // agent-browser's Rust binary spawns daemon.js via hardcoded `node` command.
-  // Since we bundle bun (not Node.js), create a node shim that delegates to bun.
-  // Always overwrite — bunPath may change after app update.
-  const nodeShimPath = join(shimsDir, 'node');
-  if (isWin) {
-    // Windows: create node.exe as a hardlink to bun.exe.
-    // Windows PATH resolves .exe before .cmd (PATHEXT order). Using .exe avoids
-    // cmd.exe being invoked for node.cmd, which would create a visible console window.
-    const nodeExePath = join(shimsDir, 'node.exe');
-    try {
-      if (existsSync(nodeExePath)) unlinkSync(nodeExePath);
-      linkSync(bunPath, nodeExePath);
-    } catch {
-      // Hardlink failed (cross-volume?) — fall back to copy
-      try { copyFileSync(bunPath, nodeExePath); } catch { /* .cmd fallback below */ }
-    }
-    // .cmd fallback for cmd.exe / PowerShell manual invocation
-    const escapedBun = bunPath.replace(/"/g, '""');
-    writeFileSync(join(shimsDir, 'node.cmd'), `@"${escapedBun}" %*\r\n`);
-    // POSIX sh fallback for Git Bash
-    writeFileSync(nodeShimPath, `#!/bin/sh\nexec "${shellEscape(bunPath)}" "$@"\n`);
-  } else {
-    writeFileSync(nodeShimPath, `#!/bin/sh\nexec "${shellEscape(bunPath)}" "$@"\n`, { mode: 0o755 });
-  }
-
-  // --- Migration: remove old node shims from ~/.myagents/bin/ (v0.1.30 artifact) ---
-  // v0.1.30 put the node shim in bin/ alongside agent-browser, polluting global PATH.
-  for (const oldShim of ['node', 'node.exe', 'node.cmd']) {
-    const oldPath = join(binDir, oldShim);
-    try {
-      if (existsSync(oldPath)) {
-        unlinkSync(oldPath);
-        console.log(`[agent-browser] Cleaned up old shim: ${oldPath}`);
-      }
-    } catch { /* ignore */ }
-  }
-
-  return true;
-}
-
-/**
- * Ensure Chromium is installed via agent-browser's own playwright-core.
- * This avoids version mismatch (agent-browser pins a specific Chromium build).
- * See: https://github.com/vercel-labs/agent-browser/issues/107
- *
- * Runs in the background — does not block caller.
- * @param cliPath Path to agent-browser.js (used to locate node_modules/playwright-core)
- */
-/**
- * Check whether Chromium needs installing, using a file-system lock so only one
- * Sidecar process across the whole app performs the download.
- */
-function ensureChromiumInstalled(cliPath: string): void {
-  // cliPath: .../agent-browser-cli/node_modules/agent-browser/bin/agent-browser.js
-  // We need:  .../agent-browser-cli/node_modules/playwright-core/cli.js
-  const nodeModulesDir = resolve(cliPath, '..', '..', '..');
-  const playwrightCli = join(nodeModulesDir, 'playwright-core', 'cli.js');
-  if (!existsSync(playwrightCli)) return;
-
-  // File-system lock: only one process installs; others skip.
-  const homeDir = getHomeDirOrNull();
-  if (!homeDir) return;
-  const lockFile = join(homeDir, '.myagents', '.chromium-installing');
-  if (existsSync(lockFile)) {
-    try {
-      const lockTime = statSync(lockFile).mtimeMs;
-      if (Date.now() - lockTime < 10 * 60 * 1000) return; // another process is working (<10 min)
-      rmSync(lockFile, { force: true }); // stale lock
-    } catch { return; }
-  }
-  try {
-    writeFileSync(lockFile, String(process.pid), { flag: 'wx' }); // exclusive create
-  } catch { return; } // another process won the race
-
-  console.log('[agent-browser] Ensuring Chromium is installed via bundled playwright-core...');
-  const bunPath = getBundledRuntimePath();
-  const chromiumProc = Bun.spawn([bunPath, playwrightCli, 'install', 'chromium'], {
-    cwd: nodeModulesDir,
-    stdout: 'ignore',
-    stderr: 'pipe',
-  });
-  chromiumProc.exited.then(async (code) => {
-    rmSync(lockFile, { force: true });
-    if (code === 0) {
-      console.log('[agent-browser] Chromium ready');
-    } else {
-      const stderr = await new Response(chromiumProc.stderr).text();
-      console.warn(`[agent-browser] Chromium install failed (exit ${code}):`, stderr.slice(0, 500));
-    }
-  }).catch((err) => {
-    rmSync(lockFile, { force: true });
-    console.error('[agent-browser] Chromium install error:', err);
-  });
-}
-
-/**
- * Auto-install agent-browser to ~/.myagents/agent-browser-cli/ using bundled bun or system npm.
- * Runs in the background so it doesn't block Sidecar startup.
- */
-function autoInstallAgentBrowser(): void {
-  const homeDir = getHomeDirOrNull();
-  if (!homeDir) return;
-
-  const installDir = join(homeDir, '.myagents', 'agent-browser-cli');
-  const lockFile = join(installDir, '.installing');
-
-  ensureDirSync(installDir);
-
-  // Atomic lock: stale check + exclusive create (same pattern as ensureChromiumInstalled)
-  if (existsSync(lockFile)) {
-    try {
-      const lockTime = statSync(lockFile).mtimeMs;
-      if (Date.now() - lockTime < 5 * 60 * 1000) {
-        console.log('[agent-browser] Install already in progress, skipping');
-        return;
-      }
-      rmSync(lockFile, { force: true }); // stale lock
-    } catch { /* ignore */ }
-  }
-  try {
-    writeFileSync(lockFile, String(process.pid), { flag: 'wx' }); // exclusive create
-  } catch {
-    console.log('[agent-browser] Install already in progress, skipping');
-    return;
-  }
-
-  // Ensure package.json exists (bun add requires it)
-  const pkgJsonPath = join(installDir, 'package.json');
-  if (!existsSync(pkgJsonPath)) {
-    writeFileSync(pkgJsonPath, '{}');
-  }
-
-  const pm = getPackageManagerPath();
-  const pkg = `agent-browser@${AGENT_BROWSER_VERSION}`;
-  // bun add <pkg> / npm install <pkg> — both work with cwd
-  const finalArgs = pm.installArgs(pkg);
-
-  console.log(`[agent-browser] Auto-installing ${pkg} to ${installDir} using ${pm.type}...`);
-
-  const proc = Bun.spawn([pm.command, ...finalArgs], {
-    cwd: installDir,
-    stdout: 'ignore',
-    stderr: 'pipe',
-  });
-
-  // Handle in background — don't block startup
-  proc.exited.then(async (code) => {
-    if (code !== 0) {
-      rmSync(lockFile, { force: true });
-      new Response(proc.stderr).text().then((stderr) => {
-        console.error(`[agent-browser] Auto-install failed (exit ${code}):`, stderr.slice(0, 500));
-      }).catch(() => {
-        console.error(`[agent-browser] Auto-install failed (exit ${code})`);
-      });
-      return;
-    }
-
-    console.log('[agent-browser] npm install completed');
-    const cliPath = getAgentBrowserCliPath();
-    if (!cliPath) {
-      rmSync(lockFile, { force: true });
-      console.warn('[agent-browser] CLI still not found after install');
-      return;
-    }
-    writeAgentBrowserWrapper(cliPath);
-    ensureChromiumInstalled(cliPath);
-    ensureBrowserStealthConfig();
-    rmSync(lockFile, { force: true });
-  }).catch((err) => {
-    rmSync(lockFile, { force: true });
-    console.error('[agent-browser] Auto-install error:', err);
-  });
-}
-
-function setupAgentBrowserWrapper(): void {
-  try {
-    const cliPath = getAgentBrowserCliPath();
-    if (cliPath) {
-      writeAgentBrowserWrapper(cliPath);
-      ensureChromiumInstalled(cliPath);  // Background — won't block startup
-      ensureBrowserStealthConfig();
-      return;
-    }
-
-    // CLI not bundled — auto-install to ~/.myagents/agent-browser-cli/
-    console.log('[agent-browser] CLI not found in bundle, starting auto-install...');
-    autoInstallAgentBrowser();
-  } catch (err) {
-    console.error('[agent-browser] Error setting up wrapper:', err);
   }
 }
 
@@ -1103,105 +899,108 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   // Strip the prefix for matching
   const route = pathname.replace('/api/admin/', '');
 
+  // Lazy-load admin-api (~150ms on first hit, cached thereafter)
+  const api = await getAdminApi();
+
   // MCP commands
-  if (route === 'mcp/list') return handleMcpList();
-  if (route === 'mcp/show') return handleMcpShow(payload as Parameters<typeof handleMcpShow>[0]);
-  if (route === 'mcp/add') return handleMcpAdd(payload as Parameters<typeof handleMcpAdd>[0]);
-  if (route === 'mcp/remove') return handleMcpRemove(payload as Parameters<typeof handleMcpRemove>[0]);
-  if (route === 'mcp/enable') return handleMcpEnable(payload as Parameters<typeof handleMcpEnable>[0]);
-  if (route === 'mcp/disable') return handleMcpDisable(payload as Parameters<typeof handleMcpDisable>[0]);
-  if (route === 'mcp/env') return handleMcpEnv(payload as Parameters<typeof handleMcpEnv>[0]);
-  if (route === 'mcp/test') return await handleMcpTest(payload as Parameters<typeof handleMcpTest>[0]);
-  if (route === 'mcp/oauth/discover') return await handleMcpOAuthDiscover(payload as Parameters<typeof handleMcpOAuthDiscover>[0]);
-  if (route === 'mcp/oauth/start') return await handleMcpOAuthStart(payload as Parameters<typeof handleMcpOAuthStart>[0]);
-  if (route === 'mcp/oauth/status') return await handleMcpOAuthStatus(payload as Parameters<typeof handleMcpOAuthStatus>[0]);
-  if (route === 'mcp/oauth/revoke') return await handleMcpOAuthRevoke(payload as Parameters<typeof handleMcpOAuthRevoke>[0]);
+  if (route === 'mcp/list') return api.handleMcpList();
+  if (route === 'mcp/show') return api.handleMcpShow(payload as Parameters<typeof api.handleMcpShow>[0]);
+  if (route === 'mcp/add') return api.handleMcpAdd(payload as Parameters<typeof api.handleMcpAdd>[0]);
+  if (route === 'mcp/remove') return api.handleMcpRemove(payload as Parameters<typeof api.handleMcpRemove>[0]);
+  if (route === 'mcp/enable') return api.handleMcpEnable(payload as Parameters<typeof api.handleMcpEnable>[0]);
+  if (route === 'mcp/disable') return api.handleMcpDisable(payload as Parameters<typeof api.handleMcpDisable>[0]);
+  if (route === 'mcp/env') return api.handleMcpEnv(payload as Parameters<typeof api.handleMcpEnv>[0]);
+  if (route === 'mcp/test') return await api.handleMcpTest(payload as Parameters<typeof api.handleMcpTest>[0]);
+  if (route === 'mcp/oauth/discover') return await api.handleMcpOAuthDiscover(payload as Parameters<typeof api.handleMcpOAuthDiscover>[0]);
+  if (route === 'mcp/oauth/start') return await api.handleMcpOAuthStart(payload as Parameters<typeof api.handleMcpOAuthStart>[0]);
+  if (route === 'mcp/oauth/status') return await api.handleMcpOAuthStatus(payload as Parameters<typeof api.handleMcpOAuthStatus>[0]);
+  if (route === 'mcp/oauth/revoke') return await api.handleMcpOAuthRevoke(payload as Parameters<typeof api.handleMcpOAuthRevoke>[0]);
 
   // Model commands
-  if (route === 'model/list') return handleModelList();
-  if (route === 'model/add') return handleModelAdd(payload as Parameters<typeof handleModelAdd>[0]);
-  if (route === 'model/remove') return handleModelRemove(payload as Parameters<typeof handleModelRemove>[0]);
-  if (route === 'model/set-key') return handleModelSetKey(payload as Parameters<typeof handleModelSetKey>[0]);
-  if (route === 'model/set-default') return handleModelSetDefault(payload as Parameters<typeof handleModelSetDefault>[0]);
-  if (route === 'model/verify') return await handleModelVerify(payload as Parameters<typeof handleModelVerify>[0]);
+  if (route === 'model/list') return api.handleModelList();
+  if (route === 'model/add') return api.handleModelAdd(payload as Parameters<typeof api.handleModelAdd>[0]);
+  if (route === 'model/remove') return api.handleModelRemove(payload as Parameters<typeof api.handleModelRemove>[0]);
+  if (route === 'model/set-key') return api.handleModelSetKey(payload as Parameters<typeof api.handleModelSetKey>[0]);
+  if (route === 'model/set-default') return api.handleModelSetDefault(payload as Parameters<typeof api.handleModelSetDefault>[0]);
+  if (route === 'model/verify') return await api.handleModelVerify(payload as Parameters<typeof api.handleModelVerify>[0]);
 
   // Agent commands
-  if (route === 'agent/list') return handleAgentList();
-  if (route === 'agent/show') return handleAgentShow(payload as Parameters<typeof handleAgentShow>[0]);
-  if (route === 'agent/enable') return handleAgentEnable(payload as Parameters<typeof handleAgentEnable>[0]);
-  if (route === 'agent/disable') return handleAgentDisable(payload as Parameters<typeof handleAgentDisable>[0]);
-  if (route === 'agent/set') return handleAgentSet(payload as Parameters<typeof handleAgentSet>[0]);
-  if (route === 'agent/channel/list') return handleAgentChannelList(payload as Parameters<typeof handleAgentChannelList>[0]);
-  if (route === 'agent/channel/add') return handleAgentChannelAdd(payload as Parameters<typeof handleAgentChannelAdd>[0]);
-  if (route === 'agent/channel/remove') return handleAgentChannelRemove(payload as Parameters<typeof handleAgentChannelRemove>[0]);
-  if (route === 'runtime/list') return await handleRuntimeList();
-  if (route === 'runtime/describe') return await handleRuntimeDescribe(payload as Parameters<typeof handleRuntimeDescribe>[0]);
+  if (route === 'agent/list') return api.handleAgentList();
+  if (route === 'agent/show') return api.handleAgentShow(payload as Parameters<typeof api.handleAgentShow>[0]);
+  if (route === 'agent/enable') return api.handleAgentEnable(payload as Parameters<typeof api.handleAgentEnable>[0]);
+  if (route === 'agent/disable') return api.handleAgentDisable(payload as Parameters<typeof api.handleAgentDisable>[0]);
+  if (route === 'agent/set') return api.handleAgentSet(payload as Parameters<typeof api.handleAgentSet>[0]);
+  if (route === 'agent/channel/list') return api.handleAgentChannelList(payload as Parameters<typeof api.handleAgentChannelList>[0]);
+  if (route === 'agent/channel/add') return api.handleAgentChannelAdd(payload as Parameters<typeof api.handleAgentChannelAdd>[0]);
+  if (route === 'agent/channel/remove') return api.handleAgentChannelRemove(payload as Parameters<typeof api.handleAgentChannelRemove>[0]);
+  if (route === 'runtime/list') return await api.handleRuntimeList();
+  if (route === 'runtime/describe') return await api.handleRuntimeDescribe(payload as Parameters<typeof api.handleRuntimeDescribe>[0]);
 
   // Agent runtime status
-  if (route === 'agent/runtime-status') return await handleAgentRuntimeStatus();
+  if (route === 'agent/runtime-status') return await api.handleAgentRuntimeStatus();
 
   // Cron task commands
-  if (route === 'cron/list') return await handleCronList(payload as Parameters<typeof handleCronList>[0]);
-  if (route === 'cron/add') return await handleCronCreate(payload);
-  if (route === 'cron/start') return await handleCronStart(payload as Parameters<typeof handleCronStart>[0]);
-  if (route === 'cron/stop') return await handleCronStop(payload as Parameters<typeof handleCronStop>[0]);
-  if (route === 'cron/remove') return await handleCronDelete(payload as Parameters<typeof handleCronDelete>[0]);
-  if (route === 'cron/update') return await handleCronUpdate(payload as Parameters<typeof handleCronUpdate>[0]);
-  if (route === 'cron/runs') return await handleCronRuns(payload as Parameters<typeof handleCronRuns>[0]);
-  if (route === 'cron/status') return await handleCronStatus(payload as Parameters<typeof handleCronStatus>[0]);
-  if (route === 'cron/exit') return handleCronExit(payload as Parameters<typeof handleCronExit>[0]);
+  if (route === 'cron/list') return await api.handleCronList(payload as Parameters<typeof api.handleCronList>[0]);
+  if (route === 'cron/add') return await api.handleCronCreate(payload);
+  if (route === 'cron/start') return await api.handleCronStart(payload as Parameters<typeof api.handleCronStart>[0]);
+  if (route === 'cron/stop') return await api.handleCronStop(payload as Parameters<typeof api.handleCronStop>[0]);
+  if (route === 'cron/remove') return await api.handleCronDelete(payload as Parameters<typeof api.handleCronDelete>[0]);
+  if (route === 'cron/update') return await api.handleCronUpdate(payload as Parameters<typeof api.handleCronUpdate>[0]);
+  if (route === 'cron/runs') return await api.handleCronRuns(payload as Parameters<typeof api.handleCronRuns>[0]);
+  if (route === 'cron/status') return await api.handleCronStatus(payload as Parameters<typeof api.handleCronStatus>[0]);
+  if (route === 'cron/exit') return api.handleCronExit(payload as Parameters<typeof api.handleCronExit>[0]);
 
   // IM runtime commands (session-scoped — only work inside an IM Bot / Agent Channel Sidecar)
-  if (route === 'im/send-media') return await handleImSendMedia(payload as Parameters<typeof handleImSendMedia>[0]);
+  if (route === 'im/send-media') return await api.handleImSendMedia(payload as Parameters<typeof api.handleImSendMedia>[0]);
 
   // Tool readme — progressive-disclosure helpers for external runtimes
   if (route === 'readme/cron' || route === 'readme/im' || route === 'readme/widget') {
     const topic = route.split('/')[1];
-    return handleReadme({
+    return api.handleReadme({
       topic,
       modules: Array.isArray(payload.modules) ? (payload.modules as string[]) : undefined,
     });
   }
 
   // Plugin commands
-  if (route === 'plugin/list') return await handlePluginList();
-  if (route === 'plugin/install') return await handlePluginInstall(payload as Parameters<typeof handlePluginInstall>[0]);
-  if (route === 'plugin/remove') return await handlePluginUninstall(payload as Parameters<typeof handlePluginUninstall>[0]);
+  if (route === 'plugin/list') return await api.handlePluginList();
+  if (route === 'plugin/install') return await api.handlePluginInstall(payload as Parameters<typeof api.handlePluginInstall>[0]);
+  if (route === 'plugin/remove') return await api.handlePluginUninstall(payload as Parameters<typeof api.handlePluginUninstall>[0]);
 
   // Skill commands
-  if (route === 'skill/list') return await handleSkillList();
-  if (route === 'skill/info') return await handleSkillInfo(payload as Parameters<typeof handleSkillInfo>[0]);
-  if (route === 'skill/add') return await handleSkillAdd(payload as Parameters<typeof handleSkillAdd>[0]);
-  if (route === 'skill/remove') return await handleSkillRemove(payload as Parameters<typeof handleSkillRemove>[0]);
-  if (route === 'skill/enable') return await handleSkillToggle({ name: String(payload.name ?? ''), enabled: true });
-  if (route === 'skill/disable') return await handleSkillToggle({ name: String(payload.name ?? ''), enabled: false });
-  if (route === 'skill/sync') return await handleSkillSync();
+  if (route === 'skill/list') return await api.handleSkillList();
+  if (route === 'skill/info') return await api.handleSkillInfo(payload as Parameters<typeof api.handleSkillInfo>[0]);
+  if (route === 'skill/add') return await api.handleSkillAdd(payload as Parameters<typeof api.handleSkillAdd>[0]);
+  if (route === 'skill/remove') return await api.handleSkillRemove(payload as Parameters<typeof api.handleSkillRemove>[0]);
+  if (route === 'skill/enable') return await api.handleSkillToggle({ name: String(payload.name ?? ''), enabled: true });
+  if (route === 'skill/disable') return await api.handleSkillToggle({ name: String(payload.name ?? ''), enabled: false });
+  if (route === 'skill/sync') return await api.handleSkillSync();
 
   // Config commands
-  if (route === 'config/get') return handleConfigGet(payload as Parameters<typeof handleConfigGet>[0]);
-  if (route === 'config/set') return handleConfigSet(payload as Parameters<typeof handleConfigSet>[0]);
+  if (route === 'config/get') return api.handleConfigGet(payload as Parameters<typeof api.handleConfigGet>[0]);
+  if (route === 'config/set') return api.handleConfigSet(payload as Parameters<typeof api.handleConfigSet>[0]);
 
   // Task Center — thoughts + tasks (v0.1.69)
-  if (route === 'task/list') return await handleTaskList(payload as Parameters<typeof handleTaskList>[0]);
-  if (route === 'task/get') return await handleTaskGet(payload as Parameters<typeof handleTaskGet>[0]);
-  if (route === 'task/create-direct') return await handleTaskCreateDirect(payload);
-  if (route === 'task/create-from-alignment') return await handleTaskCreateFromAlignment(payload);
-  if (route === 'task/run') return await handleTaskRun(payload as Parameters<typeof handleTaskRun>[0]);
-  if (route === 'task/rerun') return await handleTaskRerun(payload as Parameters<typeof handleTaskRerun>[0]);
-  if (route === 'task/update-status') return await handleTaskUpdateStatus(payload);
-  if (route === 'task/append-session') return await handleTaskAppendSession(payload as Parameters<typeof handleTaskAppendSession>[0]);
-  if (route === 'task/archive') return await handleTaskArchive(payload as Parameters<typeof handleTaskArchive>[0]);
-  if (route === 'task/delete') return await handleTaskDelete(payload as Parameters<typeof handleTaskDelete>[0]);
-  if (route === 'task/read-doc') return await handleTaskReadDoc(payload as Parameters<typeof handleTaskReadDoc>[0]);
-  if (route === 'task/write-doc') return await handleTaskWriteDoc(payload as Parameters<typeof handleTaskWriteDoc>[0]);
-  if (route === 'thought/list') return await handleThoughtList(payload as Parameters<typeof handleThoughtList>[0]);
-  if (route === 'thought/create') return await handleThoughtCreate(payload as Parameters<typeof handleThoughtCreate>[0]);
+  if (route === 'task/list') return await api.handleTaskList(payload as Parameters<typeof api.handleTaskList>[0]);
+  if (route === 'task/get') return await api.handleTaskGet(payload as Parameters<typeof api.handleTaskGet>[0]);
+  if (route === 'task/create-direct') return await api.handleTaskCreateDirect(payload);
+  if (route === 'task/create-from-alignment') return await api.handleTaskCreateFromAlignment(payload);
+  if (route === 'task/run') return await api.handleTaskRun(payload as Parameters<typeof api.handleTaskRun>[0]);
+  if (route === 'task/rerun') return await api.handleTaskRerun(payload as Parameters<typeof api.handleTaskRerun>[0]);
+  if (route === 'task/update-status') return await api.handleTaskUpdateStatus(payload);
+  if (route === 'task/append-session') return await api.handleTaskAppendSession(payload as Parameters<typeof api.handleTaskAppendSession>[0]);
+  if (route === 'task/archive') return await api.handleTaskArchive(payload as Parameters<typeof api.handleTaskArchive>[0]);
+  if (route === 'task/delete') return await api.handleTaskDelete(payload as Parameters<typeof api.handleTaskDelete>[0]);
+  if (route === 'task/read-doc') return await api.handleTaskReadDoc(payload as Parameters<typeof api.handleTaskReadDoc>[0]);
+  if (route === 'task/write-doc') return await api.handleTaskWriteDoc(payload as Parameters<typeof api.handleTaskWriteDoc>[0]);
+  if (route === 'thought/list') return await api.handleThoughtList(payload as Parameters<typeof api.handleThoughtList>[0]);
+  if (route === 'thought/create') return await api.handleThoughtCreate(payload as Parameters<typeof api.handleThoughtCreate>[0]);
 
   // System commands
-  if (route === 'status') return handleStatus();
-  if (route === 'reload') return handleReload(payload.workspacePath as string | undefined);
-  if (route === 'version') return handleVersion();
-  if (route === 'help') return handleHelp(payload as Parameters<typeof handleHelp>[0]);
+  if (route === 'status') return api.handleStatus();
+  if (route === 'reload') return api.handleReload(payload.workspacePath as string | undefined);
+  if (route === 'version') return api.handleVersion();
+  if (route === 'help') return api.handleHelp(payload as Parameters<typeof api.handleHelp>[0]);
 
   return { success: false, error: `Unknown admin route: ${pathname}` };
 }
@@ -1295,15 +1094,12 @@ async function serveStatic(pathname: string): Promise<Response | null> {
   if (!filePath.startsWith(distRoot + sep)) {
     return null;
   }
-  const file = Bun.file(filePath);
-  if (await file.exists()) {
-    return new Response(file);
-  }
+  const fileResp = await fileResponse(filePath, { contentType: sniffMime(filePath) });
+  if (fileResp) return fileResp;
 
-  const indexFile = Bun.file(join(distRoot, 'index.html'));
-  if (await indexFile.exists()) {
-    return new Response(indexFile);
-  }
+  const indexPath = join(distRoot, 'index.html');
+  const indexResp = await fileResponse(indexPath, { contentType: sniffMime(indexPath) });
+  if (indexResp) return indexResp;
 
   return null;
 }
@@ -1414,34 +1210,6 @@ async function main() {
   initLogger(getClients);
   startupBeacon('initLogger done — switching to console.log');
 
-  // Clean up old logs (30+ days)
-  cleanupOldLogs();        // Agent session logs
-  cleanupOldUnifiedLogs(); // Unified console logs
-
-  // Recovery: clean up stale Playwright MCP profile locks left by v0.1.30 bug
-  // (node→bun shim in global PATH caused Chrome CDP WebSocket timeout)
-  cleanupStalePlaywrightProfile();
-
-  // One-time migration: extract cookies from old Chromium profile to storage-state JSON
-  // (v0.1.51: switched from persistent profile to isolated mode for browser concurrency)
-  migrateProfileToStorageState();
-
-  // Seed bundled skills to ~/.myagents/skills/ on first launch
-  seedBundledSkills();
-  console.log('[startup] seedBundledSkills done');
-
-  // Generate agent-browser CLI wrapper in ~/.myagents/bin/
-  if (!isSkillBlockedOnPlatform('agent-browser')) {
-    setupAgentBrowserWrapper();
-    console.log('[startup] setupAgentBrowserWrapper done');
-  } else {
-    console.log('[startup] Skipping agent-browser on this platform (blocked)');
-  }
-
-  // Initialize SOCKS5→HTTP bridge if Rust injected socks5:// proxy env vars.
-  // Must run BEFORE initializeAgent() which triggers pre-warm → SDK subprocess spawn.
-  await initSocksBridgeFromEnv();
-
   // Store sidecar port BEFORE initializeAgent() so that:
   //   1. pre-warm's buildClaudeSessionEnv() reads the correct sidecarPort
   //      (OpenAI bridge loopback URL + MYAGENTS_PORT injection both need it).
@@ -1452,58 +1220,173 @@ async function main() {
   //      debounce outlasting the few µs between these two calls.
   setSidecarPort(port);
 
-  await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
-  console.log('[startup] initializeAgent done');
+  // ── Deferred init gate ──────────────────────────────────────────────────
+  // Everything heavy (skill seed, socks bridge, initializeAgent, external
+  // runtime restore) moves to AFTER
+  // honoServe() binds, so Rust's TCP health check unblocks in < 100ms
+  // instead of waiting ~2s for this work to complete. Routes that need
+  // agent state `await deferredInit` at the top of the fetch handler.
+  //
+  // /health is exempt so the sidecar becomes "healthy" from Rust's
+  // perspective the moment the HTTP server accepts TCP connections —
+  // letting the frontend render the Tab UI while deferred init still runs.
+  let resolveDeferredInit!: () => void;
+  let rejectDeferredInit!: (e: unknown) => void;
+  const deferredInitPromise: Promise<void> = new Promise((res, rej) => {
+    resolveDeferredInit = res;
+    rejectDeferredInit = rej;
+  });
+  // Route handlers that need agent state call `await awaitDeferredInit()`.
+  // Exposed on globalThis so the hono fetch handler (below) can reach it
+  // without changing signatures.
+  (globalThis as { __myagentsDeferredInit?: Promise<void> }).__myagentsDeferredInit =
+    deferredInitPromise;
 
-  // For external runtime sessions being resumed: restore module state so sendExternalMessage
-  // uses --resume instead of --session-id. Must happen after initializeAgent sets up the session.
-  if (shouldUseExternalRuntime() && initialSessionId) {
-    restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
+  // ── OpenAI bridge: lazy ─────────────────────────────────────────────────
+  // Only users on OpenAI-protocol providers hit /v1/messages. Importing
+  // ./openai-bridge (~2600 lines, includes translate/utils/types subtrees)
+  // at startup costs ~120ms for zero benefit on Anthropic-native setups.
+  //
+  // Strategy: keep the factory behind ensureBridgeHandler(). First /v1/messages
+  // that sees an active bridgeConfig loads the module, builds the handler,
+  // and wires registerBridgeSeedFn (bridge-cache buffers signatures until
+  // registration, so seed ordering is preserved — see bridge-cache.ts).
+  let bridgeHandlerPromise: Promise<BridgeHandler> | null = null;
+  const ensureBridgeHandler = (): Promise<BridgeHandler> => {
+    if (!bridgeHandlerPromise) {
+      bridgeHandlerPromise = import('./openai-bridge').then(({ createBridgeHandler }) => {
+        const handler = createBridgeHandler({
+          workspacePath: agentDir || undefined,
+          getUpstreamConfig: () => {
+            const config = getOpenAiBridgeConfig();
+            if (!config) throw new Error('Bridge not active');
+            return {
+              baseUrl: config.baseUrl,
+              apiKey: config.apiKey,
+              model: config.model,
+              maxOutputTokens: config.maxOutputTokens,
+              maxOutputTokensParamName: config.maxOutputTokensParamName,
+              upstreamFormat: config.upstreamFormat,
+            };
+          },
+          modelMapping: (requestModel: string) => {
+            const config = getOpenAiBridgeConfig();
+            if (!config?.modelAliases) return undefined;
+            const aliases = config.modelAliases;
+            if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
+            if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
+            if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
+            if (requestModel.startsWith('claude-')) return getSessionModel() || undefined;
+            return undefined;
+          },
+          logger: (msg) => console.log(msg),
+        });
+        // Register seed callback now that the handler exists. bridge-cache
+        // flushes any entries buffered during pre-registration.
+        registerBridgeSeedFn((entries) => handler.seedThoughtSignatures(entries));
+        return handler;
+      });
+    }
+    return bridgeHandlerPromise;
+  };
+
+  console.log(`[startup] HTTP server binding to 127.0.0.1:${port}...`);
+
+  honoServe({
+    // Explicit 127.0.0.1 for Rust proxy compatibility (IPv4).
+    port,
+    hostname: '127.0.0.1',
+    fetch: async (request) => {
+      // Pattern 6 (HTTP request boundary): each request runs inside an ALS
+      // frame so any nested console.* call automatically gets correlation
+      // fields injected. Renderer-side code (`tauriClient.ts`) attaches
+      // X-MyAgents-Session-Id / X-MyAgents-Tab-Id; the server generates a
+      // fresh requestId (or honours an inbound `X-MyAgents-Request-Id` from
+      // the Rust proxy if it pre-populated one).
+      const incomingRequestId = request.headers.get('x-myagents-request-id') ?? undefined;
+      const requestId = incomingRequestId ?? randomUUIDv4Short();
+      const sessionId = request.headers.get('x-myagents-session-id') ?? undefined;
+      const tabId = request.headers.get('x-myagents-tab-id') ?? undefined;
+      return withLogContext({ requestId, sessionId, tabId }, () => handleRequest(request));
+    },
+  } as Parameters<typeof honoServe>[0]);
+
+  /**
+   * Pattern 6 helper: short stable id for HTTP request correlation.
+   * crypto.randomUUID is ~36 chars; we collapse to 8 hex for grep-ability.
+   */
+  function randomUUIDv4Short(): string {
+    // randomUUID is imported above; we re-derive from the same 16-byte source.
+    return randomUUID().replace(/-/g, '').slice(0, 8);
   }
 
-  // Create OpenAI bridge handler (lazy: only processes requests when bridge config is active)
-  const bridgeHandler = createBridgeHandler({
-    workspacePath: agentDir || undefined,
-    getUpstreamConfig: () => {
-      const config = getOpenAiBridgeConfig();
-      if (!config) throw new Error('Bridge not active');
-      return {
-        baseUrl: config.baseUrl,
-        apiKey: config.apiKey,
-        model: config.model, // undefined when aliases exist (modelMapping handles it)
-        maxOutputTokens: config.maxOutputTokens,
-        maxOutputTokensParamName: config.maxOutputTokensParamName,
-        upstreamFormat: config.upstreamFormat,
-      };
-    },
-    // Dynamic model mapping: when aliases exist, map any Claude model ID to the provider's model.
-    // Called per-request, so it always reflects the latest provider config.
-    modelMapping: (requestModel: string) => {
-      const config = getOpenAiBridgeConfig();
-      if (!config?.modelAliases) return undefined; // No aliases → fall through to modelOverride
-      const aliases = config.modelAliases;
-      // Map SDK-resolved model names to provider models
-      if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
-      if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
-      if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
-      // Safety fallback: if this is a Claude model name that wasn't matched by any alias
-      // (e.g., partial alias config — only sonnet configured, not opus/haiku),
-      // fall back to currentModel to prevent raw "claude-*" from leaking to upstream.
-      if (requestModel.startsWith('claude-')) return getSessionModel() || undefined;
-      // Non-Claude models pass through as-is (e.g., the main model "deepseek-chat")
-      return undefined;
-    },
-    logger: (msg) => console.log(msg),
-  });
-  registerBridgeSeedFn((entries) => bridgeHandler.seedThoughtSignatures(entries));
+  /**
+   * Pattern 1 (last-consumer disconnect grace) state.
+   *
+   * Audit C: when the last renderer client closes its `/chat/stream` SSE while
+   * a turn is in flight, the SDK keeps generating into the void — burning
+   * tokens and queuing chunks no one reads. Counter-design: a 3-second grace
+   * window. If a new client connects within the window (renderer reload
+   * typically reconnects in ~1s), cancel the schedule. Otherwise, interrupt
+   * the SDK with reason 'shutdown'.
+   *
+   * Scoped to the sidecar process. IM/Cron/BackgroundCompletion sessions
+   * never have an SSE client connected in the first place, so the
+   * `clients.size === 0` check naturally excludes them — no interrupt fires
+   * for those owners.
+   */
+  const LAST_CONSUMER_GRACE_MS = 3000;
+  let lastConsumerGraceTimer: ReturnType<typeof setTimeout> | null = null;
 
-  console.log(`[startup] Bun.serve() binding to 127.0.0.1:${port}...`);
+  function cancelLastConsumerGrace(): void {
+    if (lastConsumerGraceTimer) {
+      clearTimeout(lastConsumerGraceTimer);
+      lastConsumerGraceTimer = null;
+    }
+  }
 
-  Bun.serve({
-    port,
-    hostname: '127.0.0.1', // Explicitly bind to IPv4 for Rust proxy compatibility
-    idleTimeout: 0,
-    async fetch(request) {
+  function handleChatStreamClose(): void {
+    // Recompute on close — after our own client was removed in sse.ts, the
+    // remaining count is what matters.
+    const remainingClients = getClients().length;
+    if (remainingClients > 0) {
+      // Other tabs still watching; nothing to do.
+      return;
+    }
+    if (!isTurnInFlight()) {
+      // No active turn → no tokens being burned; nothing to do.
+      return;
+    }
+    if (lastConsumerGraceTimer) {
+      // Already armed — let the existing window run out.
+      return;
+    }
+    console.warn('[chat-stream] last consumer disconnected; arming 3s grace before interrupt (reason=shutdown)');
+    lastConsumerGraceTimer = setTimeout(() => {
+      lastConsumerGraceTimer = null;
+      // Re-check at fire time — a new client may have raced past our gate.
+      if (getClients().length > 0) {
+        console.warn('[chat-stream] grace fired but a client reconnected; skipping interrupt');
+        return;
+      }
+      if (!isTurnInFlight()) {
+        // Turn already finished naturally; nothing to interrupt.
+        return;
+      }
+      console.warn('[chat-stream] grace expired; interrupting SDK turn (reason=shutdown)');
+      interruptCurrentResponse('shutdown').catch((err) => {
+        console.warn(`[chat-stream] interrupt after grace failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, LAST_CONSUMER_GRACE_MS);
+    lastConsumerGraceTimer.unref?.();
+  }
+
+  /**
+   * Original Hono fetch body, unchanged except for being moved into a named
+   * function so the outer wrapper can run inside `withLogContext`.
+   */
+  async function handleRequest(request: Request): Promise<Response> {
+    {
       const url = new URL(request.url);
       const pathname = url.pathname;
 
@@ -1529,10 +1412,87 @@ async function main() {
         });
       }
 
-      // 🩺 Health check endpoint - used by Rust sidecar manager
-      // Must be as simple as possible to verify HTTP handler is responsive
-      if (pathname === '/health' && request.method === 'GET') {
+      // 🩺 Health check endpoints - used by Rust sidecar manager and renderer.
+      //
+      // Pattern 4 splits the historical "/health = healthy" signal into three:
+      //   - /health         → liveness (TCP bind succeeded; legacy alias kept
+      //                       so existing Rust watchdogs keep working)
+      //   - /health/live    → same as /health, explicit name
+      //   - /health/ready   → deferred init complete; structured 503 + phase
+      //                       while pending or failed
+      //   - /health/functional → core feature can serve (sidecar mirrors live;
+      //                       Plugin Bridge implements the real check)
+      //
+      // All four bypass the deferred-init gate below — they MUST respond
+      // immediately, otherwise probes can't distinguish "still warming up"
+      // from "wedged".
+      if ((pathname === '/health' || pathname === '/health/live') && request.method === 'GET') {
         return jsonResponse({ status: 'ok', timestamp: Date.now() });
+      }
+      if (pathname === '/health/ready' && request.method === 'GET') {
+        const { status, body } = buildReadyResponseBody();
+        return jsonResponse(body, status);
+      }
+      if (pathname === '/health/functional' && request.method === 'GET') {
+        // Sidecar's "functional" mirrors readiness for now — once ready, the
+        // Hono handler is serving requests. Plugin Bridge has a more
+        // meaningful gateway-forwarding check.
+        const { status, body } = buildReadyResponseBody();
+        return jsonResponse(body, status);
+      }
+      // (removed) `POST /health/ready/retry` — pre-0.2.0 endpoint that reset
+      // DeferredInitState to `pending` and returned 202 promising a re-run,
+      // but no in-process re-runner exists (the deferred init block is a
+      // single IIFE). The renderer never observed progress and was misled.
+      // Retry today is a process restart; if/when an extracted re-callable
+      // init lands we can reintroduce a real retry endpoint.
+
+      // 📦 Pattern 2 §2.3.1 — Large-value ref retrieval. SSE / IPC payloads
+      // over the spill threshold leave a `{kind:'ref', id, ...}` placeholder
+      // here; consumers fetch the full body via this endpoint. Streamed via
+      // createReadStream so multi-MB bodies don't get loaded into memory.
+      // Bypasses the deferred-init gate — refs are independent of agent
+      // state, and the /chat/* SSE consumer may be mid-replay during init.
+      if (pathname.startsWith('/refs/') && request.method === 'GET') {
+        const id = decodeURIComponent(pathname.slice('/refs/'.length));
+        // Mirror the strict regex inside large-value-store.getRefStreamPath:
+        // 8–32 lowercase hex (uuid-prefix shape). The route check used to be
+        // looser (`/^[a-f0-9]+$/i`, no length cap, case-insensitive), which
+        // meant attacker-style upper-case probes returned 404 from the inner
+        // store after also satisfying the route — defense-in-depth without
+        // observable behavior change for legitimate refs.
+        if (!id || !/^[a-f0-9]{8,32}$/.test(id)) {
+          return jsonResponse({ error: 'invalid ref id' }, 400);
+        }
+        const { getRefStreamPath } = await import('./utils/large-value-store');
+        const refInfo = await getRefStreamPath(id);
+        if (!refInfo) {
+          return jsonResponse({ error: 'ref not found or expired' }, 404);
+        }
+        // Stream from disk so multi-MB bodies don't buffer into memory.
+        const fr = await fileResponse(refInfo.path, {
+          contentType: refInfo.mimetype,
+        });
+        if (!fr) {
+          return jsonResponse({ error: 'ref body missing' }, 404);
+        }
+        return fr;
+      }
+
+      // ── Deferred init gate ────────────────────────────────────────────────
+      // All other routes depend on agent state (currentAgentDir, MCP servers,
+      // session metadata, bridge handler). Pattern 4: instead of awaiting
+      // the bare promise (which either blocks indefinitely or rethrows as a
+      // 500 on failure), consult the state machine and return a structured
+      // 503 if init is pending/phase/failed. Once `kind === 'ready'`, the
+      // gate is a no-op (sub-µs) for steady-state requests.
+      const gate = buildGateResponseBody();
+      if (gate) {
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (gate.body.state === 'pending' || gate.body.state === 'phase') {
+          headers['Retry-After'] = '1';
+        }
+        return new Response(JSON.stringify(gate.body), { status: gate.status, headers });
       }
 
       // Browser dev-mode fallback for attachment files.
@@ -1540,7 +1500,8 @@ async function main() {
       // (`src-tauri/src/attachment_protocol.rs`) which serves bytes directly
       // through WebKit without round-tripping JSON. In dev (vite + browser) the
       // custom scheme isn't registered, so this route serves the same bytes
-      // via a plain HTTP GET. `Bun.file()` is a lazy handle — no main-loop read.
+      // via a plain HTTP GET. fileResponse() streams via createReadStream to
+      // avoid buffering large attachments.
       if (pathname.startsWith('/api/attachment/') && request.method === 'GET') {
         const rel = decodeURIComponent(pathname.replace('/api/attachment/', ''));
         // Reject path traversal: no `..` segments and no absolute paths.
@@ -1548,20 +1509,14 @@ async function main() {
           return new Response('Forbidden', { status: 403 });
         }
         const absolute = getAttachmentPath(rel);
-        try {
-          const file = Bun.file(absolute);
-          if (!(await file.exists())) {
-            return new Response('Not Found', { status: 404 });
-          }
-          return new Response(file, {
-            headers: {
-              'Cache-Control': 'public, max-age=31536000, immutable',
-              'Access-Control-Allow-Origin': '*',
-            },
-          });
-        } catch {
-          return new Response('Not Found', { status: 404 });
-        }
+        const fileResp = await fileResponse(absolute, {
+          contentType: sniffMime(absolute),
+          headers: {
+            'Cache-Control': 'public, max-age=31536000, immutable',
+            'Access-Control-Allow-Origin': '*',
+          },
+        });
+        return fileResp ?? new Response('Not Found', { status: 404 });
       }
 
       // Session state endpoint - used by Rust background completion polling
@@ -1607,7 +1562,11 @@ async function main() {
       }
 
       if (pathname === '/chat/stream' && request.method === 'GET') {
-        const { client, response } = createSseClient(() => { });
+        // Pattern 1: a new SSE consumer cancels any pending "last consumer
+        // disconnect" grace timer — the renderer just reconnected, no
+        // interrupt needed.
+        cancelLastConsumerGrace();
+        const { client, response } = createSseClient(handleChatStreamClose);
         const state = shouldUseExternalRuntime()
           ? { ...getAgentState(), sessionState: getExternalSessionState() }
           : getAgentState();
@@ -1887,7 +1846,7 @@ async function main() {
         if (!messageId) {
           return jsonResponse({ success: false, error: 'Missing messageId' }, 400);
         }
-        const result = forkSession(messageId);
+        const result = await forkSession(messageId);
         return jsonResponse(result);
       }
 
@@ -1966,9 +1925,17 @@ async function main() {
           // Read incremental data (cap at 1MB)
           const MAX_READ = 1024 * 1024;
           const readEnd = Math.min(offset + MAX_READ, fileSize);
-          const file = Bun.file(resolvedOutputFile);
-          const slice = file.slice(offset, readEnd);
-          const text = await slice.text();
+          const { open } = await import('node:fs/promises');
+          const fh = await open(resolvedOutputFile, 'r');
+          let text: string;
+          try {
+            const length = readEnd - offset;
+            const buf = Buffer.alloc(length);
+            await fh.read(buf, 0, length, offset);
+            text = buf.toString('utf8');
+          } finally {
+            await fh.close();
+          }
 
           // Parse JSONL lines
           let toolCount = 0;
@@ -2250,7 +2217,7 @@ async function main() {
           if (sessionId) {
             cronSnapshot.id = sessionId;
           }
-          const newSession = createSession(agentDir, cronSnapshot);
+          const newSession = await createSession(agentDir, cronSnapshot);
           const switched = await switchToSession(newSession.id);
           if (!switched) {
             console.error(`[cron] execute-sync taskId=${taskId} failed to switch to new session ${newSession.id}`);
@@ -2691,7 +2658,7 @@ async function main() {
         const agent = findAgentByWorkspacePath(agentDirValue) as AgentConfig | undefined;
         const baseSnapshot = agent ? snapshotForOwnedSession(agent) : {};
         if (runtimeValue) baseSnapshot.runtime = runtimeValue;
-        const session = createSession(agentDirValue, baseSnapshot);
+        const session = await createSession(agentDirValue, baseSnapshot);
         return jsonResponse({ success: true, session });
       }
 
@@ -2844,6 +2811,33 @@ async function main() {
 
         const session = getSessionData(sessionId);
         if (!session) {
+          // An active session may not yet have on-disk metadata: external runtimes
+          // pre-warm before the first user message, and builtin can race in the
+          // window between Tab open and first persisted turn. Treat the active
+          // session as an empty session-in-progress instead of 404 (which the
+          // frontend retries, producing log noise).
+          const isActiveBuiltin = sessionId === getSessionId();
+          const isActiveExternal = shouldUseExternalRuntime() && sessionId === getExternalSessionId();
+          if (isActiveBuiltin || isActiveExternal) {
+            // CRITICAL: include `runtime` so the frontend's TabProvider doesn't
+            // fall back to `'builtin'` (line 2645: `runtime || 'builtin'`). For
+            // a pre-warmed external session whose metadata hasn't been persisted
+            // yet, omitting runtime makes `currentRuntime` resolve to 'builtin',
+            // which then triggers the unified model-push effect to send the
+            // builtin preset model — killing the just-prewarmed external process.
+            return jsonResponse({
+              success: true,
+              session: {
+                id: sessionId,
+                runtime: isActiveExternal ? getActiveRuntimeType() : 'builtin',
+                messages: [],
+                liveStreamingMessage: null,
+                liveSessionState: isActiveExternal ? getExternalSessionState() : undefined,
+                totalCount: 0,
+                hasMoreBefore: false,
+              },
+            });
+          }
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
 
@@ -2960,7 +2954,7 @@ async function main() {
           return jsonResponse({ success: false, error: 'Session ID required.' }, 400);
         }
 
-        const deleted = deleteSession(sessionId);
+        const deleted = await deleteSession(sessionId);
         if (!deleted) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
@@ -3021,7 +3015,7 @@ async function main() {
           updates.configSnapshotAt = new Date().toISOString();
         }
 
-        const updated = updateSessionMetadata(sessionId, updates as Parameters<typeof updateSessionMetadata>[1]);
+        const updated = await updateSessionMetadata(sessionId, updates as Parameters<typeof updateSessionMetadata>[1]);
 
         if (!updated) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
@@ -3045,20 +3039,61 @@ async function main() {
           return jsonResponse({ success: false, error: 'sessionId is required.' }, 400);
         }
 
-        // Stop external runtime subprocess before switching to a DIFFERENT session.
-        // Reopening the same running external session must attach, not interrupt the turn.
-        if (shouldUseExternalRuntime() && isExternalSessionActive() && payload.sessionId !== getExternalSessionId()) {
-          await stopExternalSession();
+        // External runtime path: builtin's `switchToSession` looks up the session
+        // in builtin SessionStore, but external sessions are persisted lazily
+        // (only on first user message — pre-warm doesn't write metadata). Falling
+        // through to builtin would always 404 for a freshly-prewarmed external
+        // session and pollute the log with misleading "session not found" errors.
+        // Handle external runtime directly without consulting builtin's store.
+        if (shouldUseExternalRuntime()) {
+          // Wait for any in-flight startExternalSession (pre-warm handshake)
+          // to finish. Without this, user clicking session history during the
+          // 10–14s pre-warm spawn-and-handshake window sees `isExternalSessionActive()`
+          // = false → stopExternalSession is skipped → restoreExternalSessionState
+          // resets module state (lastSessionId, etc.) → the still-spawning prewarm
+          // subprocess for session-A then writes its post-spawn assignments
+          // against state that now believes it's session-B. Mirrors the
+          // serialization in setExternalModel/setExternalPermissionMode.
+          await awaitExternalSessionStarting();
+
+          const isCurrentlyActive = isExternalSessionActive() && payload.sessionId === getExternalSessionId();
+          const meta = getSessionMetadata(payload.sessionId);
+
+          // Validate target: must be either the current live session, or a
+          // persisted session whose runtime matches this sidecar. Without this,
+          // a typo'd sessionId would silently succeed and the next user message
+          // would create a fresh session under the wrong id (parity with
+          // builtin's switchToSession which 404s on unknown ids).
+          if (!isCurrentlyActive && !meta) {
+            return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+          }
+          // Cross-runtime guard — if the persisted session was created by a
+          // different runtime, refuse to attach. The cross-runtime fork flow
+          // is initiated by the frontend creating a new session, not by
+          // switching into the old one.
+          if (meta?.runtime && meta.runtime !== getActiveRuntimeType()) {
+            return jsonResponse(
+              { success: false, error: `Session runtime mismatch: persisted=${meta.runtime}, current=${getActiveRuntimeType()}` },
+              409,
+            );
+          }
+
+          // Switching to a DIFFERENT live external session — tear down current first.
+          // Reopening the same running session must attach, not interrupt.
+          if (isExternalSessionActive() && payload.sessionId !== getExternalSessionId()) {
+            await stopExternalSession();
+          }
+          // Idempotent — sets up resume state (runtimeSessionId / threadId / lastModel
+          // etc.) for the next user message. Safe for already-active sessions
+          // (sessionId === lastSessionId skips the state reset inside).
+          restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
+          console.log(`[sessions] Switched to external session: ${payload.sessionId}`);
+          return jsonResponse({ success: true, sessionId: payload.sessionId });
         }
 
         const success = await switchToSession(payload.sessionId);
         if (!success) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
-        }
-
-        // Restore external runtime state for the target session (enables --resume on next message)
-        if (shouldUseExternalRuntime()) {
-          restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
         }
 
         console.log(`[sessions] Switched to session: ${payload.sessionId}`);
@@ -3127,6 +3162,7 @@ async function main() {
         // short-lived CLI process of the same runtime so the title respects the
         // session's actual model + CLI auth. See title-generator.ts for rationale.
         const activeRuntime = getActiveRuntimeType();
+        const { generateTitle, generateTitleExternal } = await import('./title-generator');
         let title: string | null;
         if (activeRuntime === 'builtin') {
           title = await generateTitle(
@@ -3152,7 +3188,7 @@ async function main() {
           if (currentMeta?.titleSource === 'user') {
             return jsonResponse({ success: false, skipped: true });
           }
-          updateSessionMetadata(payload.sessionId, { title, titleSource: 'auto' } as Parameters<typeof updateSessionMetadata>[1]);
+          await updateSessionMetadata(payload.sessionId, { title, titleSource: 'auto' } as Parameters<typeof updateSessionMetadata>[1]);
           return jsonResponse({ success: true, title });
         }
 
@@ -3246,26 +3282,26 @@ async function main() {
 
           // Escape glob special characters in user query to prevent pattern injection
           const safeQuery = query.replace(/[*?[\]{}()\\]/g, '\\$&');
-          // Use glob to search files
-          const glob = new Bun.Glob(`**/*${safeQuery}*`);
+          // Use glob to search files (node:fs/promises glob, Node 22+)
           const results: { path: string; name: string; type: 'file' | 'dir' }[] = [];
-
-          for await (const file of glob.scan({
+          const globIter = nodeGlob(`**/*${safeQuery}*`, {
             cwd: currentAgentDir,
-            onlyFiles: false,
-            dot: false, // Ignore hidden files
-          })) {
-            // Skip node_modules, .git, etc.
-            if (file.includes('node_modules/') || file.includes('.git/')) {
-              continue;
-            }
+            exclude: (entry) => {
+              // Ignore dotfiles and skip node_modules/.git fast
+              const basePart = entry.split(sep).pop() ?? '';
+              if (basePart.startsWith('.')) return true;
+              return entry.includes(`node_modules${sep}`) || entry.includes(`.git${sep}`);
+            },
+          });
 
-            const fullPath = join(currentAgentDir, file);
+          for await (const file of globIter) {
+            const relFile = file as string;
+            const fullPath = join(currentAgentDir, relFile);
             try {
               const stats = await stat(fullPath);
               results.push({
-                path: file,
-                name: basename(file),
+                path: relFile,
+                name: basename(relFile),
                 type: stats.isDirectory() ? 'dir' : 'file',
               });
 
@@ -3339,20 +3375,17 @@ async function main() {
         if (!resolvedPath) {
           return jsonResponse({ error: 'Invalid path.' }, 400);
         }
-        const file = Bun.file(resolvedPath);
-        if (!(await file.exists())) {
-          return jsonResponse({ error: 'File not found.' }, 404);
-        }
         const name = basename(resolvedPath);
         // RFC 5987: use filename* with UTF-8 encoding for non-ASCII filenames
-        // Bun throws on non-ASCII characters in header values, causing 500 for Chinese filenames
+        // (HTTP header spec rejects non-ASCII in quoted-string).
         const encodedName = encodeURIComponent(name);
-        return new Response(file, {
+        const resp = await fileResponse(resolvedPath, {
+          contentType: sniffMime(resolvedPath),
           headers: {
-            'Content-Type': file.type || 'application/octet-stream',
-            'Content-Disposition': `attachment; filename="${encodedName}"; filename*=UTF-8''${encodedName}`
-          }
+            'Content-Disposition': `attachment; filename="${encodedName}"; filename*=UTF-8''${encodedName}`,
+          },
         });
+        return resp ?? jsonResponse({ error: 'File not found.' }, 404);
       }
 
       if (pathname === '/agent/file' && request.method === 'GET') {
@@ -3364,21 +3397,22 @@ async function main() {
         if (!resolvedPath) {
           return jsonResponse({ error: 'Invalid path.' }, 400);
         }
-        const file = Bun.file(resolvedPath);
-        if (!(await file.exists())) {
+        if (!existsSync(resolvedPath)) {
           return jsonResponse({ error: 'File not found.' }, 404);
         }
         const name = basename(resolvedPath);
-        if (!isPreviewableText(name, file.type)) {
+        const mimeType = sniffMime(resolvedPath);
+        if (!isPreviewableText(name, mimeType)) {
           return jsonResponse({ error: 'File type not supported.' }, 415);
         }
-        const size = file.size;
+        const statResult = await stat(resolvedPath);
+        const size = statResult.size;
         const maxSize = 512 * 1024;
         if (size > maxSize) {
           return jsonResponse({ error: 'File too large to preview.' }, 413);
         }
         try {
-          const content = await file.text();
+          const content = await readFile(resolvedPath, 'utf8');
           return jsonResponse({ content, name, size });
         } catch (error) {
           return jsonResponse(
@@ -3408,8 +3442,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Invalid path.' }, 400);
           }
 
-          const file = Bun.file(resolvedPath);
-          if (!(await file.exists())) {
+          if (!existsSync(resolvedPath)) {
             return jsonResponse({ success: false, error: 'File not found.' }, 404);
           }
 
@@ -3419,7 +3452,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'Content too large.' }, 413);
           }
 
-          await Bun.write(resolvedPath, content);
+          await writeFile(resolvedPath, content);
           return jsonResponse({ success: true });
         } catch (error) {
           return jsonResponse(
@@ -3437,6 +3470,8 @@ async function main() {
           return jsonResponse({ error: 'Invalid path.' }, 400);
         }
         try {
+          const oversized = rejectIfOversizedUpload(request);
+          if (oversized) return oversized;
           const formData = await request.formData();
           const files = Array.from(formData.values()).filter(
             (value) => typeof value !== 'string'
@@ -3449,7 +3484,7 @@ async function main() {
           for (const file of files) {
             const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
             const destination = join(resolvedTarget, safeName);
-            await Bun.write(destination, file);
+            await streamUploadToFile(file, destination);
             saved.push(relative(currentAgentDir, destination));
           }
           return jsonResponse({ success: true, files: saved });
@@ -3489,7 +3524,7 @@ async function main() {
             return jsonResponse({ success: false, error: 'File already exists.' }, 409);
           }
 
-          await Bun.write(filePath, '');
+          await writeFile(filePath, '');
           return jsonResponse({ success: true, path: relative(currentAgentDir, filePath) });
         } catch (error) {
           return jsonResponse(
@@ -3701,12 +3736,12 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            Bun.spawn(['open', '-R', resolved]);
+            fireAndForget(['open', '-R', resolved]);
           } else if (isWin) {
-            Bun.spawn(['explorer', '/select,', resolved]);
+            fireAndForget(['explorer', '/select,', resolved]);
           } else {
             // Linux: open parent directory
-            Bun.spawn(['xdg-open', dirname(resolved)]);
+            fireAndForget(['xdg-open', dirname(resolved)]);
           }
 
           return jsonResponse({ success: true });
@@ -3742,13 +3777,13 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            Bun.spawn(['open', resolved]);
+            fireAndForget(['open', resolved]);
           } else if (isWin) {
             // Use PowerShell Start-Process to avoid cmd /c shell interpretation
             // which could treat & | > in filenames as command operators
-            Bun.spawn(['powershell', '-NoProfile', '-Command', `Start-Process -FilePath '${resolved.replace(/'/g, "''")}'`]);
+            fireAndForget(['powershell', '-NoProfile', '-Command', `Start-Process -FilePath '${resolved.replace(/'/g, "''")}'`]);
           } else {
-            Bun.spawn(['xdg-open', resolved]);
+            fireAndForget(['xdg-open', resolved]);
           }
 
           return jsonResponse({ success: true });
@@ -3792,11 +3827,11 @@ async function main() {
           const isWin = process.platform === 'win32';
 
           if (isMac) {
-            Bun.spawn(['open', '-R', resolvedPath]);
+            fireAndForget(['open', '-R', resolvedPath]);
           } else if (isWin) {
-            Bun.spawn(['explorer', '/select,', resolvedPath]);
+            fireAndForget(['explorer', '/select,', resolvedPath]);
           } else {
-            Bun.spawn(['xdg-open', dirname(resolvedPath)]);
+            fireAndForget(['xdg-open', dirname(resolvedPath)]);
           }
 
           return jsonResponse({ success: true });
@@ -3818,6 +3853,8 @@ async function main() {
         }
 
         try {
+          const oversized = rejectIfOversizedUpload(request);
+          if (oversized) return oversized;
           const formData = await request.formData();
           const files = Array.from(formData.values()).filter(
             (value) => typeof value !== 'string'
@@ -3833,7 +3870,7 @@ async function main() {
           for (const file of files) {
             const safeName = file.name.replace(/[<>:"/\\|?*]/g, '_');
             const destination = join(resolvedTarget, safeName);
-            await Bun.write(destination, file);
+            await streamUploadToFile(file, destination);
             saved.push(relative(currentAgentDir, destination));
           }
 
@@ -3893,7 +3930,7 @@ async function main() {
 
             // Decode base64 and write file
             const buffer = Buffer.from(file.content, 'base64');
-            await Bun.write(destination, buffer);
+            await writeFile(destination, buffer);
 
             saved.push(relative(currentAgentDir, destination));
           }
@@ -3968,8 +4005,7 @@ async function main() {
               if (entry.isDirectory()) {
                 await copyDirectory(srcPath, destPath);
               } else {
-                const file = Bun.file(srcPath);
-                await Bun.write(destPath, file);
+                await copyFileAsync(srcPath, destPath);
               }
             }
           };
@@ -4005,8 +4041,7 @@ async function main() {
               // Copy file
               const { name: uniqueName, renamed } = getUniqueName(resolvedTarget, sourceName);
               const destPath = join(resolvedTarget, uniqueName);
-              const file = Bun.file(sourcePath);
-              await Bun.write(destPath, file);
+              await copyFileAsync(sourcePath, destPath);
               copiedFiles.push({
                 sourcePath,
                 targetPath: relative(currentAgentDir, destPath),
@@ -4150,22 +4185,9 @@ async function main() {
               }
 
               // Read file
-              const file = Bun.file(filePath);
-              const arrayBuffer = await file.arrayBuffer();
-              const base64 = Buffer.from(arrayBuffer).toString('base64');
-
-              // Determine MIME type from extension
-              const mimeTypes: Record<string, string> = {
-                png: 'image/png',
-                jpg: 'image/jpeg',
-                jpeg: 'image/jpeg',
-                gif: 'image/gif',
-                webp: 'image/webp',
-                svg: 'image/svg+xml',
-                bmp: 'image/bmp',
-                ico: 'image/x-icon',
-              };
-              const mimeType = mimeTypes[ext] || file.type || 'application/octet-stream';
+              const bytes = await readFile(filePath);
+              const base64 = bytes.toString('base64');
+              const mimeType = sniffMime(filePath);
 
               results.push({
                 path: filePath,
@@ -4222,16 +4244,14 @@ async function main() {
             return jsonResponse({ success: false, error: 'Image not found' }, 404);
           }
 
-          const file = Bun.file(resolvedPath);
           const ext = resolvedPath.split('.').pop()?.toLowerCase();
           const mimeType = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : 'image/png';
 
-          return new Response(file, {
-            headers: {
-              'Content-Type': mimeType,
-              'Cache-Control': 'public, max-age=86400',
-            },
+          const resp = await fileResponse(resolvedPath, {
+            contentType: mimeType,
+            headers: { 'Cache-Control': 'public, max-age=86400' },
           });
+          return resp ?? jsonResponse({ success: false, error: 'Image not found' }, 404);
         } catch (error) {
           console.error('[api/image] Error:', error);
           return jsonResponse(
@@ -4268,7 +4288,6 @@ async function main() {
             return jsonResponse({ success: false, error: 'Audio not found' }, 404);
           }
 
-          const file = Bun.file(resolvedPath);
           const ext = resolvedPath.split('.').pop()?.toLowerCase();
           const mimeTypes: Record<string, string> = {
             mp3: 'audio/mpeg',
@@ -4281,12 +4300,11 @@ async function main() {
           };
           const mimeType = mimeTypes[ext || ''] || 'audio/mpeg';
 
-          return new Response(file, {
-            headers: {
-              'Content-Type': mimeType,
-              'Cache-Control': 'public, max-age=86400',
-            },
+          const resp = await fileResponse(resolvedPath, {
+            contentType: mimeType,
+            headers: { 'Cache-Control': 'public, max-age=86400' },
           });
+          return resp ?? jsonResponse({ success: false, error: 'Audio not found' }, 404);
         } catch (error) {
           console.error('[api/audio] Error:', error);
           return jsonResponse(
@@ -4400,15 +4418,21 @@ async function main() {
           const isWin = process.platform === 'win32';
           const filePaths = files.map(f => joinPath(logsDir, f));
 
+          // stdout/stderr must be ignored — zip/Compress-Archive emit per-file progress
+          // that can exceed the 64KB pipe buffer on large log sets and deadlock the
+          // child waiting for us to read.
           if (isWin) {
             // PowerShell Compress-Archive
-            const proc = Bun.spawn(['powershell', '-Command',
+            const proc = subprocessSpawn(['powershell', '-Command',
               `Compress-Archive -Path '${filePaths.join("','")}' -DestinationPath '${zipPath}' -Force`
-            ]);
+            ], { stdout: 'ignore', stderr: 'ignore' });
             await proc.exited;
           } else {
             // macOS/Linux: zip command
-            const proc = Bun.spawn(['zip', '-j', zipPath, ...filePaths]);
+            const proc = subprocessSpawn(['zip', '-j', zipPath, ...filePaths], {
+              stdout: 'ignore',
+              stderr: 'ignore',
+            });
             await proc.exited;
           }
 
@@ -4662,6 +4686,15 @@ async function main() {
         try {
           const payload = await request.json() as { servers?: McpServerDefinition[] };
           const servers = payload?.servers ?? [];
+          // Multi-Agent Runtime gate (defense-in-depth): builtin SDK pre-warm
+          // path is irrelevant for external runtimes (Claude Code CLI / Codex /
+          // Gemini), which carry their own MCP config via their CLI flags.
+          // Driving setMcpServers() here would only trigger noisy fingerprint-
+          // diff + 500ms-debounced pre-warm in the builtin path. Renderer-side
+          // gate exists in Chat.tsx; this is the server-side belt.
+          if (shouldUseExternalRuntime()) {
+            return jsonResponse({ success: true, servers: servers.map(s => s.id), skipped: 'external-runtime' });
+          }
           setMcpServers(servers);
           return jsonResponse({ success: true, servers: servers.map(s => s.id) });
         } catch (error) {
@@ -4709,13 +4742,18 @@ async function main() {
             : server.command === '__bundled_cuse__' ? 'cuse' : server.command;
           console.log(`[api/mcp/enable] Enabling MCP: ${server.id}, type: ${server.type}, command: ${displayCommand}`);
 
-          // Built-in MCP (in-process) — delegate validation to registry
+          // Built-in MCP (in-process) — delegate validation to registry.
+          // getBuiltinMcpInstance() force-loads the tool module (SDK+zod) on
+          // first hit; subsequent enables for the same id hit the cached entry.
           if (server.command === '__builtin__') {
-            const entry = getBuiltinMcp(server.id);
-            if (entry?.validate) {
-              const error = await entry.validate(server.env || {});
-              if (error) {
-                return jsonResponse({ success: false, error });
+            const entryPromise = getBuiltinMcpInstance(server.id);
+            if (entryPromise) {
+              const entry = await entryPromise;
+              if (entry.validate) {
+                const error = await entry.validate(server.env || {});
+                if (error) {
+                  return jsonResponse({ success: false, error });
+                }
               }
             }
             console.log(`[api/mcp/enable] Built-in MCP: ${server.id} — enabled`);
@@ -4979,7 +5017,7 @@ async function main() {
 
             // Preset MCP (isBuiltin: true) with npx → warmup to download and cache package
             if (server.isBuiltin && command === 'npx') {
-              const { getBundledNodeDir, getBundledRuntimePath, isBunRuntime, getSystemNpxPaths, findExistingPath } = await import('./utils/runtime');
+              const { getBundledNodeDir, getSystemNpxPaths, findExistingPath } = await import('./utils/runtime');
               const { pinMcpPackageVersions } = await import('./agent-session');
               const args = pinMcpPackageVersions(server.args || []);
 
@@ -4987,7 +5025,9 @@ async function main() {
               const { getShellEnv } = await import('./utils/shell');
               const baseEnv = getShellEnv();
 
-              // Priority: system npx → bundled Node.js npx → bun x
+              // Priority: system npx → bundled Node.js npx → hard fail.
+              // v0.2.0+ removed the "bun x" emergency branch — bundled Node is always present
+              // in release builds, and dev builds fall back to system node via runtime.ts.
               const systemNpx = findExistingPath(getSystemNpxPaths());
               const nodeDir = getBundledNodeDir();
               let warmupCmd: string;
@@ -5023,20 +5063,14 @@ async function main() {
 
                 console.log(`[api/mcp/enable] Warming up with bundled npx: ${warmupArgs.join(' ')}`);
               } else {
-                // 3. Last resort: bun x
-                const runtime = getBundledRuntimePath();
-                if (!isBunRuntime(runtime)) {
-                  return jsonResponse({
-                    success: false,
-                    error: {
-                      type: 'runtime_error',
-                      message: '运行时不可用（系统/内置 Node.js 和 Bun 均未找到）',
-                    }
-                  });
-                }
-                warmupCmd = runtime;
-                warmupArgs = ['x', ...args, '--help'];
-                console.log(`[api/mcp/enable] Warming up with bun x: ${warmupArgs.join(' ')}`);
+                // 3. Neither system nor bundled Node.js found — hard fail.
+                return jsonResponse({
+                  success: false,
+                  error: {
+                    type: 'runtime_error',
+                    message: '运行时不可用（系统/内置 Node.js 均未找到）',
+                  }
+                });
               }
 
               return new Promise<Response>((resolve) => {
@@ -6454,6 +6488,7 @@ async function main() {
           if (ext === '.zip' || ext === '.skill') {
             // Handle zip/skill files - extract to skills directory
             try {
+              const { default: AdmZip } = await import('adm-zip');
               const zip = new AdmZip(fileBuffer);
               const entries = zip.getEntries();
 
@@ -7647,6 +7682,16 @@ async function main() {
       if (pathname === '/api/agents/set' && request.method === 'POST') {
         try {
           const payload = await request.json() as { agents: Record<string, unknown> };
+          // Multi-Agent Runtime gate (mirrors /api/mcp/set above): external
+          // runtimes don't consume the SDK AgentDefinition map, so forwarding
+          // to setAgents() in builtin agent-session would just churn the
+          // pre-warm fingerprint without effect. The renderer should not be
+          // posting here when external runtime is active; this is the
+          // server-side belt for the cases when it does (heartbeat, IM Cron,
+          // tooling that hasn't been migrated).
+          if (shouldUseExternalRuntime()) {
+            return jsonResponse({ success: true, skipped: 'external-runtime' });
+          }
           // The payload.agents is already in SDK AgentDefinition format
           setAgents(payload.agents as Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition>);
           return jsonResponse({ success: true });
@@ -7925,12 +7970,25 @@ async function main() {
       // ============= IM BOT API =============
       // These endpoints are called by the Rust IM layer (SessionRouter)
 
-      // POST /api/im/chat — Process an IM message through the AI agent
-      if (pathname === '/api/im/chat' && request.method === 'POST') {
+
+      // ============= IM Pipeline v2 (Pattern C/D) =============
+      // /api/im/enqueue   — sync ACK, no SSE; peer_lock on Rust side only
+      //                     wraps this call (ms-level), enabling true mid-turn
+      //                     concurrency for same-chat messages.
+      // /api/im/events    — long-poll SSE; one connection per peer_session,
+      //                     events tagged with requestId, supports `since=<seq>`
+      //                     for crash-recovery resume.
+      // /api/im/cancel    — abort an in-flight request by requestId; ties into
+      //                     v0.2.0 `cancellableFetch` / AbortSignal semantics.
+
+      // POST /api/im/enqueue — Pattern C: enqueue an IM message and return immediately.
+      // Replaces /api/im/chat. Body shape identical, but no SSE response — events
+      // flow over /api/im/events long-poll instead.
+      if (pathname === '/api/im/enqueue' && request.method === 'POST') {
         try {
           const payload = (await request.json()) as {
             message: string;
-            source: string; // '{platform}_{private|group}' — dynamic for bridge plugins
+            source: string;
             sourceId: string;
             senderName?: string;
             permissionMode?: string;
@@ -7941,7 +7999,11 @@ async function main() {
             images?: ImagePayload[];
             botId?: string;
             botName?: string;
-            // Group context fields (v0.1.28)
+            // Pattern A — Per-Request Identity. REQUIRED for /api/im/enqueue
+            // (Rust generates at edge). The legacy /api/im/chat tolerated absence
+            // because the SSE+callback model was 1:1; the new bus model needs the
+            // ID to route events.
+            requestId: string;
             sourceType?: 'group';
             groupName?: string;
             groupPlatform?: string;
@@ -7953,7 +8015,6 @@ async function main() {
             groupSystemPrompt?: string;
             isMention?: boolean;
             messageCount?: number;
-            // Bridge plugin tools context (v0.1.42)
             bridgePort?: number;
             bridgePluginId?: string;
             bridgeEnabledToolGroups?: string[];
@@ -7961,12 +8022,26 @@ async function main() {
             senderIsOwner?: boolean;
           };
 
+          if (!payload.requestId) {
+            return jsonResponse({ success: false, error: 'Missing requestId (Pattern C requires it)' }, 400);
+          }
           const hasContent = payload.message?.trim() || (payload.images && payload.images.length > 0);
           if (!hasContent) {
             return jsonResponse({ success: false, error: 'Message or images required' }, 400);
           }
 
-          // Set IM cron context for the im-cron tool (v0.1.21)
+          // Register in registry up front so /api/im/cancel works even before
+          // enqueueUserMessage returns. AbortController is paired here for
+          // Pattern D wiring (cancellableFetch hooks below).
+          // W7 fix: status='running' set BEFORE the enqueueUserMessage call so a
+          // synchronous-completing turn (rare: queued message dequeues immediately)
+          // doesn't race ahead and unregister the entry before we set 'running'.
+          imRequestRegistry.register(payload.requestId, getSessionId() || null, payload.source);
+          imRequestRegistry.setStatus(payload.requestId, 'running');
+
+          try {
+
+          // Set IM cron context for the im-cron tool (parity with /api/im/chat)
           if (payload.botId && process.env.MYAGENTS_MANAGEMENT_PORT) {
             const { getSessionModel } = await import('./agent-session');
             const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
@@ -7977,7 +8052,7 @@ async function main() {
             setImCronContext({
               botId: payload.botId,
               chatId: payload.sourceId,
-              platform: payload.source.split('_')[0], // "telegram" or "feishu"
+              platform: payload.source.split('_')[0],
               workspacePath: agentDir,
               model: imCronModel,
               permissionMode: payloadRuntime === 'builtin'
@@ -7995,22 +8070,13 @@ async function main() {
               runtime: payloadRuntime,
               runtimeConfig: payloadRuntime === 'builtin' ? undefined : payloadRuntimeConfig ?? undefined,
             });
-
-            // Set IM media context for the im-media tool (send_media).
-            // workspacePath enables the path-traversal guard in
-            // im-media-tool.ts::sendMediaHandler — without it AI-supplied file
-            // paths are NOT validated (see utils/safe-file-path.ts).
             setImMediaContext({
               botId: payload.botId,
               chatId: payload.sourceId,
               platform: payload.source.split('_')[0],
               workspacePath: agentDir,
             });
-
-            // Set Bridge tools context if this is an OpenClaw plugin session with tools
-            // Async: fetches tool definitions from Bridge and creates dynamic MCP server
             if (payload.bridgePort && payload.bridgePluginId) {
-              // Derive sourceType from source string (e.g. "feishu_private" → "private")
               const bridgeSourceType = payload.source?.split('_')[1] as string | undefined;
               await setImBridgeToolsContext({
                 bridgePort: payload.bridgePort,
@@ -8024,8 +8090,7 @@ async function main() {
             }
           }
 
-          // Set IM interaction scenario (L1 + L2-im + L3-heartbeat).
-          // Must be set BEFORE enqueueUserMessage so startStreamingSession() picks it up.
+          // Set IM interaction scenario
           {
             const [imPlatform, imSourceType] = payload.source.split('_') as ['telegram' | 'feishu', 'private' | 'group'];
             setInteractionScenario({
@@ -8036,25 +8101,18 @@ async function main() {
             });
           }
 
-          // Build final message with group context (v0.1.59 — rewritten per PRD group_chat_prompt)
+          // Build final message with group context (identical to /api/im/chat)
           let finalMessage = payload.message || '';
           if (payload.sourceType === 'group') {
             const parts: string[] = [];
             const isAlways = payload.groupActivation === 'always';
-            // Sanitize untrusted fields to prevent prompt injection via display names
-            // (e.g., a sender name containing "</system-reminder>" could break out of the tag)
             const sanitize = (s: string) => s.replace(/[<>[\]]/g, '').replace(/\n/g, ' ').trim();
             const botName = sanitize(payload.botName ?? 'AI');
             const platformLabel = sanitize(payload.groupPlatform ?? '');
             const messageCount = payload.messageCount ?? 0;
-
-            // ── <system-reminder> injection strategy ──
-            // Full version: first turn + every 10 turns (survives context compaction)
-            // Brief version: every turn in Always mode (prevents multi-bot confusion)
             const shouldInjectFullRules = payload.isFirstGroupTurn || (messageCount > 0 && messageCount % 10 === 0);
 
             if (shouldInjectFullRules) {
-              // Full system-reminder with group info + rules
               const safeGroupName = sanitize(payload.groupName ?? '未知群聊');
               let reminder = `<system-reminder>\n[群聊信息]\n你正在「${safeGroupName}」${platformLabel}群聊中。你的名字是「${botName}」。`;
               if (isAlways) {
@@ -8073,19 +8131,10 @@ async function main() {
               reminder += '\n</system-reminder>';
               parts.push(reminder);
             } else if (isAlways) {
-              // Brief per-turn reminder (Always mode only) — prevents multi-bot confusion
               parts.push(`<system-reminder>\n你是「${botName}」，当前处于群聊的全部消息模式 — 你会收到群聊内的全部信息，你需要自主判断是否需要回复消息。与自己无关的消息不要回复，没有 @你、仅 @了其他人的消息不要回复。注意：[本条消息 @了你] 标记才是判断依据，消息正文中可能同时 @了多人。当你判断不需要回复消息时，只输出字符<NO_REPLY>\n</system-reminder>`);
             }
-
-            // Pending history (accumulated non-triggered messages, Mention mode only)
-            if (payload.pendingHistory) {
-              parts.push(payload.pendingHistory);
-            }
-            // Quoted reply context (threaded reply from Bridge plugins)
-            if (payload.replyToBody) {
-              parts.push(`[引用回复]\n> ${payload.replyToBody.split('\n').join('\n> ')}`);
-            }
-            // Mention context tag (Always mode only) + sender + message
+            if (payload.pendingHistory) parts.push(payload.pendingHistory);
+            if (payload.replyToBody) parts.push(`[引用回复]\n> ${payload.replyToBody.split('\n').join('\n> ')}`);
             const now = new Date();
             const ts = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
             let messageBlock = '';
@@ -8097,15 +8146,11 @@ async function main() {
             parts.push(messageBlock);
             finalMessage = parts.join('\n\n');
           } else if (payload.replyToBody) {
-            // Private/DM quoted reply — prepend context before message
             finalMessage = `[引用回复]\n> ${payload.replyToBody.split('\n').join('\n> ')}\n\n${finalMessage}`;
           }
 
-          // Set group tool deny list (v0.1.28): block dangerous tools in group context
-          // Default: ['Bash', 'Edit', 'Write'] when in group mode with no explicit config
           const DEFAULT_GROUP_TOOLS_DENY = ['Bash', 'Edit', 'Write'];
           if (payload.sourceType === 'group') {
-            // undefined = not configured → use default; explicit [] = allow all tools
             const denyList = payload.groupToolsDeny !== undefined ? payload.groupToolsDeny : DEFAULT_GROUP_TOOLS_DENY;
             setGroupToolsDeny(denyList);
           } else {
@@ -8118,32 +8163,15 @@ async function main() {
             senderName: payload.senderName,
           };
 
-          // ─── External Runtime branch (CC/Codex/Gemini) ───
+          // Dispatch to runtime (External vs Builtin)
           if (shouldUseExternalRuntime()) {
             const imSource = payload.source.split('_')[0];
             const imSourceType = payload.source.includes('group') ? 'group' as const : 'private' as const;
             const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
             const runtimeConfig = payload.runtimeConfig ?? null;
-            // Runtime drift is handled authoritatively on the Rust side:
-            //   - Desktop/Tab: v0.1.62 session-stability pins runtime
-            //   - IM/Agent:    v0.1.66 SessionRouter::check_and_reset_on_runtime_drift
-            //                  runs before ensure_sidecar, regenerating the peer
-            //                  session_id and forking a fresh Sidecar with the
-            //                  agent's current runtime
-            //
-            // By the time a message reaches this handler, the MYAGENTS_RUNTIME
-            // env var was set at spawn time and Rust guarantees it matches the
-            // agent's current runtime (modulo race windows during config
-            // hot-reload). If we DO observe a mismatch at this layer, it means
-            // Rust's drift detection missed an edge case — log loudly so it
-            // surfaces in reports, but DO NOT return an error: there's no
-            // downstream Rust handler for a 409, which would turn the race
-            // into a permanently-broken session. The stale runtime is still
-            // better than a hard failure, and the user's next message will
-            // re-trigger drift detection on Rust's side.
             if (payloadRuntime !== getActiveRuntimeType()) {
               console.error(
-                `[im/chat] Runtime mismatch (Rust drift detection failed to catch): sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}. Proceeding with sidecar runtime; user should re-send after Rust drift detection reconciles.`,
+                `[im/enqueue] Runtime mismatch (Rust drift detection failed to catch): sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}.`,
               );
             }
             const ccResult = await sendExternalMessage(
@@ -8154,162 +8182,168 @@ async function main() {
                 scenario: { type: 'agent-channel' as const, platform: imSource, sourceType: imSourceType, botName: payload.botName },
                 permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
                 model: getRuntimeConfigModel(runtimeConfig),
+                requestId: payload.requestId,
               },
             );
             if (!ccResult.queued) {
+              imRequestRegistry.unregister(payload.requestId);
               return jsonResponse({ success: false, error: ccResult.error ?? 'Failed to send via external runtime' }, 503);
             }
           } else {
-            // Use enqueueUserMessage — shares the same persistent generator as Desktop
             const result = await enqueueUserMessage(
               finalMessage,
-              payload.images, // forward image attachments from Telegram
+              payload.images,
               (payload.permissionMode as PermissionMode) ?? 'plan',
-              payload.model ?? undefined, // model: per-message from Rust /model command
-              payload.providerEnv ?? undefined, // providerEnv: forwarded from Rust IM (undefined = keep current)
+              payload.model ?? undefined,
+              payload.providerEnv ?? undefined,
               metadata,
+              payload.requestId,
             );
-
             if (result.error) {
+              imRequestRegistry.unregister(payload.requestId);
               return jsonResponse({ success: false, error: result.error }, 503);
             }
           }
 
-          // Mark session source (only on first IM message for this session)
           const currentSessionId = getSessionId();
           if (currentSessionId) {
             const sessionMeta = getSessionMetadata(currentSessionId);
             if (sessionMeta && !sessionMeta.source) {
-              updateSessionMetadata(currentSessionId, { source: payload.source as SessionSource });
+              await updateSessionMetadata(currentSessionId, { source: payload.source as SessionSource });
             }
           }
 
-          // Notify Desktop: a new IM user message was enqueued
-          broadcast('im:message_received', {
+          return jsonResponse({
+            success: true,
+            requestId: payload.requestId,
+            accepted: true,
             sessionId: currentSessionId,
-            source: payload.source,
-            senderName: payload.senderName ?? payload.sourceId,
-            content: payload.message,
           });
 
-          // === SSE Stream: stream text deltas to Rust IM for Telegram draft editing ===
-          const encoder = new TextEncoder();
-          let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-          let safetyTimer: ReturnType<typeof setTimeout> | null = null;
-          let closed = false;
-          let imAccText = ''; // Current block's accumulated text
-          let lastBlockText = ''; // Preserved across block-end for NO_REPLY detection
-
-          const stream = new ReadableStream({
-            start(controller) {
-              // Immediately flush headers by sending an SSE comment
-              // (Bun buffers the response until the first body chunk is written)
-              controller.enqueue(encoder.encode(': connected\n\n'));
-
-              // 15s heartbeat (keep-alive during tool calls; Rust read_timeout=300s)
-              heartbeatTimer = setInterval(() => {
-                try { if (!closed) controller.enqueue(encoder.encode(': ping\n\n')); }
-                catch { /* stream closed */ }
-              }, 15000);
-
-              const sendEvent = (data: object) => {
-                if (closed) return;
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-              };
-              const clearCallback = shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback;
-              const closeStream = () => {
-                if (closed) return;
-                closed = true;
-                if (heartbeatTimer) clearInterval(heartbeatTimer);
-                if (safetyTimer) clearTimeout(safetyTimer);
-                clearCallback(null);
-                try { controller.close(); } catch { /* already closed */ }
-              };
-
-              // 3600s (60 min) safety timeout — aligned with cron task timeout
-              safetyTimer = setTimeout(() => {
-                if (!closed) {
-                  // Flush any remaining text as final block
-                  if (imAccText) {
-                    sendEvent({ type: 'block-end', text: imAccText });
-                    imAccText = '';
-                  }
-                  // Send 'error' (not 'complete') to prevent Rust from treating timeout as success
-                  sendEvent({ type: 'error', error: 'IM 响应超时（60分钟），请重新发送' });
-                  closeStream();
-                }
-              }, 3_600_000);
-
-              // Route IM stream callback to the appropriate runtime's relay
-              const setCallback = shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback;
-              setCallback((event, data) => {
-                if (event === 'permission-request') {
-                  // Forward permission request to Rust for interactive approval
-                  sendEvent({ type: 'permission-request', ...JSON.parse(data) });
-                } else if (event === 'delta') {
-                  imAccText += data;
-                  sendEvent({ type: 'partial', text: imAccText });
-                } else if (event === 'block-end') {
-                  lastBlockText = imAccText; // Preserve for NO_REPLY detection in 'complete'
-                  sendEvent({ type: 'block-end', text: imAccText });
-                  imAccText = ''; // Reset for next block
-                } else if (event === 'complete') {
-                  // Group "always" mode: detect <NO_REPLY> → send silent complete
-                  // Check lastBlockText because imAccText is already cleared by block-end
-                  if (payload.sourceType === 'group' && payload.groupActivation === 'always') {
-                    const trimmed = (imAccText || lastBlockText).trim();
-                    if (trimmed === '<NO_REPLY>' || trimmed === 'NO_REPLY') {
-                      imAccText = '';
-                      sendEvent({ type: 'complete', sessionId: getSessionId(), silent: true });
-                      broadcast('im:response_sent', { sessionId: getSessionId() });
-                      closeStream();
-                      return;
-                    }
-                  }
-                  // Flush any un-ended text
-                  if (imAccText) {
-                    sendEvent({ type: 'block-end', text: imAccText });
-                    imAccText = '';
-                  }
-                  sendEvent({ type: 'complete', sessionId: getSessionId() });
-                  // Notify Desktop: IM turn completed
-                  broadcast('im:response_sent', {
-                    sessionId: getSessionId(),
-                  });
-                  closeStream();
-                } else if (event === 'activity') {
-                  // Non-text block started (thinking, tool_use) — Rust uses this for placeholder
-                  sendEvent({ type: 'activity' });
-                } else if (event === 'error') {
-                  sendEvent({ type: 'error', error: data });
-                  closeStream();
-                }
-              });
-            },
-            cancel() {
-              closed = true;
-              if (heartbeatTimer) clearInterval(heartbeatTimer);
-              if (safetyTimer) clearTimeout(safetyTimer);
-              (shouldUseExternalRuntime() ? setExternalImStreamCallback : setImStreamCallback)(null);
-            }
-          });
-
-          return new Response(stream, {
-            headers: {
-              'Content-Type': 'text/event-stream; charset=utf-8',
-              'Cache-Control': 'no-cache, no-transform',
-              'Connection': 'keep-alive',
-              'X-Accel-Buffering': 'no',
-            },
-          });
+          } catch (innerError) {
+            // W1 fix: any throw between register() and the dispatch result handlers
+            // would leave a registry entry to leak for 6h until prune. Catch + clean.
+            try { imRequestRegistry.unregister(payload.requestId); } catch { /* ignore */ }
+            throw innerError;
+          }
         } catch (error) {
-          console.error('[im/chat] Error:', error);
+          console.error('[im/enqueue] Error:', error);
           return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'IM chat error' },
+            { success: false, error: error instanceof Error ? error.message : 'IM enqueue error' },
             500,
           );
         }
       }
+
+      // GET /api/im/events?since=<seq> — Pattern C: long-poll SSE.
+      // One connection per peer_session, events fan-in from all in-flight requests
+      // tagged with their requestId. Caller filters per requestId on the Rust
+      // side (ReplyRouter). `since` enables crash-recovery resume — ImEventBus
+      // replays ring-buffered events with seq > since before going live.
+      if (pathname === '/api/im/events' && request.method === 'GET') {
+        const sinceParam = url.searchParams.get('since');
+        const sinceSeq = sinceParam ? parseInt(sinceParam, 10) : imEventBus.currentSeq();
+        const safeSince = Number.isFinite(sinceSeq) && sinceSeq >= 0 ? sinceSeq : imEventBus.currentSeq();
+
+        const encoder = new TextEncoder();
+        let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+        let closed = false;
+        let unsubscribe: (() => void) | null = null;
+
+        const stream = new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(`: connected since=${safeSince}\n\n`));
+            // 15s heartbeat keep-alive
+            heartbeatTimer = setInterval(() => {
+              try { if (!closed) controller.enqueue(encoder.encode(': ping\n\n')); }
+              catch { /* stream closed */ }
+            }, 15000);
+
+            unsubscribe = imEventBus.subscribe(safeSince, (event) => {
+              if (closed) return;
+              try {
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+              } catch {
+                // Controller closed mid-emit — schedule cleanup
+                closed = true;
+                if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+                if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+              }
+            });
+          },
+          cancel() {
+            closed = true;
+            if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
+            if (unsubscribe) { unsubscribe(); unsubscribe = null; }
+          }
+        });
+
+        return new Response(stream, {
+          headers: {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no',
+          },
+        });
+      }
+
+      // POST /api/im/cancel — Pattern D: abort an in-flight IM request.
+      // Body: { requestId, reason? }. Drives THREE cancellation paths:
+      //   1. Registry AbortController.abort(reason) — for callers that hold the
+      //      signal directly (currently no in-tree consumers, kept for API parity)
+      //   2. cancelImRequest / cancelExternalImRequest — actual SDK-level cancel
+      //      via interruptCurrentResponse (builtin) or stopExternalSession (external).
+      //      This is what stops the SDK turn from burning tokens.
+      //   3. imEventBus.emit('cancelled', ...) — Rust ReplyRouter sees this and
+      //      closes the reply slot (UI feedback).
+      if (pathname === '/api/im/cancel' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { requestId: string; reason?: string };
+          if (!body.requestId) {
+            return jsonResponse({ success: false, error: 'Missing requestId' }, 400);
+          }
+          const reason = body.reason ?? 'user';
+          const entry = imRequestRegistry.get(body.requestId);
+          if (!entry) {
+            return jsonResponse({ success: false, error: 'Unknown or already-aborted requestId' }, 404);
+          }
+
+          // Step 1: registry abort signal (covers any pluggable subscribers).
+          imRequestRegistry.abort(body.requestId, reason);
+
+          // Step 2: actual SDK / queue cancel.
+          let cancelResult;
+          if (shouldUseExternalRuntime()) {
+            cancelResult = await cancelExternalImRequest(body.requestId, reason);
+          } else {
+            cancelResult = await cancelImRequest(
+              body.requestId,
+              reason as CancelReason,
+            );
+          }
+
+          // Step 3: bus event for UI feedback (so the reply slot closes promptly).
+          imEventBus.emit(body.requestId, 'cancelled', reason);
+
+          // Cleanup registry entry — abort already set status to 'cancelled'.
+          imRequestRegistry.unregister(body.requestId);
+
+          return jsonResponse({
+            success: true,
+            requestId: body.requestId,
+            mode: cancelResult.mode,
+          });
+        } catch (error) {
+          console.error('[im/cancel] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'IM cancel error' },
+            500,
+          );
+        }
+      }
+
+      // ============= END IM Pipeline v2 =============
 
       // POST /api/im/heartbeat — Execute a heartbeat check (synchronous JSON response, not SSE)
       if (pathname === '/api/im/heartbeat' && request.method === 'POST') {
@@ -8662,7 +8696,8 @@ description: >
             console.log(`[bridge] Incoming request: model=${body.model ?? '(none)'}, bridge_model_override=${bridgeConfig.model ?? '(none)'}`);
           } catch { /* ignore parse errors for diagnostic */ }
           try {
-            return await bridgeHandler(request);
+            const handler = await ensureBridgeHandler();
+            return await handler(request);
           } catch (error) {
             console.error('[bridge] Handler error:', error);
             return jsonResponse(
@@ -8700,23 +8735,112 @@ description: >
 
       return new Response('Not Found', { status: 404 });
     }
-  });
-
-  console.log(`Web UI server listening on http://localhost:${port}`);
-
-  // ── Sidecar Boot Banner: single-line for AI grep ──
-  {
-    const model = getSessionModel() || '?';
-    const mcpList = getMcpServers();
-    const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
-    const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
-    console.log(`[boot] pid=${process.pid} port=${port} bun=${Bun.version} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames}`);
   }
 
-  // Verify PATH detection
-  import('./utils/shell').then(({ getShellEnv, getShellPath }) => {
-    getShellEnv(); // Ensure PATH is initialized
-    console.log('[server] Startup PATH:', getShellPath());
+  // The same HTTP server serves both purposes — Tauri client proxies all
+  // /api/* + /sessions/* + /chat/stream traffic here via Rust local_http;
+  // browser dev mode (`start_dev.sh`) additionally hits the `serveStatic`
+  // fallback to load the React `dist/` bundle. Naming reflects the
+  // production primary role.
+  console.log(`[startup] Sidecar HTTP server ready on http://127.0.0.1:${port}`);
+
+  // Pattern 2 §2.3.1 — Start the periodic GC for spilled large-value refs.
+  // Runs every 60s; reaps any ref past its TTL (default 1h). The timer is
+  // unref'd inside startRefsGc, so it doesn't keep the event loop alive.
+  void import('./utils/large-value-store').then(({ startRefsGc }) => {
+    startRefsGc(60_000);
+  }).catch((err) => {
+    console.warn(`[refs] failed to start GC: ${err instanceof Error ? err.message : String(err)}`);
+  });
+
+  // ── Deferred heavy init ─────────────────────────────────────────────────
+  // Runs AFTER honoServe has bound the port. Rust's TCP health check now
+  // passes within ~50ms instead of waiting ~2s for all this work to finish.
+  // Routes (except /health) `await __myagentsDeferredInit` before running,
+  // so correctness is preserved: anything that needs agent state (MCP,
+  // model, file watcher, bridge) waits for this block to finish.
+  //
+  // Order within this block still matters:
+  //   1. migrations/cleanup — best-effort, can interleave
+  //   2. socks bridge BEFORE initializeAgent (pre-warm spawns SDK which
+  //      reads HTTP_PROXY env vars set by initSocksBridgeFromEnv)
+  //   3. initializeAgent — the big one
+  //   4. external runtime restore
+  //   5. boot banner — prints with fully resolved state
+  // Pattern 4: track which phase is running so /health/ready can report
+  // {phase: 'migration' | 'skill-seed' | 'sdk-init' | ...} on failure.
+  let currentInitPhase = 'startup';
+  (async () => {
+    try {
+      currentInitPhase = 'cleanup';
+      setDeferredInitPhase(currentInitPhase);
+      cleanupOldLogs();
+      cleanupOldUnifiedLogs();
+      cleanupStalePlaywrightProfile();
+
+      currentInitPhase = 'skill-seed';
+      setDeferredInitPhase(currentInitPhase);
+      seedBundledSkills();
+      console.log('[startup] seedBundledSkills done');
+
+      currentInitPhase = 'socks-bridge';
+      setDeferredInitPhase(currentInitPhase);
+      await initSocksBridgeFromEnv();
+
+      currentInitPhase = 'sdk-init';
+      setDeferredInitPhase(currentInitPhase);
+      await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
+      console.log('[startup] initializeAgent done');
+
+      if (shouldUseExternalRuntime() && initialSessionId) {
+        currentInitPhase = 'external-runtime-restore';
+        setDeferredInitPhase(currentInitPhase);
+        restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
+      }
+
+      // ── Sidecar Boot Banner: single-line for AI grep ──
+      {
+        const model = getSessionModel() || '?';
+        const mcpList = getMcpServers();
+        const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
+        const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
+        // Health signal: confirm builtin-mcp-meta.ts's side-effect registration
+        // actually fired. An empty list here is a red flag — the META file was
+        // not imported by agent-session.ts, which means lazy MCP lookup will
+        // return undefined for every builtin.
+        const { listBuiltinMcpIds } = await import('./tools/builtin-mcp-registry');
+        const builtinMcpMeta = listBuiltinMcpIds().join(',') || 'none';
+        console.log(`[boot] pid=${process.pid} port=${port} node=${process.versions.node} workspace=${currentAgentDir} session=${initialSessionId ?? 'new'} resume=${!!initialSessionId} model=${model} bridge=${bridge} mcp=${mcpNames} builtin-mcp-meta=${builtinMcpMeta}`);
+      }
+
+      markDeferredInitReady();
+      resolveDeferredInit();
+    } catch (err) {
+      console.error('[startup] Deferred init failed:', err);
+      console.warn(`[health-state] Deferred init failed in phase=${currentInitPhase}: ${err instanceof Error ? err.message : String(err)}`);
+      // Pattern 4: capture the phase for /health/ready's structured 503.
+      // retryable=false until we have a real re-runner (TODO above).
+      markDeferredInitFailed(currentInitPhase, err, false);
+      rejectDeferredInit(err);
+      // Don't re-throw — the server stays up so /health/* keeps responding
+      // and the renderer can render the failure state instead of timing out.
+    }
+  })();
+
+  // Kick off interactive-shell PATH detection in the background.
+  // `warmupShellPath()` uses async `execFile` so it never blocks the event loop
+  // (unlike the old `execSync` path, which starved TCP accept for 3–5s while
+  // zsh -i -l sourced a heavy .zshrc — Rust's sidecar health check would retry
+  // 15× before finally connecting).
+  //
+  // Startup returns immediately; detected PATH is applied whenever the shell
+  // finishes. `getShellEnv()` keeps returning the platform fallback PATH until
+  // then — sufficient for common binary lookups (.myagents/bin, homebrew, nvm,
+  // fnm, volta, pnpm, cargo all in fallback).
+  import('./utils/shell').then(({ warmupShellPath, getShellPath }) => {
+    warmupShellPath().then(() => {
+      console.log('[server] Startup PATH:', getShellPath());
+    });
   });
 }
 

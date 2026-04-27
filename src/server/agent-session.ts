@@ -3,22 +3,28 @@ import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlink
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
-import { getScriptDir, getBundledBunDir, getBundledNodeDir, getAgentBrowserCliPath, getSystemNodeDirs } from './utils/runtime';
+import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
-import { processImage, resizeToolImageContent } from './utils/imageResize';
-import { cronToolsServer, getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
-import { imCronToolServer, getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
-import { imMediaToolServer, getImMediaContext } from './tools/im-media-tool';
+import { lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
+// Context helpers only — tool server singletons are no longer exported from
+// these modules. The actual SDK server objects are created on-demand via
+// `getBuiltinMcpInstance()` in buildSdkMcpServers() below. See
+// ./tools/builtin-mcp-meta.ts for META registrations.
+import { getCronTaskContext, clearCronTaskContext } from './tools/cron-tools';
+import { getImCronContext, setSessionCronContext, clearSessionCronContext } from './tools/im-cron-tool';
+import { getImMediaContext } from './tools/im-media-tool';
 import { getImBridgeToolsContext, getImBridgeToolServer } from './tools/im-bridge-tools';
-import { getBuiltinMcp } from './tools/builtin-mcp-registry';
+import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
+// Side-effect import — registers META (ids + lazy factories) at cold start.
+// Cheap: just function-ref storage, no SDK/zod eval, no tool module loaded.
+import './tools/builtin-mcp-meta';
 import { startSocksBridge, stopSocksBridge, isSocksBridgeRunning } from './utils/socks-bridge';
 import { startFileWatcher } from './file-watcher';
 import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from './mcp-oauth';
 // Side-effect imports: each registers itself in the builtin MCP registry
-import './tools/gemini-image-tool';
-import './tools/edge-tts-tool';
-import { generativeUiServer } from './tools/generative-ui-tool';
+// gemini-image / edge-tts / generative-ui registered in builtin-mcp-meta.ts.
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
@@ -31,13 +37,45 @@ import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
+import { setAmbientLogContext, clearAmbientLogContextField } from './logger-context';
+import { beginTurn as beginTurnAbort, endTurn as endTurnAbort, abortTurn as abortTurnAbort } from './utils/turn-abort';
+import type { CancelReason } from './utils/cancellation';
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import type { ImagePayload } from './runtimes/types';
+import { imEventBus, type ImEventType } from './utils/im-event-bus';
+import { imRequestRegistry } from './utils/im-request-registry';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
+
+/**
+ * Pattern 3 §3.2.5 — per-token `stream_event` log suppression.
+ *
+ * The SDK emits one `stream_event` per token (chunk_start / token_delta / etc).
+ * The legacy code path was: every event → `logStringify` → `appendLogLine` →
+ *   - `appendLog()` writes a line into the per-session log file
+ *   - `broadcast('chat:log', ...)` queues an SSE event to every viewer
+ *
+ * For a 10k-token response this fans out 10k disk writes + 10k SSE frames per
+ * subscribed renderer, while the actual token text is already streamed via
+ * `chat:message-chunk`. The cost is purely diagnostic noise.
+ *
+ * When `SUPPRESS_PER_TOKEN_LOG_BROADCAST = true` (default):
+ *   - the per-event `appendLogLine(...)` call is skipped for `stream_event`
+ *   - no `chat:log` is broadcast for `stream_event`
+ *   - on `result` (turn-end) we emit one summary line:
+ *       `[agent][sdk] stream_event_summary turn=<msgCount> deltas=<n>`
+ *     and one aggregate `chat:log` so consumers can still see "this turn
+ *     happened"
+ *
+ * Set to `false` only when you specifically need the per-token transcript
+ * for debugging (rare). The other branch (debug mode) of `isDebugMode` already
+ * keeps the data path live for assistant / system / result events; this flag
+ * only governs `stream_event` (the noisy path).
+ */
+const SUPPRESS_PER_TOKEN_LOG_BROADCAST = true;
 
 // Shared NO_PROXY value — comprehensive list of localhost addresses to bypass proxy
 const PROXY_NO_PROXY_VAL = 'localhost,localhost.localdomain,127.0.0.1,127.0.0.0/8,::1,[::1]';
@@ -381,6 +419,53 @@ export type MessageWire = {
 
 const requireModule = createRequire(import.meta.url);
 
+/**
+ * Strip image content blocks from a queued user message when the resolved
+ * model has lost `image` modality support since enqueue time. Defensive
+ * second pass — `enqueueUserMessage` is the primary filter (ran against the
+ * model at the time of enqueue); this re-checks against the model active at
+ * yield time so a mid-turn model switch can't leak baked image blocks into
+ * a text-only model's request.
+ *
+ * Returns the input untouched in the common case (no drift). Only allocates
+ * when re-stripping is required.
+ */
+function stripUnsupportedModalityBlocks(
+  message: SDKUserMessage['message'],
+  modelAtYield: string | undefined,
+): SDKUserMessage['message'] {
+  const content = message.content;
+  if (!Array.isArray(content)) return message;
+  // Fast-path: no image block → nothing to strip.
+  let hasImageBlock = false;
+  for (const block of content) {
+    if (block && typeof block === 'object' && (block as { type?: string }).type === 'image') {
+      hasImageBlock = true;
+      break;
+    }
+  }
+  if (!hasImageBlock) return message;
+  if (modelSupportsModality(modelAtYield, 'image')) return message;
+
+  // Drift detected: filter out image blocks; if nothing usable remains,
+  // append a synthetic placeholder so the SDK still receives a non-empty
+  // user turn. Mirrors the synthetic-note path in enqueueUserMessage.
+  const kept = content.filter(b => !(b && typeof b === 'object' && (b as { type?: string }).type === 'image'));
+  const droppedCount = content.length - kept.length;
+  if (kept.length === 0) {
+    kept.push({ type: 'text', text: `[${droppedCount} image attachment(s) omitted — current model does not support image input]` });
+  }
+  console.log(`[agent] modality re-strip at dequeue: dropped ${droppedCount} image block(s) for model=${modelAtYield ?? '(unknown)'} (model changed since enqueue)`);
+  broadcast('chat:attachments-filtered', {
+    reason: 'modality',
+    kind: 'image',
+    count: droppedCount,
+    model: modelAtYield ?? null,
+    phase: 'dequeue',
+  });
+  return { ...message, content: kept };
+}
+
 let agentDir = '';
 let hasInitialPrompt = false;
 let sessionState: SessionState = 'idle';
@@ -398,7 +483,8 @@ type RestartReason =
   | 'agents'       // setAgents — sub-agent definitions changed
   | 'provider'     // setSessionProviderEnv — provider env (baseUrl, apiKey, etc.) changed
   | 'proxy'        // triggerProxyRestart — HTTP proxy changed via Settings
-  | 'oauth';       // MCP OAuth token acquired/refreshed
+  | 'oauth'        // MCP OAuth token acquired/refreshed
+  | 'model-window'; // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
 
 // Deferred config restart: config changes during an active turn / pre-warm
 // stage set a reason in this set instead of aborting immediately. Two consumers
@@ -504,20 +590,66 @@ let isStreamingMessage = false;
 let postInterruptTurnEndResolve: (() => void) | null = null;
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
+// Pattern 3 §3.2.4 — incremental persistence cursor.
+// `persistMessagesToStorage` previously remapped the entire `messages` array
+// every turn (O(history) per turn, where history grows monotonically).
+// Now we only map and append the new tail (`messages.slice(lastPersistedIndex)`)
+// and bump the cursor on success. Reset to 0 in any path that recreates the
+// session-scoped state (resetSession / new session / fork / rewind).
+let lastPersistedIndex = 0;
 const streamIndexToToolId: Map<number, string> = new Map();
 const streamIndexToBlockType: Map<number, string> = new Map(); // Positive block type tracking for subagent content_block_stop
 const toolResultIndexToId: Map<number, string> = new Map();
 
-// IM Draft Stream: callback for streaming text to Telegram
-type ImStreamCallback = (event: 'delta' | 'block-end' | 'complete' | 'error' | 'permission-request' | 'activity', data: string) => void;
-let imStreamCallback: ImStreamCallback | null = null;
-// Cross-turn guard: set to true when imStreamCallback is nulled (timeout/error) or replaced
-// (defense-in-depth) during a turn. Reset to false by messageGenerator before each yield.
-// handleMessageComplete/Stopped only fires 'complete' when flag is false, preventing
-// a stale turn's completion from consuming a subsequent turn's SSE stream.
-// Race-safe: unlike a generation counter snapshot (which can run before setImStreamCallback),
-// this flag is set BY setImStreamCallback itself, so ordering is guaranteed.
-let imCallbackNulledDuringTurn = false;
+// IM Pipeline v2 — Pattern B + G: per-request attribution via FIFO queue.
+//
+// `pendingRequestIds` holds the requestIds of user messages YIELDED to SDK
+// stdin but not yet finalized (no `result` boundary observed). The HEAD is
+// the request currently owning SDK output; SDK events tagged with head get
+// published to ImEventBus where /api/im/events subscribers filter by id.
+//
+// Why a queue, not a single `activeRequestId` (Codex C4 / Pattern G fix):
+// mid-turn injection lets us yield message B while SDK is still processing
+// A. The legacy "single `activeRequestId` overwritten on each yield" model
+// misattributed A's continuation events to B. Pattern G fix: advance the
+// queue only on SDK `result` boundary (handleMessageComplete / Stopped /
+// Error), not on yield. So head stays "A" until A's turn ends, then "B".
+//
+// Replaces the legacy `imStreamCallback` singleton + `imCallbackNulledDuringTurn`
+// flag (Pattern B already removed those). Cross-event leakage is structurally
+// impossible — old events carry the old requestId, new subscribers filter.
+const pendingRequestIds: string[] = [];
+
+/** Emit a per-request IM event tagged with the queue head. No-op when the
+ *  queue is empty (desktop / cron path, no IM trace). System-level events
+ *  (e.g. session-init in Pattern C) call `imEventBus.emit(null, ...)` directly. */
+function emitImEvent(type: ImEventType, data?: unknown): void {
+  const head = pendingRequestIds[0];
+  if (head !== undefined) {
+    imEventBus.emit(head, type, data);
+  }
+}
+
+/** Push a yielded user message's requestId onto the FIFO queue. Called from
+ *  messageGenerator when yielding to SDK stdin. No-op for desktop / cron
+ *  (no IM trace ID). */
+function pushPendingRequest(requestId: string | null | undefined): void {
+  if (requestId) pendingRequestIds.push(requestId);
+}
+
+/** Pop the queue head — called from handleMessageComplete / Stopped / Error
+ *  on SDK `result` boundary (one yield → one result). Returns popped id. */
+function popPendingRequest(): string | null {
+  return pendingRequestIds.shift() ?? null;
+}
+
+/** Clear the entire queue — called from abortPersistentSession /
+ *  clearMessageState (whole-session abort or reset). Returns drained ids. */
+function clearPendingRequests(): string[] {
+  const drained = pendingRequestIds.slice();
+  pendingRequestIds.length = 0;
+  return drained;
+}
 // Group chat tool deny list (v0.1.28): set per IM message, cleared on next non-group request
 let currentGroupToolsDeny: string[] = [];
 // Flag: auto-reset session after image content pollutes conversation history
@@ -559,6 +691,10 @@ type MessageQueueItem = {
   wasQueued: boolean;             // true if added via non-blocking path (AI was busy)
   resolve: () => void;
   attachments?: MessageWire['attachments'];  // Saved attachments for deferred user message rendering
+  // Pattern A — Per-Request Identity (IM Pipeline v2). Carries the trace ID assigned
+  // at the IM edge (Rust mod.rs spawn entry → /api/im/chat payload).
+  // Empty string for desktop / cron / heartbeat paths (no IM identity).
+  requestId?: string;
 };
 const messageQueue: MessageQueueItem[] = [];
 // Pending attachments to persist with user messages
@@ -793,11 +929,16 @@ function abortPersistentSession(): void {
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
   rescuePendingToQueue();
-  // Notify IM stream callback before abort
-  if (imStreamCallback) {
-    imStreamCallback('error', '会话已中断，请重新发送');
-    imStreamCallback = null;
+  // Pattern B/C/G: notify IM bus subscribers + tear down ALL pending registry
+  // entries (whole-session abort affects every in-flight request, not just head).
+  // Emit an 'error' for each pending requestId so each subscriber's reply slot
+  // closes — emitImEvent only tags head, so iterate manually.
+  for (const reqId of pendingRequestIds) {
+    imEventBus.emit(reqId, 'error', '会话已中断，请重新发送');
+    imRequestRegistry.setStatus(reqId, 'failed');
+    imRequestRegistry.unregister(reqId);
   }
+  clearPendingRequests();
   // 唤醒被阻塞的 generator（waitForMessage）
   if (messageResolver) {
     const resolve = messageResolver;
@@ -877,8 +1018,12 @@ function resetTurnUsage(): void {
 
 // ===== MCP Configuration =====
 import type { McpServerDefinition } from '../renderer/config/types';
+// SDK's in-process server instance type — what createSdkMcpServer() returns.
+// Imported as a type (no runtime cost) so we can annotate the buildSdkMcpServers
+// result map without relying on a module-level singleton.
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 
-// SDK MCP server config type (subset of what SDK accepts)
+// SDK MCP server config type (subset of what SDK accepts — external transports only)
 type SdkMcpServerConfig = {
   type?: 'stdio';
   command: string;
@@ -889,6 +1034,11 @@ type SdkMcpServerConfig = {
   url: string;
   headers?: Record<string, string>;
 };
+
+// Union type for buildSdkMcpServers result — each slot is either an external
+// transport spec (SDK spawns subprocess / hits URL) or an in-process SDK
+// server object (tool handlers run in this Node process).
+type McpServerEntry = SdkMcpServerConfig | McpSdkServerConfigWithInstance;
 
 // Current MCP servers enabled for this workspace (set per-query)
 // null = never set (use config file fallback), [] = explicitly set to none
@@ -904,7 +1054,7 @@ let currentAgentDefinitions: Record<string, AgentDefinition> | null = null;
  * Triggers session restart (abort + resume + pre-warm) identical to MCP config changes,
  * but only when the effective proxy URL actually changed.
  *
- * SOCKS5 handling: Bun/Node.js `fetch()` doesn't support `socks5://` in HTTP_PROXY env vars.
+ * SOCKS5 handling: Node.js `fetch()` (undici) doesn't support `socks5://` in HTTP_PROXY env vars.
  * When SOCKS5 is configured, we start a local HTTP-to-SOCKS5 bridge and set HTTP_PROXY to
  * the bridge's HTTP URL. The bridge transparently tunnels traffic through SOCKS5.
  */
@@ -1247,6 +1397,23 @@ export function setSessionModel(model: string): void {
       console.error('[agent] failed to apply model to running session:', err);
     });
   }
+
+  // CLAUDE_CODE_AUTO_COMPACT_WINDOW is baked into the subprocess env at spawn
+  // time and cannot be updated on a live process — `querySession.setModel()`
+  // above only switches the model ID the SDK sends to the provider. So if the
+  // old and new models have different `contextLength`, the autocompact
+  // threshold stays frozen at the old model's cap until the next subprocess
+  // respawn. Schedule a deferred restart so the fresh env reflects the new
+  // model's real window. Same rationale as the `provider` reason in
+  // `setSessionProviderEnv` — env-baked knobs need a respawn.
+  const oldCtx = lookupModelContextLength(oldModel);
+  const newCtx = lookupModelContextLength(model);
+  if (oldCtx !== newCtx) {
+    if (querySession) {
+      console.log(`[agent] model window changed (${oldCtx ?? 'SDK-default'} → ${newCtx ?? 'SDK-default'}) → schedule deferred restart to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW`);
+      scheduleDeferredRestart('model-window');
+    }
+  }
 }
 
 /** Get current provider env (used by heartbeat/memory-update to preserve provider across internal calls). */
@@ -1563,11 +1730,14 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * Convert McpServerDefinition to SDK mcpServers format.
  *
  * Three MCP injection patterns:
- * 1. Context-injected (cron-tools, im-cron, im-media) — always present based on sidecar context,
- *    invisible in Settings UI, not user-toggled.
+ * 1. Context-injected (cron-tools, im-cron, im-media, generative-ui) — always present based on
+ *    sidecar context, invisible in Settings UI, not user-toggled.
  * 2. Builtin registry (command='__builtin__') — in-process servers, user-toggled via Settings,
- *    self-registered via builtin-mcp-registry.ts. Adding a new one = add registerBuiltinMcp()
- *    call in the tool file + side-effect import below.
+ *    registered as META in `./tools/builtin-mcp-meta.ts`. Adding a new one:
+ *      (a) add `registerBuiltinMcpMeta({ id, load })` block in builtin-mcp-meta.ts, and
+ *      (b) write the tool file with `createXxxServer()` async factory whose SDK + zod imports
+ *          live INSIDE the factory via `await import()` — never at the tool module's top level,
+ *          or the lazy-load win is defeated (see CLAUDE.md 禁止事项 and builtin-mcp-registry.ts).
  * 3. External (stdio/sse/http) — subprocess or remote servers, user-configured.
  *
  * Execution strategy for external stdio:
@@ -1575,7 +1745,7 @@ export function pinMcpPackageVersions(args: string[]): string[] {
  * - For other commands: Uses user-specified command directly (node/python etc.)
  * - Inherits proxy env + injects NO_PROXY to protect localhost (mirrors Rust proxy_config)
  */
-async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig | typeof cronToolsServer>> {
+async function buildSdkMcpServers(): Promise<Record<string, McpServerEntry>> {
   // null = MCP not yet configured (e.g. Global sidecar, or Tab pre-warm before /api/mcp/set)
   // [] = explicitly no MCP (user has none enabled)
   // [...]= user's enabled MCP servers
@@ -1594,28 +1764,51 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
   });
   if (isDebugMode) console.log(`[agent] MCP servers: ${servers.map(s => s.id).join(', ') || 'none'}`);
 
-  const result: Record<string, SdkMcpServerConfig | typeof cronToolsServer> = {};
+  const result: Record<string, McpServerEntry> = {};
+
+  // Helper — lazy-load a builtin MCP's server object via the META registry.
+  // Returns null if the id isn't registered (shouldn't happen for ids we hard-code,
+  // but defensive). First call for a given id triggers SDK+zod+schema construction
+  // (~100-300ms); subsequent calls in this Sidecar's lifetime are cached no-ops.
+  const loadBuiltinServer = async (id: string) => {
+    const entryPromise = getBuiltinMcpInstance(id);
+    if (!entryPromise) {
+      console.warn(`[agent] Builtin MCP '${id}' not registered in META — skipping`);
+      return null;
+    }
+    const entry = await entryPromise;
+    return entry.server as McpSdkServerConfigWithInstance;
+  };
 
   // --- Pattern 1: Context-injected MCPs (always present based on sidecar context) ---
   const cronContext = getCronTaskContext();
   if (cronContext.taskId) {
-    result['cron-tools'] = cronToolsServer;
-    console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
+    const s = await loadBuiltinServer('cron-tools');
+    if (s) {
+      result['cron-tools'] = s;
+      console.log(`[agent] Added cron-tools MCP server for task ${cronContext.taskId}`);
+    }
   }
 
   // Add cron tool for ALL sessions when management API is available
   // IM sessions use imCronContext (with delivery), regular sessions use sessionCronContext
   if (process.env.MYAGENTS_MANAGEMENT_PORT) {
-    result['im-cron'] = imCronToolServer;
-    const imCronCtx = getImCronContext();
-    console.log(`[agent] Added im-cron MCP server${imCronCtx ? ` for bot ${imCronCtx.botId}` : ' (session mode)'}`);
+    const s = await loadBuiltinServer('im-cron');
+    if (s) {
+      result['im-cron'] = s;
+      const imCronCtx = getImCronContext();
+      console.log(`[agent] Added im-cron MCP server${imCronCtx ? ` for bot ${imCronCtx.botId}` : ' (session mode)'}`);
+    }
   }
 
   // Add IM media tool if we're in an IM context with management API available
   const imMediaCtx = getImMediaContext();
   if (imMediaCtx && process.env.MYAGENTS_MANAGEMENT_PORT) {
-    result['im-media'] = imMediaToolServer;
-    console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
+    const s = await loadBuiltinServer('im-media');
+    if (s) {
+      result['im-media'] = s;
+      console.log(`[agent] Added im-media MCP server for bot ${imMediaCtx.botId}`);
+    }
   }
 
   // Add Bridge tools if we're in an IM context with a plugin bridge that has tools
@@ -1630,19 +1823,25 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
   // Add Generative UI tool for desktop sessions (not IM/Cron — they can't render widgets)
   // Use currentScenario (consistent with system-prompt.ts generativeUiEnabled check)
   if (currentScenario.type === 'desktop') {
-    result['generative-ui'] = generativeUiServer as typeof cronToolsServer;
-    console.log('[agent] Added generative-ui MCP server');
+    const s = await loadBuiltinServer('generative-ui');
+    if (s) {
+      result['generative-ui'] = s;
+      console.log('[agent] Added generative-ui MCP server');
+    }
   }
 
   // --- Pattern 2: Builtin registry MCPs (in-process, user-toggled) ---
   for (const server of servers) {
     if (server.command !== '__builtin__') continue;
-    const entry = getBuiltinMcp(server.id);
-    if (entry) {
-      entry.configure(server.env || {}, { sessionId: sessionId || 'default', workspace: agentDir });
-      result[server.id] = entry.server as typeof cronToolsServer;
-      console.log(`[agent] Added builtin MCP: ${server.id}`);
+    const entryPromise = getBuiltinMcpInstance(server.id);
+    if (!entryPromise) {
+      console.warn(`[agent] Builtin MCP '${server.id}' not registered — skipping`);
+      continue;
     }
+    const entry = await entryPromise;
+    entry.configure?.(server.env || {}, { sessionId: sessionId || 'default', workspace: agentDir });
+    result[server.id] = entry.server as McpSdkServerConfigWithInstance;
+    console.log(`[agent] Added builtin MCP: ${server.id}`);
   }
 
   // --- Pattern 3: External MCPs (stdio/sse/http subprocess or remote) ---
@@ -1698,9 +1897,10 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
         // to find npx.cmd via filtered PATH — failed on Windows when PATH was incomplete
         // or when the SDK's env whitelist (RK_) didn't propagate Node.js directories.
         // Resolving to full path eliminates this class of issues (pit-of-success pattern).
-        // Priority: system npx → bundled Node.js npx → bun x
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { getBundledNodeDir: getNodeDir, getBundledRuntimePath, isBunRuntime, getSystemNpxPaths, findExistingPath } = require('./utils/runtime');
+        // v0.2.0+ priority: system npx → bundled Node.js npx → npx derived from runtime path.
+        // Bun fallback removed — MyAgents no longer bundles Bun, and "bun x" was an
+        // emergency escape hatch for Linux boxes with neither Node nor bundled runtime,
+        // which is no longer a supported config.
         const systemNpx = findExistingPath(getSystemNpxPaths());
 
         if (systemNpx) {
@@ -1710,31 +1910,19 @@ async function buildSdkMcpServers(): Promise<Record<string, SdkMcpServerConfig |
           console.log(`[agent] MCP ${server.id}: Using system npx (${systemNpx})`);
         } else {
           // 2. Fallback to bundled Node.js npx (use absolute path for deterministic resolution)
-          const nodeDir = getNodeDir();
+          const nodeDir = getBundledNodeDir();
           if (nodeDir) {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const { join: pathJoin } = require('path');
-            command = process.platform === 'win32' ? pathJoin(nodeDir, 'npx.cmd') : pathJoin(nodeDir, 'npx');
+            command = process.platform === 'win32' ? join(nodeDir, 'npx.cmd') : join(nodeDir, 'npx');
             if (!args.includes('-y')) args = ['-y', ...args];
             console.log(`[agent] MCP ${server.id}: System npx not found, using bundled Node.js npx (${command})`);
           } else {
-            // 3. Last resort: bun x or derive npx from system node
+            // 3. Last resort: derive npx from the runtime path returned by
+            //    getBundledRuntimePath() (always a Node binary in v0.2.0+).
             const runtime = getBundledRuntimePath();
-            if (isBunRuntime(runtime)) {
-              command = runtime;
-              // bun x doesn't use -y flag — strip only the leading -y (npx auto-confirm)
-              const bunArgs = args[0] === '-y' ? args.slice(1) : args;
-              args = ['x', ...bunArgs];
-              console.log(`[agent] MCP ${server.id}: No Node.js found (system or bundled), falling back to bun x`);
-            } else {
-              // getBundledRuntimePath found a system node — derive npx from same dir
-              // eslint-disable-next-line @typescript-eslint/no-require-imports
-              const { dirname: pathDirname, resolve: pathResolve } = require('path');
-              const npxSibling = pathResolve(pathDirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
-              command = npxSibling;
-              if (!args.includes('-y')) args = ['-y', ...args];
-              console.log(`[agent] MCP ${server.id}: Derived npx from system node: ${npxSibling}`);
-            }
+            const npxSibling = resolve(dirname(runtime), process.platform === 'win32' ? 'npx.cmd' : 'npx');
+            command = npxSibling;
+            if (!args.includes('-y')) args = ['-y', ...args];
+            console.log(`[agent] MCP ${server.id}: Derived npx from runtime path: ${npxSibling}`);
           }
         }
       }
@@ -2265,10 +2453,8 @@ async function checkToolPermission(
     input: inputPreview,
   });
 
-  // Forward to IM stream if active (for interactive approval cards)
-  if (imStreamCallback) {
-    imStreamCallback('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
-  }
+  // Forward to IM event bus (subscribers route per-requestId for interactive approval cards)
+  emitImEvent('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
 
   // Wait for user response or abort
   return new Promise((resolve, reject) => {
@@ -2352,14 +2538,51 @@ export function handlePermissionResponse(
 }
 
 /**
- * Clear session permission state (call when session ends)
+ * Clear session permission state (call when session ends).
+ *
+ * Pattern 1 cleanup contract: every pending request map holds (timer, resolve).
+ * If we just `.clear()` the maps, the timers fire later (logging stale state)
+ * and the resolve callbacks never run — leaving the SDK / tool turn waiting
+ * forever for a decision that will never come. We must:
+ *   1. clearTimeout each entry's timer
+ *   2. resolve each waiter with a "denied / cancelled" outcome
+ *      (deny for permission-style, null/false for question/plan-mode —
+ *       matches the timeout fallback paths above)
+ *
+ * Called from session reset / switch / fork / rewind paths.
  */
 export function clearSessionPermissions(): void {
-  sessionAlwaysAllowed.clear();
+  // Permission requests: resolve with 'deny' so any awaiting tool call
+  // surfaces as denied (the same behaviour as the per-entry 10-min timeout).
+  for (const [, p] of pendingPermissions) {
+    clearTimeout(p.timer);
+    try { p.resolve('deny'); } catch { /* swallow — never propagate from cleanup */ }
+  }
   pendingPermissions.clear();
+
+  // Ask-user-question: resolve with null (matches timeout path) → tool sees
+  // "user did not answer" and degrades gracefully.
+  for (const [, q] of pendingAskUserQuestions) {
+    clearTimeout(q.timer);
+    try { q.resolve(null); } catch { /* swallow */ }
+  }
   pendingAskUserQuestions.clear();
+
+  // Plan-mode entries resolve with `false` (mirrors the per-entry timeout
+  // semantics — request was not approved).
+  for (const [, p] of pendingExitPlanMode) {
+    clearTimeout(p.timer);
+    try { p.resolve(false); } catch { /* swallow */ }
+  }
   pendingExitPlanMode.clear();
+
+  for (const [, p] of pendingEnterPlanMode) {
+    clearTimeout(p.timer);
+    try { p.resolve(false); } catch { /* swallow */ }
+  }
   pendingEnterPlanMode.clear();
+
+  sessionAlwaysAllowed.clear();
   prePlanPermissionMode = null;
 }
 
@@ -2404,19 +2627,102 @@ export function getPendingInteractiveRequests(): Array<{
 }
 
 /**
- * Persist messages to SessionStore for session recovery
+ * Persist messages to SessionStore for session recovery.
+ *
+ * Pattern 3 §3.2.4 — incremental contract. The legacy implementation mapped the
+ * entire `messages` array on every turn (O(history) per turn). We now only map
+ * the new tail: `messages.slice(lastPersistedIndex)`. SessionStore's
+ * `saveSessionMessages` is given the *full* logical array shape it expects by
+ * passing `[ ...alreadyPersisted (placeholders), ...newTail ]`? No — that would
+ * defeat the purpose. Instead we leverage the contract that
+ * `saveSessionMessages` already only appends the new tail (it slices internally
+ * by file line count). So we map only the tail and pass it along with a
+ * synthesised "head spacer" length — or, simpler, we pass the full array to
+ * `saveSessionMessages` (so its rewind-detection still works), but build it as
+ * a sparse mapping where the head is reused from a cache.
+ *
+ * Implementation choice: keep it simple — only map the tail; for the head we
+ * skip rebuilding the SessionMessage objects entirely and rely on
+ * `saveSessionMessages` slicing by `existingCount`. We pass `messages.length`
+ * total objects but the head ones are *not* deeply remapped each turn — they
+ * are cached in `persistedTailCache` and reused.
+ *
+ * Cursor advances on success. Rewind / fork / session-reset paths reset the
+ * cursor to 0 so a full remap runs the next time.
+ *
  * @param lastAssistantUsage - Usage info for the last assistant message (on message complete)
  * @param lastAssistantToolCount - Tool count for the last assistant message
  * @param lastAssistantDurationMs - Duration for the last assistant response
  */
-function persistMessagesToStorage(
+const persistedSessionMessageCache: SessionMessage[] = [];
+
+// Pattern 3 §3.2.4 — fix #2 (reentrance). The four fire-and-forget callsites
+// in handleMessageComplete / handleMessageStopped / handleMessageError used to
+// fire `void persistMessagesToStorage()` independently. Two overlapping
+// invocations would each snapshot `lastPersistedIndex`, both await
+// `saveSessionMessages` serially, and the second would write a stale cursor —
+// double-counting head or losing tail. We serialize per-session via an
+// in-flight chain map (keyed by sessionId at call time so that a forkSession
+// or fresh-session swap doesn't replay onto the wrong key).
+const persistChainBySession = new Map<string, Promise<void>>();
+
+function schedulePersist(
   lastAssistantUsage?: MessageUsage,
   lastAssistantToolCount?: number,
   lastAssistantDurationMs?: number
-): void {
-  const sessionMessages: SessionMessage[] = messages.map((msg, index) => {
-    const isLastAssistant = index === messages.length - 1 && msg.role === 'assistant';
-    // Strip Playwright tool results from disk persistence (keep in-memory data for SDK context)
+): Promise<void> {
+  const key = sessionId;
+  const prev = persistChainBySession.get(key) ?? Promise.resolve();
+  const next = prev.then(() => doPersistMessagesToStorage(
+    lastAssistantUsage,
+    lastAssistantToolCount,
+    lastAssistantDurationMs,
+  )).catch(err => {
+    console.warn('[agent-session] persist failed:', err);
+  });
+  persistChainBySession.set(key, next);
+  // Best-effort cleanup once the tail settles — only delete if we are still
+  // the tail (another schedulePersist may have pushed onto the chain since).
+  void next.then(() => {
+    if (persistChainBySession.get(key) === next) {
+      persistChainBySession.delete(key);
+    }
+  });
+  return next;
+}
+
+async function persistMessagesToStorage(
+  lastAssistantUsage?: MessageUsage,
+  lastAssistantToolCount?: number,
+  lastAssistantDurationMs?: number
+): Promise<void> {
+  // Top-level entry — go through the per-session serializer so concurrent
+  // callers don't interleave their cursor writes.
+  return schedulePersist(lastAssistantUsage, lastAssistantToolCount, lastAssistantDurationMs);
+}
+
+async function doPersistMessagesToStorage(
+  lastAssistantUsage?: MessageUsage,
+  lastAssistantToolCount?: number,
+  lastAssistantDurationMs?: number
+): Promise<void> {
+  // Defensive: if the cursor is somehow > messages.length on entry (rewind
+  // race, fork side-effect), log a warning and reset rather than silently
+  // skipping the rest of the work.
+  if (lastPersistedIndex > messages.length) {
+    console.warn(`[agent-session] persist cursor (${lastPersistedIndex}) exceeds messages.length (${messages.length}); resetting`);
+    lastPersistedIndex = 0;
+    persistedSessionMessageCache.length = 0;
+  }
+  // Trim cache if it has grown past current message count (defensive).
+  if (persistedSessionMessageCache.length > messages.length) {
+    persistedSessionMessageCache.length = messages.length;
+  }
+
+  const tail = messages.slice(lastPersistedIndex);
+  const tailMapped: SessionMessage[] = tail.map((msg, i) => {
+    const absoluteIndex = lastPersistedIndex + i;
+    const isLastAssistant = absoluteIndex === messages.length - 1 && msg.role === 'assistant';
     const contentForDisk = typeof msg.content === 'string'
       ? msg.content
       : JSON.stringify(stripPlaywrightResults(msg.content));
@@ -2430,16 +2736,32 @@ function persistMessagesToStorage(
         id: att.id,
         name: att.name,
         mimeType: att.mimeType,
-        path: att.relativePath ?? '', // Map relativePath to path for storage
+        path: att.relativePath ?? '',
       })),
       metadata: msg.metadata,
-      // Attach usage info only to the last assistant message if provided
       usage: isLastAssistant && lastAssistantUsage ? lastAssistantUsage : undefined,
       toolCount: isLastAssistant && lastAssistantToolCount ? lastAssistantToolCount : undefined,
       durationMs: isLastAssistant && lastAssistantDurationMs ? lastAssistantDurationMs : undefined,
     };
   });
-  saveSessionMessages(sessionId, sessionMessages);
+
+  // Stitch cached head + freshly-mapped tail. Cache holds previously-persisted
+  // SessionMessage objects so we don't pay map cost on them every turn.
+  // Attach last-assistant usage info onto the cached entry too if the SDK
+  // delivered usage on the trailing assistant of a *prior* turn (rare, but
+  // defensive — saveSessionMessages reads only the tail anyway).
+  const sessionMessages: SessionMessage[] = persistedSessionMessageCache
+    .slice(0, lastPersistedIndex)
+    .concat(tailMapped);
+
+  await saveSessionMessages(sessionId, sessionMessages);
+
+  // Commit the new tail into the cache and bump the cursor.
+  persistedSessionMessageCache.length = lastPersistedIndex; // ensure size matches cursor
+  for (const m of tailMapped) {
+    persistedSessionMessageCache.push(m);
+  }
+  lastPersistedIndex = messages.length;
   // Compute lastMessagePreview from last real user message
   // (skip system-injected messages like HEARTBEAT, MEMORY_UPDATE).
   // Also track whether we found a real user message to decide lastActiveAt update.
@@ -2477,7 +2799,7 @@ function persistMessagesToStorage(
   }
   // Only update lastActiveAt if a real user message exists (not just system injections).
   // This prevents heartbeat/memory-update from making stale sessions appear "active".
-  updateSessionMetadata(sessionId, {
+  await updateSessionMetadata(sessionId, {
     ...(foundRealUserMessage ? { lastActiveAt: new Date().toISOString() } : {}),
     lastMessagePreview,
   });
@@ -2541,73 +2863,79 @@ export function setGroupToolsDeny(tools: string[]): void {
   currentGroupToolsDeny = tools;
 }
 
-export function setImStreamCallback(cb: ImStreamCallback | null): void {
-  // Defense-in-depth: if there's already an active callback when setting a new one,
-  // notify the old callback with an error so its SSE stream terminates cleanly.
-  // This should not happen when peer_locks are properly used, but guards against
-  // silent callback replacement that would leave the old SSE stream hanging.
-  if (cb !== null && imStreamCallback !== null) {
-    console.warn('[agent] setImStreamCallback: replacing active callback — notifying old stream');
-    imCallbackNulledDuringTurn = true;
-    try {
-      imStreamCallback('error', '消息处理被新请求取代');
-    } catch { /* old stream may already be closed */ }
-  }
-  // Mark callback as stale when it's being nulled (e.g., SSE safety timeout, closeStream).
-  // handleMessageComplete/Stopped checks this flag to avoid sending 'complete' to a
-  // replacement callback that belongs to a different turn.
-  if (cb === null && imStreamCallback !== null) {
-    imCallbackNulledDuringTurn = true;
-  }
-  imStreamCallback = cb;
-}
+// Pattern B — `setImStreamCallback` removed. Callers in /api/im/chat now
+// `imEventBus.subscribe(currentSeq, cb)` directly and filter by requestId.
+// Pattern C will replace the entire /api/im/chat protocol with /api/im/enqueue
+// + /api/im/events long-poll, at which point even the subscription site moves
+// out of agent-session.ts.
 
 function resetAbortFlag(): void {
   shouldAbortSession = false;
 }
 
+/**
+ * Resolve the Claude Code native binary spawned by the SDK subprocess.
+ *
+ * SDK 0.2.113+ distributes a single-file `claude` binary (bun build --compile)
+ * via per-platform optional packages, replacing the bundled `cli.js` model.
+ * The binary self-executes (no external JS runtime required).
+ *
+ * Resolution order:
+ *   1. App bundle: `<resources>/claude-agent-sdk/claude[.exe]`
+ *      (build scripts copy from node_modules/@anthropic-ai/claude-agent-sdk-{triple}/claude)
+ *   2. node_modules: per-platform optional package installed by npm
+ *      (`@anthropic-ai/claude-agent-sdk-<triple>/claude[.exe]`)
+ */
 export function resolveClaudeCodeCli(): string {
   const t0 = Date.now();
-  // Check bundled path FIRST to avoid bun's auto-install behavior.
-  // In production builds, require.resolve() can't find the SDK in node_modules
-  // (it doesn't exist in the app bundle). Bun then attempts to auto-install
-  // the package from npm, which blocks the event loop for 10+ minutes.
-  // By checking the bundled path first, we skip the costly require.resolve entirely.
-  const cwd = process.cwd();
-  const bundledPath = join(cwd, 'claude-agent-sdk', 'cli.js');
-  if (existsSync(bundledPath)) {
-    console.log(`[sdk] CLI resolved via bundled path in ${Date.now() - t0}ms: ${bundledPath}`);
-    return bundledPath;
-  }
-  console.warn(`[sdk] Bundled SDK not found at ${bundledPath} (cwd=${cwd}), falling back to require.resolve`);
+  const ext = process.platform === 'win32' ? '.exe' : '';
+  const triple = getPlatformTriple();
 
-  // Development: resolve from node_modules
-  // SDK 0.2.80+ has `exports` in package.json that does NOT export `./cli.js`,
-  // so require.resolve('@anthropic-ai/claude-agent-sdk/cli.js') fails with
-  // ERR_PACKAGE_PATH_NOT_EXPORTED. Instead, resolve the package root via the
-  // main export, then derive cli.js from the package directory.
+  // 1. Production: bundled native binary under resources/claude-agent-sdk/
+  //    (Legacy directory name preserved from cli.js era; only contents changed.)
+  const cwd = process.cwd();
+  const bundledNative = join(cwd, 'claude-agent-sdk', `claude${ext}`);
+  if (existsSync(bundledNative)) {
+    console.log(`[sdk] Claude native binary resolved via bundled path in ${Date.now() - t0}ms: ${bundledNative}`);
+    return bundledNative;
+  }
+
+  // 2. Development / fallback: locate per-platform optional package in node_modules
   try {
-    const sdkMain = requireModule.resolve('@anthropic-ai/claude-agent-sdk');
-    // dirname(sdkMain) gives us the package root — assumes main export is in root dir.
-    // This is the standard Node.js ecosystem pattern for exports-locked packages.
-    const sdkDir = dirname(sdkMain);
-    const cliPath = join(sdkDir, 'cli.js');
-    if (!existsSync(cliPath)) {
-      throw new Error(`cli.js not found at ${cliPath} (resolved SDK root: ${sdkDir})`);
+    const platformPkg = `@anthropic-ai/claude-agent-sdk-${triple}`;
+    const manifestPath = requireModule.resolve(`${platformPkg}/package.json`);
+    const candidate = join(dirname(manifestPath), `claude${ext}`);
+    if (existsSync(candidate)) {
+      console.log(`[sdk] Claude native binary resolved via node_modules in ${Date.now() - t0}ms: ${candidate}`);
+      return candidate;
     }
-    if (cliPath.includes('app.asar')) {
-      const unpackedPath = cliPath.replace('app.asar', 'app.asar.unpacked');
-      if (existsSync(unpackedPath)) {
-        console.log(`[sdk] CLI resolved via asar.unpacked in ${Date.now() - t0}ms: ${unpackedPath}`);
-        return unpackedPath;
-      }
-    }
-    console.log(`[sdk] CLI resolved via require.resolve in ${Date.now() - t0}ms: ${cliPath}`);
-    return cliPath;
+    throw new Error(`Binary missing at ${candidate} (package dir exists but claude executable is absent)`);
   } catch (error) {
-    console.error(`[sdk] CLI resolve FAILED in ${Date.now() - t0}ms. Bundled: ${bundledPath}, cwd: ${cwd}`, error);
+    console.error(
+      `[sdk] Claude native binary resolve FAILED in ${Date.now() - t0}ms. ` +
+        `Bundled: ${bundledNative}, triple: ${triple}. ` +
+        `Run \`npm install\` to restore optional platform package.`,
+      error,
+    );
     throw error;
   }
+}
+
+/**
+ * Compute the SDK platform triple matching `@anthropic-ai/claude-agent-sdk-<triple>` package names.
+ * On Linux, distinguishes glibc (default) from musl (Alpine et al.) via process.report.
+ */
+function getPlatformTriple(): string {
+  const { platform, arch } = process;
+  if (platform === 'darwin') return arch === 'arm64' ? 'darwin-arm64' : 'darwin-x64';
+  if (platform === 'win32') return arch === 'arm64' ? 'win32-arm64' : 'win32-x64';
+  if (platform === 'linux') {
+    const report = process.report?.getReport?.() as { header?: { glibcVersionRuntime?: string } } | undefined;
+    const isMusl = !report?.header?.glibcVersionRuntime;
+    const base = arch === 'arm64' ? 'linux-arm64' : 'linux-x64';
+    return isMusl ? `${base}-musl` : base;
+  }
+  throw new Error(`Unsupported platform for Claude Agent SDK: ${platform}-${arch}`);
 }
 
 /**
@@ -2615,29 +2943,31 @@ export function resolveClaudeCodeCli(): string {
  * @param providerEnv - Optional provider environment override (for verification or external calls)
  */
 /**
- * Auth env vars that the Claude Code CLI reads at startup. Any one of these
- * left unset (after `{...process.env}` spread + our provider branches) becomes
- * a hole that Bun's auto-dotenv loader can fill from the project workspace's
- * `.env` — for example a `.env.example`-style placeholder
+ * Auth env vars that the Claude Code CLI / SDK native binary reads at startup.
+ * Any one of these left unset (after `{...process.env}` spread + our provider
+ * branches) becomes a hole that the SDK's "fall back to whatever I find" path
+ * can fill from a stale source — typically a `.env.example`-style placeholder
  * `ANTHROPIC_API_KEY=sk-ant-your-anthropic-key-here` that an AI helpfully
- * copied over. The polluted value then reaches cli.js and surfaces as
- * "Not logged in · Please run /login".
+ * copied into the workspace. The polluted value reaches the SDK auth layer
+ * and surfaces as "Not logged in · Please run /login".
  *
  * Fix: after all provider branches run, any var in this list that's still
  * absent gets sealed to an empty string. Verified by reading claude-code
  * source (utils/auth.ts, utils/authFileDescriptor.ts, services/api/filesApi.ts)
  * — every check is a JS truthy test (`if (process.env.X)` or
  * `process.env.X || fallback`), so empty string is semantically identical to
- * unset: OAuth keychain fallback, apiKeyHelper, and Bedrock/Vertex paths all
- * continue to work. Empty strings block Bun's dotenv merge because Bun treats
- * "key explicitly present in spawn env" as parent-wins even when the value
- * happens to be "". Smoke-tested with Bun 1.3.6 (see PR discussion).
+ * unset for the SDK's purposes: OAuth keychain fallback, apiKeyHelper, and
+ * Bedrock/Vertex paths all continue to work.
+ *
+ * v0.2.0 status: under bundled Node + native-binary SDK we no longer have a
+ * runtime that auto-loads `.env` from cwd, so the active pollution vector is
+ * gone. The seal stays as defense-in-depth: cheap (a handful of `in` checks),
+ * documents the auth-env contract, and protects against future SDK runtimes
+ * (or shell wrappers) that might re-introduce auto-dotenv behavior.
  *
  * NOT included: CLAUDE_CONFIG_DIR — claude-code/src/utils/envUtils.ts:10 reads
  * it with `??` (nullish coalescing), so an empty string would fall through as
  * "" (not as the homedir fallback) and break the keychain service-name hash.
- * `.env` pollution of CLAUDE_CONFIG_DIR is also essentially impossible — no
- * project template ever sets a CC-internal var like that.
  */
 const CC_AUTH_ENV_VARS_TO_SEAL = [
   'ANTHROPIC_API_KEY',
@@ -2648,10 +2978,11 @@ const CC_AUTH_ENV_VARS_TO_SEAL = [
 ] as const;
 
 /**
- * Seal CC auth env vars against Bun dotenv auto-load pollution.
- * Only fills in empty strings for vars that are currently ABSENT from env —
- * preserves any real value we or the parent shell explicitly set. See
- * `CC_AUTH_ENV_VARS_TO_SEAL` above for the full rationale.
+ * Seal SDK auth env vars against environment-pollution sources (legacy Bun
+ * auto-dotenv, future shell wrappers, anything that might fill an absent var
+ * with a stale value). Only fills empty strings for vars currently ABSENT
+ * from env — preserves any real value we or the parent shell explicitly
+ * set. See `CC_AUTH_ENV_VARS_TO_SEAL` above for the full rationale.
  */
 function sealCcAuthEnv(env: NodeJS.ProcessEnv): void {
   for (const key of CC_AUTH_ENV_VARS_TO_SEAL) {
@@ -2661,7 +2992,23 @@ function sealCcAuthEnv(env: NodeJS.ProcessEnv): void {
   }
 }
 
-export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.ProcessEnv {
+/**
+ * Build the env map passed to the Claude Agent SDK subprocess.
+ *
+ * @param providerEnv  Override the active session's provider. Used by
+ *   one-shot callers (provider-verify, title-generator) that spawn an SDK
+ *   subprocess against a DIFFERENT provider than the Tab's active session.
+ * @param modelOverride  Override `currentModel` for the autocompact-window
+ *   lookup. MUST be provided whenever `providerEnv` overrides the session
+ *   provider; otherwise `currentModel` (which reflects the Tab's active
+ *   session, not the one we're building env for) would inject the wrong
+ *   cap into the verify/title subprocess. Safe to omit when this is a
+ *   regular session spawn where `currentModel` is already correct.
+ */
+export function buildClaudeSessionEnv(
+  providerEnv?: ProviderEnv,
+  modelOverride?: string,
+): NodeJS.ProcessEnv {
   // Ensure essential paths are always present, even when launched from Finder
   // (Finder launches via launchd which doesn't inherit shell environment variables)
   const { home } = getCrossPlatformEnv();
@@ -2671,9 +3018,8 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   const PATH_SEP = process.platform === 'win32' ? ';' : ':';
   const PATH_KEY = process.platform === 'win32' ? 'Path' : 'PATH';
 
-  // Detect bundled runtime directories using shared utility from runtime.ts
+  // Detect bundled Node.js directory using shared utility from runtime.ts
   const isWindows = process.platform === 'win32';
-  const bundledBunDir = getBundledBunDir();
   const bundledNodeDir = getBundledNodeDir();
 
   // Windows directory env vars — hoisted for reuse across essentialPaths + git-bash detection
@@ -2683,17 +3029,12 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
 
   if (isDebug) {
     console.log('[env] Script directory:', getScriptDir());
-    console.log(`[env] Bundled bun: ${bundledBunDir || 'NOT FOUND'}`);
     console.log(`[env] Bundled Node.js: ${bundledNodeDir || 'NOT FOUND'}`);
   }
 
-  // Build essential paths based on platform
+  // Build essential paths based on platform.
+  // v0.2.0+: bundled Bun removed; bundled Node.js is the only app-local JS runtime.
   const essentialPaths: string[] = [];
-
-  // Bundled bun directory (highest priority — Sidecar/agent-browser need it)
-  if (bundledBunDir) {
-    essentialPaths.push(bundledBunDir);
-  }
 
   // System Node.js directories — preferred over bundled for MCP/npm ecosystem reliability.
   // User-maintained Node.js is less likely to have broken npm than our bundled version.
@@ -2709,9 +3050,27 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     essentialPaths.push(bundledNodeDir);
   }
 
-  // MyAgents bin directory — user-facing commands (agent-browser wrapper etc.)
-  // Safe for global PATH: runtime shims (node→bun) are in ~/.myagents/shims/
-  // and scoped inside each wrapper script, not exposed here.
+  // MyAgents-managed npm global prefix — every `npm install -g <pkg>` from an
+  // AI Bash tool lands in `~/.myagents/npm-global/{bin,lib}` thanks to the
+  // `npm_config_prefix` env we inject below. This dir comes BEFORE
+  // `~/.myagents/bin` in essentialPaths so:
+  //   1. AI-installed tools (e.g. agent-browser) shadow any legacy
+  //      `~/.myagents/bin/<name>` wrapper from older app versions —
+  //      legacy wrappers naturally fall idle without explicit cleanup.
+  //   2. We control the install location regardless of whether bundled
+  //      Node or system Node serves the npm subprocess (signed app
+  //      bundle's default prefix is read-only → bare `npm install -g`
+  //      would fail without this override).
+  if (home) {
+    const npmGlobalBinDir = isWindows
+      ? resolve(home, '.myagents', 'npm-global')  // npm on Windows puts binaries under prefix root, not prefix/bin
+      : `${home}/.myagents/npm-global/bin`;
+    essentialPaths.push(npmGlobalBinDir);
+  }
+
+  // MyAgents bin directory — user-facing commands (the `myagents` CLI itself).
+  // Legacy `agent-browser` wrappers from older app versions may still live
+  // here; they're shadowed by `npm-global/bin` above so no cleanup needed.
   if (home) {
     const myagentsBinDir = isWindows
       ? resolve(home, '.myagents', 'bin')
@@ -2769,7 +3128,7 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   const finalPath = pathParts.join(PATH_SEP);
   if (isDebug) {
     console.log('[env] Final PATH (first 5 entries):', pathParts.slice(0, 5).join(PATH_SEP));
-    console.log('[env] Bundled bun will be used:', bundledBunDir ? 'YES' : 'NO (using system bun)');
+    console.log('[env] Bundled Node.js dir:', bundledNodeDir ? bundledNodeDir : 'NOT FOUND (system Node will be used)');
   }
 
   // Build base environment
@@ -2779,6 +3138,25 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   delete env.PATH;
   delete env.Path;
   env[PATH_KEY] = finalPath;
+
+  // Pin `npm install -g` target to a writable, MyAgents-managed prefix.
+  //
+  // Without this override:
+  //   - Bundled Node's default prefix is the signed app bundle's Resources
+  //     dir → read-only → `npm install -g` fails EACCES on production macOS.
+  //   - System Node's default prefix is typically `/usr/local` (sudo) or
+  //     a user-configured path that may be inconsistent across machines.
+  //
+  // With the override: `~/.myagents/npm-global/{bin,lib}` is always writable
+  // and the install target is predictable. Combined with adding
+  // `<prefix>/bin` to PATH above, AI-installed CLIs (e.g. agent-browser via
+  // its skill bootstrap) become immediately invocable in subsequent Bash
+  // turns without per-shell setup.
+  if (home) {
+    env.npm_config_prefix = isWindows
+      ? resolve(home, '.myagents', 'npm-global')
+      : `${home}/.myagents/npm-global`;
+  }
   // Disable SDK nonessential traffic (Statsig telemetry, Sentry error reporting, surveys).
   // MyAgents manages its own telemetry; these external connections add startup latency
   // and can timeout in restricted network environments (e.g. China).
@@ -2820,17 +3198,13 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
   // and break Anthropic subscription OAuth. User-level skills are synced as symlinks
   // into project .claude/skills/ by syncProjectUserConfig() instead.
 
-  // agent-browser: config is at ~/.agent-browser/config.json (default path, no env var needed)
-
-  // agent-browser: bypass Rust canonicalize() UNC path issue on Windows
-  // https://github.com/vercel-labs/agent-browser/issues/393
-  if (isWindows) {
-    const abCliPath = getAgentBrowserCliPath();
-    if (abCliPath) {
-      // cliPath = .../agent-browser/bin/agent-browser.js → HOME = .../agent-browser/
-      env.AGENT_BROWSER_HOME = resolve(abCliPath, '..', '..');
-    }
-  }
+  // agent-browser: no env injection needed. The CLI ships its own config
+  // discovery (~/.agent-browser/config.json default path) and is installed
+  // by the AI via the agent-browser skill on first use, not bundled here.
+  // Earlier versions set AGENT_BROWSER_HOME on Windows to bypass a Rust
+  // canonicalize() UNC path issue (vercel-labs/agent-browser#393); that
+  // workaround required the bundled CLI path to derive HOME, and is now
+  // upstream's responsibility.
 
   // Self-Config CLI: expose sidecar port so the `myagents` CLI can call back
   if (sidecarPort > 0) {
@@ -2878,6 +3252,50 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     console.log(`[env] Model aliases set: sonnet=${aliases.sonnet ?? '(none)'}, opus=${aliases.opus ?? '(none)'}, haiku=${aliases.haiku ?? '(none)'}`);
   }
 
+  // ── Auto-compact effective window ──
+  // Claude Agent SDK's `getContextWindowForModel()` returns 200_000 as fallback
+  // for any non-Anthropic model (MODEL_CONTEXT_WINDOW_DEFAULT; see
+  // claude-code/src/utils/context.ts:97). For third-party models with smaller
+  // native windows (DeepSeek-chat 128K, GLM-4.5-Air 128K, …) this puts the
+  // autoCompactThreshold (~effectiveWindow − 13K) above the model's real limit
+  // → upstream API errors with "context_length_exceeded" before SDK fires
+  // compaction. SDK exposes `CLAUDE_CODE_AUTO_COMPACT_WINDOW` env which caps
+  // the window via `Math.min(contextWindow, envCap)` (autoCompact.ts:40-46).
+  //
+  // We look the resolved model up in the flat custom+discovered+preset
+  // registry (see utils/model-capabilities.ts). The resolution order prefers
+  // `modelOverride` (one-shot callers that spawn against a different
+  // provider/model) over `currentModel` (active Tab session state) — see the
+  // function JSDoc for the rationale.
+  //
+  // `env` starts from `{ ...process.env }`, so any CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  // inherited from the user's shell / launch environment is already there. We
+  // MUST either override it with our computed value OR explicitly delete it;
+  // leaving the inherited value in place would silently cap subprocesses by
+  // whatever the user had in their shell rc, with no visibility.
+  //
+  // Scope: the cap is subprocess-env-wide, so sub-agents invoked via the
+  // model-alias map (`sonnet`/`opus`/`haiku` → different provider IDs) share
+  // the same cap as the primary model. Acceptable for V1 since the failing
+  // case (primary model hits its own 128K ceiling) is what this fixes;
+  // sub-agents on a smaller window would be further over-capped, not
+  // under-capped.
+  const resolvedModel = modelOverride ?? currentModel;
+  const modelContextLength = lookupModelContextLength(resolvedModel);
+  if (modelContextLength && modelContextLength > 0) {
+    env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(modelContextLength);
+    console.log(`[env] CLAUDE_CODE_AUTO_COMPACT_WINDOW=${modelContextLength} (model=${resolvedModel ?? '(unknown)'})`);
+  } else {
+    // Unknown / custom / missing-contextLength: clear any inherited value so
+    // SDK's built-in default (MODEL_CONTEXT_WINDOW_DEFAULT=200K) applies,
+    // exactly per product requirement #4. Logging only when a model is
+    // actually set — empty currentModel at pre-warm is a normal startup state.
+    delete env.CLAUDE_CODE_AUTO_COMPACT_WINDOW;
+    if (resolvedModel) {
+      console.log(`[env] No contextLength found for model=${resolvedModel} — SDK default 200K applies`);
+    }
+  }
+
   // OpenAI Bridge: if provider uses OpenAI protocol, loopback to sidecar
   if (effectiveProviderEnv?.apiProtocol === 'openai' && sidecarPort > 0) {
     // SDK requests go to sidecar's /v1/messages route, which translates to OpenAI format
@@ -2916,11 +3334,9 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);
     // Seal any auth var not explicitly set above (e.g. ANTHROPIC_AUTH_TOKEN
     // was deleted, CLAUDE_CODE_OAUTH_TOKEN was never touched) to an empty
-    // string so Bun's auto-dotenv loader can't backfill them from the
-    // workspace's .env at subprocess spawn time. See CC_AUTH_ENV_VARS_TO_SEAL
-    // above for full rationale — this is the "Not logged in · Please run
-    // /login" bug that triggers when a user (or an AI helping them) fills
-    // out a project's .env.example with placeholder Anthropic credentials.
+    // string. Defense-in-depth against stale `.env` placeholders surfacing
+    // as "Not logged in · Please run /login" — see CC_AUTH_ENV_VARS_TO_SEAL
+    // above for full rationale.
     sealCcAuthEnv(env);
     return env;
   }
@@ -2981,23 +3397,23 @@ export function buildClaudeSessionEnv(providerEnv?: ProviderEnv): NodeJS.Process
     }
   } else {
     // Subscription mode: clear any previously inherited third-party apiKey so
-    // the SDK falls through to keychain OAuth. NOTE: `delete` alone is NOT
-    // enough — when the SDK subprocess (bun cli.js) starts with cwd set to
-    // the project workspace, Bun's auto-dotenv loader will happily refill
-    // any deleted key from the project's .env. `sealCcAuthEnv(env)` below
-    // plugs that hole by converting the deletes into explicit empty strings,
-    // which Bun treats as "parent already set this, don't override".
+    // the SDK falls through to keychain OAuth. `sealCcAuthEnv(env)` below
+    // converts the deletes into explicit empty strings — defense-in-depth
+    // against any spawning runtime that auto-loads `.env` from cwd and would
+    // otherwise refill the keys from a placeholder template.
     delete env.ANTHROPIC_AUTH_TOKEN;
     delete env.ANTHROPIC_API_KEY;
     console.log('[env] ANTHROPIC_AUTH_TOKEN cleared (using default auth)');
   }
 
-  // Block Bun auto-dotenv pollution of CC auth env vars before handing the
-  // env off to sdk.mjs. This is the last-line-of-defense for anything the
-  // branches above either deleted (subscription mode) or never set at all
-  // (CLAUDE_CODE_OAUTH_TOKEN{,_FILE_DESCRIPTOR}). See CC_AUTH_ENV_VARS_TO_SEAL
-  // above for the full rationale — triggering symptom is "Not logged in"
-  // after a user (or an AI) fills out a project's .env.example.
+  // Seal CC auth env vars before handing the env off to the SDK subprocess
+  // (defense-in-depth against `.env`-style pollution). Last-line-of-defense
+  // for anything the branches above either deleted (subscription mode) or
+  // never set at all (CLAUDE_CODE_OAUTH_TOKEN{,_FILE_DESCRIPTOR}). See
+  // CC_AUTH_ENV_VARS_TO_SEAL above for the full rationale — the triggering
+  // symptom was "Not logged in · Please run /login" after a user (or an AI
+  // helping them) filled out a project's .env.example with placeholder
+  // Anthropic credentials.
   sealCcAuthEnv(env);
   return env;
 }
@@ -3327,7 +3743,20 @@ function ensureSubagentToolPlaceholder(parentToolUseId: string, toolUseId: strin
   });
 }
 
-function handleToolInputDelta(index: number, toolId: string, delta: string): void {
+// Pattern 3 §3.2 / §D.3 — parsePartialJson throttle.
+//
+// `parsePartialJson` walks the entire accumulated string each call. For large
+// Edit/Write tool args (multi-MB `new_string`) the legacy "parse on every
+// delta" behaviour is O(n²). We now keep a per-tool cursor of the buffer size
+// at the last successful parse, and only re-parse when the buffer has grown
+// by `PARSE_PARTIAL_JSON_REPARSE_BYTES` or a content-block-stop forces a
+// final parse (see `handleContentBlockStop` below — it always calls
+// `parsePartialJson` / `JSON.parse` on the final accumulated string).
+const PARSE_PARTIAL_JSON_REPARSE_BYTES = 16 * 1024; // 16 KiB
+const lastParsedBytesByToolId = new Map<string, number>();
+const lastParsedBytesBySubagentToolId = new Map<string, number>();
+
+function handleToolInputDelta(_index: number, toolId: string, delta: string): void {
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
   const toolBlock = contentArray.find(
@@ -3338,10 +3767,16 @@ function handleToolInputDelta(index: number, toolId: string, delta: string): voi
   }
   const newInputJson = `${toolBlock.tool.inputJson ?? ''}${delta}`;
   toolBlock.tool.inputJson = newInputJson;
+  // Throttle: only attempt parse when buffer has grown ≥16 KiB since last parse.
+  const lastParsed = lastParsedBytesByToolId.get(toolId) ?? 0;
+  if (newInputJson.length - lastParsed < PARSE_PARTIAL_JSON_REPARSE_BYTES) {
+    return; // keep previous `parsedInput`; consumer sees the last successful value
+  }
   const parsedInput = parsePartialJson<ToolInput>(newInputJson);
   if (parsedInput) {
     toolBlock.tool.parsedInput = parsedInput;
   }
+  lastParsedBytesByToolId.set(toolId, newInputJson.length);
 }
 
 function handleSubagentToolInputDelta(
@@ -3359,10 +3794,15 @@ function handleSubagentToolInputDelta(
   }
   const newInputJson = `${subCall.inputJson ?? ''}${delta}`;
   subCall.inputJson = newInputJson;
+  const lastParsed = lastParsedBytesBySubagentToolId.get(toolId) ?? 0;
+  if (newInputJson.length - lastParsed < PARSE_PARTIAL_JSON_REPARSE_BYTES) {
+    return;
+  }
   const parsedInput = parsePartialJson<ToolInput>(newInputJson);
   if (parsedInput) {
     subCall.parsedInput = parsedInput;
   }
+  lastParsedBytesBySubagentToolId.set(toolId, newInputJson.length);
 }
 
 function finalizeSubagentToolInput(parentToolUseId: string, toolId: string): void {
@@ -3382,6 +3822,8 @@ function finalizeSubagentToolInput(parentToolUseId: string, toolId: string): voi
       subCall.parsedInput = parsed;
     }
   }
+  // Pattern 3 §D.3 — terminal state; drop throttle cursor.
+  lastParsedBytesBySubagentToolId.delete(toolId);
 }
 
 function handleContentBlockStop(index: number, toolId?: string): void {
@@ -3411,6 +3853,9 @@ function handleContentBlockStop(index: number, toolId?: string): void {
         toolBlock.tool.parsedInput = parsed;
       }
     }
+    // Pattern 3 §D.3 — block has reached terminal state, drop the throttle
+    // cursor so a future tool with a recycled id starts fresh.
+    if (toolId) lastParsedBytesByToolId.delete(toolId);
   }
 }
 
@@ -3432,12 +3877,20 @@ function handleMessageComplete(): void {
   // Flush pending mid-turn messages BEFORE marking streaming as done.
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
-  // Notify IM stream: turn complete — only if callback was NOT nulled/replaced during this turn.
-  // A nulled callback means the SSE stream timed out and a new one may have been set for a
-  // subsequent queued message; firing 'complete' here would consume the wrong stream.
-  if (imStreamCallback && !imCallbackNulledDuringTurn) {
-    imStreamCallback('complete', '');
-    imStreamCallback = null;
+  // Pattern 1 follow-up: turn finished cleanly — drop the registration
+  // without aborting. The next turn will register a fresh controller.
+  if (sessionId) endTurnAbort(sessionId);
+  // Pattern 6: turn finished — drop the ambient turnId so subsequent logs
+  // (idle / pre-warm / next turn) don't inherit the stale id.
+  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
+  clearAmbientLogContextField(sessionId, 'turnId');
+  // Pattern B/C/G: turn complete → emit 'complete' for the head request, then
+  // pop it. Subsequent turns (mid-turn injected) advance to the next head.
+  emitImEvent('complete', '');
+  const completedReq = popPendingRequest();
+  if (completedReq) {
+    imRequestRegistry.setStatus(completedReq, 'completed');
+    imRequestRegistry.unregister(completedReq);
   }
   // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
   // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
@@ -3487,25 +3940,37 @@ function handleMessageComplete(): void {
   // Calculate duration for this turn
   const durationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
 
-  // Persist messages with usage info after AI response completes
-  persistMessagesToStorage({
+  // Persist messages with usage info after AI response completes.
+  // Fire-and-forget: persistMessagesToStorage is async (cooperative file lock),
+  // but the enclosing handler is a sync stream-event callback. Errors are already
+  // swallowed inside SessionStore writers; surfacing them here would be no-op.
+  void persistMessagesToStorage({
     inputTokens: currentTurnUsage.inputTokens,
     outputTokens: currentTurnUsage.outputTokens,
     cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
     cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
     model: currentTurnUsage.model,
     modelUsage: currentTurnUsage.modelUsage,
-  }, currentTurnToolCount, durationMs);
+  }, currentTurnToolCount, durationMs).catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
 }
 
 function handleMessageStopped(): void {
   // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
-  // Notify IM stream: turn complete (stopped) — cross-turn guard prevents misfire
-  if (imStreamCallback && !imCallbackNulledDuringTurn) {
-    imStreamCallback('complete', '');
-    imStreamCallback = null;
+  // Pattern 1 follow-up: turn ended (interrupted). Drop the registration.
+  // If interruptCurrentResponse drove the stop it already abort()ed the
+  // controller; this endTurn is the idempotent cleanup of the slot.
+  if (sessionId) endTurnAbort(sessionId);
+  // Pattern 6: clear turnId on stop (mirror of handleMessageComplete).
+  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
+  clearAmbientLogContextField(sessionId, 'turnId');
+  // Pattern B/C/G: turn stopped → emit 'complete' for head + pop queue.
+  emitImEvent('complete', '');
+  const stoppedReq = popPendingRequest();
+  if (stoppedReq) {
+    imRequestRegistry.setStatus(stoppedReq, 'completed');
+    imRequestRegistry.unregister(stoppedReq);
   }
   // 跨回合状态清理（与 handleMessageComplete 保持一致）
   streamIndexToToolId.clear();
@@ -3522,8 +3987,8 @@ function handleMessageStopped(): void {
   }
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage || lastMessage.role !== 'assistant' || typeof lastMessage.content === 'string') {
-    // Persist even if no assistant message
-    persistMessagesToStorage();
+    // Persist even if no assistant message (fire-and-forget — async lock).
+    void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
     return;
   }
   lastMessage.content = lastMessage.content.map((block) => {
@@ -3537,18 +4002,27 @@ function handleMessageStopped(): void {
     }
     return block;
   });
-  // Persist after processing message
-  persistMessagesToStorage();
+  // Persist after processing message (fire-and-forget — async lock).
+  void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
 }
 
 function handleMessageError(error: string): void {
   // Flush pending mid-turn messages before marking done (same as handleMessageComplete).
   flushPendingMidTurnQueue();
   isStreamingMessage = false;
-  // Notify IM stream: localized error
-  if (imStreamCallback) {
-    imStreamCallback('error', localizeImError(error));
-    imStreamCallback = null;
+  // Pattern 1 follow-up: turn ended due to error. Abort the turn signal so
+  // any in-flight tool fetches release immediately rather than waiting on
+  // their own per-call timeouts. Ignored if no turn is registered.
+  if (sessionId) abortTurnAbort(sessionId, 'error');
+  // Pattern 6: clear turnId on error too — turn is over either way.
+  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
+  clearAmbientLogContextField(sessionId, 'turnId');
+  // Pattern B/C/G: error → emit 'error' for head + pop queue.
+  emitImEvent('error', localizeImError(error));
+  const failedReq = popPendingRequest();
+  if (failedReq) {
+    imRequestRegistry.setStatus(failedReq, 'failed');
+    imRequestRegistry.unregister(failedReq);
   }
   setSessionState('idle');
 
@@ -3572,8 +4046,8 @@ function handleMessageError(error: string): void {
     content: `Error: ${error}`,
     timestamp: new Date().toISOString()
   });
-  // Persist error message
-  persistMessagesToStorage();
+  // Persist error message (fire-and-forget — async lock).
+  void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
 }
 
 function findToolBlockById(toolUseId: string): { tool: ToolUseState } | null {
@@ -3884,6 +4358,20 @@ export function getAndClearLastAgentError(): string | null {
  */
 function clearMessageState(): void {
   messages.length = 0;
+  // Pattern 3 §3.2.4 — `messages` was just emptied; reset the persistence
+  // cursor so the next persist run sees `slice(0) === []` and does not
+  // mistakenly believe N messages have already been persisted. Drop the
+  // cached SessionMessage objects too — they belong to a different session.
+  lastPersistedIndex = 0;
+  persistedSessionMessageCache.length = 0;
+  // Pattern 3 §3.2.4 — fix #2 (reentrance). Drop the per-session persist
+  // chain so a fresh session starts with no in-flight tail awaiting writes
+  // that no longer match the cleared in-memory state.
+  persistChainBySession.delete(sessionId);
+  // Pattern 3 §D.3 — drop parsePartialJson throttle cursors so a recycled
+  // toolId in a fresh session is not confused with the old buffer length.
+  lastParsedBytesByToolId.clear();
+  lastParsedBytesBySubagentToolId.clear();
   // Queue clearing is always explicit (broadcast queue:cancelled to the frontend).
   // Defensive: in practice, resetSession / switchToSession drain earlier (before
   // awaitSessionTermination); initializeAgent is typically called on an empty queue.
@@ -3904,6 +4392,13 @@ function clearMessageState(): void {
   // Reset browser tool tracking for new session
   sessionBrowserToolUsed = false;
   sessionStorageStateSaved = false;
+  // Pattern B/G: drain the pending requestId queue — any in-flight bus
+  // subscribers for the old session belong to closed SSE streams; new SDK
+  // output for a new session should not be tagged with old trace IDs.
+  clearPendingRequests();
+  imEventBus.clear();
+  // Pattern C: drop all registry entries (aborts in-flight controllers via clear()).
+  imRequestRegistry.clear();
 }
 
 /**
@@ -3971,6 +4466,14 @@ function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
       })),
       metadata: storedMsg.metadata,
     });
+  }
+  // Pattern 3 §3.2.4 — these messages are already on disk; seed the persist
+  // cursor + cache so the next persist run only maps the new tail (messages
+  // produced after this load), not the entire restored history.
+  lastPersistedIndex = messages.length;
+  persistedSessionMessageCache.length = 0;
+  for (const sm of storedMessages) {
+    persistedSessionMessageCache.push(sm);
   }
   // Update messageSequence to continue from the last message
   if (storedMessages.length > 0) {
@@ -4041,7 +4544,16 @@ export async function resetSession(): Promise<void> {
   // sessionId still points to the OLD session here (updated in step 3).
   if (messages.length > 0) {
     console.log(`[agent] resetSession: persisting ${messages.length} in-memory messages before clearing`);
-    persistMessagesToStorage();
+    await persistMessagesToStorage();
+  }
+
+  // 1c. Pattern 2 §2.3.1 — release any spilled large-value refs tagged with
+  // the old sessionId. Best-effort; fired-and-forget so resetSession isn't
+  // delayed by ref I/O. The periodic GC also catches anything left behind.
+  if (sessionId) {
+    void import('./utils/large-value-store').then(({ clearSessionRefs }) =>
+      clearSessionRefs(sessionId)
+    ).catch(() => { /* swallow — best-effort cleanup */ });
   }
 
   // 2. Clear all message state (shared with initializeAgent)
@@ -4179,6 +4691,12 @@ export async function initializeAgent(
   hasInitialPrompt = Boolean(initialPrompt && initialPrompt.trim());
   systemInitInfo = null;
 
+  // Memoize session metadata for the whole initialization pass. Previously this
+  // function called getSessionMetadata(initialSessionId) three times (at resume
+  // decision, message load, and MCP self-resolve); each call scans sessions.json
+  // and a large JSONL can cost ~30-100ms. Read once, reuse.
+  const initMeta = initialSessionId ? getSessionMetadata(initialSessionId) : null;
+
   if (initialSessionId) {
     // Use caller-specified session_id (IM / Tab opening existing session / CronTask)
     sessionId = initialSessionId as typeof sessionId;
@@ -4188,7 +4706,7 @@ export async function initializeAgent(
     // is only written after system_init succeeds. If the previous Bun process crashed
     // before system_init, metadata exists (with unifiedSession:true) but sdkSessionId
     // is absent — yet the SDK session directory already exists on disk.
-    const meta = getSessionMetadata(initialSessionId);
+    const meta = initMeta;
     if (meta) {
       // Cross-runtime guard: if session was created by a DIFFERENT runtime than the current one,
       // attempting to resume would fail (SDK: "No conversation found", CC/Codex: unknown session ID).
@@ -4235,7 +4753,7 @@ export async function initializeAgent(
   // (SessionStore.ts calculateSessionStats), whereas messageSequence indexes
   // every persisted message — so the seed would under-count and still collide.
   // Removed rather than fixed: the disk-first write order is the real guard.
-  if (initialSessionId && getSessionMetadata(initialSessionId)) {
+  if (initialSessionId && initMeta) {
     const sessionData = getSessionData(initialSessionId);
     if (sessionData?.messages?.length) {
       loadMessagesFromStorage(sessionData.messages);
@@ -4260,14 +4778,21 @@ export async function initializeAgent(
   // Skip for Global Sidecar (no workspace-specific config).
   if (!preWarmDisabled) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { resolveWorkspaceConfig } = require('./utils/admin-config');
+      const { resolveWorkspaceConfig } = await import('./utils/admin-config');
       // v0.1.69: pass session metadata so the sidecar prefers session snapshot
       // (`meta.model`, `meta.providerId/EnvJson`, `meta.mcpEnabledServers`) over the
       // agent's current values. For IM sessions (which deliberately don't snapshot
       // these fields), this is a no-op — the agent fallback handles them.
-      const sessionMetaForResolve = sessionId ? getSessionMetadata(sessionId) : null;
-      const resolved = resolveWorkspaceConfig(agentDir, sessionMetaForResolve);
+      //
+      // Pass `includeMcp: hasInitialPrompt` — Tab sessions (no initial prompt)
+      // deliberately skip MCP self-resolve below anyway (the frontend's
+      // /api/mcp/set is authoritative), so asking resolveWorkspaceConfig to
+      // compute an MCP list that will be discarded is pure waste. Cuts the
+      // expensive getAllMcpServers/getEffectiveMcpServers disk walk out of
+      // the Tab-open critical path.
+      const resolved = resolveWorkspaceConfig(agentDir, initMeta, {
+        includeMcp: hasInitialPrompt,
+      });
       // Only self-resolve MCP for sessions with initialPrompt (IM/Cron).
       // Tab sessions must NOT self-resolve: the frontend's /api/mcp/set is the
       // authoritative source, and self-resolve produces slightly different field
@@ -4354,7 +4879,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // (e.g., if an active streaming session accumulated messages not yet saved to disk)
   if (messages.length > 0) {
     console.log(`[agent] switchToSession: persisting ${messages.length} in-memory messages before clearing`);
-    persistMessagesToStorage();
+    await persistMessagesToStorage();
   }
 
   // Reset message/queue/streaming state (shared with initializeAgent, resetSession)
@@ -4394,6 +4919,10 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     // SDK 已注册此 session，后续 query 必须用 resume
     sessionRegistered = true;
     console.log(`[agent] switchToSession: will resume session ${sessionId}`);
+  } else if (isExternalRuntime(getCurrentRuntimeType())) {
+    // External runtimes (codex/gemini/CC) don't use sdkSessionId — resume is
+    // driven by runtimeSessionId in external-session.ts. Not a problem.
+    sessionRegistered = false;
   } else {
     // 从未 query 过的 session，用 sessionId 创建
     sessionRegistered = false;
@@ -4473,6 +5002,9 @@ export async function enqueueUserMessage(
   model?: string,
   providerEnv?: ProviderEnv | 'subscription',
   metadata?: { source: SessionSource; sourceId?: string; senderName?: string },
+  // Pattern A — IM trace ID. Forwarded from /api/im/chat (Rust generates at edge).
+  // Desktop / cron / heartbeat callers omit this — those paths get no IM identity.
+  requestId?: string,
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await sessionTerminationPromise 需要数秒），
@@ -4544,6 +5076,10 @@ export async function enqueueUserMessage(
       sessionId = randomUUID();
       hasInitialPrompt = false;
       messages.length = 0;
+      // Pattern 3 §3.2.4 — fresh session means existing on-disk JSONL is
+      // unrelated to this in-memory state; reset the cursor.
+      lastPersistedIndex = 0;
+      persistedSessionMessageCache.length = 0;
       systemInitInfo = null;
       console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
     }
@@ -4621,7 +5157,7 @@ export async function enqueueUserMessage(
       // Session already in index — only update title if it's still default
       const title = trimmed ? trimmed.slice(0, 40) + (trimmed.length > 40 ? '...' : '') : '图片消息';
       if (existingMeta.title === 'New Chat') {
-        updateSessionMetadata(sessionId, { title });
+        await updateSessionMetadata(sessionId, { title });
       }
       console.log(`[agent] session ${sessionId} already exists in SessionStore, preserving stats`);
     } else {
@@ -4646,13 +5182,13 @@ export async function enqueueUserMessage(
       if (sessionMeta.title.length < trimmed.length) {
         sessionMeta.title += '...';
       }
-      saveSessionMetadata(sessionMeta);
+      await saveSessionMetadata(sessionMeta);
       console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${lazyAgent ? (useLiveFollow ? 'im' : 'owned') : 'none'})`);
     }
   } else {
     // Update session title from first real message if needed
     if (trimmed && messages.length === 0) {
-      updateSessionTitleFromMessage(sessionId, trimmed);
+      await updateSessionTitleFromMessage(sessionId, trimmed);
     }
   }
 
@@ -4718,19 +5254,39 @@ export async function enqueueUserMessage(
     | { type: 'image'; source: { type: 'base64'; media_type: ImageMediaType; data: string } }
   > = [];
 
+  // Modality gate. The full image array is still saved to disk above
+  // (`savedAttachments`) so the UI message bubble shows what the user sent.
+  // What we drop here is just the SDK content blocks for unsupported
+  // modalities — the model never sees them. Defaults to allow when the model
+  // is unknown (custom provider with no `inputModalities` set), per spec.
+  // This is the authoritative filter point: IM Bot / Cron / Agent Channel
+  // also flow through `enqueueUserMessage`, so frontend toasts are an
+  // ergonomic enhancement, not the security boundary.
+  //
+  // We resolve against the message's intended model: caller-provided `model`
+  // if any (this is the model that will actually run the turn — applied via
+  // `applySessionConfig` further down on the non-busy path; on the queued/
+  // busy path it's intentionally inherited rather than applied per existing
+  // provider-env semantics, and `stripUnsupportedModalityBlocks` re-checks
+  // at dequeue to catch any drift), otherwise the session's current model.
+  const modelForFilter = model ?? currentModel;
+  const imagesAllowed = modelSupportsModality(modelForFilter, 'image');
+  const filteredImageCount = hasImages && !imagesAllowed ? images!.length : 0;
+
   // Add images first so Claude can see them before the text query
   // Images are resized/sliced server-side to stay within API limits (≤1568px, long images → 1:2 tiles)
-  if (hasImages) {
+  if (hasImages && imagesAllowed) {
     for (const img of images) {
       let tiles: Awaited<ReturnType<typeof processImage>>;
       try {
         tiles = await processImage(img);
       } catch (err) {
         // Image too large or processing failed — notify user and inform Claude
-        const errMsg = err instanceof Error ? err.message : 'Image processing failed';
-        console.warn(`[agent] processImage error for ${img.name}: ${errMsg}`);
-        broadcast('chat:message-error', `图片 "${img.name}" 处理失败：${errMsg}`);
-        contentBlocks.push({ type: 'text', text: `[Image "${img.name}" omitted: ${errMsg}]` });
+        const friendly = classifyImageError(err);
+        const raw = err instanceof Error ? err.message : String(err);
+        console.warn(`[agent] processImage error for ${img.name}: ${raw}`);
+        broadcast('chat:message-error', `图片 "${img.name}" 处理失败：${friendly}`);
+        contentBlocks.push({ type: 'text', text: `[Image "${img.name}" omitted: ${friendly}]` });
         continue;
       }
       if (tiles.length > 1) {
@@ -4753,6 +5309,21 @@ export async function enqueueUserMessage(
         });
       }
     }
+  } else if (filteredImageCount > 0) {
+    // Models without image support: surface a synthetic note in the SDK
+    // payload so the model isn't confused by the user appearing to "send
+    // nothing". Same shape as the per-image error path above.
+    console.log(`[agent] modality filter: dropping ${filteredImageCount} image(s) for model=${modelForFilter ?? '(unknown)'} (text-only)`);
+    contentBlocks.push({
+      type: 'text',
+      text: `[${filteredImageCount} image attachment(s) omitted — current model does not support image input]`,
+    });
+    broadcast('chat:attachments-filtered', {
+      reason: 'modality',
+      kind: 'image',
+      count: filteredImageCount,
+      model: modelForFilter ?? null,
+    });
   }
 
   // Add text content if present
@@ -4782,11 +5353,12 @@ export async function enqueueUserMessage(
       wasQueued: true,
       resolve: () => {},  // No-op: no one is awaiting
       attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
+      requestId,
     };
     // wakeGenerator delivers directly if generator is at waitForMessage (messageResolver set),
     // or buffers in messageQueue if generator is suspended at yield (SDK hasn't called next() yet).
     wakeGenerator(queueItem);
-    console.log(`[agent] Message queued (mid-turn injection): queueId=${queueId} text="${trimmed.slice(0, 50)}"`);
+    console.log(`[agent] Message queued (mid-turn injection): queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
     broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100) });
 
     // Safety net: if message was queued because shouldAbortSession is true but no session
@@ -4812,7 +5384,7 @@ export async function enqueueUserMessage(
   broadcast('chat:message-replay', { message: userMessage });
 
   // Persist messages to disk after adding user message
-  persistMessagesToStorage();
+  await persistMessagesToStorage();
 
   const queueItem: MessageQueueItem = {
     id: queueId,
@@ -4820,6 +5392,7 @@ export async function enqueueUserMessage(
     messageText: trimmed,
     wasQueued: false,
     resolve: () => {},  // No-op: no one is awaiting
+    requestId,
   };
 
   if (!isSessionActive()) {
@@ -4915,7 +5488,7 @@ export async function waitForSessionIdle(
   return false;
 }
 
-export async function interruptCurrentResponse(): Promise<boolean> {
+export async function interruptCurrentResponse(reason: CancelReason = 'user'): Promise<boolean> {
   if (!isTurnInFlight()) {
     // No active turn, but there might be orphaned queued messages.
     // Drain them and notify the frontend so the UI can recover.
@@ -4929,6 +5502,13 @@ export async function interruptCurrentResponse(): Promise<boolean> {
   if (isInterruptingResponse) {
     return true;
   }
+
+  // Pattern 1 follow-up: abort the turn-scoped controller FIRST so any
+  // in-flight tool fetches / streams in our Node process see the cancel
+  // immediately, in parallel with the cooperative SDK interrupt below.
+  // Both are fire-and-forget; we don't await this — withAbortSignal /
+  // cancellableFetch wake their op via the AbortSignal listener.
+  if (sessionId) abortTurnAbort(sessionId, reason);
 
   if (!querySession) {
     console.log('[agent] No querySession but turn is still marked active, resetting state');
@@ -5008,6 +5588,53 @@ export async function interruptCurrentResponse(): Promise<boolean> {
   } finally {
     isInterruptingResponse = false;
   }
+}
+
+/**
+ * Pattern D — IM trace-id-targeted cancellation. Resolves whether the request
+ * is currently running or queued, then takes the appropriate action:
+ *   - queued (in messageQueue / pendingMidTurnQueue) → splice out, broadcast
+ *     queue:cancelled, no SDK interrupt needed
+ *   - running (activeRequestId matches + turn in flight) → interruptCurrentResponse
+ *     which already wires `abortTurnAbort` → cancellableFetch unblock + SDK interrupt
+ *   - unknown → no-op (caller can still emit a 'cancelled' event for UI)
+ *
+ * Returns the resolved mode so the caller (`/api/im/cancel`) can shape the response.
+ */
+export async function cancelImRequest(
+  requestId: string,
+  reason: CancelReason = 'user',
+): Promise<{ aborted: boolean; mode: 'running' | 'queued' | 'unknown' }> {
+  // Try messageQueue first
+  const qIdx = messageQueue.findIndex(item => item.requestId === requestId);
+  if (qIdx >= 0) {
+    const [item] = messageQueue.splice(qIdx, 1);
+    item.resolve();
+    broadcast('queue:cancelled', { queueId: item.id });
+    console.log(`[agent] cancelImRequest requestId=${requestId} mode=queued`);
+    return { aborted: true, mode: 'queued' };
+  }
+  // Try pendingMidTurnQueue (already yielded to SDK stdin, but unconsumed)
+  const pmIdx = pendingMidTurnQueue.findIndex(p => p.sourceItem.requestId === requestId);
+  if (pmIdx >= 0) {
+    const [removed] = pendingMidTurnQueue.splice(pmIdx, 1);
+    broadcast('queue:cancelled', { queueId: removed.queueId });
+    console.log(`[agent] cancelImRequest requestId=${requestId} mode=pending-mid-turn`);
+    // Note: SDK has already received the message via stdin; we can't unsend it.
+    // The pending-queue removal prevents `queue:started` and messages[] insertion.
+    // If this was the active turn driver, also issue interrupt.
+    if (pendingRequestIds[0] === requestId && isTurnInFlight()) {
+      await interruptCurrentResponse(reason);
+    }
+    return { aborted: true, mode: 'queued' };
+  }
+  // Active turn? (queue head matches)
+  if (pendingRequestIds[0] === requestId && isTurnInFlight()) {
+    console.log(`[agent] cancelImRequest requestId=${requestId} mode=running`);
+    await interruptCurrentResponse(reason);
+    return { aborted: true, mode: 'running' };
+  }
+  return { aborted: false, mode: 'unknown' };
 }
 
 /**
@@ -5155,7 +5782,12 @@ export async function rewindSession(userMessageId: string): Promise<{
 
     // 6. 截断消息
     messages.length = targetIndex;
-    persistMessagesToStorage();
+    // Pattern 3 §3.2.4 — rewind shrinks the array; force a full remap by
+    // resetting the cursor + cache. SessionStore detects the truncation and
+    // rewrites the JSONL file so the on-disk state matches.
+    lastPersistedIndex = 0;
+    persistedSessionMessageCache.length = 0;
+    await persistMessagesToStorage();
 
     // 7. 设置下次 query 的对话截断点
     //    UUID 有效性校验（OR 逻辑）：
@@ -5199,13 +5831,13 @@ export async function rewindSession(userMessageId: string): Promise<{
  * Non-destructive — the current session remains untouched.
  * The new session uses SDK's forkSession option on first startup.
  */
-export function forkSession(assistantMessageId: string): {
+export async function forkSession(assistantMessageId: string): Promise<{
   success: boolean;
   newSessionId?: string;
   agentDir?: string;
   title?: string;
   error?: string;
-} {
+}> {
   // 1. Find target assistant message in memory first, then fall back to persistent storage.
   // The in-memory `messages[]` may be empty after session switch/reset (clearMessageState),
   // while the frontend still shows the fork button because it has the message from loaded state.
@@ -5305,9 +5937,30 @@ export function forkSession(assistantMessageId: string): {
       metadata: m.metadata,
     }));
 
-    // 5. Persist new session
-    saveSessionMetadata(newSession);
-    saveSessionMessages(newSession.id, forkedMessages);
+    // 5. Persist new session.
+    // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the
+    // parent's persist cursor + cache before invoking SessionStore writers
+    // for the FORKED session; restore them afterwards so a subsequent persist
+    // on the parent doesn't accidentally observe stale state from any code
+    // path that might mutate this module's locals during the fork. fork's
+    // saveSessionMessages writes to a different file under a different lock,
+    // so this is defensive — but cheap insurance against future regressions.
+    const parentPersistCursorSnapshot = lastPersistedIndex;
+    const parentPersistCacheSnapshot = persistedSessionMessageCache.slice();
+
+    await saveSessionMetadata(newSession);
+    await saveSessionMessages(newSession.id, forkedMessages);
+
+    // Restore parent persistence state (no-op in normal flow; defends against
+    // future cross-talk if forkSession ever needs to run a parent write too).
+    if (lastPersistedIndex !== parentPersistCursorSnapshot) {
+      console.warn(`[agent] forkSession: parent persist cursor drifted (${parentPersistCursorSnapshot} → ${lastPersistedIndex}); restoring`);
+      lastPersistedIndex = parentPersistCursorSnapshot;
+    }
+    if (persistedSessionMessageCache.length !== parentPersistCacheSnapshot.length) {
+      persistedSessionMessageCache.length = 0;
+      for (const m of parentPersistCacheSnapshot) persistedSessionMessageCache.push(m);
+    }
 
     console.log(`[agent] forked session ${sourceSessionId} → ${newSession.id} at message ${assistantMessageId} (sdkUuid: ${targetMsg.sdkUuid}), ${forkedMessages.length} messages copied`);
 
@@ -5426,7 +6079,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       forkResumeAt = messageUuid;
       // Clear forkFrom so subsequent restarts resume normally
       delete forkMeta.forkFrom;
-      saveSessionMetadata(forkMeta);
+      await saveSessionMetadata(forkMeta);
     }
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
@@ -5491,7 +6144,6 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       allowDangerouslySkipPermissions: true,
       model: currentModel, // Use currently selected model
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
-      executable: 'bun' as const,
       env,
       stderr: (message: string) => {
         // Always log stderr to help diagnose subprocess issues (especially on older Windows)
@@ -5571,7 +6223,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
         // Headless IM fast-path: IM bridges (Telegram/Dingtalk builtin + all OpenClaw plugins
         // like weixin/feishu) have no permission approval UI. Routing Bash/WebSearch/etc. through
-        // checkToolPermission would forward a permission-request to imStreamCallback that no
+        // checkToolPermission would emit a permission-request event to the IM event bus that no
         // bridge can answer → 10-minute timeout per tool call → user sees endless loading.
         //
         // Sticky by design: `currentScenario = 'im'` is set at IM request entry (index.ts:7116)
@@ -5664,9 +6316,11 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       hooks: {
         PostToolUse: [{
           hooks: [
-            async (input: HookInput, _toolUseId: string | undefined, _options: { signal: AbortSignal }): Promise<HookJSONOutput> => {
+            async (input: HookInput, _toolUseId: string | undefined, options: { signal: AbortSignal }): Promise<HookJSONOutput> => {
               const postInput = input as PostToolUseHookInput;
-              const resized = await resizeToolImageContent(postInput.tool_response);
+              // Propagate SDK's turn-level AbortSignal so resize aborts when the turn does.
+              // Without this, a Jimp/sharp stall here blocks the SDK main loop's stdio drain.
+              const resized = await resizeToolImageContent(postInput.tool_response, options?.signal);
               if (resized) {
                 console.log(`[image-resize] PostToolUse hook resized images for tool: ${postInput.tool_name}`);
                 return {
@@ -5759,6 +6413,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     }
 
     let messageCount = 0;
+    // Pattern 3 §3.2.5 — count stream_event deltas seen during this turn so we
+    // can emit a single aggregate `chat:log` at turn-end instead of one per token.
+    let streamEventDeltaCount = 0;
+    let streamEventTokenTotal = 0;
 
     // ── API response watchdog ──────────────────────────────────────────
     // Detects hung API connections AND hung MCP tool calls.
@@ -5826,11 +6484,34 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent][sdk] message #${messageCount} type=${sdkMessage.type}${extra}${stop}`);
         }
       }
-      try {
-        const line = `${localTimestamp()} ${logStringify(sdkMessage)}`;
-        appendLogLine(line);
-      } catch (error) {
-        console.log('[agent][sdk] (unserializable)', error);
+      // Pattern 3 §3.2.5 — for stream_event, default-suppress the per-event
+      // disk write + SSE broadcast. The token text itself is delivered via
+      // chat:message-chunk on a separate code path; the legacy logStringify
+      // here was diagnostic only. Track counts so we can emit one aggregate
+      // log line per turn (see `result` branch below).
+      if (sdkMessage.type === 'stream_event' && SUPPRESS_PER_TOKEN_LOG_BROADCAST) {
+        streamEventDeltaCount++;
+        const ev = (sdkMessage as { event?: { delta?: unknown; usage?: { output_tokens?: number } } }).event;
+        const outTok = ev?.usage?.output_tokens;
+        if (typeof outTok === 'number' && outTok > streamEventTokenTotal) {
+          streamEventTokenTotal = outTok;
+        }
+      } else {
+        try {
+          const line = `${localTimestamp()} ${logStringify(sdkMessage)}`;
+          appendLogLine(line);
+        } catch (error) {
+          console.log('[agent][sdk] (unserializable)', error);
+        }
+        // On turn-end (`result`), emit the stream_event aggregate so log
+        // consumers see "this turn streamed N deltas" without the per-token
+        // spam. Reset counters for the next turn.
+        if (sdkMessage.type === 'result' && streamEventDeltaCount > 0) {
+          const summary = `${localTimestamp()} [stream_event_summary] deltas=${streamEventDeltaCount} output_tokens=${streamEventTokenTotal}`;
+          try { appendLogLine(summary); } catch { /* logger errors are non-fatal */ }
+          streamEventDeltaCount = 0;
+          streamEventTokenTotal = 0;
+        }
       }
       const nextSystemInit = parseSystemInitInfo(sdkMessage);
       if (nextSystemInit) {
@@ -5864,7 +6545,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Save SDK session_id and verify unified session status
         if (nextSystemInit.session_id) {
           const isUnified = nextSystemInit.session_id === sessionId;
-          updateSessionMetadata(sessionId, {
+          await updateSessionMetadata(sessionId, {
             sdkSessionId: nextSystemInit.session_id,
             unifiedSession: isUnified,
           });
@@ -6015,8 +6696,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   appendTextChunk(streamEvent.delta.text);
                   broadcast('chat:message-chunk', streamEvent.delta.text);
                   currentTurnHasOutput = true;
-                  // IM stream: forward non-subagent text delta (cross-turn guard)
-                  if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', streamEvent.delta.text);
+                  // IM stream: forward non-subagent text delta to event bus (Pattern B)
+                  emitImEvent('delta', streamEvent.delta.text);
                 } else {
                   console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
                 }
@@ -6073,12 +6754,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           if (streamEvent.content_block.type === 'text' && !sdkMessage.parent_tool_use_id) {
             flushPendingMidTurnQueue();
           }
-          if (imStreamCallback && !sdkMessage.parent_tool_use_id && !imCallbackNulledDuringTurn) {
+          // Pattern B: forward non-subagent block-start activity to event bus.
+          if (!sdkMessage.parent_tool_use_id) {
             if (streamEvent.content_block.type === 'text') {
               imTextBlockIndices.add(streamEvent.index);
             } else {
               // Notify non-text block activity (thinking, tool_use) so IM can show placeholder
-              imStreamCallback('activity', streamEvent.content_block.type);
+              emitImEvent('activity', streamEvent.content_block.type);
             }
           }
           // Track block type by stream index for precise subagent content_block_stop handling
@@ -6245,9 +6927,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               toolId: toolId || undefined
             });
             handleContentBlockStop(streamEvent.index, toolId || undefined);
-            // IM stream: signal text block end (cross-turn guard)
-            if (imStreamCallback && !imCallbackNulledDuringTurn && imTextBlockIndices.has(streamEvent.index)) {
-              imStreamCallback('block-end', '');
+            // IM stream: signal text block end via event bus (Pattern B)
+            if (imTextBlockIndices.has(streamEvent.index)) {
+              emitImEvent('block-end', '');
               imTextBlockIndices.delete(streamEvent.index);
             }
           }
@@ -6281,7 +6963,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             };
             messages.push(localCommandMessage);
             broadcast('chat:message-replay', { message: localCommandMessage });
-            persistMessagesToStorage();
+            await persistMessagesToStorage();
           }
 
           // Check for structured tool_use_result data (e.g., WebSearch results)
@@ -6508,7 +7190,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             appendTextChunk(nonStreamedText);
             broadcast('chat:message-chunk', nonStreamedText);
             currentTurnHasOutput = true;
-            if (!imCallbackNulledDuringTurn) imStreamCallback?.('delta', nonStreamedText);
+            emitImEvent('delta', nonStreamedText);
           }
         }
       } else if (sdkMessage.type === 'result') {
@@ -6572,11 +7254,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             shouldResetSessionAfterError = true;
             shouldResetReason = 'stale';
           }
-          if (imStreamCallback) {
+          if (pendingRequestIds.length > 0) {
             const errorText = localizeImError(rawError);
-            console.warn('[agent] SDK result is_error, forwarding to IM:', errorText);
-            imStreamCallback('error', errorText);
-            imStreamCallback = null;
+            console.warn('[agent] SDK result is_error, forwarding to IM bus:', errorText);
+            emitImEvent('error', errorText);
+            // W2 fix: also unregister the registry entry that the legacy code skipped.
+            const failedReq = popPendingRequest();
+            if (failedReq) {
+              imRequestRegistry.setStatus(failedReq, 'failed');
+              imRequestRegistry.unregister(failedReq);
+            }
           }
         }
 
@@ -6598,11 +7285,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             appendTextChunk(resultText);
             broadcast('chat:message-chunk', resultText);
           }
-          // Forward to IM callback (prevents "(No Response)" for SDK failures)
-          // Cross-turn guard: only forward if callback was not nulled/replaced
-          if (imStreamCallback && !imCallbackNulledDuringTurn) {
-            imStreamCallback('complete', resultText);
-            imStreamCallback = null;
+          // Forward to IM event bus (prevents "(No Response)" for SDK failures).
+          // Pattern B+G: pop the head request — the upcoming handleMessageComplete
+          // for this turn will find the head already cleared and skip duplicate
+          // emission. Defensive against handleMessageComplete not running for
+          // is_error / no-output results.
+          emitImEvent('complete', resultText);
+          const completedReq = popPendingRequest();
+          if (completedReq) {
+            imRequestRegistry.setStatus(completedReq, 'completed');
+            imRequestRegistry.unregister(completedReq);
           }
         }
 
@@ -7032,9 +7724,27 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       if (!isMidTurn) {
         // Normal turn start: push to messages, persist, broadcast immediately
         messages.push(userMessage);
-        persistMessagesToStorage();
+        await persistMessagesToStorage();
         resetTurnUsage();
         currentTurnStartTime = Date.now();
+        // Pattern 1 follow-up: register a fresh turn-scoped AbortController.
+        // Tool fetches and other in-flight async work in our Node process pull
+        // this signal as their parent via `getCurrentTurnSignal()`. On stop
+        // (interruptCurrentResponse) we abort it; on success we drop it via
+        // endTurn() inside handleMessageComplete/Stopped/Error.
+        if (sessionId) beginTurnAbort(sessionId);
+        // Pattern 6 (SDK turn boundary): stamp `turnId` ambient so all
+        // logs emitted between now and handleMessageComplete()/Stopped/
+        // handleAbort carry it. Ambient (not ALS) because the persistent
+        // messageGenerator yields back into SDK code outside our wrapper
+        // function, so call-stack ALS would lose the frame on resume.
+        // Cleared in handleMessageComplete()/handleMessageStopped()/
+        // handleAbort() below.
+        const turnId = randomUUID().replace(/-/g, '').slice(0, 8);
+        // Pattern 6 (cross-owner contamination fix): key the ambient slot by
+        // sessionId so two concurrent turns on different owners (Tab/IM/Cron)
+        // can each carry their own turnId without clobbering each other.
+        setAmbientLogContext(sessionId, { turnId, sessionId });
         broadcast('queue:started', {
           queueId: item.id,
           userMessage: {
@@ -7069,22 +7779,33 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     }
 
     // Yield 消息到 SDK stdin
-    // Only reset cross-turn guards for NEW turns (not mid-turn injections).
     const isMidTurnInjection = isStreamingMessage;
     if (!isMidTurnInjection) {
-      // Reset cross-turn guard: this turn starts fresh, no timeout/replacement yet.
-      imCallbackNulledDuringTurn = false;
       isStreamingMessage = true;
-    } else if (imStreamCallback) {
-      // Mid-turn injection WITH an active IM callback: this is a new IM message that was
-      // queued during session restart (e.g., MCP config change). The flag may have been set
-      // to true during the restart. Reset it so delta/block-end events are forwarded.
-      imCallbackNulledDuringTurn = false;
     }
-    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, midTurn=${isMidTurnInjection}`);
+    // Pattern B+G: push this user message's requestId onto the FIFO queue.
+    // SDK output continues to be tagged with the queue HEAD until the SDK
+    // emits a `result` boundary, at which point handleMessageComplete pops
+    // the head and the next pending request becomes head. This preserves
+    // attribution under mid-turn injection: yielding B mid-A-turn doesn't
+    // misattribute A's continuation to B.
+    pushPendingRequest(item.requestId);
+
+    // Modality re-check at dequeue. The earlier filter in enqueueUserMessage
+    // ran against the model active at enqueue time. If the user switched to a
+    // text-only model in the gap before this dequeue (rare but real — e.g.
+    // pasted image + text on Claude, then realized DeepSeek was the
+    // intended target, switched, AI was still mid-turn so message stayed
+    // queued), the baked content blocks would carry image blocks the new
+    // model can't accept. Strip last-minute against `currentModel`. This is
+    // defensive — the enqueue-time filter is still authoritative for the
+    // common case; we only rewrite content here when modality drifted.
+    const yieldedMessage = stripUnsupportedModalityBlocks(item.message, currentModel);
+
+    console.log(`[messageGenerator] Yielding message, wasQueued=${item.wasQueued}, midTurn=${isMidTurnInjection}, requestId=${item.requestId ?? '-'}`);
     yield {
       type: 'user' as const,
-      message: item.message,
+      message: yieldedMessage,
       parent_tool_use_id: null,
       session_id: getSessionId()
     };

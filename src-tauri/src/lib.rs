@@ -4,6 +4,7 @@
 pub mod app_dirs;
 pub mod attachment_protocol;
 pub mod cli;
+pub mod config_io;
 mod commands;
 pub mod cron_task;
 pub mod im;
@@ -24,6 +25,7 @@ pub mod search;
 pub mod thought;
 mod tray;
 mod updater;
+pub mod utils;
 
 use sidecar::{
     cleanup_stale_sidecars, cleanup_stale_sidecars_preamble, init_startup_cleanup_barrier,
@@ -59,6 +61,39 @@ pub fn run_cli(args: &[String]) -> i32 {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ── DIAGNOSTIC PANIC HOOK (April 2026 crash investigation) ─────────────
+    // Install BEFORE any other init so we capture every panic, including
+    // setup-time / did_finish_launching ones that don't reach the unified
+    // logger. Writes to ~/.myagents/logs/panic-{pid}-{timestamp}.log so a
+    // post-mortem has the actual panic message even when the app aborts
+    // before normal log flush.
+    {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let log_dir = app_dirs::myagents_data_dir()
+                .map(|d| d.join("logs"))
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let _ = std::fs::create_dir_all(&log_dir);
+            let pid = std::process::id();
+            let ts = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f");
+            let path = log_dir.join(format!("panic-{}-{}.log", pid, ts));
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let payload = format!(
+                "TIME: {}\nPID: {}\nINFO: {}\nLOCATION: {:?}\n\nBACKTRACE:\n{}\n",
+                chrono::Local::now().to_rfc3339(),
+                pid,
+                info,
+                info.location(),
+                backtrace,
+            );
+            let _ = std::fs::write(&path, &payload);
+            // Also try to print to stderr as a fallback
+            eprintln!("[PANIC-HOOK] wrote {}", path.display());
+            eprintln!("{}", payload);
+            prev(info);
+        }));
+    }
+
     // NOTE: cleanup_stale_sidecars() was moved into .setup() callback below.
     // This ensures it only runs for the PRIMARY app instance, not when a second
     // instance is launched (which would kill the running app's sidecar processes).
@@ -124,6 +159,16 @@ pub fn run() {
     // Build the app first, then run with event handler
     // This allows us to handle RunEvent::ExitRequested for Cmd+Q and Dock quit
     let app = tauri::Builder::default()
+        // Builder-level menu event handler (canonical Tauri 2 pattern).
+        // Routes Window > Close Tab (Cmd+W accelerator + mouse click) to the
+        // frontend, which walks its own overlay/tab close hierarchy.
+        .on_menu_event(|app, event| {
+            if event.id().as_ref() == "cmd-w-close" {
+                if let Err(e) = app.emit("window:cmd-w", ()) {
+                    ulog_warn!("[App] Cmd+W emit failed: {}", e);
+                }
+            }
+        })
         .register_asynchronous_uri_scheme_protocol("myagents", attachment_protocol::handle)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // Another instance was launched — bring the existing window to the foreground
@@ -287,6 +332,7 @@ pub fn run() {
             commands::cmd_delete_workspace_file,
             commands::cmd_read_file_base64,
             commands::cmd_open_file,
+            config_io::cmd_fsync_path,
             // Full-text search commands
             search::cmd_search_sessions,
             search::cmd_search_workspace_files,
@@ -340,6 +386,13 @@ pub fn run() {
 
             // Initialize global AppHandle for unified logging (IM module etc.)
             logger::init_app_handle(app.handle().clone());
+
+            // Pattern 6: spawn the buffered writer task so subsequent
+            // ulog_*! calls go through the bounded mpsc → BufWriter path
+            // instead of opening/appending/closing per line. Pre-init
+            // calls (extremely early startup) fall back to a synchronous
+            // append protected by a mutex.
+            logger::init_buffered_writer();
 
             // Acquire PID lock — kills any stale instance that macOS auto-restarted
             // (e.g., after build_dev.sh pkill). Must run before cleanup_stale_sidecars
@@ -468,7 +521,7 @@ pub fn run() {
             // which hides the window before JS can handle it.
             #[cfg(target_os = "macos")]
             {
-                use tauri::menu::{MenuBuilder, SubmenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+                use tauri::menu::{MenuBuilder, SubmenuBuilder, MenuItemBuilder, PredefinedMenuItem, WINDOW_SUBMENU_ID};
 
                 let app_name = app.package_info().name.clone();
                 let app_handle = app.handle();
@@ -499,7 +552,13 @@ pub fn run() {
                     .select_all()
                     .build()?;
 
-                let window_menu = SubmenuBuilder::new(app_handle, "Window")
+                // Use `WINDOW_SUBMENU_ID` (the magic Tauri 2 constant) so
+                // `init_app_menu` calls `NSApp.setWindowsMenu(menu)` — i.e.
+                // marks this submenu as macOS's official Window menu (used
+                // for the open-window tracking list, "Bring All to Front",
+                // etc.). Tauri's default Window menu uses the same ID; we
+                // mirror that pattern when supplying our own.
+                let window_menu = SubmenuBuilder::with_id(app_handle, WINDOW_SUBMENU_ID, "Window")
                     .item(&close_tab)
                     .item(&PredefinedMenuItem::minimize(app_handle, None)?)
                     .item(&PredefinedMenuItem::maximize(app_handle, None)?)
@@ -514,14 +573,8 @@ pub fn run() {
                     .build()?;
 
                 app.set_menu(menu)?;
-
-                // Handle custom menu item click
-                let app_handle_for_menu = app.handle().clone();
-                app.on_menu_event(move |_app, event| {
-                    if event.id().as_ref() == "cmd-w-close" {
-                        let _ = app_handle_for_menu.emit("window:cmd-w", ());
-                    }
-                });
+                // Note: the matching `on_menu_event` handler lives at Builder
+                // level at the top of `run()`.
             }
 
             // Windows: Remove system decorations for custom title bar
