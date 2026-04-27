@@ -86,12 +86,32 @@ console.log(`→ npm install tsx@${tsxVersion} --os=${os} --cpu=${cpu} into ${RU
 // quoting. Our args are all `--flag=value` with no spaces, so this is
 // safe; revisit if anyone adds an arg with user-supplied content.
 const isWindows = process.platform === 'win32';
+//
+// `--ignore-scripts` is load-bearing for cross-arch builds, not a stylistic
+// hardening. esbuild's postinstall runs `node install.js` from inside the
+// freshly installed package and validates the **host arch's**
+// `@esbuild/<triple>/bin/esbuild` version against esbuild's own
+// `package.json` version. With `--cpu=<TARGET>`, npm filters
+// optionalDependencies to the target arch only — the host arch's
+// `@esbuild/<host-triple>` is never installed under tsx-runtime/, so the
+// resolver walks UP the directory tree and ends up finding the project
+// root's `node_modules/@esbuild/<host-triple>` (a different version
+// pulled in by our own esbuild devDep). Mismatch → throw, build fails:
+//
+//   Error: Expected "0.27.7" but got "0.25.12"
+//
+// We don't need esbuild's postinstall at all — we ship the resulting
+// directory for the target's runtime to consume, not for invocation
+// from this build host. Skipping all install scripts is safe for the
+// dependency graph here (tsx itself has no postinstall, and esbuild's
+// is purely the version-mismatch check above).
 execFileSync(
   isWindows ? 'npm.cmd' : 'npm',
   [
     'install',
     '--no-audit',
     '--no-fund',
+    '--ignore-scripts',
     `--os=${os}`,
     `--cpu=${cpu}`,
   ],
