@@ -1596,6 +1596,15 @@ async fn check_plugin_compat(pkg_json_path: &std::path::Path) -> Option<String> 
 /// Plugin then failed to load with `Cannot find package 'openclaw'`.
 /// Bundling tsx once kills that whole class of failure.
 fn find_tsx_runtime_loader<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    use crate::sidecar::normalize_external_path;
+
+    // Result is fed to Node via `--import file:///<path>` — must be free of
+    // Windows' `\\?\` extended-length prefix, otherwise `fileURLToPath`
+    // rejects with `ERR_INVALID_FILE_URL_PATH: must be absolute` and Plugin
+    // Bridge dies before serving its first health check (verified on a real
+    // 0.2.0 Windows build). Both prod and dev branches funnel through the
+    // same normalize call so neither path can regress.
+
     // Production: bundled in resources/tsx-runtime/
     #[cfg(not(debug_assertions))]
     {
@@ -1608,7 +1617,7 @@ fn find_tsx_runtime_loader<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) 
                 .join("esm")
                 .join("index.mjs");
             if p.exists() {
-                return Some(p);
+                return Some(normalize_external_path(p));
             }
         }
     }
@@ -1626,7 +1635,7 @@ fn find_tsx_runtime_loader<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) 
         .join("esm")
         .join("index.mjs");
     if dev_path.exists() {
-        return Some(dev_path);
+        return Some(normalize_external_path(dev_path));
     }
 
     let _ = app_handle;
@@ -1636,25 +1645,18 @@ fn find_tsx_runtime_loader<R: tauri::Runtime>(app_handle: &tauri::AppHandle<R>) 
 /// Convert an absolute `Path` to a `file://` URL string suitable for Node's
 /// `--import` flag. On Windows we must replace `\` with `/` and prepend the
 /// extra `/` so the URL parses correctly (`file:///C:/...`).
+///
+/// Precondition: `path` must already have any platform-specific prefixes
+/// (notably Windows' `\\?\`) stripped. Use `sidecar::normalize_external_path`
+/// at the path's source. We don't strip here so this stays a pure URL
+/// formatter — keeping the platform-quirk logic in one helper instead of
+/// reimplementing it at every URL call site.
 fn path_to_file_url(path: &std::path::Path) -> String {
     let s = path.display().to_string();
     #[cfg(windows)]
     {
-        // Strip the Windows extended-length path prefix (`\\?\`) if present.
-        // Tauri 2's `resource_dir()` returns paths in this form on Windows
-        // (and some Rust stdlib operations like `canonicalize` do too). If
-        // we leave it in, the URL becomes `file://///?/C:/...` and Node's
-        // `fileURLToPath` rejects it with `ERR_INVALID_FILE_URL_PATH: must be
-        // absolute` — Plugin Bridge dies on first import, every IM bot fails
-        // its 30-attempt health check loop. Verified against a real Windows
-        // 0.2.0 build's bridge-err log.
-        //
-        // Note we don't try to handle the UNC variant `\\?\UNC\server\share\…`;
-        // we don't ship resources off network shares, and silently mangling
-        // such a path is worse than failing loudly.
-        let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
         // Windows paths look like `C:\Users\...`; URL form is `file:///C:/Users/...`.
-        format!("file:///{}", stripped.replace('\\', "/"))
+        format!("file:///{}", s.replace('\\', "/"))
     }
     #[cfg(not(windows))]
     {
