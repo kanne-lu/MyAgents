@@ -21,10 +21,10 @@
 //   <os>  ∈ darwin | linux | win32
 //   <cpu> ∈ arm64  | x64
 
-import { writeFile, mkdir, rm, readFile } from 'node:fs/promises';
+import { writeFile, mkdir, rm, readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { resolve, relative } from 'node:path';
 
 const [os, cpu] = process.argv.slice(2);
 const VALID_OS = new Set(['darwin', 'linux', 'win32']);
@@ -118,6 +118,35 @@ execFileSync(
   { cwd: RUNTIME_DIR, stdio: 'inherit', shell: isWindows },
 );
 
+// Drop unused optionalDependencies that ship native code we don't sign.
+//
+// `fsevents` is pulled in by tsx purely for chokidar watch-mode FS events
+// on macOS. We invoke tsx as an ESM loader (`--import .../tsx/.../index.mjs`),
+// never `tsx watch ...`, so fsevents is dead weight. It also ships
+// `fsevents.node` — a Mach-O native module — which would force a separate
+// codesign + notarization pass on every macOS build (Apple flags any
+// unsigned `.node` in the bundle as a "binary not signed" critical
+// validation error). Deleting it removes the file before it ever reaches
+// the Tauri resources copy, eliminating the failure mode at the source
+// rather than papering over it with an extra signing rule.
+//
+// Safe because fsevents is declared as `optionalDependencies` in tsx's
+// package.json — tsx's `try { require('fsevents') } catch {}` fallback
+// silently skips when missing. We can't pass `--omit=optional` to npm
+// install because esbuild's per-platform `@esbuild/<triple>` packages
+// are *also* optionalDependencies, and dropping those would break the
+// whole point of this script. Surgically removing fsevents is the only
+// option that keeps esbuild intact.
+//
+// If new native `.node` files appear in tsx's transitive graph in a
+// future tsx release, the sanity check below + the notarization step
+// in build_macos.sh will both fail loudly so we know to extend this.
+const fseventsDir = resolve(RUNTIME_DIR, 'node_modules/fsevents');
+if (existsSync(fseventsDir)) {
+  await rm(fseventsDir, { recursive: true, force: true });
+  console.log(`  ↳ removed fsevents (watch-mode dep, unused as ESM loader)`);
+}
+
 // Sanity check: the platform binary must end up under @esbuild/<triple>.
 //
 // Layout differs by platform — POSIX puts the binary in `bin/esbuild`
@@ -136,4 +165,49 @@ if (!existsSync(platformBinary)) {
   console.error(`  Check npm version (need ≥10.x for --os/--cpu flags) and network.`);
   process.exit(1);
 }
+
+// Guardrail: fail loudly on unexpected native binaries.
+//
+// Apple notarization rejects any unsigned `.node` (or `.dylib`, `.so`,
+// `.dll`) anywhere in the .app bundle. Today the only legitimate native
+// file under tsx-runtime is `@esbuild/<triple>/bin/esbuild` (signed by
+// build_macos.sh's per-target loop). If a future tsx release adds a
+// new transitive native dep, we want a build-time failure here naming
+// the file rather than a 30-min round-trip through Apple's notarizer.
+//
+// "Allowed" is encoded as a path predicate, not a list of basenames,
+// so a renamed binary in @esbuild's tree still passes while a brand-new
+// `.node` elsewhere flags.
+async function* walkFiles(dir) {
+  for (const ent of await readdir(dir, { withFileTypes: true })) {
+    const p = resolve(dir, ent.name);
+    if (ent.isDirectory()) yield* walkFiles(p);
+    else if (ent.isFile()) yield p;
+  }
+}
+const NATIVE_EXTS = /\.(node|dylib|so|dll)$/i;
+const isAllowedNative = (rel) =>
+  // The platform-specific esbuild binary lives under @esbuild/<triple>/bin/.
+  // It's a Mach-O / ELF / PE depending on target — `.node`/`.dylib`/`.so`/`.dll`
+  // never matches there because the file has no extension on POSIX and `.exe`
+  // on Windows, so this allowance is effectively for future-proofing if
+  // upstream changes naming.
+  rel.startsWith('node_modules/@esbuild/');
+const stragglers = [];
+for await (const file of walkFiles(resolve(RUNTIME_DIR, 'node_modules'))) {
+  const rel = relative(RUNTIME_DIR, file).replace(/\\/g, '/');
+  if (NATIVE_EXTS.test(rel) && !isAllowedNative(rel)) stragglers.push(rel);
+}
+if (stragglers.length > 0) {
+  console.error(`✘ Unexpected native binaries in tsx-runtime:`);
+  for (const s of stragglers) console.error(`  - ${s}`);
+  console.error(
+    `  Notarization will fail unless these are signed or removed. If they're\n` +
+      `  truly needed at runtime, extend build_macos.sh's tsx-runtime signing\n` +
+      `  loop to cover them. If they're dead weight (like fsevents was), add\n` +
+      `  a targeted rm step above.`,
+  );
+  process.exit(1);
+}
+
 console.log(`✓ tsx-runtime ready at ${RUNTIME_DIR} (target=${triple})`);
