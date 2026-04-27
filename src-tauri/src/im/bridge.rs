@@ -1640,8 +1640,21 @@ fn path_to_file_url(path: &std::path::Path) -> String {
     let s = path.display().to_string();
     #[cfg(windows)]
     {
+        // Strip the Windows extended-length path prefix (`\\?\`) if present.
+        // Tauri 2's `resource_dir()` returns paths in this form on Windows
+        // (and some Rust stdlib operations like `canonicalize` do too). If
+        // we leave it in, the URL becomes `file://///?/C:/...` and Node's
+        // `fileURLToPath` rejects it with `ERR_INVALID_FILE_URL_PATH: must be
+        // absolute` — Plugin Bridge dies on first import, every IM bot fails
+        // its 30-attempt health check loop. Verified against a real Windows
+        // 0.2.0 build's bridge-err log.
+        //
+        // Note we don't try to handle the UNC variant `\\?\UNC\server\share\…`;
+        // we don't ship resources off network shares, and silently mangling
+        // such a path is worse than failing loudly.
+        let stripped = s.strip_prefix(r"\\?\").unwrap_or(&s);
         // Windows paths look like `C:\Users\...`; URL form is `file:///C:/Users/...`.
-        format!("file:///{}", s.replace('\\', "/"))
+        format!("file:///{}", stripped.replace('\\', "/"))
     }
     #[cfg(not(windows))]
     {
